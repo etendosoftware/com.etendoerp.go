@@ -102,9 +102,14 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *       rule matrix lives in {@link FinancialAccountHandlerCountryTest}.</li>
  *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
  *       account → 404 (ETP-5474).</li>
+ *   <li>update of the PSD2 import keys (ETP-6151): {@code pSD2StatementFrequency} must be one of
+ *       1BD/1BW/1BM/1BE (written back trimmed), and {@code pSD2ImportFromDate} cannot be cleared
+ *       on a bank-connected account — both a 400 with the same texts as the bank-connection
+ *       actions, before the generic CRUD runs; a body without those keys loads nothing.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
+ * @covers com.etendoerp.go.schemaforge.BankImportSettingsRules
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerTest {
@@ -120,12 +125,18 @@ public class FinancialAccountHandlerTest {
 
   private FinancialAccountHandler handler;
 
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
+
   /**
    * Initializes a Mockito spy of the handler before each test so individual
    * methods can stub the DB-bound seams without touching the real DAL layer.
    */
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new FinancialAccountHandler());
     // Stub the OBContext/OBDal seams so tests run without a live Etendo
     // session (CI has no initialized OBContext on the thread).
@@ -142,7 +153,17 @@ public class FinancialAccountHandlerTest {
    */
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Switches the ETP-6151 gate OFF for the rest of the test: the pre-ETP-6151 behaviour.
+   */
+  private void flagOff() {
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(false);
   }
 
   private NeoContext contextFor(String method, JSONObject body, String recordId) {
@@ -587,6 +608,229 @@ public class FinancialAccountHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     assertTrue(errorMessage(response).contains("France"));
+  }
+
+  // ── update: PSD2 import keys (pSD2StatementFrequency / pSD2ImportFromDate) ──
+
+  /**
+   * A mock account whose PSD2 connection status is {@code status} and whose stored import settings
+   * are both null, returned by the {@code loadAccount} seam for {@link #ACC_ID}.
+   *
+   * @param status the connection status ({@code "CO"} = connected), possibly {@code null}
+   * @return the account
+   */
+  private FIN_FinancialAccount stubStoredPsd2Account(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    // A real stored configuration: clearing it is what the connected-account rule protects.
+    when(account.getPSD2StatementFrequency()).thenReturn("1BD");
+    when(account.getPSD2ImportFromDate()).thenReturn(new java.util.Date(0L));
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
+  /**
+   * A bank-connected account linked before the import settings were required: both stored values
+   * are null, so sending them null again changes nothing.
+   *
+   * @return the account
+   */
+  private FIN_FinancialAccount stubConnectedAccountWithNullSettings() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn("CO");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
+  /**
+   * Runs a PATCH of {@link #ACC_ID} with {@code body} through {@code handle} and asserts it is
+   * refused with a 400 carrying {@code expectedMessage}: the pre-hook short-circuits, so the
+   * generic CRUD never runs, and the transaction is rolled back.
+   *
+   * @param body            the PATCH body
+   * @param expectedMessage the exact error text
+   */
+  private void assertPatchRejected(JSONObject body, String expectedMessage) throws Exception {
+    NeoResponse response = handler.handle(contextFor("PATCH", body, ACC_ID));
+
+    assertNotNull(body.toString(), response);
+    assertEquals(body.toString(), 400, response.getHttpStatus());
+    assertEquals(expectedMessage, response.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /** Each of the four PSD2 groupings passes and is written back trimmed; nothing is loaded. */
+  @Test
+  public void testUpdateAcceptsEveryPsd2GroupingTrimmed() throws Exception {
+    for (String grouping : List.of("1BD", "1BW", "1BM", "1BE")) {
+      JSONObject body = new JSONObject().put("pSD2StatementFrequency", " " + grouping + " ");
+
+      assertNull(grouping, handler.validateAndEnrichUpdate(ACC_ID, body));
+      assertEquals(grouping, body.getString("pSD2StatementFrequency"));
+    }
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** An update touching neither PSD2 import key never evaluates the flag (no account lookup). */
+  @Test
+  public void testUpdateWithoutImportKeysDoesNotEvaluateTheFlag() throws Exception {
+    JSONObject body = new JSONObject().put("description", "Notes");
+
+    handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    flagMock.verify(Psd2ImportSettingsFlag::isEnabled, never());
+  }
+
+  /** A body carrying a PSD2 import key evaluates the flag exactly once. */
+  @Test
+  public void testUpdateWithImportKeyEvaluatesTheFlagOnce() throws Exception {
+    handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("pSD2ImportFromDate", "2026-01-01"));
+    flagMock.verify(Psd2ImportSettingsFlag::isEnabled, org.mockito.Mockito.times(1));
+  }
+
+  /**
+   * Flag {@code psd2-statement-import-settings} OFF — the PUT/PATCH pre-hook does not validate the
+   * PSD2 import keys: an invalid grouping passes untouched (not trimmed, not refused) and no stored
+   * account is loaded.
+   */
+  @Test
+  public void testUpdateFlagOffDoesNotValidateTheImportKeys() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", " MONTHLY ");
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+
+    assertEquals(" MONTHLY ", body.getString("pSD2StatementFrequency"));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * Flag OFF — clearing the import-from date and the grouping of a bank-connected account is not
+   * refused (the pre-ETP-6151 behaviour).
+   */
+  @Test
+  public void testUpdateFlagOffAllowsClearingTheImportKeysOfAConnectedAccount() throws Exception {
+    flagOff();
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)
+        .put("pSD2ImportFromDate", JSONObject.NULL);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A grouping outside the four codes is a 400 with the shared text, and is rolled back. */
+  @Test
+  public void testUpdateInvalidGroupingReturns400() throws Exception {
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "MONTHLY"),
+        "The statement grouping must be one of 1BD, 1BW, 1BM, 1BE");
+    verify(handler).doRollbackAndClose();
+  }
+
+  /**
+   * Clearing a stored grouping (JSON null or blank) of a bank-connected account is a 400: a
+   * connected account's saved configuration needs one.
+   */
+  @Test
+  public void testUpdateClearedGroupingOnConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("CO");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL),
+        "The statement grouping is required");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "  "),
+        "The statement grouping is required");
+    verify(handler, times(2)).doRollbackAndClose();
+  }
+
+  /**
+   * Echoing null/blank over an already null stored value passes on a connected account, for both
+   * keys: nothing real is cleared. The account is loaded once per request.
+   */
+  @Test
+  public void testUpdateEchoingNullOverNullStoredValuesPassesOnConnectedAccount()
+      throws Exception {
+    stubConnectedAccountWithNullSettings();
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)
+        .put("pSD2ImportFromDate", JSONObject.NULL);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    verify(handler, times(1)).loadAccount(ACC_ID);
+  }
+
+  /** On an account with no bank connection clearing the grouping stays allowed. */
+  @Test
+  public void testUpdateClearedGroupingOnNotConnectedAccountPasses() throws Exception {
+    for (String status : new String[] {"DC", null}) {
+      stubStoredPsd2Account(status);
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID,
+          new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)));
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID,
+          new JSONObject().put("pSD2StatementFrequency", "  ")));
+    }
+  }
+
+  /** A non-null grouping outside the four codes stays a 400 on an account with no connection. */
+  @Test
+  public void testUpdateInvalidGroupingOnNotConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("DC");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "MONTHLY"),
+        "The statement grouping must be one of 1BD, 1BW, 1BM, 1BE");
+  }
+
+  /**
+   * Clearing a stored import-from date (JSON null or blank) of a bank-connected account is a 400:
+   * a connected account always knows from which day its movements are imported.
+   */
+  @Test
+  public void testUpdateClearingImportFromOnConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("CO");
+
+    assertPatchRejected(new JSONObject().put("pSD2ImportFromDate", JSONObject.NULL),
+        "The import from date is required");
+    assertPatchRejected(new JSONObject().put("pSD2ImportFromDate", ""),
+        "The import from date is required");
+    verify(handler, times(2)).doRollbackAndClose();
+  }
+
+  /**
+   * On an account with no bank connection (the "disconnected" default, or no status) clearing the
+   * import-from date stays allowed.
+   */
+  @Test
+  public void testUpdateClearingImportFromOnNotConnectedAccountPasses() throws Exception {
+    for (String status : new String[] {"DC", null}) {
+      stubStoredPsd2Account(status);
+      JSONObject body = new JSONObject().put("pSD2ImportFromDate", JSONObject.NULL);
+
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID, body));
+    }
+  }
+
+  /**
+   * Setting the import-from date to a value needs no account: it is never loaded (the date's
+   * format is left to the generic CRUD).
+   */
+  @Test
+  public void testUpdateSettingImportFromNeverLoadsTheAccount() throws Exception {
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("pSD2ImportFromDate", "2026-01-01");
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * A body touching neither key is never checked: a connected account whose stored settings are
+   * null (linked before they were required) keeps accepting unrelated edits, and is not even
+   * loaded for them.
+   */
+  @Test
+  public void testUpdateWithoutImportKeysIsNotCheckedOnAConnectedAccount() throws Exception {
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("swiftCode", "BBVAESMM");
+
+    assertNull(handler.handle(contextFor("PATCH", body, ACC_ID)));
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).doRollbackAndClose();
   }
 
   /** Neither IBAN nor country touched: a no-op, mirroring the trigger's own re-validate guard —

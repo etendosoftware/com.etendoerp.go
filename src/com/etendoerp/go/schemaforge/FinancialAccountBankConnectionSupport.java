@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -38,6 +40,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
@@ -130,10 +133,28 @@ final class FinancialAccountBankConnectionSupport {
     if (!Boolean.TRUE.equals(connection.isHandlesTransactions())) {
       return null;
     }
-    if (StringUtils.isBlank(connection.getProviderCode())) {
+    return maxFetchIntervalOfProvider(connection.getProviderCode());
+  }
+
+  /**
+   * The maximum number of days of history the provider with this Salt Edge code declares, read
+   * from its {@code PSD2_PROVIDER.MAX_FETCH_INTERVAL} row, or null when the code is blank, the
+   * provider is not registered yet, or it declares no limit. Same "say nothing" contract and the
+   * same {@code Integer} conversion as {@link #maxFetchIntervalOf}, which delegates here once its
+   * connection guards pass.
+   *
+   * <p>ETP-6151: also used by {@code GET accounts}, where no {@link FinaccConnection} exists yet —
+   * only the provider code of the Salt Edge connection being linked — so the selection modal can
+   * warn about the history limit before the user confirms the link.
+   *
+   * @param providerCode the Salt Edge provider code, possibly blank
+   * @return the limit in whole days, or {@code null} when there is nothing to advise
+   */
+  static Integer maxFetchIntervalOfProvider(String providerCode) {
+    if (StringUtils.isBlank(providerCode)) {
       return null;
     }
-    Provider provider = findProviderByCode(connection.getProviderCode());
+    Provider provider = findProviderByCode(providerCode);
     if (provider == null) {
       return null;
     }
@@ -144,6 +165,25 @@ final class FinancialAccountBankConnectionSupport {
       return null;
     }
     return maxFetchInterval.intValue();
+  }
+
+  /**
+   * Total form of {@link #maxFetchIntervalOfProvider} for {@code GET accounts} (ETP-6151, through
+   * {@link #fetchProviderDisplay}): the history limit there is a non-critical extra, like the
+   * provider logo, so a failed lookup is logged and answered as "unknown" instead of failing the
+   * account list the user is choosing from.
+   *
+   * @param providerCode the Salt Edge provider code, possibly blank
+   * @return the limit in whole days, or {@code null} when unknown or the lookup failed
+   */
+  static Integer maxFetchIntervalOfProviderOrNull(String providerCode) {
+    try {
+      return maxFetchIntervalOfProvider(providerCode);
+    } catch (Exception e) {
+      log.warn("Could not resolve the max fetch interval of provider {}: {}", providerCode,
+          e.getMessage());
+      return null;
+    }
   }
 
   /** An import-from date older than the bank's history: the limit in days and the earliest usable day. */
@@ -226,6 +266,29 @@ final class FinancialAccountBankConnectionSupport {
         exceeded.getEarliestDate().format(java.time.format.DateTimeFormatter.ofPattern(pattern)));
   }
 
+  /**
+   * ETP-6151. Adds the non-blocking "this bank only provides the last N days" advisory to a write
+   * response when {@code importFrom} is older than the history of the account's active connection.
+   * One place for the envelope, so {@code import-settings}, {@code link} and {@code createAndLink}
+   * answer it with the very same key and shape: a {@code messages} entry
+   * {@code {type: "warning", text}} added by {@link NeoHints#addMessage} (top level for the SPA,
+   * inside {@code response} for an MCP caller). Says nothing when the rule says nothing, and never
+   * throws (see {@link #findImportFromBeyondFetchInterval(FIN_FinancialAccount, Date)}).
+   *
+   * @param response   the successful response to annotate
+   * @param context    the request, for its origin (SPA or MCP)
+   * @param finAcc     the financial account whose active connection gives the limit
+   * @param importFrom the import-from date that was saved, possibly {@code null}
+   */
+  static void addFetchIntervalAdvisory(NeoResponse response, NeoContext context,
+      FIN_FinancialAccount finAcc, Date importFrom) {
+    FetchIntervalExceeded exceeded = findImportFromBeyondFetchInterval(finAcc, importFrom);
+    if (exceeded != null) {
+      NeoHints.addMessage(response.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
+          fetchIntervalExceededText(exceeded, NeoLanguage.currentCode()));
+    }
+  }
+
   private static Provider fetchAndRegisterProvider(String providerCode, String providerName,
       String apiKey) {
     String name = StringUtils.defaultIfBlank(providerName, providerCode);
@@ -290,6 +353,14 @@ final class FinancialAccountBankConnectionSupport {
     return value.length() > NAME_MAX_LENGTH ? value.substring(0, NAME_MAX_LENGTH) : value;
   }
 
+  /**
+   * The provider logo URL for {@code GET accounts} when the ETP-6151 flag is off: one Salt Edge
+   * call to {@code providers/{code}}, empty when the call fails or carries no logo. Never throws.
+   *
+   * @param providerCode the Salt Edge provider code
+   * @param apiKey       the PSD2 API key the call runs under
+   * @return the logo URL, empty when unknown
+   */
   static String fetchProviderLogo(String providerCode, String apiKey) {
     try {
       String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode;
@@ -299,6 +370,89 @@ final class FinancialAccountBankConnectionSupport {
     } catch (Exception e) {
       log.warn("Could not fetch provider logo for {}: {}", providerCode, e.getMessage());
       return "";
+    }
+  }
+
+  /**
+   * What {@code GET accounts} shows about the bank of the connection being linked: its logo and
+   * the days of history it serves (ETP-6151).
+   */
+  static final class ProviderDisplay {
+    private final String logoUrl;
+    private final Integer maxFetchInterval;
+
+    /**
+     * @param logoUrl          the provider logo URL, empty when unknown
+     * @param maxFetchInterval the history limit in whole days, or {@code null} when unknown
+     */
+    ProviderDisplay(String logoUrl, Integer maxFetchInterval) {
+      this.logoUrl = logoUrl;
+      this.maxFetchInterval = maxFetchInterval;
+    }
+
+    /** @return the provider logo URL, never {@code null} (empty when unknown) */
+    String getLogoUrl() {
+      return logoUrl;
+    }
+
+    /** @return the history limit in whole days, or {@code null} when unknown */
+    Integer getMaxFetchInterval() {
+      return maxFetchInterval;
+    }
+  }
+
+  /**
+   * Resolves the provider logo and its history limit for {@code GET accounts} with ONE Salt Edge
+   * call to {@code providers/{code}} (the call that used to serve the logo alone).
+   *
+   * <p>The limit comes from the registered {@code PSD2_PROVIDER.MAX_FETCH_INTERVAL} first — the
+   * same source the {@code status} action and the synchronization's own warning read, so all of
+   * them name the same number — and falls back to that answer's {@code max_fetch_interval} only
+   * when the row is missing or declares no limit (a bank never linked on this instance has no row
+   * yet: it is registered at link time). Total: a failed call or lookup leaves the field unknown,
+   * it never fails the account list the user is choosing from.
+   *
+   * @param providerCode the Salt Edge provider code, not blank
+   * @param apiKey       the PSD2 API key the call runs under
+   * @return the logo (empty when unknown) and the limit ({@code null} when unknown)
+   */
+  static ProviderDisplay fetchProviderDisplay(String providerCode, String apiKey) {
+    JSONObject data = fetchSaltEdgeProvider(providerCode, apiKey);
+    String logoUrl = data != null ? data.optString(KEY_LOGO_URL, "") : "";
+    Integer maxFetchInterval = maxFetchIntervalOfProviderOrNull(providerCode);
+    if (maxFetchInterval == null && data != null) {
+      long fromSaltEdge = data.optLong(BankIntegrationConstants.MAX_FETCH_INTERVAL, 0);
+      // Same "0 or less means not declared" rule as the registered value.
+      if (fromSaltEdge > 0 && fromSaltEdge <= Integer.MAX_VALUE) {
+        maxFetchInterval = (int) fromSaltEdge;
+      }
+    }
+    return new ProviderDisplay(logoUrl, maxFetchInterval);
+  }
+
+  /**
+   * The {@code data} object of the Salt Edge middleware's {@code providers/{code}} answer, or
+   * {@code null} when the call fails or the answer carries none (logged, never thrown).
+   *
+   * <p>Requested with {@code include_ais_fields=true}: {@code max_fetch_interval} is an AIS field,
+   * so without it the answer omits the limit and the {@link #fetchProviderDisplay} fallback would
+   * silently find nothing. Same query the PSD2 module's own readers use
+   * ({@code AisConnectionCallback}, {@code SyncBankProviders}); the logo is in the same answer. The
+   * code is URL-encoded, as the callback does.
+   *
+   * @param providerCode the Salt Edge provider code
+   * @param apiKey       the PSD2 API key the call runs under
+   * @return the provider object, or {@code null}
+   */
+  private static JSONObject fetchSaltEdgeProvider(String providerCode, String apiKey) {
+    try {
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/"
+          + URLEncoder.encode(providerCode, StandardCharsets.UTF_8) + "?include_ais_fields=true";
+      JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
+      return response != null ? response.optJSONObject(KEY_DATA) : null;
+    } catch (Exception e) {
+      log.warn("Could not fetch provider details for {}: {}", providerCode, e.getMessage());
+      return null;
     }
   }
 

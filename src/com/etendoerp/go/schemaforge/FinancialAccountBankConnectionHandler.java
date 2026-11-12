@@ -76,10 +76,11 @@ import com.google.common.cache.CacheBuilder;
  *   <li>{@code POST connect} — returns the Salt Edge connect URL. Same for both entry points; the
  *       account need not exist yet (case 2). The {@code return_to} is built server-side from the
  *       request {@code Origin} header so the popup returns to the SPA callback route.</li>
- *   <li>{@code POST link {financialAccountId, connectionId, saltEdgeAccountId}} — case 1: link the
- *       chosen Salt Edge account to an existing FA.</li>
- *   <li>{@code POST createAndLink {type, connectionId, saltEdgeAccountId}} — case 2: create the FA
- *       from the chosen Salt Edge account (name, currency) plus the chosen {@code type}, then link.</li>
+ *   <li>{@code POST link {financialAccountId, connectionId, saltEdgeAccountId, importFromDate,
+ *       statementGrouping}} — case 1: link the chosen Salt Edge account to an existing FA.</li>
+ *   <li>{@code POST createAndLink {type, connectionId, saltEdgeAccountId, importFromDate,
+ *       statementGrouping}} — case 2: create the FA from the chosen Salt Edge account (name,
+ *       currency) plus the chosen {@code type}, then link.</li>
  *   <li>{@code POST reconnect {financialAccountId}} — returns the Salt Edge reconnect URL.</li>
  *   <li>{@code POST disconnect {financialAccountId}} — unlinks (and deletes the Salt Edge
  *       connection when not shared).</li>
@@ -90,8 +91,25 @@ import com.google.common.cache.CacheBuilder;
  *       {@code GET syncStatus&financialAccountIds=id1,id2}) — per account, whether a sync is
  *       running and the outcome of the last one (ETP-6154).</li>
  *   <li>{@code POST import-settings {financialAccountId, importFromDate?, importToDate?,
- *       statementGrouping?}} — updates the import configuration on the FA.</li>
+ *       statementGrouping?}} — updates the import configuration on the FA. An omitted key keeps
+ *       its stored value, but the configuration it saves must have an import-from date and a
+ *       valid grouping (ETP-6151).</li>
  * </ul>
+ *
+ * <p><b>Import settings at link time (ETP-6151, flag {@code psd2-statement-import-settings}).</b>
+ * Everything in this paragraph, the {@code import-settings} requirements and {@code maxFetchInterval}
+ * on {@code accounts} applies only with the flag on for the account ({@link Psd2ImportSettingsFlag});
+ * off, the actions behave as before ETP-6151 and the new keys are ignored. {@code link} and {@code createAndLink} require
+ * {@code importFromDate} ({@code yyyy-MM-dd}) and {@code statementGrouping} (one of {@code 1BD},
+ * {@code 1BW}, {@code 1BM}, {@code 1BE}); a missing or invalid value answers 400 before anything
+ * is written or any Salt Edge call is made. Both are stored on the FA
+ * ({@code EM_PSD2_IMPORT_FROM_DATE}, {@code EM_PSD2_STATEMENT_FREQUENCY}) in the same transaction
+ * as the link, so no synchronization ever runs on the new link without them. The three write
+ * actions ({@code link}, {@code createAndLink}, {@code import-settings}) validate with the same
+ * code ({@link BankImportSettingsRules#requireImportSettings} and its parts) and add
+ * the same non-blocking {@code messages} warning when the import-from date is older than the
+ * history the bank serves. {@code accounts} exposes that history limit as
+ * {@code maxFetchInterval} so the selection modal can warn before the link is confirmed.
  *
  * <p><b>Binding.</b> {@link NeoExtension} only (ETP-6154, following the ETP-5588 recipe): the
  * {@code ETGO_SF_ENTITY} row of the {@code financial-account-bank-connection} report spec carries
@@ -167,9 +185,12 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_WARNING = "warning";
   private static final String KEY_PROVIDER_NAME = "providerName";
   private static final String KEY_LAST_SYNC_DATE = "lastSyncDate";
-  private static final String KEY_IMPORT_FROM_DATE = "importFromDate";
-  private static final String KEY_IMPORT_TO_DATE = "importToDate";
-  private static final String KEY_STATEMENT_GROUPING = "statementGrouping";
+  private static final String KEY_IMPORT_FROM_DATE =
+      BankImportSettingsRules.KEY_IMPORT_FROM_DATE;
+  private static final String KEY_IMPORT_TO_DATE =
+      BankImportSettingsRules.KEY_IMPORT_TO_DATE;
+  private static final String KEY_STATEMENT_GROUPING =
+      BankImportSettingsRules.KEY_STATEMENT_GROUPING;
   private static final String KEY_MAX_FETCH_INTERVAL = "maxFetchInterval";
   private static final String KEY_PROVIDER_LOGO = "providerLogoUrl";
   private static final String KEY_LOGO_URL = "logo_url";
@@ -359,6 +380,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // GET accounts (found bank accounts for a connection, filtered for the SPA modal)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Lists the bank accounts of a Salt Edge connection that can be linked: filtered by the
+   * Financial Account type, minus the ones already linked elsewhere, and — when an existing account
+   * is being connected — by its currency. When the list is not empty it also carries the bank's
+   * {@code providerName}, {@code providerLogoUrl} and, ETP-6151, {@code maxFetchInterval}: the
+   * whole days of history the provider declares ({@code PSD2_PROVIDER.MAX_FETCH_INTERVAL} resolved
+   * by the connection's provider code, else the {@code max_fetch_interval} of the same Salt Edge
+   * answer that carries the logo), an int, omitted when unknown — same field and same omission
+   * rule as in {@code status}. An empty list carries {@code emptyReason} instead.
+   *
+   * @param context the request: {@code connectionId} (required), {@code type},
+   *                {@code financialAccountId}
+   * @return the accounts payload, or 400 when the connection id is missing
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleAccounts(NeoContext context) throws JSONException {
     String connectionId = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_CONNECTION_ID);
     String type = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_TYPE);
@@ -410,8 +446,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       data.put(KEY_PROVIDER_NAME, details.optString(BankIntegrationConstants.PROVIDER_NAME, ""));
       String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
       if (StringUtils.isNotBlank(providerCode)) {
-        data.put(KEY_PROVIDER_LOGO,
-            FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
+        // One Salt Edge call serves both the logo and, when the provider is not registered here
+        // yet, the history limit (ETP-6151).
+        if (Psd2ImportSettingsFlag.isEnabled()) {
+          FinancialAccountBankConnectionSupport.ProviderDisplay provider =
+              FinancialAccountBankConnectionSupport.fetchProviderDisplay(providerCode, apiKey);
+          data.put(KEY_PROVIDER_LOGO, provider.getLogoUrl());
+          // Omitted (not null) when unknown, so the SPA reads `undefined` and stays silent.
+          if (provider.getMaxFetchInterval() != null) {
+            data.put(KEY_MAX_FETCH_INTERVAL, provider.getMaxFetchInterval().intValue());
+          }
+        } else {
+          // Flag off: the logo alone, through the single call it always was.
+          data.put(KEY_PROVIDER_LOGO,
+              FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
+        }
       }
     } else {
       putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked, finAcc);
@@ -605,6 +654,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // POST link (case 1 — existing FA)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Case 1: links the chosen Salt Edge account to an existing Financial Account.
+   *
+   * <p>ETP-6151: the body must also carry {@code importFromDate} and {@code statementGrouping}
+   * (validated by {@link BankImportSettingsRules#requireImportSettings}, 400 when missing or
+   * invalid). They are written on the account before the link and committed with it. When the date
+   * is after the account's stored import-to date, that stale import-to is cleared (set to null) in
+   * the same transaction and the link goes on; {@code import-settings} keeps its range check. The answer adds the fetch-interval advisory when the date is older than the history
+   * the bank serves.
+   *
+   * @param context the request; body {@code {financialAccountId, connectionId, saltEdgeAccountId,
+   *                importFromDate, statementGrouping}}
+   * @return {@code {linked, financialAccountId, warning}}, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleLink(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -614,6 +678,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (StringUtils.isAnyBlank(accountId, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "financialAccountId/connectionId/saltEdgeAccountId");
     }
+    // Flag off: the import keys are neither required nor read, exactly as before ETP-6151.
+    BankImportSettingsRules.ImportSettings settings = Psd2ImportSettingsFlag.isEnabled()
+        ? BankImportSettingsRules.requireImportSettings(body) : null;
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
@@ -625,18 +692,47 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       return NeoResponse.error(404, "Selected bank account not found in the connection");
     }
     JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+    if (settings != null) {
+      settings.applyTo(finAcc);
+      // A stored import-to older than the new import-from is stale (the user is picking a fresh
+      // window while connecting): clear it in the same transaction instead of refusing the link.
+      if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(settings.getImportFrom(),
+          finAcc.getPSD2ImportToDate())) {
+        finAcc.setPSD2ImportToDate(null);
+      }
+    }
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put("linked", true);
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_WARNING, warning);
-    return FinancialAccountBankConnectionSupport.okData(data);
+    NeoResponse linked = FinancialAccountBankConnectionSupport.okData(data);
+    if (settings != null) {
+      FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(linked, context, finAcc,
+          settings.getImportFrom());
+    }
+    return linked;
   }
 
   // ---------------------------------------------------------------------------
   // POST createAndLink (case 2 — create the FA from the chosen Salt Edge account, then link)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Case 2: creates the Financial Account from the chosen Salt Edge account (name, currency) plus
+   * the chosen {@code type}, provisions it like any new account, then links it.
+   *
+   * <p>ETP-6151: the body must also carry {@code importFromDate} and {@code statementGrouping},
+   * validated BEFORE the account is created (400 when missing or invalid, so a bad request never
+   * leaves an account behind) and written on the new account in the same transaction as the link.
+   * The answer adds the fetch-interval advisory when the date is older than the history the bank
+   * serves.
+   *
+   * @param context the request; body {@code {type, connectionId, saltEdgeAccountId,
+   *                importFromDate, statementGrouping}}
+   * @return 201 {@code {financialAccountId, name, warning}}, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleCreateAndLink(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String type = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_TYPE);
@@ -646,6 +742,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (StringUtils.isAnyBlank(type, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "type/connectionId/saltEdgeAccountId");
     }
+    // Flag off: the import keys are neither required nor read, exactly as before ETP-6151.
+    BankImportSettingsRules.ImportSettings settings = Psd2ImportSettingsFlag.isEnabled()
+        ? BankImportSettingsRules.requireImportSettings(body) : null;
 
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
     JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
@@ -675,12 +774,20 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     // corrects. Salt Edge linking below stays here — it is path-specific, not shared provisioning.
     FinancialAccountSupport.provisionNewAccount(finAcc);
 
+    if (settings != null) {
+      settings.applyTo(finAcc);
+    }
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_NAME, finAcc.getName());
     data.put(KEY_WARNING, warning);
-    return NeoResponse.createdWithData(data);
+    NeoResponse created = NeoResponse.createdWithData(data);
+    if (settings != null) {
+      FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(created, context, finAcc,
+          settings.getImportFrom());
+    }
+    return created;
   }
 
   // ---------------------------------------------------------------------------
@@ -1082,6 +1189,40 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // POST import-settings
   // ---------------------------------------------------------------------------
 
+  /**
+   * Parses one import-settings date of the body. With the ETP-6151 flag on a malformed value
+   * answers the coded 400 message of {@code invalidMessage}; with it off the raw parse is used and
+   * a malformed value fails as it always did.
+   *
+   * @param body           the request body
+   * @param key            the body key holding the date
+   * @param invalidMessage the 400 message for a malformed date (flag on only)
+   * @param flagOn         whether the ETP-6151 flag is on for this request
+   * @return the parsed date, or {@code null} for a blank value
+   */
+  private static Date parseImportSettingsDate(JSONObject body, String key, String invalidMessage,
+      boolean flagOn) {
+    String value = FinancialAccountBankConnectionSupport.bodyString(body, key);
+    return flagOn ? BankImportSettingsRules.parseImportDate(value, invalidMessage)
+        : FinancialAccountBankConnectionSupport.parseDate(value);
+  }
+
+  /**
+   * Updates the import configuration of a Financial Account: import-from date, import-to date and
+   * statement grouping.
+   *
+   * <p>An omitted key keeps its stored value. ETP-6151: the configuration being saved must have an
+   * import-from date and a valid grouping — the same validation as {@code link} /
+   * {@code createAndLink}, applied to the values the request would RESULT in — and a malformed date
+   * answers 400 instead of 500. An account linked before ETP-6151 with no import-from date keeps
+   * syncing without a lower bound; it only has to provide one the next time it saves this
+   * configuration.
+   *
+   * @param context the request; body {@code {financialAccountId, importFromDate?, importToDate?,
+   *                statementGrouping?}}
+   * @return {@code {saved: true}} plus the fetch-interval advisory when it applies, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleImportSettings(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -1089,22 +1230,33 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
-    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the pair the
-    // request would RESULT in: a body may carry only one of the two bounds, in which case the other
-    // keeps its stored value and is just as much part of the range being saved. Applying the
-    // setters first and rejecting afterwards would not work — `finAcc` is a managed instance, so
-    // Hibernate's dirty checking would flush the rejected values at commit anyway.
+    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the values the
+    // request would RESULT in: a body may carry only some of the keys, in which case the others
+    // keep their stored values and are just as much part of the configuration being saved.
+    // Applying the setters first and rejecting afterwards would not work — `finAcc` is a managed
+    // instance, so Hibernate's dirty checking would flush the rejected values at commit anyway.
+    // The required / format checks throw OBException, which handle() turns into a 400.
+    // Flag off: the pre-ETP-6151 reading and validation (raw date parse, nothing required).
+    boolean importSettingsOn = Psd2ImportSettingsFlag.isEnabled();
     Date importFrom = body.has(KEY_IMPORT_FROM_DATE)
-        ? FinancialAccountBankConnectionSupport.parseDate(
-            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE))
+        ? parseImportSettingsDate(body, KEY_IMPORT_FROM_DATE,
+            BankImportSettingsRules.MSG_IMPORT_FROM_DATE_INVALID, importSettingsOn)
         : finAcc.getPSD2ImportFromDate();
     Date importTo = body.has(KEY_IMPORT_TO_DATE)
-        ? FinancialAccountBankConnectionSupport.parseDate(
-            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE))
+        ? parseImportSettingsDate(body, KEY_IMPORT_TO_DATE,
+            BankImportSettingsRules.MSG_IMPORT_TO_DATE_INVALID, importSettingsOn)
         : finAcc.getPSD2ImportToDate();
+    String grouping = body.has(KEY_STATEMENT_GROUPING)
+        ? FinancialAccountBankConnectionSupport.bodyString(body, KEY_STATEMENT_GROUPING)
+        : finAcc.getPSD2StatementFrequency();
+    if (importSettingsOn) {
+      BankImportSettingsRules.requireImportFromDate(importFrom);
+      BankImportSettingsRules.requireStatementGrouping(grouping);
+    }
     if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(importFrom, importTo)) {
       return NeoResponse.error(400, MSG_IMPORT_RANGE_INVALID);
     }
+    // Only the keys the body carries are written; an omitted one keeps its stored value.
     if (body.has(KEY_IMPORT_FROM_DATE)) {
       finAcc.setPSD2ImportFromDate(importFrom);
     }
@@ -1112,8 +1264,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       finAcc.setPSD2ImportToDate(importTo);
     }
     if (body.has(KEY_STATEMENT_GROUPING)) {
-      finAcc.setPSD2StatementFrequency(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_STATEMENT_GROUPING));
+      finAcc.setPSD2StatementFrequency(grouping);
     }
     OBDal.getInstance().save(finAcc);
     OBDal.getInstance().flush();
@@ -1121,13 +1272,8 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     data.put("saved", true);
     NeoResponse saved = FinancialAccountBankConnectionSupport.okData(data);
     // ETP-5805: non-blocking advisory, same rule and envelope as the PUT/PATCH hook.
-    FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
-        FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc, importFrom);
-    if (exceeded != null) {
-      NeoHints.addMessage(saved.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
-          FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded,
-              NeoLanguage.currentCode()));
-    }
+    FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(saved, context, finAcc,
+        importFrom);
     return saved;
   }
 

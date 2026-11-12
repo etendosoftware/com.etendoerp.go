@@ -3496,8 +3496,11 @@ applies to a manual statement.
 Notes: `lines[]` items are `{date, in, out, description, reference, bpartnerName, bpartnerId,
 glItemId}`; `reference` defaults to `**`. `updateStatement` replaces only the unmatched lines and
 works on drafts only; `reactivateStatement` needs a processed, not posted statement and does not
-reverse reconciliations; `deleteStatement` works on drafts only, answers **409** on a
-PSD2-connected account and **400** while matched lines remain. Upload formats are Cuaderno 43 or a
+reverse reconciliations; `deleteStatement` deletes a draft. On a PSD2-connected account it answers **409**, unless the
+per-account flag `psd2-statement-import-settings` is on (ETP-6151): then it also deletes a processed
+statement (reactivated and deleted in one transaction) and answers **400** when that statement is posted.
+It answers **400** while matched lines remain, and on an account that is not connected a processed
+statement answers **400**. (The tool description is static and states both rules.) Upload formats are Cuaderno 43 or a
 generic CSV with header `Transaction Date, Reference No., Business Partner Name, Description,
 Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
 
@@ -5643,6 +5646,24 @@ place of `bounceDecisions`, an agent's `applySuggestions` that applied at least 
 group reports the preselected pairs it left out as `unchecked` (inferred by the backend), and one
 with no `bouncePair` group reports nothing for bounces.
 
+##### REST and MCP on statement deletion with `psd2-statement-import-settings` off (ETP-6151, declared exception)
+
+The MCP's declared actions are static (`BankStatementAgentActions.CONTRACTS`, built once), so the
+`deleteStatement` description that `etendo_schema(view:"actions")` and `etendo_discover` show cannot
+depend on the account of the request: it states **both** rules and names the flag. The behaviour is
+the same on both channels, evaluated per account by `Psd2ImportSettingsFlag`; only the advertised
+text is not filtered. User decision: declared, not filtered per request.
+
+| what | REST / SPA | MCP |
+|---|---|---|
+| `deleteStatement` / `?action=delete`, flag **off** | drafts only; a statement of a bank-connected account answers `409 Statements from a bank-connected account cannot be deleted.`, a processed one the not-draft `400` | the same answers; the description says "a statement is deleted only when the psd2-statement-import-settings behaviour is enabled for the account (409 otherwise)" |
+| `deleteStatement` / `?action=delete`, flag **on** | a processed statement of a connected account is reactivated and deleted; posted or matched-lines statements answer `400` | the same answers; the description states that rule too |
+
+The other ETP-6151 surfaces (`link`, `createAndLink`, `import-settings`, `GET accounts`) are REST/SPA
+actions of `financial-account-bank-connection` with no MCP contract; the generic `PUT`/`PATCH` of
+`financial-account/account` is gated by the same flag on both channels. The backend therefore answers
+coherently per account whichever channel calls it.
+
 ##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 
 No longer a divergence. A token on org `0` carries the System client `0`; `/sws/neo/*` (`NEO_API`)
@@ -5893,6 +5914,35 @@ behaviour is unchanged. Channels as noted per field:
   flattened record has it at top level); REST puts it at the root of the body. `import-settings` builds
   its body with `okData` (`{"response":{"data":{"saved":true}}}`), so over REST `messages` sits at the
   root next to `response`, not inside it.
+  **`link` and `createAndLink` carry the same advisory (ETP-6151, flag `psd2-statement-import-settings` on).** All three write actions go through
+  `FinancialAccountBankConnectionSupport#addFetchIntervalAdvisory`, so the top-level `messages` entry
+  appears on the link / create response too (the SPA toasts it after the link). To let the SPA warn
+  *before* the link is confirmed, `GET accounts` returns `maxFetchInterval` (int, omitted when unknown,
+  like `status`): the `PSD2_PROVIDER.MAX_FETCH_INTERVAL` of the connection's provider code, else the
+  `max_fetch_interval` of the Salt Edge `providers/{code}?include_ais_fields=true` call that already
+  supplies the logo (`fetchProviderDisplay`, one call for both).
+  **PSD2 import settings are required (ETP-6151, only with the flag `psd2-statement-import-settings` on for the account; with it off `link`, `createAndLink`, `import-settings`, the `PUT`/`PATCH` pre-hook and `GET accounts` behave as before ETP-6151 and the new keys are ignored — one evaluator, `Psd2ImportSettingsFlag`; see 'ETP-6151 flag' below).** The rule is one class, `BankImportSettingsRules`,
+  used by four entry points. `POST financial-account-bank-connection?action=link` and `?action=createAndLink`
+  take two new **required** body fields besides `connectionId` / `saltEdgeAccountId` (and `financialAccountId` or `type`):
+  `importFromDate` (`yyyy-MM-dd`) and `statementGrouping` (`1BD` | `1BW` | `1BM` | `1BE`; no empty value).
+  They are validated before anything is written or any Salt Edge call is made (`createAndLink` before the
+  account is created) and stored (`EM_PSD2_IMPORT_FROM_DATE`, `EM_PSD2_STATEMENT_FREQUENCY`) in the same
+  transaction as the link, so no sync, not even the scheduled one, runs on the new link without a lower bound.
+  When the date is after the account's stored import-to date, `link` does not refuse: it clears that stale
+  import-to (sets it to null) in the same transaction and links. `?action=import-settings` keeps "an omitted key keeps its stored
+  value" but the configuration it saves must have a from-date and a valid grouping, and a malformed date is a
+  `400` (previously `500`). The generic `PUT`/`PATCH` of `financial-account/account` (`FinancialAccountHandler`
+  pre-hook, `BankImportSettingsRules#validateImportSettingsUpdate`) validates `pSD2StatementFrequency` against the
+  four codes on every account, and refuses sending it or `pSD2ImportFromDate` null/blank only on a
+  bank-connected account whose stored value is non-null (it would clear a real value); echoing a null over a
+  null passes, and the account is loaded at most once.
+  Wire messages (English literals, the SPA maps them by exact text; changing one is a contract change):
+  `The import from date is required`, `The import from date is not a valid date (expected yyyy-MM-dd)`,
+  `The import to date is not a valid date (expected yyyy-MM-dd)`, `The statement grouping is required`,
+  `The statement grouping must be one of 1BD, 1BW, 1BM, 1BE`. The statement grouping logic itself is unchanged: the
+  PSD2 module groups by the day the sync runs, not by transaction date, and changing the grouping does not regroup
+  statements already imported. An account linked before this change with no from-date keeps syncing without a
+  lower bound until it next saves this configuration.
 
 ##### Orders of an invoice resolved from its lines — `linkedOrders` (ETP-5828)
 
@@ -8725,7 +8775,11 @@ The Go SPA's corresponding fix (`tools/app-shell/src/windows/custom/fiscal-model
 
   Three rules when touching it. **(a)** `OBContext.setAdminMode(false)` is not an alternative and fails silently — `doOrgClientAccessCheck` reads the *innermost* admin frame, and core pushes its own `setAdminMode(true)` inside `APRM_MatchingUtility#addNewDraftReconciliation`, so an outer frame is never the one consulted. The grant has to change the writable-organization *set*. **(b)** The flush belongs inside the scope, because the check fires on flush, not on save; at the cash-close site nothing flushes in the enclosing method at all. **(c)** Never widen a scope to enclose a `TenantOwnership.loadOwned` call — that guard consults the readable-organization list, so it would be transiently relaxed for org `"0"`. Resolve request-supplied ids before entering.
 
-**Bank statements on a PSD2-connected account (ETP-5471):** on an account whose `EM_PSD2_Connection_Status` is connected (`BankStatementsSupport#isBankConnected`, i.e. `BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED`), statements belong to the bank sync, and creating or importing one by hand is refused with `409`. `BankStatementsHandler` checks it in `handleCreate` and, through `parseUploadInput`, in `handleImport`/`handlePreview`; `handleDelete` already refused deleting one. Those methods are the single write path: the REST actions (`?action=create|import|preview|delete`) and the MCP named actions of the `bank-statements` spec (`createStatement`, `importStatement`, `previewStatement`, `deleteStatement`, `BankStatementAgentActions`) dispatch to them, and the generic `financial-account` entities `importedBankStatements`/`bankStatementLines` refuse every write with `405` (`BankStatementEntityHandler`, ETP-5447), so there is no way around the check. The sync itself is not affected: it writes through OBDal (`BankStatementHelper#createBankStatement` in the PSD2 module) and never reaches a NEO handler, which is also why the check is not an entity observer.
+**Bank statements on a PSD2-connected account (ETP-5471):** on an account whose `EM_PSD2_Connection_Status` is connected (`BankStatementsSupport#isBankConnected`, i.e. `BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED`), statements belong to the bank sync, and creating or importing one by hand is refused with `409`. `BankStatementsHandler` checks it in `handleCreate` and, through `parseUploadInput`, in `handleImport`/`handlePreview`; `handleDelete` refuses deleting one with `409` unless the flag `psd2-statement-import-settings` is on (ETP-6151, see below). Those methods are the single write path: the REST actions (`?action=create|import|preview|delete`) and the MCP named actions of the `bank-statements` spec (`createStatement`, `importStatement`, `previewStatement`, `deleteStatement`, `BankStatementAgentActions`) dispatch to them, and the generic `financial-account` entities `importedBankStatements`/`bankStatementLines` refuse every write with `405` (`BankStatementEntityHandler`, ETP-5447), so there is no way around the check. The sync itself is not affected: it writes through OBDal (`BankStatementHelper#createBankStatement` in the PSD2 module) and never reaches a NEO handler, which is also why the check is not an entity observer.
+
+**Deleting a statement on a PSD2-connected account (ETP-6151, behind the flag `psd2-statement-import-settings`).** ETP-5111 answered `409` to every delete on a connected account; with the flag **on** that is gone, with it **off** (the default) `BankStatementDeletion#prepareLegacy` answers it again exactly as before (drafts only, `409` `BankStatementDeletion.MSG_STATEMENT_BANK_CONNECTED` on a connected account, the not-draft `400` on a processed one). The flag is per account (see 'ETP-6151 flag' below). What follows is the flag-**on** rule. `BankStatementsHandler#handleDelete` now loads the statement with `BankStatementDeletion#load` and applies `BankStatementDeletion#prepare`, which branches only on structure (the account's connection status, the statement's `processed` and `posted` flags). Not connected: only a draft is deleted, a processed statement answers `400` (`MSG_NOT_DRAFT`, unchanged). Connected: a draft is deleted as above; a processed statement answers `400` `The statement is posted. Unpost it before deleting it.` when posted (`MSG_STATEMENT_POSTED_NOT_DELETABLE`), otherwise it is reactivated with the same `reactivateStatement` as `?action=reactivate` and deleted in the same transaction. A statement with matched lines answers `400` `MSG_HAS_MATCHED_LINES` in both cases, and every rejection happens before anything is written. REST, batch and the MCP `deleteStatement` action all land in the same method. Nothing records that a statement was deleted: whether its movements come back is decided only by the account's `EM_PSD2_IMPORT_FROM_DATE` on the next synchronization (the bank still serves them, within its history window), so the only way to keep them out is to move that date forward. The SPA warns about it in the delete dialog. A bulk delete is one request per statement, so partial success is possible. Create and import stay `409`.
+
+**ETP-6151 flag (`psd2-statement-import-settings`).** Every ETP-6151 behaviour in this module is gated by one flag, evaluated **per account** by `Psd2ImportSettingsFlag` (`FeatureFlagContext.forAccount(<ETGO_ACCOUNT email>)`, email resolved like `PortalLinkPolicy#currentAccountEmail`; no account or a failed lookup reads off). Gated: the required/validated/stored `importFromDate` and `statementGrouping` of `link`/`createAndLink` (and the stale import-to clearing), the `import-settings` required fields and coded `400`, the `PUT`/`PATCH` `financial-account/account` import-key validation, `maxFetchInterval` of `GET accounts` (flag off: logo through the single plain Salt Edge call) and the delete rule above. Declared exception (§4.12.9, "REST and MCP on statement deletion with `psd2-statement-import-settings` off"): the MCP `deleteStatement` description is static and states both rules. The SPA evaluates the same key itself, so no value is exposed by the backend. Operations, rollout and retirement: `feature-flags-and-tenant-upgrade.md`, section "`psd2-statement-import-settings` (ETP-6151)".
 
 **Record ownership before any action (ETP-5558, REST and MCP).** Both channels run an action in
 admin mode, and until this change nothing between the request and the action looked at the record
