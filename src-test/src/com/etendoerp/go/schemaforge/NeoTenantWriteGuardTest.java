@@ -45,6 +45,7 @@ import org.openbravo.client.kernel.event.EntityUpdateEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 /**
@@ -130,6 +131,37 @@ class NeoTenantWriteGuardTest {
     when(event.getTargetInstance()).thenReturn(target);
     Client previous = client(previousClientId);
     when(event.getPreviousState(clientProperty)).thenReturn(previous);
+    return event;
+  }
+
+  /** A preference the way core's {@code Preferences.setPreferenceValue} stores it. */
+  private static Preference preference(String clientId, String visibleAtClientId) {
+    Preference preference = mock(Preference.class);
+    Client client = client(clientId);
+    when(preference.getClient()).thenReturn(client);
+    Client visibleAt = visibleAtClientId != null ? client(visibleAtClientId) : null;
+    when(preference.getVisibleAtClient()).thenReturn(visibleAt);
+    when(preference.getEntityName()).thenReturn(Preference.ENTITY_NAME);
+    return preference;
+  }
+
+  private static EntityUpdateEvent preferenceUpdateEvent(Preference target,
+      String previousVisibleAtClientId) {
+    Entity entity = mock(Entity.class);
+    Property clientProperty = mock(Property.class);
+    Property visibleAtProperty = mock(Property.class);
+    when(entity.getProperty("client", false)).thenReturn(clientProperty);
+    when(entity.getProperty(Preference.PROPERTY_VISIBLEATCLIENT, false))
+        .thenReturn(visibleAtProperty);
+    when(target.getEntity()).thenReturn(entity);
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    when(event.getTargetInstance()).thenReturn(target);
+    Client previousClient = target.getClient();
+    when(event.getPreviousState(clientProperty)).thenReturn(previousClient);
+    Client previousVisibleAt = previousVisibleAtClientId != null
+        ? client(previousVisibleAtClientId)
+        : null;
+    when(event.getPreviousState(visibleAtProperty)).thenReturn(previousVisibleAt);
     return event;
   }
 
@@ -228,6 +260,40 @@ class NeoTenantWriteGuardTest {
   @Test
   void systemRowsAreRefused() {
     assertRefused(() -> guard.onUpdate(updateEvent(row(SYSTEM), SYSTEM)));
+  }
+
+  // ------------------------------------------------------------ System preferences (ETP-6224)
+
+  @Test
+  void aSystemPreferenceVisibleAtTheTenantPasses() {
+    assertDoesNotThrow(() -> guarded(() -> {
+      guard.onSave(newEvent(preference(SYSTEM, TENANT)));
+      guard.onUpdate(preferenceUpdateEvent(preference(SYSTEM, TENANT), TENANT));
+      guard.onDelete(deleteEvent(preference(SYSTEM, TENANT)));
+    }));
+    verify(session, never()).setDoRollback(true);
+  }
+
+  @Test
+  void aSystemPreferenceVisibleAtAnotherTenantIsRefused() {
+    assertRefused(() -> guard.onSave(newEvent(preference(SYSTEM, OTHER_TENANT))));
+  }
+
+  @Test
+  void aGlobalSystemPreferenceIsRefused() {
+    assertRefused(() -> guard.onUpdate(preferenceUpdateEvent(preference(SYSTEM, null), null)));
+  }
+
+  @Test
+  void pullingAnotherTenantsSystemPreferenceIntoOursIsRefused() {
+    assertRefused(() -> guard.onUpdate(
+        preferenceUpdateEvent(preference(SYSTEM, TENANT), OTHER_TENANT)));
+  }
+
+  @Test
+  void aGlobalSystemPreferencePassesInsideTheExplicitScope() {
+    assertDoesNotThrow(() -> guarded(() -> NeoTenantWriteGuard.allowingSystemRows(
+        () -> guard.onSave(newEvent(preference(SYSTEM, null))))));
   }
 
   @Test
