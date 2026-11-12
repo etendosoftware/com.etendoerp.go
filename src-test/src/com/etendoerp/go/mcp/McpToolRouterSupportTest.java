@@ -77,6 +77,7 @@ import com.etendoerp.go.usage.quota.QuotaVerdict;
  * Tests the pure utility methods that don't require DB access.
  *
  * @covers com.etendoerp.go.mcp.McpToolRouterSupport
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -2207,6 +2208,84 @@ class McpToolRouterSupportTest {
     @DisplayName("null in, null out")
     void nullIsNull() throws Exception {
       assertNull(McpToolRouterSupport.flattenCoreResponse(null));
+    }
+  }
+
+  // ─── emptyPageWhenPastEnd (ETP-5837, QA CP-16) ──────────────────────
+
+  /**
+   * Core restarts an empty page from row 0, so {@code etendo_list(offset:7)} over 7 rows answered
+   * the same 7 rows with {@code startRow:0}. The MCP list must answer the empty page it was asked
+   * for, keeping the count.
+   */
+  @Nested
+  @DisplayName("emptyPageWhenPastEnd")
+  class EmptyPageWhenPastEnd {
+
+    private JSONObject corePage(int startRow, int endRow, int totalRows, int rows) throws Exception {
+      JSONArray data = new JSONArray();
+      for (int i = 0; i < rows; i++) {
+        data.put(new JSONObject().put("id", "R" + i));
+      }
+      return new JSONObject().put("response", new JSONObject()
+          .put("status", 0).put("data", data)
+          .put("startRow", startRow).put("endRow", endRow).put("totalRows", totalRows));
+    }
+
+    /** Columns: requested offset | core startRow, endRow, totalRows, rows | replaced? */
+    @org.junit.jupiter.params.ParameterizedTest(name = "[{index}] offset {0}, core startRow {1} -> replaced {5}")
+    @org.junit.jupiter.params.provider.CsvSource({
+        // the QA repro: offset == totalRows, core fell back to the first page
+        "7,  0, 6, 7, 7, true",
+        // far past the end, same fallback
+        "60, 0, 6, 7, 7, true",
+        // a real page in range is left alone
+        "2,  2, 6, 7, 5, false",
+        // offset 0 is never touched, even on an empty set
+        "0,  0, 0, 0, 0, false"
+    })
+    @DisplayName("replaces only core's restart-from-zero page with an empty page at the offset")
+    void replacesOnlyRestartedPage(int offset, int startRow, int endRow, int totalRows, int rows,
+        boolean replaced) throws Exception {
+      JSONObject response = corePage(startRow, endRow, totalRows, rows);
+
+      assertEquals(replaced, McpToolRouterSupport.emptyPageWhenPastEnd(response, offset));
+
+      JSONObject inner = response.getJSONObject("response");
+      assertEquals(replaced ? 0 : rows, inner.getJSONArray("data").length());
+      assertEquals(replaced ? offset : startRow, inner.getInt("startRow"));
+      assertEquals(replaced ? offset - 1 : endRow, inner.getInt("endRow"));
+      assertEquals(totalRows, inner.getInt("totalRows"), "the count is never changed");
+    }
+
+    @Test
+    @DisplayName("a body without the core envelope or its startRow is left untouched")
+    void leavesUnknownShapesAlone() throws Exception {
+      JSONObject flat = new JSONObject().put("data", new JSONArray().put("x")).put("startRow", 0);
+      JSONObject noStart = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put("x")));
+      String flatBefore = flat.toString();
+      String noStartBefore = noStart.toString();
+
+      assertFalse(McpToolRouterSupport.emptyPageWhenPastEnd(flat, 5));
+      assertFalse(McpToolRouterSupport.emptyPageWhenPastEnd(noStart, 5));
+      assertFalse(McpToolRouterSupport.emptyPageWhenPastEnd(null, 5));
+      assertEquals(flatBefore, flat.toString());
+      assertEquals(noStartBefore, noStart.toString());
+    }
+
+    /** {@code handleList} needs a live DAL, so the wiring is guarded on the call site. */
+    @Test
+    @DisplayName("handleList applies it to the fetched page before the read hook and projection")
+    void handleListAppliesItAfterTheFetch() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleList");
+      int fetch = body.indexOf("jsonService.fetch(");
+      int fix = body.indexOf("McpToolRouterSupport.emptyPageWhenPastEnd(responseJson, offset)");
+      int readHook = body.indexOf("McpHookExecutor.runReadHook(");
+      assertTrue(fetch >= 0 && fix > fetch && readHook > fix,
+          "handleList must correct core's restarted page right after jsonService.fetch and"
+              + " before the read hook sees it (ETP-5837, QA CP-16)");
     }
   }
 
