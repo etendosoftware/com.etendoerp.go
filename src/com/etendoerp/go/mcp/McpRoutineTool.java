@@ -19,145 +19,84 @@ package com.etendoerp.go.mcp;
 import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
 import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
 
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.mcp.McpRoutineSteps.Refusal;
+import com.etendoerp.go.mcp.McpRoutineSteps.Step;
+import com.etendoerp.go.mcp.McpRoutineStore.Execution;
+import com.etendoerp.go.mcp.McpRoutineStore.Owner;
+import com.etendoerp.go.mcp.McpRoutineStore.Routine;
+import com.etendoerp.go.mcp.McpRoutineStore.Version;
+
 /**
  * The {@code etendo_routine} tool (ETP-6236, etendo-ai#51): several calls of the existing tools in
- * one call, each step able to use what an earlier step returned.
+ * one call, and routines saved to run them again with new parameters.
  *
- * <p>It owns no business logic. Every step is an ordinary tool call that goes through the router
- * ({@link StepRunner}, which is {@code McpToolRouter#route}), so the unknown-argument guard, the
- * scope check, the spec access check, the handlers and their error envelopes are the very ones a
- * separate call would get. What this class owns is what is new: validating the steps as a whole,
- * substituting {@code $ref} references, ending each step's transaction and reporting the outcome.
- * </p>
- *
- * <p><b>Not atomic, on purpose.</b> A document action commits by itself, so an all-or-nothing
- * routine cannot be promised. Each step commits when it succeeds; the first failure rolls back only
- * that step and stops the routine, and the answer lists what was done and what was not.</p>
- *
- * <p>Phase 1 of the proposal ({@code docs/proposals/mcp-routines.md} in schema_forge): only
- * {@code mode:"exec"}, inline steps. Saved routines, parameters and stored executions come
- * next.</p>
+ * <p>Running steps is {@link McpRoutineSteps}; parameters are {@link McpRoutineParams}; storage is
+ * {@link McpRoutineStore}. This class is the tool: its definition, the modes and their answers.
+ * Routines and executions are personal: every lookup is scoped to the calling user.</p>
  */
 final class McpRoutineTool {
 
   private static final Logger log = LogManager.getLogger(McpRoutineTool.class);
 
-  /** Hard cap on the steps of one routine; a longer list is refused before anything runs. */
-  static final int MAX_STEPS = 20;
-
   static final String PARAM_MODE = "mode";
   static final String PARAM_STEPS = "steps";
+  static final String PARAM_NAME = "name";
+  static final String PARAM_DESCRIPTION = McpConstants.KEY_DESCRIPTION;
+  static final String PARAM_PARAMS = McpRoutineParams.FIELD_PARAMS;
+  static final String PARAM_VERSION = "version";
+  static final String PARAM_EXECUTION_ID = "executionId";
+  static final String PARAM_FROM_EXECUTION = "fromExecution";
+
   static final String MODE_EXEC = "exec";
+  static final String MODE_RUN = "run";
+  static final String MODE_SAVE = "save";
+  static final String MODE_UPDATE = "update";
+  static final String MODE_LIST = "list";
+  static final String MODE_DESCRIBE = "describe";
+  static final String MODE_DELETE = "delete";
+  static final String MODE_EXECUTION = "execution";
+  static final List<String> MODES = List.of(MODE_EXEC, MODE_RUN, MODE_SAVE, MODE_UPDATE,
+      MODE_LIST, MODE_DESCRIBE, MODE_DELETE, MODE_EXECUTION);
 
-  static final String STEP_ID = "id";
-  static final String STEP_TOOL = "tool";
-  static final String STEP_ARGS = "args";
-  static final String STEP_RETURN_RESULT = "returnResult";
-  private static final Set<String> STEP_KEYS = Set.of(STEP_ID, STEP_TOOL, STEP_ARGS,
-      STEP_RETURN_RESULT);
+  static final String STATUS_OK = "OK";
+  static final String STATUS_FAILED = "FAILED";
 
-  /** A string value of this form is replaced with something an earlier step returned. */
-  static final String REF_PREFIX = "$ref:";
-  /** Reserved for the parameters of saved routines; refused until they exist. */
-  static final String PARAM_PREFIX = "$param.";
+  private static final Pattern NAME_PATTERN = Pattern.compile("[a-z0-9][a-z0-9_-]{0,59}");
+  private static final int MAX_DESCRIPTION = 2000;
+  private static final String NOTHING_RUN = " Nothing was run.";
+  private static final String KEY_ROUTINES = "routines";
+  private static final String KEY_CURRENT_VERSION = "currentVersion";
+
+  private final McpRoutineStore store;
+  private final Supplier<Owner> owner;
+  private final McpRoutineSteps.StepRunner runner;
 
   /**
-   * The tools a step may call. Reads, plus the writes that add, change or complete a record.
-   * Deleting, emailing and anything that reaches outside the ERP stay separate calls the agent
-   * decides on one by one; a routine is also not a step of another routine.
+   * @param store  where routines and executions live
+   * @param owner  who the call runs as; read once, when first needed
+   * @param runner the router, one tool call per step
    */
-  static final List<String> STEP_TOOLS = List.of(
-      McpConstants.TOOL_NEO_LIST,
-      McpConstants.TOOL_NEO_GET,
-      McpConstants.TOOL_NEO_SELECTORS,
-      McpConstants.TOOL_NEO_DEFAULTS,
-      McpConstants.TOOL_NEO_CREATE,
-      McpConstants.TOOL_NEO_UPDATE,
-      McpConstants.TOOL_NEO_ACTION);
-
-  private static final Pattern STEP_ID_PATTERN = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,39}");
-  private static final Pattern INDEX_PATTERN = Pattern.compile("\\d+");
-
-  private static final String KEY_OK = "ok";
-  private static final String KEY_RECORD_ID = "recordId";
-  private static final String KEY_DATA = "data";
-  private static final String NOTHING_RUN = " Nothing was run.";
-
-  private McpRoutineTool() {
-  }
-
-  /** Runs one step: a tool call through the router, under the caller's role and scopes. */
-  @FunctionalInterface
-  interface StepRunner {
-
-    /**
-     * Calls one tool.
-     *
-     * @param toolName the tool of the step
-     * @param args     the step's arguments, references already substituted
-     * @return the MCP tool-result content of that call
-     * @throws Exception whatever the router lets through (a scope refusal is thrown, not answered)
-     */
-    // The runner is the router's route(), which reports most failures as content but lets a scope
-    // refusal escape; the routine turns each into the step's error
-    JSONObject run(String toolName, JSONObject args) throws Exception; // NOSONAR java:S112
-  }
-
-  /** One validated step of the call. */
-  private static final class Step {
-    private final int index;
-    private final String id;
-    private final String tool;
-    private final JSONObject args;
-    private final boolean returnResult;
-
-    Step(int index, String id, String tool, JSONObject args, boolean returnResult) {
-      this.index = index;
-      this.id = id;
-      this.tool = tool;
-      this.args = args;
-      this.returnResult = returnResult;
-    }
-  }
-
-  /** What a successful step left for the steps after it. */
-  private static final class Done {
-    private final Step step;
-    private final JSONObject body;
-    private final Object recordId;
-
-    Done(Step step, JSONObject body) {
-      this.step = step;
-      this.body = body;
-      this.recordId = recordIdOf(body);
-    }
-  }
-
-  /** A step that could not run, or that ran and failed; carries the error body to report. */
-  private static final class StepFailure extends Exception {
-    private static final long serialVersionUID = 1L;
-    private final transient JSONObject body;
-
-    StepFailure(JSONObject body) {
-      super(body.optString(McpConstants.KEY_DETAIL, body.optString(McpConstants.KEY_ERROR)));
-      this.body = body;
-    }
+  McpRoutineTool(McpRoutineStore store, Supplier<Owner> owner,
+      McpRoutineSteps.StepRunner runner) {
+    this.store = store;
+    this.owner = owner;
+    this.runner = runner;
   }
 
   // ── Definition ──────────────────────────────────────────────────────────
@@ -169,424 +108,565 @@ final class McpRoutineTool {
    */
   static McpToolDefinition definition() {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(PARAM_MODE, enumProp("What to do. 'exec' runs the steps sent in 'steps', in order.",
-        List.of(MODE_EXEC)));
+    props.put(PARAM_MODE, enumProp("What to do: exec runs 'steps' now; save stores them as a "
+        + "routine; run runs a saved routine with 'params'; list, describe, update and delete "
+        + "manage your routines; execution reads a past execution.", MODES));
 
     Map<String, Object> stepProps = new LinkedHashMap<>();
-    stepProps.put(STEP_ID, McpJsonSchema.stringProp("This step's name, unique in the call, "
-        + "letters, digits, '_' or '-', starting with a letter. Later steps refer to its result "
-        + "as '$ref:<id>'."));
-    stepProps.put(STEP_TOOL, enumProp("The tool this step calls.", STEP_TOOLS));
-    stepProps.put(STEP_ARGS, McpJsonSchema.objectProp("The arguments of that tool, exactly as "
-        + "the tool takes them on its own (e.g. {spec, entity, fields} for etendo_create)."));
-    stepProps.put(STEP_RETURN_RESULT, McpJsonSchema.booleanProp("Optional. true returns this "
-        + "step's full result in the answer. When no step sets it, only the last step's result "
-        + "is returned."));
-    Map<String, Object> steps = McpJsonSchema.objectArrayProp("The steps, run in this order, at "
-        + "most " + MAX_STEPS + ".", stepProps, List.of(STEP_ID, STEP_TOOL, STEP_ARGS));
+    stepProps.put(McpRoutineSteps.STEP_ID, McpJsonSchema.stringProp("This step's name, unique in "
+        + "the routine, letters, digits, '_' or '-', starting with a letter. Later steps refer to "
+        + "its result as '$ref:<id>'."));
+    stepProps.put(McpRoutineSteps.STEP_TOOL, enumProp("The tool this step calls.",
+        McpRoutineSteps.STEP_TOOLS));
+    stepProps.put(McpRoutineSteps.STEP_ARGS, McpJsonSchema.objectProp("The arguments of that "
+        + "tool, exactly as the tool takes them on its own (e.g. {spec, entity, fields} for "
+        + "etendo_create)."));
+    stepProps.put(McpRoutineSteps.STEP_RETURN_RESULT, McpJsonSchema.booleanProp("Optional. true "
+        + "returns this step's full result in the answer. When no step sets it, only the last "
+        + "step's result is returned."));
+    Map<String, Object> steps = McpJsonSchema.objectArrayProp("exec, save, update: the steps, run "
+        + "in this order, at most " + McpRoutineSteps.MAX_STEPS + ".", stepProps,
+        List.of(McpRoutineSteps.STEP_ID, McpRoutineSteps.STEP_TOOL, McpRoutineSteps.STEP_ARGS));
     steps.put("minItems", 1);
-    steps.put("maxItems", MAX_STEPS);
+    steps.put("maxItems", McpRoutineSteps.MAX_STEPS);
     props.put(PARAM_STEPS, steps);
+    props.put(PARAM_NAME, McpJsonSchema.stringProp("run, save, update, describe, delete: the "
+        + "routine's name, lowercase letters, digits, '-' or '_' (e.g. 'create-customer')."));
+    props.put(PARAM_DESCRIPTION, McpJsonSchema.stringProp("save (required), update (optional): "
+        + "what the routine does and when to use it."));
+    props.put(PARAM_PARAMS, McpJsonSchema.objectProp("save, update: the parameters the steps use "
+        + "as '$param.<name>', each {type: string|number|boolean|id, required, description}; with "
+        + "fromExecution each also takes from:[<stepId>.<path>, ...], the values of that "
+        + "execution it replaces. run: the values, {<name>: value}."));
+    props.put(PARAM_VERSION, McpJsonSchema.numericProp("integer", "run, describe: an older "
+        + "version of the routine; the current one by default."));
+    props.put(PARAM_FROM_EXECUTION, McpJsonSchema.stringProp("save: the executionId of a "
+        + "successful exec whose steps become the routine, instead of sending 'steps'."));
+    props.put(PARAM_EXECUTION_ID, McpJsonSchema.stringProp("execution: the executionId to read."));
 
     return new McpToolDefinition(McpConstants.TOOL_NEO_ROUTINE, description(),
-        buildObjectSchema(props, List.of(PARAM_MODE, PARAM_STEPS)));
+        buildObjectSchema(props, List.of(PARAM_MODE)));
   }
 
   /** The text the agent reads: what the tool does, what it does not, and the shape it answers. */
   private static String description() {
     return "Run several calls of the other tools in ONE call, in order, each step able to use what "
-        + "an earlier step returned. Use it for a flow whose steps you already know — e.g. create "
-        + "a customer, its address and an invoice for it, then complete the invoice — instead of "
-        + "one call per step. Each step is {id, tool, args}: 'tool' is one of " + STEP_TOOLS
-        + " and 'args' are that tool's own arguments; every step runs exactly as that tool would "
-        + "run alone, with the same permissions, checks and errors. A string value '$ref:<id>' "
-        + "anywhere in 'args' is replaced with the record id an earlier step created or read "
-        + "(its data.id); '$ref:<id>.<path>' with any value of that step's result, e.g. "
-        + "'$ref:agua.data[0].id' for the first row of an etendo_list. The whole string must be "
-        + "the reference. NOT atomic: each step commits when it succeeds; the first failing step "
-        + "is rolled back and stops the routine. "
-        + "Returns {ok:true, steps:[{id, tool, ok:true, recordId}], results:{<id>: <that step's "
-        + "result>}} — results carries the steps marked returnResult:true, or only the last one — "
-        + "or, on failure, an error whose failedAt names the step, stepError is that step's own "
-        + "error, completed lists the steps that are done and stay done (with their recordId) and "
-        + "pending the ones that did not run. Fix the cause and send only the failed and pending "
-        + "steps again, using the recordIds of the completed ones. At most " + MAX_STEPS
-        + " steps; for many records of one kind use etendo_batch. Example — a customer with one "
-        + "address: {mode:'exec', steps:[{id:'bp', tool:'etendo_create', args:{spec:'contacts', "
+        + "an earlier step returned; and save such a flow as a routine of yours to run it again "
+        + "with new values. Use it for a flow whose steps you already know — e.g. create a "
+        + "customer, its address and an invoice for it, then complete the invoice — instead of "
+        + "one call per step. Each step is {id, tool, args}: 'tool' is one of "
+        + McpRoutineSteps.STEP_TOOLS + " and 'args' are that tool's own arguments; every step "
+        + "runs exactly as that tool would run alone, with the same permissions, checks and "
+        + "errors. A string value '$ref:<id>' anywhere in 'args' is replaced with the record id "
+        + "an earlier step created or read (its data.id); '$ref:<id>.<path>' with any value of "
+        + "that step's result, e.g. '$ref:agua.data[0].id' for the first row of an etendo_list; "
+        + "'$param.<name>' with a parameter of a saved routine. The whole string must be the "
+        + "reference. NOT atomic: each step commits when it succeeds; the first failing step is "
+        + "rolled back and stops the routine. exec and run return {ok:true, executionId, "
+        + "steps:[{id, tool, ok:true, recordId}], results:{<id>: <that step's result>}} — "
+        + "results carries the steps marked returnResult:true, or only the last one — or, on "
+        + "failure, an error whose failedAt names the step, stepError is that step's own error, "
+        + "completed lists the steps that are done and stay done (with their recordId) and "
+        + "pending the ones that did not run; mode execution with the executionId returns every "
+        + "step's full result later. Routines are yours only: list shows them (call it at the "
+        + "start of a task: a routine may already do it), describe shows one with its steps, "
+        + "save stores one (or, with fromExecution, the steps of a successful exec, turning the "
+        + "values named in each parameter's 'from' into parameters), update stores a new version "
+        + "and delete removes it. At most " + McpRoutineSteps.MAX_STEPS + " steps; for many "
+        + "records of one kind use etendo_batch. Example — a customer with one address: "
+        + "{mode:'exec', steps:[{id:'bp', tool:'etendo_create', args:{spec:'contacts', "
         + "entity:'businessPartner', fields:{name:'Acme'}}}, {id:'addr', tool:'etendo_create', "
         + "args:{spec:'contacts', entity:'locationAddress', parentId:'$ref:bp', "
         + "fields:{country:'106', addressLine1:'Calle Mayor 1', cityName:'Madrid', "
         + "postalCode:'28001'}}}]}.";
   }
 
-  // ── Runtime ─────────────────────────────────────────────────────────────
+  // ── Dispatch ────────────────────────────────────────────────────────────
 
   /**
    * Handles one {@code etendo_routine} call.
    *
-   * @param args   the tool arguments
-   * @param runner the router, one tool call per step
-   * @return the MCP content: every step's outcome and the selected results, or an error naming the
-   *         failed step with what was done and what was not
+   * @param args the tool arguments
+   * @return the MCP content of the mode's answer, or its refusal
    */
-  static JSONObject handle(JSONObject args, StepRunner runner) {
-    List<Step> steps;
+  JSONObject handle(JSONObject args) {
+    JSONObject arguments = args == null ? new JSONObject() : args;
+    String mode = arguments.optString(PARAM_MODE, null);
     try {
-      steps = validate(args);
-    } catch (StepFailure refused) {
-      try {
-        refused.body.put(McpConstants.KEY_DETAIL,
-            refused.body.optString(McpConstants.KEY_DETAIL) + NOTHING_RUN);
-      } catch (JSONException cannotHappen) {
-        log.debug("Could not mark the refusal as nothing run", cannotHappen);
+      if (mode == null || !MODES.contains(mode)) {
+        throw McpRoutineSteps.refusal(PARAM_MODE, "'mode' must be one of " + MODES + ".");
       }
-      return McpToolRouter.wrapAsErrorContent(refused.body);
+      return McpToolRouter.wrapAsTextContent(dispatch(mode, arguments));
+    } catch (Refusal refused) {
+      return McpToolRouter.wrapAsErrorContent(refused.body());
+    } catch (StepsFailed failed) {
+      return McpToolRouter.wrapAsErrorContent(failed.body);
     }
-    Map<String, Done> done = new HashMap<>();
-    List<Done> completed = new ArrayList<>();
-    for (Step step : steps) {
-      try {
-        Done outcome = runStep(step, done, runner);
-        done.put(step.id, outcome);
-        completed.add(outcome);
-      } catch (StepFailure failed) {
-        log.info("etendo_routine stopped at step {} ({}) of {}: {}", step.id, step.tool,
-            steps.size(), failed.getMessage());
-        return McpToolRouter.wrapAsErrorContent(failure(step, failed.body, completed, steps));
-      }
-    }
-    log.info("etendo_routine ran {} steps", steps.size());
-    return McpToolRouter.wrapAsTextContent(success(steps, completed));
   }
 
-  /**
-   * Runs one step and ends its transaction: commit on success, roll back on failure.
-   *
-   * @throws StepFailure when a reference cannot be resolved or the tool answers an error
-   */
-  private static Done runStep(Step step, Map<String, Done> done, StepRunner runner)
-      throws StepFailure {
-    JSONObject resolved;
+  /** A run that stopped at a failing step; its body is the routine's failure answer. */
+  private static final class StepsFailed extends Exception {
+    private static final long serialVersionUID = 1L;
+    private final transient JSONObject body;
+
+    StepsFailed(JSONObject body) {
+      super("routine step failed");
+      this.body = body;
+    }
+  }
+
+  private JSONObject dispatch(String mode, JSONObject args) throws Refusal, StepsFailed {
+    switch (mode) {
+      case MODE_EXEC:
+        return exec(args);
+      case MODE_RUN:
+        return run(args);
+      case MODE_SAVE:
+        return save(args);
+      case MODE_UPDATE:
+        return update(args);
+      case MODE_LIST:
+        return list();
+      case MODE_DESCRIBE:
+        return describe(args);
+      case MODE_DELETE:
+        return delete(args);
+      default:
+        return execution(args);
+    }
+  }
+
+  // ── exec / run ──────────────────────────────────────────────────────────
+
+  private JSONObject exec(JSONObject args) throws Refusal, StepsFailed {
+    onlyArguments(args, PARAM_STEPS);
+    Object rawSteps = args.opt(PARAM_STEPS);
+    List<Step> steps = nothingRun(() -> McpRoutineSteps.parse(rawSteps, Set.of(),
+        new HashSet<>()));
+    return execute(steps, Map.of(), MODE_EXEC, null, null, rawSteps);
+  }
+
+  private JSONObject run(JSONObject args) throws Refusal, StepsFailed {
+    onlyArguments(args, PARAM_NAME, PARAM_PARAMS, PARAM_VERSION);
+    Routine routine = existing(args);
+    Version version = version(routine, args);
+    JSONObject declarations = parse(version.params);
+    JSONArray storedSteps = parseArray(version.steps);
+    Map<String, Object> values = nothingRun(() -> McpRoutineParams.values(declarations,
+        args.opt(PARAM_PARAMS)));
+    List<Step> steps = nothingRun(() -> McpRoutineSteps.parse(storedSteps,
+        McpRoutineParams.names(declarations), new HashSet<>()));
+    return execute(steps, values, MODE_RUN, routine.name, version.number, storedSteps);
+  }
+
+  /** Runs the steps, records the execution and answers with its id. */
+  private JSONObject execute(List<Step> steps, Map<String, Object> values, String mode,
+      String routineName, Integer versionNo, Object sentSteps) throws StepsFailed {
+    McpRoutineSteps.Outcome outcome = McpRoutineSteps.run(steps, values, runner);
+    String executionId = record(new Execution(null, mode, outcome.ok ? STATUS_OK : STATUS_FAILED,
+        routineName, versionNo, String.valueOf(sentSteps), outcome.record.toString(), null));
     try {
-      resolved = (JSONObject) resolve(copy(step.args), done, step);
+      if (executionId != null) {
+        outcome.body.put(PARAM_EXECUTION_ID, executionId);
+      }
+      if (routineName != null) {
+        outcome.body.put(PARAM_NAME, routineName);
+        outcome.body.put(PARAM_VERSION, versionNo);
+      }
     } catch (JSONException e) {
-      throw new StepFailure(refusal(STEP_ARGS, "Step '" + step.id + "': its args could not be "
-          + "read: " + e.getMessage() + "."));
+      throw new McpToolException("Error building the routine answer", e);
     }
-    JSONObject content;
-    try {
-      content = runner.run(step.tool, resolved);
-    } catch (Exception e) {
-      McpActionBatch.rollbackQuietly();
-      throw new StepFailure(McpActionBatch.parseBody(
-          McpActionBatch.errorBodyOf(e, step.tool)));
-    } finally {
-      McpActionBatch.ensureAdminMode();
+    if (!outcome.ok) {
+      throw new StepsFailed(outcome.body);
     }
-    JSONObject body = McpActionBatch.parseBody(McpActionBatch.textOf(content));
-    boolean failed = content == null || content.optBoolean(McpActionBatch.KEY_IS_ERROR, false);
-    McpActionBatch.finishTransaction(!failed);
-    if (failed) {
-      throw new StepFailure(body);
-    }
-    return new Done(step, body);
+    return outcome.body;
   }
 
-  // ── Validation ──────────────────────────────────────────────────────────
+  /**
+   * Stores an execution. A failure to store it does not change what the steps did, so it is
+   * logged and the answer simply carries no executionId.
+   */
+  private String record(Execution execution) {
+    try {
+      return store.recordExecution(owner.get(), execution);
+    } catch (RuntimeException e) {
+      log.warn("etendo_routine could not record the execution: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  // ── save / update ───────────────────────────────────────────────────────
+
+  private JSONObject save(JSONObject args) throws Refusal {
+    onlyArguments(args, PARAM_NAME, PARAM_DESCRIPTION, PARAM_PARAMS, PARAM_STEPS,
+        PARAM_FROM_EXECUTION);
+    String name = name(args);
+    String description = description(args, true);
+    String fromExecution = StringUtils.trimToNull(args.optString(PARAM_FROM_EXECUTION, null));
+    if (fromExecution != null && args.has(PARAM_STEPS)) {
+      throw McpRoutineSteps.refusal(PARAM_STEPS, "Send either 'steps' or 'fromExecution', not "
+          + "both.");
+    }
+    if (store.find(owner.get(), name) != null) {
+      throw McpRoutineSteps.refusal(PARAM_NAME, "You already have a routine named '" + name
+          + "'. Use mode update to store a new version of it, or pick another name.");
+    }
+    JSONObject declarations = McpRoutineParams.declarations(args.opt(PARAM_PARAMS),
+        fromExecution != null);
+    Object rawSteps = fromExecution == null ? args.opt(PARAM_STEPS)
+        : stepsFromExecution(fromExecution, declarations);
+    JSONArray steps = checkedDefinition(rawSteps, declarations);
+    Routine routine = store.create(owner.get(), name, description, declarations.toString(),
+        steps.toString());
+    return saved(routine.name, 1, declarations,
+        "Saved. Run it with {mode:'run', name:'" + routine.name + "', params:{...}}.");
+  }
+
+  private JSONObject update(JSONObject args) throws Refusal {
+    onlyArguments(args, PARAM_NAME, PARAM_DESCRIPTION, PARAM_PARAMS, PARAM_STEPS);
+    Routine routine = existing(args);
+    if (!args.has(PARAM_STEPS)) {
+      throw McpRoutineSteps.refusal(PARAM_STEPS, "update stores a complete new version: send "
+          + "'steps' and 'params' (describe shows the current ones).");
+    }
+    String description = args.has(PARAM_DESCRIPTION) ? description(args, true)
+        : routine.description;
+    JSONObject declarations = McpRoutineParams.declarations(args.opt(PARAM_PARAMS), false);
+    JSONArray steps = checkedDefinition(args.opt(PARAM_STEPS), declarations);
+    int number = store.addVersion(owner.get(), routine, description, declarations.toString(),
+        steps.toString());
+    return saved(routine.name, number, declarations, "Version " + number + " is now current; "
+        + "older versions stay available with run/describe and 'version'.");
+  }
 
   /**
-   * Checks the call as a whole before anything runs: the mode, the step count, each step's shape
-   * and tool, and that every reference names an earlier step.
+   * Validates the steps of a routine being stored: their shape, and that every declared
+   * parameter is used and every used one declared.
    *
-   * @return the steps, in order
-   * @throws StepFailure a refusal; nothing ran
+   * @return the steps as they will be stored
    */
-  private static List<Step> validate(JSONObject args) throws StepFailure {
-    String mode = args == null ? null : args.optString(PARAM_MODE, null);
-    if (!MODE_EXEC.equals(mode)) {
-      throw new StepFailure(refusal(PARAM_MODE, "'mode' must be '" + MODE_EXEC + "'."));
+  private static JSONArray checkedDefinition(Object rawSteps, JSONObject declarations)
+      throws Refusal {
+    Set<String> declared = McpRoutineParams.names(declarations);
+    Set<String> used = new HashSet<>();
+    McpRoutineSteps.parse(rawSteps, declared, used);
+    Set<String> unused = new java.util.TreeSet<>(declared);
+    unused.removeAll(used);
+    if (!unused.isEmpty()) {
+      throw McpRoutineSteps.refusal(PARAM_PARAMS, "Parameter(s) " + unused + " are declared but "
+          + "no step uses them as '$param.<name>'. Remove them or use them.");
     }
-    Object raw = args.opt(PARAM_STEPS);
-    if (!(raw instanceof JSONArray) || ((JSONArray) raw).length() == 0) {
-      throw new StepFailure(refusal(PARAM_STEPS, "'steps' must be a non-empty array of "
-          + "{id, tool, args}."));
+    return (JSONArray) rawSteps;
+  }
+
+  /**
+   * The steps of a successful inline execution of the caller, with every value a parameter's
+   * {@code from} names replaced by {@code $param.<name>}. The {@code from} keys are removed
+   * from {@code declarations}.
+   */
+  private JSONArray stepsFromExecution(String executionId, JSONObject declarations)
+      throws Refusal {
+    Execution execution = store.findExecution(owner.get(), executionId);
+    if (execution == null) {
+      throw McpRoutineSteps.refusal(PARAM_FROM_EXECUTION, "You have no execution '" + executionId
+          + "'.");
     }
-    JSONArray array = (JSONArray) raw;
-    if (array.length() > MAX_STEPS) {
-      throw new StepFailure(refusal(PARAM_STEPS, "'steps' has " + array.length()
-          + " steps and the maximum is " + MAX_STEPS + ". Split the flow, or use etendo_batch "
-          + "for many records of one kind."));
+    if (!MODE_EXEC.equals(execution.mode) || !STATUS_OK.equals(execution.status)) {
+      throw McpRoutineSteps.refusal(PARAM_FROM_EXECUTION, "Execution '" + executionId + "' is "
+          + "not a successful exec (it is a " + execution.mode + " that ended " + execution.status
+          + "). Only the steps of an exec that finished ok can become a routine.");
     }
-    List<Step> steps = new ArrayList<>();
-    Set<String> earlier = new HashSet<>();
-    for (int i = 0; i < array.length(); i++) {
-      Step step = parseStep(array.opt(i), i, earlier);
-      checkReferences(step.args, step, earlier);
-      earlier.add(step.id);
-      steps.add(step);
+    JSONArray steps = parseArray(execution.steps);
+    for (String name : McpRoutineParams.names(declarations)) {
+      JSONObject declaration = declarations.optJSONObject(name);
+      Object from = declaration.remove(McpRoutineParams.KEY_FROM);
+      if (!(from instanceof JSONArray) || ((JSONArray) from).length() == 0) {
+        throw McpRoutineSteps.refusal(PARAM_PARAMS, "Parameter '" + name + "' needs 'from': the "
+            + "values of the execution it replaces, as ['<stepId>.<path>', ...] (e.g. "
+            + "'bp.args.fields.name').");
+      }
+      JSONArray paths = (JSONArray) from;
+      for (int i = 0; i < paths.length(); i++) {
+        replaceAt(steps, paths.optString(i), McpRoutineSteps.PARAM_PREFIX + name);
+      }
     }
     return steps;
   }
 
-  private static Step parseStep(Object raw, int index, Set<String> earlier) throws StepFailure {
-    String where = "Step at position " + index;
-    if (!(raw instanceof JSONObject)) {
-      throw new StepFailure(refusal(PARAM_STEPS, where + " is not an object {id, tool, args}."));
-    }
-    JSONObject json = (JSONObject) raw;
-    Iterator<?> keys = json.keys();
-    while (keys.hasNext()) {
-      String key = String.valueOf(keys.next());
-      if (!STEP_KEYS.contains(key)) {
-        throw new StepFailure(refusal(PARAM_STEPS, where + " has an unknown key '" + key
-            + "'. A step takes only " + STEP_KEYS + "; the tool's arguments go inside 'args'."));
+  /** Replaces the value at {@code <stepId>.<path>} of the steps; refuses a path that is absent. */
+  private static void replaceAt(JSONArray steps, String path, String replacement)
+      throws Refusal {
+    List<String> segments = McpRoutineSteps.segments("." + path);
+    JSONObject step = null;
+    for (int i = 0; !segments.isEmpty() && i < steps.length(); i++) {
+      JSONObject candidate = steps.optJSONObject(i);
+      if (candidate != null && segments.get(0).equals(candidate.optString(
+          McpRoutineSteps.STEP_ID))) {
+        step = candidate;
       }
     }
-    String id = json.optString(STEP_ID, null);
-    if (id == null || !STEP_ID_PATTERN.matcher(id).matches()) {
-      throw new StepFailure(refusal(PARAM_STEPS, where + " needs an 'id' of letters, digits, "
-          + "'_' or '-', starting with a letter (at most 40 characters)."));
+    if (step == null || segments.size() < 2) {
+      throw missingPath(path);
     }
-    if (earlier.contains(id)) {
-      throw new StepFailure(refusal(PARAM_STEPS, "Step id '" + id + "' is repeated: each step "
-          + "needs its own id."));
+    Object parent = step;
+    for (int i = 1; i < segments.size() - 1; i++) {
+      parent = childOf(parent, segments.get(i));
+      if (parent == null) {
+        throw missingPath(path);
+      }
     }
-    String tool = json.optString(STEP_TOOL, null);
-    if (!STEP_TOOLS.contains(tool)) {
-      throw new StepFailure(refusal(PARAM_STEPS, "Step '" + id + "' calls '" + tool
-          + "', which a routine cannot run. A step may call " + STEP_TOOLS + "."));
+    String last = segments.get(segments.size() - 1);
+    try {
+      if (parent instanceof JSONObject && ((JSONObject) parent).has(last)) {
+        ((JSONObject) parent).put(last, replacement);
+        return;
+      }
+      if (parent instanceof JSONArray && last.matches("\\d+")
+          && Integer.parseInt(last) < ((JSONArray) parent).length()) {
+        ((JSONArray) parent).put(Integer.parseInt(last), replacement);
+        return;
+      }
+    } catch (JSONException e) {
+      throw new McpToolException("Error replacing a routine value", e);
     }
-    Object stepArgs = json.opt(STEP_ARGS);
-    if (!(stepArgs instanceof JSONObject)) {
-      throw new StepFailure(refusal(PARAM_STEPS, "Step '" + id + "' needs 'args': the "
-          + "arguments object of " + tool + "."));
-    }
-    Object returnResult = json.opt(STEP_RETURN_RESULT);
-    if (returnResult != null && !(returnResult instanceof Boolean)) {
-      throw new StepFailure(refusal(PARAM_STEPS, "Step '" + id + "': 'returnResult' must be "
-          + "true or false."));
-    }
-    return new Step(index, id, tool, (JSONObject) stepArgs, Boolean.TRUE.equals(returnResult));
+    throw missingPath(path);
   }
 
-  /** Walks the step's arguments and refuses a reference to a step that is not an earlier one. */
-  private static void checkReferences(Object value, Step step, Set<String> earlier)
-      throws StepFailure {
-    if (value instanceof JSONObject) {
-      Iterator<?> keys = ((JSONObject) value).keys();
-      while (keys.hasNext()) {
-        checkReferences(((JSONObject) value).opt(String.valueOf(keys.next())), step, earlier);
-      }
-    } else if (value instanceof JSONArray) {
-      JSONArray array = (JSONArray) value;
-      for (int i = 0; i < array.length(); i++) {
-        checkReferences(array.opt(i), step, earlier);
-      }
-    } else if (value instanceof String) {
-      String text = (String) value;
-      if (text.startsWith(PARAM_PREFIX)) {
-        throw new StepFailure(refusal(PARAM_STEPS, "Step '" + step.id + "' uses '" + text
-            + "': parameters belong to saved routines, which this server does not offer yet. "
-            + "Send the value itself."));
-      }
-      if (text.startsWith(REF_PREFIX) && !earlier.contains(targetOf(text))) {
-        throw new StepFailure(refusal(PARAM_STEPS, "Step '" + step.id + "' refers to '"
-            + targetOf(text) + "' in '" + text + "', which is not an earlier step. A reference "
-            + "can only use a step that runs before it" + (earlier.isEmpty() ? "" : ": "
-            + earlier) + "."));
-      }
-    }
-  }
-
-  // ── References ──────────────────────────────────────────────────────────
-
-  /** @return the step id a reference names: what follows the prefix, up to '.' or '[' */
-  static String targetOf(String reference) {
-    String rest = reference.substring(REF_PREFIX.length());
-    int end = rest.length();
-    for (int i = 0; i < rest.length(); i++) {
-      char c = rest.charAt(i);
-      if (c == '.' || c == '[') {
-        end = i;
-        break;
-      }
-    }
-    return rest.substring(0, end);
-  }
-
-  /** Replaces every reference in {@code value} (a fresh copy) with the value it names. */
-  private static Object resolve(Object value, Map<String, Done> done, Step step)
-      throws JSONException, StepFailure {
-    if (value instanceof JSONObject) {
-      JSONObject object = (JSONObject) value;
-      List<String> keys = new ArrayList<>();
-      Iterator<?> it = object.keys();
-      while (it.hasNext()) {
-        keys.add(String.valueOf(it.next()));
-      }
-      for (String key : keys) {
-        object.put(key, resolve(object.get(key), done, step));
-      }
-      return object;
-    }
-    if (value instanceof JSONArray) {
-      JSONArray array = (JSONArray) value;
-      for (int i = 0; i < array.length(); i++) {
-        array.put(i, resolve(array.get(i), done, step));
-      }
-      return array;
-    }
-    if (value instanceof String && ((String) value).startsWith(REF_PREFIX)) {
-      return valueOf((String) value, done, step);
-    }
-    return value;
-  }
-
-  /**
-   * The value a reference names: {@code $ref:<id>} is the step's record id, {@code
-   * $ref:<id>.<path>} a value of its result. Path segments are keys, {@code [n]} or {@code .n}
-   * array positions.
-   */
-  private static Object valueOf(String reference, Map<String, Done> done, Step step)
-      throws StepFailure {
-    String target = targetOf(reference);
-    Done source = done.get(target);
-    String path = reference.substring(REF_PREFIX.length() + target.length());
-    if (path.isEmpty()) {
-      if (source.recordId == null) {
-        throw new StepFailure(refusal(PARAM_STEPS, "Step '" + step.id + "' uses '" + reference
-            + "', but step '" + target + "' (" + source.step.tool + ") returned no record id "
-            + "(data.id). Name the value with a path, e.g. '" + reference + ".data[0].id'."));
-      }
-      return source.recordId;
-    }
-    Object current = source.body;
-    for (String segment : segments(path)) {
-      current = child(current, segment);
-      if (current == null) {
-        throw new StepFailure(refusal(PARAM_STEPS, "Step '" + step.id + "' uses '" + reference
-            + "', but the result of step '" + target + "' has nothing at '" + segment
-            + "'. Steps before it are done; check that result and send the rest again."));
-      }
-    }
-    return current;
-  }
-
-  /** Splits {@code .data[0].id} or {@code .data.0.id} into {@code data, 0, id}. */
-  private static List<String> segments(String path) {
-    List<String> segments = new ArrayList<>();
-    for (String part : path.replace("[", ".").replace("]", "").split("\\.")) {
-      if (!part.isEmpty()) {
-        segments.add(part);
-      }
-    }
-    return segments;
-  }
-
-  private static Object child(Object parent, String segment) {
+  private static Object childOf(Object parent, String segment) {
     if (parent instanceof JSONObject) {
-      Object value = ((JSONObject) parent).opt(segment);
-      return value == JSONObject.NULL ? null : value;
+      return ((JSONObject) parent).opt(segment);
     }
-    if (parent instanceof JSONArray && INDEX_PATTERN.matcher(segment).matches()) {
-      Object value = ((JSONArray) parent).opt(Integer.parseInt(segment));
-      return value == JSONObject.NULL ? null : value;
+    if (parent instanceof JSONArray && segment.matches("\\d+")) {
+      return ((JSONArray) parent).opt(Integer.parseInt(segment));
     }
     return null;
   }
 
-  /** @return {@code data.id} of a step's result when it is one record's id, else {@code null} */
-  private static Object recordIdOf(JSONObject body) {
-    JSONObject data = body.optJSONObject(KEY_DATA);
-    Object id = data == null ? null : data.opt(STEP_ID);
-    return id instanceof String ? id : null;
+  private static Refusal missingPath(String path) {
+    return McpRoutineSteps.refusal(PARAM_PARAMS, "'from' path '" + path + "' is not a value of "
+        + "the execution's steps. Use '<stepId>.<path>' as the step was sent, e.g. "
+        + "'bp.args.fields.name'.");
   }
 
-  private static JSONObject copy(JSONObject args) throws JSONException {
-    return new JSONObject(args.toString());
-  }
-
-  // ── Answers ─────────────────────────────────────────────────────────────
-
-  private static JSONObject success(List<Step> steps, List<Done> completed) {
+  private static JSONObject saved(String name, int version, JSONObject declarations, String hint)
+      throws Refusal {
     try {
-      boolean anyMarked = steps.stream().anyMatch(s -> s.returnResult);
-      JSONObject results = new JSONObject();
-      for (Done d : completed) {
-        if (d.step.returnResult || (!anyMarked && d.step.index == steps.size() - 1)) {
-          results.put(d.step.id, d.body);
-        }
-      }
       JSONObject body = new JSONObject();
-      body.put(KEY_OK, true);
-      body.put(PARAM_STEPS, summaries(completed));
-      body.put("results", results);
+      body.put(McpRoutineSteps.KEY_OK, true);
+      body.put(PARAM_NAME, name);
+      body.put(PARAM_VERSION, version);
+      body.put(PARAM_PARAMS, declarations);
+      body.put(McpConstants.KEY_HINT, hint);
       return body;
     } catch (JSONException e) {
       throw new McpToolException("Error building the routine answer", e);
     }
   }
 
-  private static JSONObject failure(Step step, JSONObject stepError, List<Done> completed,
-      List<Step> steps) {
+  // ── list / describe / delete / execution ────────────────────────────────
+
+  private JSONObject list() throws Refusal {
     try {
-      JSONObject failedAt = new JSONObject();
-      failedAt.put(STEP_ID, step.id);
-      failedAt.put("index", step.index);
-      failedAt.put(STEP_TOOL, step.tool);
-      JSONArray pending = new JSONArray();
-      for (Step later : steps.subList(step.index + 1, steps.size())) {
-        pending.put(later.id);
+      JSONArray routines = new JSONArray();
+      for (Routine routine : store.list(owner.get())) {
+        Version current = store.version(routine.id, routine.currentVersion);
+        JSONObject entry = new JSONObject();
+        entry.put(PARAM_NAME, routine.name);
+        entry.put(PARAM_DESCRIPTION, routine.description);
+        entry.put(PARAM_PARAMS, current == null ? new JSONObject() : parse(current.params));
+        entry.put(KEY_CURRENT_VERSION, routine.currentVersion);
+        routines.put(entry);
       }
       JSONObject body = new JSONObject();
-      body.put(KEY_OK, false);
-      body.put(McpConstants.KEY_STATUS, stepError.optInt(McpConstants.KEY_STATUS,
-          McpConstants.STATUS_UNPROCESSABLE));
-      body.put(McpConstants.KEY_ERROR, stepError.optString(McpConstants.KEY_ERROR,
-          McpConstants.ERROR_VALIDATION));
-      body.put(McpConstants.KEY_DETAIL, "Step '" + step.id + "' (" + step.tool + ", position "
-          + step.index + ") failed and was rolled back; " + completed.size() + " earlier step(s) "
-          + "are done and stay done, " + pending.length() + " did not run.");
-      body.put("failedAt", failedAt);
-      body.put("stepError", stepError);
-      body.put("completed", summaries(completed));
-      body.put("pending", pending);
-      body.put(McpConstants.KEY_HINT, "Fix what stepError names and send the failed step and the "
-          + "pending ones again. Do not resend the completed steps: they are saved; use their "
-          + "recordId instead of a $ref to them.");
+      body.put(KEY_ROUTINES, routines);
+      body.put(McpConstants.KEY_HINT, routines.length() == 0
+          ? "You have no saved routines yet. When you finish a flow with exec, save it "
+              + "(fromExecution) to run it again in one call."
+          : "Remember these routines and prefer them when a task matches one: one run call "
+              + "replaces all its steps. List them again from time to time: they can change.");
       return body;
     } catch (JSONException e) {
-      throw new McpToolException("Error building the routine failure", e);
+      throw new McpToolException("Error building the routine list", e);
     }
   }
 
-  private static JSONArray summaries(List<Done> completed) throws JSONException {
-    JSONArray summaries = new JSONArray();
-    for (Done d : completed) {
-      JSONObject summary = new JSONObject();
-      summary.put(STEP_ID, d.step.id);
-      summary.put(STEP_TOOL, d.step.tool);
-      summary.put(KEY_OK, true);
-      if (d.recordId != null) {
-        summary.put(KEY_RECORD_ID, d.recordId);
-      }
-      summaries.put(summary);
-    }
-    return summaries;
-  }
-
-  /** @return a 422 validation refusal on {@code field}; nothing was run */
-  private static JSONObject refusal(String field, String detail) {
-    JSONObject body = new JSONObject();
+  private JSONObject describe(JSONObject args) throws Refusal {
+    onlyArguments(args, PARAM_NAME, PARAM_VERSION);
+    Routine routine = existing(args);
+    Version version = version(routine, args);
     try {
-      body.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
-      body.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-      body.put(McpConstants.PARAM_FIELD, field);
-      body.put(McpConstants.KEY_DETAIL, detail);
-      body.put(McpConstants.KEY_TOOL, McpConstants.TOOL_NEO_ROUTINE);
+      JSONObject body = new JSONObject();
+      body.put(PARAM_NAME, routine.name);
+      body.put(PARAM_DESCRIPTION, routine.description);
+      body.put(PARAM_VERSION, version.number);
+      body.put(KEY_CURRENT_VERSION, routine.currentVersion);
+      body.put("versions", new JSONArray(store.versionNumbers(routine.id)));
+      body.put(PARAM_PARAMS, parse(version.params));
+      body.put(PARAM_STEPS, parseArray(version.steps));
+      body.put("created", version.created);
+      return body;
+    } catch (JSONException e) {
+      throw new McpToolException("Error building the routine description", e);
+    }
+  }
+
+  private JSONObject delete(JSONObject args) throws Refusal {
+    onlyArguments(args, PARAM_NAME);
+    String name = name(args);
+    if (!store.delete(owner.get(), name)) {
+      throw notFound(name);
+    }
+    try {
+      JSONObject body = new JSONObject();
+      body.put(McpRoutineSteps.KEY_OK, true);
+      body.put(PARAM_NAME, name);
+      body.put(McpConstants.KEY_DETAIL, "Routine '" + name + "' and all its versions were "
+          + "deleted. Past executions stay readable with mode execution.");
+      return body;
+    } catch (JSONException e) {
+      throw new McpToolException("Error building the routine answer", e);
+    }
+  }
+
+  private JSONObject execution(JSONObject args) throws Refusal {
+    onlyArguments(args, PARAM_EXECUTION_ID);
+    String executionId = StringUtils.trimToNull(args.optString(PARAM_EXECUTION_ID, null));
+    if (executionId == null) {
+      throw McpRoutineSteps.refusal(PARAM_EXECUTION_ID, "mode execution needs 'executionId'.");
+    }
+    Execution execution = store.findExecution(owner.get(), executionId);
+    if (execution == null) {
+      throw McpRoutineSteps.refusal(PARAM_EXECUTION_ID, "You have no execution '" + executionId
+          + "'.");
+    }
+    try {
+      JSONObject body = new JSONObject();
+      body.put(PARAM_EXECUTION_ID, execution.id);
+      body.put(PARAM_MODE, execution.mode);
+      body.put(McpRoutineSteps.KEY_OK, STATUS_OK.equals(execution.status));
+      if (execution.routineName != null) {
+        body.put(PARAM_NAME, execution.routineName);
+        body.put(PARAM_VERSION, execution.version);
+      }
+      body.put("created", execution.created);
+      body.put(PARAM_STEPS, parseArray(execution.result));
+      return body;
+    } catch (JSONException e) {
+      throw new McpToolException("Error building the execution", e);
+    }
+  }
+
+  // ── helpers ─────────────────────────────────────────────────────────────
+
+  /** Refuses an argument the mode does not take, naming the ones it does. */
+  private static void onlyArguments(JSONObject args, String... allowed) throws Refusal {
+    Set<String> accepted = new HashSet<>(List.of(allowed));
+    accepted.add(PARAM_MODE);
+    Iterator<?> keys = args.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (!accepted.contains(key)) {
+        throw McpRoutineSteps.refusal(key, "mode '" + args.optString(PARAM_MODE) + "' does not "
+            + "take '" + key + "'. It takes " + List.of(allowed) + ".");
+      }
+    }
+  }
+
+  private static String name(JSONObject args) throws Refusal {
+    String name = StringUtils.trimToNull(args.optString(PARAM_NAME, null));
+    if (name == null || !NAME_PATTERN.matcher(name).matches()) {
+      throw McpRoutineSteps.refusal(PARAM_NAME, "'name' must be lowercase letters, digits, '-' "
+          + "or '_', starting with a letter or digit (at most 60 characters), e.g. "
+          + "'create-customer'.");
+    }
+    return name;
+  }
+
+  private static String description(JSONObject args, boolean required) throws Refusal {
+    String description = StringUtils.trimToNull(args.optString(PARAM_DESCRIPTION, null));
+    if (description == null && required) {
+      throw McpRoutineSteps.refusal(PARAM_DESCRIPTION, "'description' is required: what the "
+          + "routine does and when to use it, so you and list can tell routines apart.");
+    }
+    if (description != null && description.length() > MAX_DESCRIPTION) {
+      throw McpRoutineSteps.refusal(PARAM_DESCRIPTION, "'description' has more than "
+          + MAX_DESCRIPTION + " characters.");
+    }
+    return description;
+  }
+
+  private Routine existing(JSONObject args) throws Refusal {
+    String name = name(args);
+    Routine routine = store.find(owner.get(), name);
+    if (routine == null) {
+      throw notFound(name);
+    }
+    return routine;
+  }
+
+  private Version version(Routine routine, JSONObject args) throws Refusal {
+    int number = routine.currentVersion;
+    if (args.has(PARAM_VERSION)) {
+      Object raw = args.opt(PARAM_VERSION);
+      if (!(raw instanceof Integer)) {
+        throw McpRoutineSteps.refusal(PARAM_VERSION, "'version' must be an integer.");
+      }
+      number = (Integer) raw;
+    }
+    Version version = store.version(routine.id, number);
+    if (version == null) {
+      throw McpRoutineSteps.refusal(PARAM_VERSION, "Routine '" + routine.name + "' has no "
+          + "version " + number + ". Versions: " + store.versionNumbers(routine.id) + ".");
+    }
+    return version;
+  }
+
+  private static Refusal notFound(String name) {
+    Refusal refusal = McpRoutineSteps.refusal(PARAM_NAME, "You have no routine named '" + name
+        + "'. mode list shows yours.");
+    try {
+      refusal.body().put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
+      refusal.body().put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
     } catch (JSONException e) {
       throw new McpToolException("Error building a refusal", e);
     }
-    return body;
+    return refusal;
+  }
+
+  private static JSONObject parse(String json) {
+    try {
+      return new JSONObject(json);
+    } catch (JSONException e) {
+      throw new McpToolException("A stored routine could not be read", e);
+    }
+  }
+
+  private static JSONArray parseArray(String json) {
+    try {
+      return new JSONArray(json);
+    } catch (JSONException e) {
+      throw new McpToolException("A stored routine could not be read", e);
+    }
+  }
+
+  /** A check that refuses the call before anything ran. */
+  @FunctionalInterface
+  private interface Check<T> {
+    T get() throws Refusal;
+  }
+
+  /** Runs a check; its refusal says that nothing was run. */
+  private static <T> T nothingRun(Check<T> check) throws Refusal {
+    try {
+      return check.get();
+    } catch (Refusal refused) {
+      try {
+        refused.body().put(McpConstants.KEY_DETAIL,
+            refused.body().optString(McpConstants.KEY_DETAIL) + NOTHING_RUN);
+      } catch (JSONException cannotHappen) {
+        log.debug("Could not mark the refusal as nothing run", cannotHappen);
+      }
+      throw refused;
+    }
   }
 }

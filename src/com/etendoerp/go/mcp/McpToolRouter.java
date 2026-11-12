@@ -283,8 +283,8 @@ public class McpToolRouter {
             return McpWhoamiTool.handle(arguments, scopes);
           // ETP-6236: every step is a call of this same router, under the same role and scopes.
           case McpConstants.TOOL_NEO_ROUTINE:
-            return McpRoutineTool.handle(arguments,
-                (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes));
+            return new McpRoutineTool(new McpRoutineJdbcStore(), McpRoutineStore.Owner::current,
+                (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes)).handle(arguments);
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:

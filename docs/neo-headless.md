@@ -14909,45 +14909,62 @@ template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reache
 Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
 `McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.
 
-#### 4.12.44 Several calls in one: `etendo_routine` (ETP-6236, etendo-ai#51)
+#### 4.12.44 Several calls in one, and saved routines: `etendo_routine` (ETP-6236, etendo-ai#51)
 
 A flow whose steps the agent already knows — create a customer, its address and an invoice for it, then
 complete the invoice — used to cost one call per step, each one paying the round trip and the context of the
 answer. `etendo_routine` runs those calls in **one** call, in order, each step able to use what an earlier step
-returned. Design and later phases (saved routines, parameters, stored executions):
-`docs/proposals/mcp-routines.md` in schema_forge. This is phase 1: `mode:"exec"`, inline steps.
+returned, and saves a flow as a **routine** the same user runs again with new values. Design and decisions:
+`docs/proposals/mcp-routines.md` in schema_forge.
 
-- **It owns no business logic.** Each step is `{id, tool, args}` and runs through `McpToolRouter.route` exactly as
-  the separate call would: unknown-argument guard, scope check, spec access, handler, error envelope. A step may
-  call `etendo_list`, `etendo_get`, `etendo_selectors`, `etendo_defaults`, `etendo_create`, `etendo_update` or
-  `etendo_action`; delete, email, uploads and another routine stay separate calls.
+| `mode` | Arguments | What it does |
+|---|---|---|
+| `exec` | `steps` | Runs the steps now; answers an `executionId`. |
+| `save` | `name`, `description`, `params`?, `steps` **or** `fromExecution` | Stores a routine at version 1. |
+| `run` | `name`, `params`?, `version`? | Runs a saved routine (its current version by default). |
+| `list` | — | The caller's routines: name, description, declared parameters, current version. |
+| `describe` | `name`, `version`? | One routine with its steps, parameters and version numbers. |
+| `update` | `name`, `steps`, `params`?, `description`? | Stores a complete new version and makes it current. |
+| `delete` | `name` | Deletes the routine and all its versions (executions stay). |
+| `execution` | `executionId` | A past `exec`/`run` with every step's full result or error. |
+
+An argument the mode does not take is refused (`validation_error` naming it).
+
+**Steps** (`McpRoutineSteps`)
+
+- **It owns no business logic.** Each step is `{id, tool, args, returnResult?}` and runs through
+  `McpToolRouter.route` exactly as the separate call would: unknown-argument guard, scope check, spec access,
+  handler, error envelope. A step may call `etendo_list`, `etendo_get`, `etendo_selectors`, `etendo_defaults`,
+  `etendo_create`, `etendo_update` or `etendo_action`; delete, email, uploads and another routine stay separate
+  calls.
 - **Read tier** for the routine itself: every step asks its own scope, so a create step of a read-only session is
   refused as that step's `forbidden` error. Annotated as modifying.
 - **References.** A string value `"$ref:<id>"` anywhere in `args` is replaced with the earlier step's record id
   (`data.id` of its result); `"$ref:<id>.<path>"` with any value of its result, keys and `[n]`/`.n` positions,
-  e.g. `"$ref:agua.data[0].id"`. The whole string must be the reference; the value keeps its JSON type.
-  A reference to a step that does not run earlier is refused before anything runs.
+  e.g. `"$ref:agua.data[0].id"`. `"$param.<name>"` is a parameter of a saved routine; an optional one that was
+  not sent drops the key that held it. The whole string must be the reference; the value keeps its JSON type.
 - **Not atomic.** Each step commits when it succeeds (`commitAndClose`, the per-document discipline of
   `etendo_action_batch`, whose transaction helpers it shares). The first failing step is rolled back and stops the
   routine.
-- **Refused before anything runs** (422 `validation_error`, `detail` ends with "Nothing was run."): a mode other
-  than `exec`, empty `steps` or more than 20, a step without a valid unique `id`, a tool outside the list, `args`
-  that is not an object, an unknown step key, a `$param.` value (saved routines do not exist yet).
+- **Refused before anything runs** (422 `validation_error`, `detail` ends with "Nothing was run."): empty
+  `steps` or more than 20, a step without a valid unique `id`, a tool outside the list, `args` that is not an
+  object, an unknown step key, a reference to a step that does not run earlier, a `$param.` that is not declared
+  (inline steps declare none), and on `run` a missing required, mistyped or unknown parameter.
 
-Success:
+Success of `exec`/`run`:
 
 ```json
-{"ok": true,
+{"ok": true, "executionId": "…", "name": "new-customer", "version": 1,
  "steps": [{"id": "bp", "tool": "etendo_create", "ok": true, "recordId": "…"},
            {"id": "addr", "tool": "etendo_create", "ok": true, "recordId": "…"}],
  "results": {"addr": {"data": {"id": "…"}}}}
 ```
 
-`results` carries the full result of the steps marked `returnResult:true`; when none is marked, only the last
-step's. Failure (an MCP error result; `status`/`error` are the failed step's own):
+`name`/`version` only on `run`. `results` carries the full result of the steps marked `returnResult:true`; when
+none is marked, only the last step's. Failure (an MCP error result; `status`/`error` are the failed step's own):
 
 ```json
-{"ok": false, "status": 422, "error": "validation_error",
+{"ok": false, "executionId": "…", "status": 422, "error": "validation_error",
  "detail": "Step 'addr' (etendo_create, position 1) failed and was rolled back; 1 earlier step(s) are done and stay done, 1 did not run.",
  "failedAt": {"id": "addr", "index": 1, "tool": "etendo_create"},
  "stepError": {"…": "the step's own error envelope"},
@@ -14957,3 +14974,27 @@ step's. Failure (an MCP error result; `status`/`error` are the failed step's own
 ```
 
 A reference whose path is not in the earlier result fails that step the same way, with the completed steps kept.
+
+**Saved routines** (`McpRoutineTool`, `McpRoutineParams`)
+
+- **Personal.** A routine belongs to one user of one client; every lookup (`list`, `run`, `describe`, `update`,
+  `delete`, `execution`, `fromExecution`) is scoped to the caller, and another user's name answers `not_found`.
+  Running one never grants more than the caller's role: each step still goes through `route()`.
+- **Names**: lowercase letters, digits, `-`, `_` (at most 60), unique per user. `description` is required on save.
+- **Parameters**: `params` declares `{<name>: {type, required, description}}`, `type` one of `string`, `number`,
+  `boolean`, `id`. Every declared parameter must be used as `$param.<name>` and every used one declared.
+- **Versions**: `update` sends a complete new version (steps and parameters) and makes it current; older versions
+  stay and `run`/`describe` take `version`.
+- **`fromExecution`**: `save` takes the steps of the caller's own successful `exec`; each parameter adds
+  `from: ["<stepId>.<path>", …]` (e.g. `bp.args.fields.name`), the values of that execution it replaces with
+  `$param.<name>`. A path that is not a value of those steps is refused, naming it.
+- **`list`** adds a hint telling the agent to remember its routines, prefer them and list them again from time to
+  time; the tool description tells it to call `list` at the start of a task.
+
+**Storage** (`McpRoutineStore`, `McpRoutineJdbcStore`): `ETGO_MCP_ROUTINE` (name, description, owner, current
+version), `ETGO_MCP_ROUTINE_VERSION` (parameters and steps per version, cascade-deleted with the routine) and
+`ETGO_MCP_ROUTINE_EXEC` (mode, status, routine and version, the steps as sent and every step's result). Like
+`ETGO_BATCH_JOB` they are plain tables written over JDBC on their own pooled connection — no AD dictionary entry,
+no DAL entity — so saving a routine or recording an execution never joins or rolls back with the steps' business
+transaction. A failure to record an execution is logged and the answer carries no `executionId`; the steps' outcome
+is unchanged. Executions are kept indefinitely for now.
