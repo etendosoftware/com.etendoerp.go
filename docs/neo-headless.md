@@ -370,6 +370,17 @@ allowed sub-type), is left untouched. The defaults and create cascades run their
 the same method, so they get the same filtering before `reapplyDocTypeFromTabFilter` runs; their
 result is unchanged.
 
+Each column is checked only when the table has it, through the non-throwing
+`Entity#getPropertyByColumnName(column, false)`. A table that carries only `C_DocType_ID`
+(`M_InOut`) is checked on that column alone. The first version used the one-argument lookup,
+which throws `CheckException` for the missing `C_DocTypeTarget_ID`; the exception was caught and
+the guard did nothing on `M_InOut` (QA round 1, CP-9/CP-15). On a Return Material Receipt
+(`documentType.return=true`) picking the customer switched the doc type to the shipment one and
+the number preview to the shipment sequence, in the form and in `etendo_defaults` with a
+`recordContext.businessPartner`. `reapplyDocTypeFromTabFilter` does not cover that table either:
+it only acts when the table has `C_DocTypeTarget_ID`. The callout guard is what keeps the return
+doc type there.
+
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
 *before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
@@ -5572,6 +5583,7 @@ Other MCP-only refusals declared in §4.12.6:
 | a handler's 403 refusal, e.g. an aging report the role may not run (ETP-5852, M-154) | `403` with the handler's body | `error:"forbidden"` (`McpSupportInternals#errorCodeForStatus`, also for batch rows); it read `validation_error`, as if the request could be fixed |
 | `etendo_action` refused because the period is not open (`PeriodNotAvailable` / `PeriodNotValid`) (ETP-5852, M-193) | the refusal text only | also `period`: the record's `accountingDate` and the period that covers it in the calendar of the organization that controls periods — `id` (the `open-close-period-control/periodControl` record), `name`, `documentCategory` and its `status` for that category (`open`, `closed`, `neverOpened`, `permanentlyClosed`), or `exists:false` (`McpPeriodRefusal`); the keyed hint points at `period.id` |
 | `totalRows` of a paged list (ETP-5852, M-1) | core's default: while more rows remain it is an estimate, rows shown + 1 (the grid only needs to know there is more) | the real count of the records matching the filters and read predicates, on every page: `etendo_list` sends `_noCount=false`, one count query per call |
+| `etendo_list` / list `GET` with an offset at or past the end (ETP-5837, QA CP-16) | core's grid behaviour (`DefaultJsonDataService.fetch`): an empty page with `startRow > 0` is fetched again from row 0, so the first page comes back with `startRow: 0` | an empty page: `data: []`, `startRow` = the requested `offset`, `endRow` = `offset - 1` (no row served), `totalRows` unchanged (`McpListPaging#emptyPageWhenPastEnd`, applied in `handleList` right after the fetch, before the read hook). Detected structurally: core's `startRow` differs from the requested offset only when it restarted. Before, `etendo_list(offset:7)` over 7 rows answered the same 7 rows, so an agent paging until an empty page never got one. The REST list keeps core's answer. A customization that serves the list itself (read provider) pages on its own and is not affected |
 | `etendo_list` filter value of the wrong type — a word on a number, a date that is not `YYYY-MM-DD`, a boolean other than `true`/`false`, on equality, `gt/gte/lt/lte`, `between` and every `in` element (ETP-5914, ETP-5852) | n/a (the REST list takes core's criteria) | **422 `validation_error`** with `field`, `expectedType` and `received`, nothing read (`McpBusinessFilters#formatHqlValue`). Before: a number answered 500 `DataException`, a date was cleaned to empty and the filter matched everything, a boolean read as `false` |
 | list of `contacts/customer` or `contacts/vendorCreditor` without `parentId` (ETP-5852) | every business partner — the role tabs carry no AD filter | only the partners holding the role (`isCustomer` / `isVendor`), via the `readPredicates` of `handlers.ContactCustomerTabHandler` / `ContactVendorTabHandler` (`ContactRoleListScope`, MCP origin only; the same classes carry the contact type guard); a list with `parentId` is unchanged |
 | payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment`, and `retryPisPayment` / `pisPaymentStatus` on the payment record | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
