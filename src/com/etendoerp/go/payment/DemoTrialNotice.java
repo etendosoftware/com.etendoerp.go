@@ -25,7 +25,9 @@ import java.time.Instant;
  * <p>Produced by {@link DemoTrialNoticePlanner} and delivered through the email contract named
  * {@link #CONTRACT_NAME}. A notice is identified by its trial start and its {@link #milestone()}:
  * that pair is what the delivery is de-duplicated on, so a re-run never repeats a notice while a
- * trial restarted with a new start instant may be notified again.</p>
+ * trial restarted with a new start instant may be notified again. A trial whose end was edited
+ * (ETP-6223) is identified by its end too ({@link #trialKey()}), so moving the date re-arms its
+ * reminders and its expiry notice.</p>
  */
 public final class DemoTrialNotice {
 
@@ -45,14 +47,26 @@ public final class DemoTrialNotice {
   private final long remainingDays;
   private final Instant trialStartedAt;
   private final Instant trialEndsAt;
+  private final boolean trialEndEdited;
 
   private DemoTrialNotice(Kind kind, int thresholdDays, long remainingDays, Instant trialStartedAt,
-      Instant trialEndsAt) {
+      Instant trialEndsAt, boolean trialEndEdited) {
     this.kind = kind;
     this.thresholdDays = thresholdDays;
     this.remainingDays = remainingDays;
     this.trialStartedAt = trialStartedAt;
     this.trialEndsAt = trialEndsAt;
+    this.trialEndEdited = trialEndEdited;
+  }
+
+  /**
+   * ETP-6223 — the same notice, for a trial whose end was edited by hand.
+   *
+   * @return a copy that identifies its trial by its end too
+   */
+  public DemoTrialNotice withEditedTrialEnd() {
+    return new DemoTrialNotice(kind, thresholdDays, remainingDays, trialStartedAt, trialEndsAt,
+        true);
   }
 
   /**
@@ -67,7 +81,7 @@ public final class DemoTrialNotice {
   public static DemoTrialNotice reminder(int thresholdDays, long remainingDays,
       Instant trialStartedAt, Instant trialEndsAt) {
     return new DemoTrialNotice(Kind.REMINDER, thresholdDays, remainingDays, trialStartedAt,
-        trialEndsAt);
+        trialEndsAt, false);
   }
 
   /**
@@ -78,7 +92,7 @@ public final class DemoTrialNotice {
    * @return the expiry notice
    */
   public static DemoTrialNotice expired(Instant trialStartedAt, Instant trialEndsAt) {
-    return new DemoTrialNotice(Kind.EXPIRED, 0, 0, trialStartedAt, trialEndsAt);
+    return new DemoTrialNotice(Kind.EXPIRED, 0, 0, trialStartedAt, trialEndsAt, false);
   }
 
   public Kind getKind() {
@@ -114,5 +128,20 @@ public final class DemoTrialNotice {
    */
   public String milestone() {
     return kind == Kind.EXPIRED ? "expired" : "reminder-" + thresholdDays;
+  }
+
+  /** @return whether the trial end was edited by hand rather than derived from its start */
+  public boolean isTrialEndEdited() {
+    return trialEndEdited;
+  }
+
+  /**
+   * Identifies the trial the notice belongs to, for de-duplication: its start, plus its end when
+   * the end was edited. A standard trial keeps the key it always had.
+   *
+   * @return the trial key
+   */
+  public String trialKey() {
+    return trialEndEdited ? trialStartedAt + "~" + trialEndsAt : String.valueOf(trialStartedAt);
   }
 }
