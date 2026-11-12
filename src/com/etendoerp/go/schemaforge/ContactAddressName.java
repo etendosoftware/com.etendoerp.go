@@ -32,6 +32,15 @@ final class ContactAddressName {
   private static final String FIELD_NAME = "name";
   private static final String AD_DEFAULT = ".";
   private static final String FALLBACK = "Location";
+  /**
+   * Length of {@code C_BPartner_Location.Name} (NVARCHAR(60) in
+   * {@code src-db/database/model/tables/C_BPARTNER_LOCATION.xml}). A constant rather than a
+   * {@code ModelProvider} lookup so this class stays a pure function a unit test can call without
+   * booting the DAL model; keep it in step with the column.
+   */
+  static final int NAME_MAX_LENGTH = 60;
+  /** What a cut may leave dangling at the end: the ", " between city and address, or spaces. */
+  private static final String TRAILING_SEPARATORS = " ,";
 
   private ContactAddressName() {
   }
@@ -48,9 +57,18 @@ final class ContactAddressName {
    * @param body        the create body
    * @param geoLoc      the address's location, may be {@code null}
    * @param displayName the location's display name, {@code null} when it has none
-   * @return the name to store, never {@code null}
+   * <p>ETP-6206: whatever the source, the result is capped at {@link #NAME_MAX_LENGTH}. The app's
+   * editor and the Contacts import send "city, address line", which a long street pushes past the
+   * column, and the over-long name then failed the save at flush.
+   *
+   * @return the name to store, never {@code null}, at most {@link #NAME_MAX_LENGTH} characters
    */
   static String of(NeoContext ctx, JSONObject body, Location geoLoc,
+      Function<Location, String> displayName) {
+    return capped(uncapped(ctx, body, geoLoc, displayName));
+  }
+
+  private static String uncapped(NeoContext ctx, JSONObject body, Location geoLoc,
       Function<Location, String> displayName) {
     String sentName = nonBlank(body.optString(FIELD_NAME, null));
     if (ctx == null || !ctx.isMcpOrigin() || geoLoc == null) {
@@ -64,6 +82,22 @@ final class ContactAddressName {
       name = displayName.apply(geoLoc);
     }
     return name != null ? name : FALLBACK;
+  }
+
+  /**
+   * {@code name} cut to {@link #NAME_MAX_LENGTH}, without the separators or spaces a cut can leave
+   * at its end. A name that fits is returned unchanged.
+   */
+  static String capped(String name) {
+    if (name.length() <= NAME_MAX_LENGTH) {
+      return name;
+    }
+    String cut = name.substring(0, NAME_MAX_LENGTH);
+    int end = cut.length();
+    while (end > 0 && TRAILING_SEPARATORS.indexOf(cut.charAt(end - 1)) >= 0) {
+      end--;
+    }
+    return end > 0 ? cut.substring(0, end) : FALLBACK;
   }
 
   /** As the handler's {@code nullIfEmpty}: empty and the literal "null" are no value. */

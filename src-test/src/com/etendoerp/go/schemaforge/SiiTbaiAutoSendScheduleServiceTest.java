@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.testsupport.ProcessRequestTestFixture.propertyBackedRequest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -23,7 +24,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -192,12 +192,8 @@ public class SiiTbaiAutoSendScheduleServiceTest {
     doReturn(null).when(service).findExistingRequest(CLIENT_ID, OTHER_ORG_ID, process);
     doReturn(OB_CONTEXT).when(service).buildObContext(CLIENT_ID, OTHER_ORG_ID, USER_ID, ROLE_ID);
 
-    ProcessRequest newRequest = spy(new ProcessRequest());
-    newRequest.setId(NEW_REQUEST_ID);
-    doNothing().when(newRequest).setClient(any());
-    doNothing().when(newRequest).setOrganization(any());
-    doNothing().when(newRequest).setUserContact(any());
-    doNothing().when(newRequest).setProcess(any());
+    ProcessRequest newRequest = propertyBackedRequest();
+    when(newRequest.getId()).thenReturn(NEW_REQUEST_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
@@ -238,16 +234,9 @@ public class SiiTbaiAutoSendScheduleServiceTest {
     doReturn(null).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
     doReturn(OB_CONTEXT).when(service).buildObContext(CLIENT_ID, ORG_ID, USER_ID, ROLE_ID);
 
-    // Spy so the FK setters are no-ops:
-    // setting a mock Client/Organization/User on a real DAL object triggers
-    // BaseOBObject.checkIsValidValue, which NPEs on the mock's null Entity. The scheduling-field
-    // setters asserted below are left untouched.
-    ProcessRequest request = spy(new ProcessRequest());
-    request.setId(NEW_REQUEST_ID);
-    doNothing().when(request).setClient(any());
-    doNothing().when(request).setOrganization(any());
-    doNothing().when(request).setUserContact(any());
-    doNothing().when(request).setProcess(any());
+    // Retain the generated scheduling accessors without constructing a live DAL record.
+    ProcessRequest request = propertyBackedRequest();
+    when(request.getId()).thenReturn(NEW_REQUEST_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);

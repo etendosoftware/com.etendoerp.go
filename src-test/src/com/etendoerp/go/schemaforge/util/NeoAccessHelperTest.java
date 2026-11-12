@@ -52,6 +52,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -709,6 +710,47 @@ public class NeoAccessHelperTest {
     assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
     assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "POST"));
   }
+
+  /**
+   * ETP-6154 (QA G1): the report spec {@code financial-account-bank-connection}, as it is shipped.
+   * Its only entity points at the PSD2 "Bank Connections" tab of the Financial Account window
+   * ({@value #FINANCIAL_ACCOUNT_WINDOW_ID}), and since the {@code @NeoExtension} migration it has
+   * no {@code Java_Qualifier}; its handler declares no access rule of its own. A role with
+   * READ-ONLY access to that window must be allowed {@code GET ?action=syncStatus} (the SPA polls
+   * it on load) and refused every {@code POST}, {@code sync} included.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_bankConnectionSpecReadOnlyRole_allowsGetSyncStatusDeniesPostSync() {
+    when(role.getId()).thenReturn("role-id-bank-connection-readonly");
+    SFSpec spec = reportSpec("financial-account-bank-connection");
+    SFEntity entity = entityForWindow(FINANCIAL_ACCOUNT_WINDOW_ID);
+    when(entity.getJavaQualifier()).thenReturn(null);
+    when(entity.getName()).thenReturn("financial-account-bank-connection");
+    givenSpecEntities(Collections.singletonList(entity));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess readOnly = mock(WindowAccess.class);
+    when(readOnly.isEditableField()).thenReturn(false);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(readOnly));
+
+    NeoHandler bankConnection = new FinancialAccountBankConnectionHandler();
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
+      lookupMock.when(() -> NeoHandlerLookup.hasCustomization(entity)).thenReturn(true);
+      lookupMock.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(bankConnection);
+
+      assertTrue("The handler states no rule of its own: the window grant decides",
+          bankConnection.isAccessibleForCurrentRole());
+      assertTrue("GET ?action=syncStatus is a read", NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+      assertFalse("POST ?action=sync is a write", NeoAccessHelper.hasReportSpecAccess(spec, "POST"));
+    }
+  }
+
+  /** The classic "Financial Account" window, the constituent window of the bank connection spec. */
+  private static final String FINANCIAL_ACCOUNT_WINDOW_ID = "94EAA455D2644E04AB25D93BE5157B6D";
 
   // ── hasReportSpecAccess — handler-declared tier (ETP-5335) ────────────────
 

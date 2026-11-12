@@ -4,6 +4,7 @@
 This directory stores module-specific technical documentation for `com.etendoerp.go`.
 
 ## Documents
+- `checkout-promotion.md` — immutable commercial terms and durable second-month-free promotion schedules.
 - `neo-headless.md` — Neo Headless overview and architecture notes.
 - `neo-headless-guide.md` — detailed Neo Headless development guide.
 - `onboarding-sampledata-packaging.md` — how onboarding sampledata is staged into `WebContent/WEB-INF/classes` for WAR packaging.

@@ -19,24 +19,39 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_IDS;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACTION;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.account;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.getContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.singleParam;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubProviderLookup;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubSyncLock;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.syncStatusBody;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -53,6 +68,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountSyncLock;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
@@ -68,6 +84,14 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * for connected and disconnected accounts; account-not-found → 404; the ETP-5181
  * {@code maxFetchInterval} advisory field; the OBException → 400 and the generic Exception → 500
  * translations (both rollback).
+ *
+ * <p>{@code syncStatus} (ETP-6154), the other status read, as POST {@code {financialAccountIds: []}}
+ * or GET {@code ?financialAccountIds=a,b} with the same answer: missing body, array or parameter →
+ * 400; more than {@code MAX_SYNC_STATUS_IDS} distinct ids → 400; blank and repeated ids are
+ * dropped before any account is read, and ids the caller cannot read (foreign, unknown) are
+ * omitted;
+ * {@code inProgress} comes from the account sync lock probe; {@code lastResult} is the newer of the
+ * latest connection's last success and last failure.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
@@ -579,5 +603,317 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  // ── POST syncStatus (ETP-6154) ─────────────────────────────────────────────
+
+  private static final String ACTION_SYNC_STATUS = "syncStatus";
+  private static final String OTHER_ACCOUNT_ID = "FA-002";
+  private static final String FOREIGN_ACCOUNT_ID = "FA-FOREIGN";
+  private static final Instant EARLIER = Instant.parse("2026-11-01T08:00:00Z");
+  private static final Instant LATER = Instant.parse("2026-11-02T09:30:00Z");
+
+  /** syncStatus without a body is a 400 (business error), and the transaction is rolled back. */
+  @Test
+  public void testSyncStatusWithoutBodyReturns400() throws Exception {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class)) {
+      NeoResponse response = handler.handle(postContext(ACTION_SYNC_STATUS, null));
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(response.getBody().toString().contains("Missing request body"));
+      verify(handler).doRollbackAndClose();
+      locks.verifyNoInteractions();
+    }
+  }
+
+  /** syncStatus without the ids array (or with a non-array value) is a 400 naming the key. */
+  @Test
+  public void testSyncStatusWithoutIdsReturns400() throws Exception {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class)) {
+      NeoResponse missing = handler.handle(postContext(ACTION_SYNC_STATUS, new JSONObject()));
+      NeoResponse notArray = handler.handle(postContext(ACTION_SYNC_STATUS,
+          new JSONObject().put(PARAM_ACCOUNT_IDS, ACCOUNT_ID)));
+
+      assertEquals(400, missing.getHttpStatus());
+      assertTrue(missing.getBody().toString().contains(PARAM_ACCOUNT_IDS));
+      assertEquals(400, notArray.getHttpStatus());
+      verify(handler, never()).loadAccount(anyString());
+      locks.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * An id the caller cannot read (foreign or unknown) and a blank id are simply omitted, never an
+   * error (no existence oracle); a repeated id is reported once and probed once.
+   */
+  @Test
+  public void testSyncStatusOmitsUnreadableIdsAndCollapsesRepeatedOnes() throws Exception {
+    FIN_FinancialAccount finAcc = account(ACCOUNT_ID);
+    doReturn(null).when(handler).loadAccount(anyString());
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      AccountSyncLock lock = stubSyncLock(locks);
+
+      NeoResponse response = handler.handle(postContext(ACTION_SYNC_STATUS,
+          syncStatusBody(ACCOUNT_ID, FOREIGN_ACCOUNT_ID, ACCOUNT_ID, "  ")));
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject accounts = dataOf(response).getJSONObject("accounts");
+      assertEquals(1, accounts.length());
+      assertTrue(accounts.has(ACCOUNT_ID));
+      assertFalse(accounts.has(FOREIGN_ACCOUNT_ID));
+      verify(lock).heldAmong(List.of(ACCOUNT_ID));
+      verify(handler, times(1)).loadAccount(ACCOUNT_ID);
+      verify(handler, times(1)).loadAccount(FOREIGN_ACCOUNT_ID);
+      verify(handler, never()).loadAccount(isNull());
+    }
+  }
+
+  /**
+   * The ids are read from the POST body array or the GET comma-separated parameter, trimmed, with
+   * blanks dropped and repeats collapsed in first-seen order; absent → null (the caller's 400).
+   */
+  @Test
+  public void testSyncStatusIdsAreTrimmedDeduplicatedAndOrdered() throws Exception {
+    NeoContext post = postContext(ACTION_SYNC_STATUS,
+        syncStatusBody(" " + OTHER_ACCOUNT_ID, ACCOUNT_ID, "", OTHER_ACCOUNT_ID, "  "));
+    NeoContext get = getContext(syncStatusQuery(ACCOUNT_ID + ", ," + OTHER_ACCOUNT_ID + ","
+        + ACCOUNT_ID));
+    NeoContext postWithoutArray = postContext(ACTION_SYNC_STATUS,
+        new JSONObject());
+    NeoContext getWithoutParam = getContext(singleParam(PARAM_ACTION, ACTION_SYNC_STATUS));
+
+    assertEquals(List.of(OTHER_ACCOUNT_ID, ACCOUNT_ID),
+        List.copyOf(FinancialAccountBankConnectionHandler.syncStatusIds(post)));
+    assertEquals(List.of(ACCOUNT_ID, OTHER_ACCOUNT_ID),
+        List.copyOf(FinancialAccountBankConnectionHandler.syncStatusIds(get)));
+    assertEquals(Set.of(), FinancialAccountBankConnectionHandler.syncStatusIds(
+        getContext(syncStatusQuery(" , "))));
+    assertNull(FinancialAccountBankConnectionHandler.syncStatusIds(postWithoutArray));
+    assertNull(FinancialAccountBankConnectionHandler.syncStatusIds(getWithoutParam));
+  }
+
+  /**
+   * Over {@code MAX_SYNC_STATUS_IDS} distinct ids is a 400 before any account is read or probed;
+   * exactly the maximum is served. Repeats do not count towards the cap.
+   */
+  @Test
+  public void testSyncStatusCapsTheDistinctIds() throws Exception {
+    int max = FinancialAccountBankConnectionHandler.MAX_SYNC_STATUS_IDS;
+    assertEquals(200, max);
+    doReturn(null).when(handler).loadAccount(anyString());
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubSyncLock(locks);
+
+      NeoResponse tooMany = handler.handle(postContext(
+          ACTION_SYNC_STATUS, syncStatusBody(distinctIds(max + 1))));
+      assertEquals(400, tooMany.getHttpStatus());
+      assertTrue(tooMany.getBody().toString().contains(
+          FinancialAccountBankConnectionHandler.MSG_TOO_MANY_SYNC_STATUS_IDS));
+      verify(handler, never()).loadAccount(anyString());
+      locks.verify(AccountSyncLock::getInstance, never());
+
+      String[] maxWithRepeats = new String[max + 5];
+      System.arraycopy(distinctIds(max), 0, maxWithRepeats, 0, max);
+      for (int i = max; i < maxWithRepeats.length; i++) {
+        maxWithRepeats[i] = "ID-0";
+      }
+      NeoResponse atMax = handler.handle(postContext(
+          ACTION_SYNC_STATUS, syncStatusBody(maxWithRepeats)));
+      assertEquals(200, atMax.getHttpStatus());
+      verify(handler, times(max)).loadAccount(anyString());
+    }
+  }
+
+  /**
+   * {@code GET ?action=syncStatus&financialAccountIds=a,b} answers exactly what the POST form
+   * answers for the same ids.
+   */
+  @Test
+  public void testSyncStatusGetFormAnswersLikeThePostForm() throws Exception {
+    FIN_FinancialAccount running = account(ACCOUNT_ID);
+    FIN_FinancialAccount idle = account(OTHER_ACCOUNT_ID);
+    when(running.getPSD2LastSyncDate()).thenReturn(Date.from(EARLIER));
+    doReturn(running).when(handler).loadAccount(ACCOUNT_ID);
+    doReturn(idle).when(handler).loadAccount(OTHER_ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubSyncLock(locks, ACCOUNT_ID);
+
+      NeoResponse viaGet = handler.handle(
+          getContext(syncStatusQuery(ACCOUNT_ID + "," + OTHER_ACCOUNT_ID)));
+      NeoResponse viaPost = handler.handle(postContext(
+          ACTION_SYNC_STATUS, syncStatusBody(ACCOUNT_ID, OTHER_ACCOUNT_ID)));
+
+      assertEquals(200, viaGet.getHttpStatus());
+      JSONObject getAccounts = dataOf(viaGet).getJSONObject("accounts");
+      JSONObject postAccounts = dataOf(viaPost).getJSONObject("accounts");
+      assertTrue(getAccounts.getJSONObject(ACCOUNT_ID).getBoolean("inProgress"));
+      assertFalse(getAccounts.getJSONObject(OTHER_ACCOUNT_ID).getBoolean("inProgress"));
+      assertEquals(postAccounts.toString(), getAccounts.toString());
+    }
+  }
+
+  /** GET syncStatus without the ids parameter is a 400 naming it, and reads no account. */
+  @Test
+  public void testSyncStatusGetWithoutIdsReturns400() throws Exception {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class)) {
+      NeoResponse response = handler.handle(getContext(singleParam(PARAM_ACTION,
+          ACTION_SYNC_STATUS)));
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(response.getBody().toString().contains(PARAM_ACCOUNT_IDS));
+      verify(handler, never()).loadAccount(anyString());
+      locks.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * GET query params of a {@code syncStatus} request.
+   *
+   * @param ids the raw comma-separated {@code financialAccountIds} value
+   * @return the query param map
+   */
+  private static Map<String, String> syncStatusQuery(String ids) {
+    Map<String, String> params = new HashMap<>();
+    params.put(PARAM_ACTION, ACTION_SYNC_STATUS);
+    params.put(PARAM_ACCOUNT_IDS, ids);
+    return params;
+  }
+
+  /**
+   * {@code count} distinct ids, {@code ID-0} to {@code ID-<count-1>}.
+   *
+   * @param count how many
+   * @return the ids
+   */
+  private static String[] distinctIds(int count) {
+    String[] ids = new String[count];
+    for (int i = 0; i < count; i++) {
+      ids[i] = "ID-" + i;
+    }
+    return ids;
+  }
+
+  /** inProgress is true exactly for the accounts whose sync lock the probe reports as held. */
+  @Test
+  public void testSyncStatusReportsInProgressFromTheSyncLock() throws Exception {
+    FIN_FinancialAccount running = account(ACCOUNT_ID);
+    FIN_FinancialAccount idle = account(OTHER_ACCOUNT_ID);
+    when(running.getPSD2LastSyncDate()).thenReturn(Date.from(EARLIER));
+    doReturn(running).when(handler).loadAccount(ACCOUNT_ID);
+    doReturn(idle).when(handler).loadAccount(OTHER_ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubSyncLock(locks, ACCOUNT_ID);
+
+      JSONObject accounts = dataOf(handler.handle(postContext(ACTION_SYNC_STATUS,
+          syncStatusBody(ACCOUNT_ID, OTHER_ACCOUNT_ID)))).getJSONObject("accounts");
+
+      JSONObject runningEntry = accounts.getJSONObject(ACCOUNT_ID);
+      JSONObject idleEntry = accounts.getJSONObject(OTHER_ACCOUNT_ID);
+      assertTrue(runningEntry.getBoolean("inProgress"));
+      assertEquals(EARLIER.toString(), runningEntry.getString("lastSyncDate"));
+      assertFalse(idleEntry.getBoolean("inProgress"));
+      assertTrue(idleEntry.isNull("lastSyncDate"));
+      // No connection at all: lastResult is present with every field null.
+      JSONObject lastResult = idleEntry.getJSONObject("lastResult");
+      assertTrue(lastResult.isNull("status"));
+      assertTrue(lastResult.isNull("message"));
+      assertTrue(lastResult.isNull("at"));
+    }
+  }
+
+  /**
+   * lastResult is read from the account's latest bank connection: a failure newer than the last
+   * success reports ERROR with the bank's message and when it happened.
+   */
+  @Test
+  public void testSyncStatusReportsTheLatestConnectionFailure() throws Exception {
+    FIN_FinancialAccount finAcc = account(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    FinaccConnection connection = connectionWith(EARLIER, LATER, "Bank is down");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountSyncLock> locks = mockStatic(AccountSyncLock.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubSyncLock(locks);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+
+      JSONObject lastResult = dataOf(handler.handle(postContext(ACTION_SYNC_STATUS,
+          syncStatusBody(ACCOUNT_ID)))).getJSONObject("accounts").getJSONObject(ACCOUNT_ID)
+          .getJSONObject("lastResult");
+
+      assertEquals("ERROR", lastResult.getString("status"));
+      assertEquals("Bank is down", lastResult.getString("message"));
+      assertEquals(LATER.toString(), lastResult.getString("at"));
+    }
+  }
+
+  /**
+   * The lastResult branches: success newer than failure (or tied) is OK with a null message; a
+   * failure with no success is ERROR, with a null message when the bank gave a blank one; neither
+   * recorded (or no connection) leaves every field null.
+   */
+  @Test
+  public void testLastResultPicksTheNewerOfSuccessAndFailure() throws Exception {
+    JSONObject successNewer = FinancialAccountBankConnectionHandler
+        .lastResultJson(connectionWith(LATER, EARLIER, "old failure"));
+    JSONObject tie = FinancialAccountBankConnectionHandler
+        .lastResultJson(connectionWith(LATER, LATER, "same instant"));
+    JSONObject onlyFailure = FinancialAccountBankConnectionHandler
+        .lastResultJson(connectionWith(null, EARLIER, "  "));
+    JSONObject never = FinancialAccountBankConnectionHandler
+        .lastResultJson(connectionWith(null, null, null));
+    JSONObject noConnection = FinancialAccountBankConnectionHandler.lastResultJson(null);
+
+    assertEquals("OK", successNewer.getString("status"));
+    assertTrue(successNewer.isNull("message"));
+    assertEquals(LATER.toString(), successNewer.getString("at"));
+    assertEquals("OK", tie.getString("status"));
+    assertEquals("ERROR", onlyFailure.getString("status"));
+    assertTrue(onlyFailure.isNull("message"));
+    assertEquals(EARLIER.toString(), onlyFailure.getString("at"));
+    for (JSONObject empty : new JSONObject[] {never, noConnection}) {
+      assertTrue(empty.isNull("status"));
+      assertTrue(empty.isNull("message"));
+      assertTrue(empty.isNull("at"));
+    }
+  }
+
+  /**
+   * A bank connection with the given fetch health (ETP-5089 fields).
+   *
+   * @param successAt   when it last reached the bank successfully, or null
+   * @param failAt      when it last failed to, or null
+   * @param failMessage the bank's message of that failure, or null
+   * @return the connection mock
+   */
+  private static FinaccConnection connectionWith(Instant successAt, Instant failAt,
+      String failMessage) {
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getLastSuccessAt()).thenReturn(successAt != null ? Date.from(successAt) : null);
+    when(connection.getLastFailAt()).thenReturn(failAt != null ? Date.from(failAt) : null);
+    when(connection.getLastFailMessage()).thenReturn(failMessage);
+    return connection;
   }
 }

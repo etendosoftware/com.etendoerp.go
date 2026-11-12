@@ -445,7 +445,8 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException unknownFilterField(String key, String entityName,
       List<String> available) {
-    List<String> names = available == null ? List.of() : available;
+    List<String> names = available == null ? List.of()
+        : McpClosestNames.closestFirst(key, available);
     boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
     if (truncated) {
       names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
