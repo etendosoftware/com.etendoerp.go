@@ -412,7 +412,7 @@ public class RectificationFiscalCodeGuardTest {
    */
   @Test
   public void evaluateAnswersWhatCheckAndApplyAnswersOnEveryScenario() throws Exception {
-    // {rectificative, sii, tbai, verifactu, motive, tbaiCode, vfType}
+    // Each row lists, in order: rectificative, sii, tbai, verifactu, motive, tbaiCode, vfType
     Object[][] scenarios = {
         { true, true, true, true, null, null, "F1" },
         { true, true, true, false, null, null, null },

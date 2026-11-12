@@ -896,8 +896,8 @@ public class PurchaseOrderHeaderHandlerTest {
         List.copyOf(contracts.keySet()));
     for (NeoActionContract c : contracts.values()) {
       assertEquals("POST", c.getHttpMethod());
-      // ETP-5714: createPurchaseInvoice declares the optional boolean allowDuplicate;
-      // ETP-6179: and the optional sifFields object
+      // createPurchaseInvoice is the only action with parameters: allowDuplicate (ETP-5714)
+      // and sifFields (ETP-6179)
       assertEquals(c.getName() + " parameters",
           "createPurchaseInvoice".equals(c.getName()) ? List.of("allowDuplicate", "sifFields")
               : List.<String>of(),
