@@ -4034,6 +4034,17 @@ that is still linked to Salt Edge remains blocked from deletion.
 `MCP_CONFIG.actions.hidden`, §4.12.6): they need the account holder to authenticate at the bank
 (SCA), which an agent cannot do. The `reason` of `MCP_CONFIG` names the two actions.
 
+**Manual transaction synchronization.** `POST financial-account-bank-connection?action=sync`
+delegates to `AccountTransactionsSync.fetchAccountTransactions`, the same PSD2 entry point as
+Classic `GetTransactions`. PSD2 moved this operation out of `SaltEdgeAccountLinkHelper` in
+ETP-6154; consumers must use the current entry point rather than reproduce its fetch or locking
+logic. The PSD2 service owns the per-account lock, transaction import and commit before lock
+release. The GO response keeps its existing status contract: PSD2's `SYNC_IN_PROGRESS` outcome
+becomes `WARNING` and its `SYNC_LOCK_UNAVAILABLE` outcome becomes `ERROR`, matching Classic;
+other statuses pass through.
+Messages and the account's `lastSyncDate` are returned unchanged, with surrounding message
+whitespace trimmed as before.
+
 ##### 4.12.1.9 The country of a financial account — required on create, refused in the caller's language (ETP-5473)
 
 `FinancialAccountHandler` enforces on every channel (REST single, `/batch`, MCP) what the SPA's

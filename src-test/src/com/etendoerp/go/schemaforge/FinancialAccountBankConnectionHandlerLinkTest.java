@@ -71,6 +71,8 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -79,8 +81,9 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * Unit tests for the {@link FinancialAccountBankConnectionHandler} POST {@code link}, {@code createAndLink},
  * {@code sync} and {@code import-settings} actions (the write paths).
  *
- * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
- * {@link FinancialAccountSupport}. Both are mocked statically so the tests assert only this
+ * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}, transaction synchronization to
+ * {@link AccountTransactionsSync}, and account creation to {@link FinancialAccountSupport}.
+ * These collaborators are mocked statically so the tests assert only this
  * handler's orchestration and response envelope.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
@@ -382,10 +385,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> transactionsSync =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
+      transactionsSync.when(() -> AccountTransactionsSync.fetchAccountTransactions(eq(finAcc), any()))
           .thenAnswer(invocation -> {
             StringBuilder sb = invocation.getArgument(1);
             sb.append("  Imported 5 statements  ");
@@ -411,10 +414,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> transactionsSync =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
+      transactionsSync.when(() -> AccountTransactionsSync.fetchAccountTransactions(eq(finAcc), any()))
           .thenReturn("OK");
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
@@ -432,16 +435,58 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> transactionsSync =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
+      transactionsSync.when(() -> AccountTransactionsSync.fetchAccountTransactions(eq(finAcc), any()))
           .thenReturn("ERROR");
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
       assertTrue(data.has("lastSyncDate"));
       assertTrue(data.isNull("lastSyncDate"));
+    }
+  }
+
+  /** An already-running account sync keeps the Classic warning status and its explanation. */
+  @Test
+  public void testSyncWhenAnotherSyncIsRunningReturnsWarning() throws Exception {
+    assertSkippedSyncOutcome(BankIntegrationConstants.SYNC_IN_PROGRESS,
+        BankIntegrationConstants.WARNING, "Another sync is active");
+  }
+
+  /** A sync whose lock cannot be acquired keeps the Classic error status without a false stamp. */
+  @Test
+  public void testSyncWhenLockIsUnavailableReturnsError() throws Exception {
+    assertSkippedSyncOutcome(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE,
+        BankIntegrationConstants.ERROR, "The account sync lock is unavailable");
+  }
+
+  private void assertSkippedSyncOutcome(String syncOutcome, String expectedStatus, String message)
+      throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<AccountTransactionsSync> transactionsSync =
+            mockStatic(AccountTransactionsSync.class)) {
+      stubObContext(obContext);
+      transactionsSync.when(() -> AccountTransactionsSync.fetchAccountTransactions(eq(finAcc), any()))
+          .thenAnswer(invocation -> {
+            StringBuilder messages = invocation.getArgument(1);
+            messages.append("  ").append(message).append("  ");
+            return syncOutcome;
+          });
+
+      NeoResponse response = handler.handle(postContext("sync", body));
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = dataOf(response);
+      assertEquals(expectedStatus, data.getString("status"));
+      assertEquals(message, data.getString("message"));
+      assertTrue(data.isNull("lastSyncDate"));
+      transactionsSync.verify(() -> AccountTransactionsSync.fetchAccountTransactions(eq(finAcc), any()));
     }
   }
 
