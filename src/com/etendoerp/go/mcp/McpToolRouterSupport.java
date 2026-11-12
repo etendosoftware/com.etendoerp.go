@@ -913,47 +913,6 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Turns core's "start over" answer to a page past the end into the empty page that was asked for
-   * (ETP-5837, QA CP-16).
-   *
-   * <p>{@code DefaultJsonDataService.fetch} re-runs a read from row 0 when the requested page comes
-   * back empty and {@code startRow > 0} (core's grid behaviour: "reload the startrow again from 0").
-   * So {@code etendo_list} with an {@code offset} at or past {@code totalRows} answered the FIRST
-   * page again, with {@code startRow: 0}. An agent paging until it gets an empty page never got one
-   * and looped over the same rows. The response's own {@code startRow} is how this is detected: it
-   * is the first row core actually served, and it differs from the requested offset only when core
-   * restarted.
-   *
-   * <p>Structural: it reads only the paging keys of the core envelope, never an entity. Applied to
-   * the MCP list only; the REST list keeps core's behaviour.
-   *
-   * <p>The corrected page is {@code data: []}, {@code startRow = offset},
-   * {@code endRow = offset - 1} (no row served: {@code endRow - startRow + 1 = 0}) and the
-   * {@code totalRows} core counted, unchanged.
-   *
-   * @param responseJson the core response, still wrapped in {@code response}; modified in place
-   * @param offset       the requested first row
-   * @return {@code true} when the page was replaced by an empty one
-   * @throws JSONException never in practice (plain values only)
-   */
-  static boolean emptyPageWhenPastEnd(JSONObject responseJson, int offset) throws JSONException {
-    if (responseJson == null || offset <= 0) {
-      return false;
-    }
-    JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-    if (inner == null || !inner.has(JsonConstants.RESPONSE_STARTROW)) {
-      return false;
-    }
-    if (inner.optInt(JsonConstants.RESPONSE_STARTROW, offset) == offset) {
-      return false;
-    }
-    inner.put(JsonConstants.RESPONSE_DATA, new JSONArray());
-    inner.put(JsonConstants.RESPONSE_STARTROW, offset);
-    inner.put(JsonConstants.RESPONSE_ENDROW, offset - 1);
-    return true;
-  }
-
-  /**
    * Builds the guidance object advertised by {@code etendo_discover} so a cold agent is routed to the
    * {@code docs} tool for ready-to-run recipes (IMP-10). Shape:
    * {@code {"tool":"docs","hint":"Call docs(topic:…) for ready-to-run recipes per task."}}.

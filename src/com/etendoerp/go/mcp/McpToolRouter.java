@@ -545,7 +545,7 @@ public class McpToolRouter {
     }
     // ETP-5837 (QA CP-16): an offset at or past the end is an empty page, not the first page
     // again — core restarts an empty page from row 0. MCP only; the REST list keeps core's answer.
-    McpToolRouterSupport.emptyPageWhenPastEnd(responseJson, offset);
+    McpListPaging.emptyPageWhenPastEnd(responseJson, offset);
 
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
