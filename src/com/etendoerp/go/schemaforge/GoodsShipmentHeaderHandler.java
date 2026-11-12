@@ -217,21 +217,15 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   /**
    * ETP-6002 review M4: a later partial shipment of an invoice line got its {@code M_MatchSI} row
    * at draft time with the line's quantity then; bring it to the current quantity before the
-   * shipment is completed ({@link InvoiceLineLinker#refreshDraftMatchQuantities}). Best effort: a
-   * failure is logged and completion goes on — the pending readers use the line quantity, not the
-   * match row's.
+   * shipment is completed ({@link InvoiceLineLinker#refreshDraftMatchQuantities}). A failure is
+   * NOT swallowed: on PostgreSQL a failed statement aborts the transaction, so going on would only
+   * make the completion fail later with a misleading "current transaction is aborted".
    */
   private static void refreshDraftMatchQuantities(String shipmentId) {
     if (shipmentId == null) {
       return;
     }
-    try {
-      InvoiceLineLinker.refreshDraftMatchQuantities(shipmentId,
-          InOutInvoiceLinks.MatchTable.SALES);
-    } catch (RuntimeException e) {
-      log.warn("Could not refresh the draft invoice matches of shipment {}: {}", shipmentId,
-          e.getMessage());
-    }
+    InvoiceLineLinker.refreshDraftMatchQuantities(shipmentId, InOutInvoiceLinks.MatchTable.SALES);
   }
 
   /**

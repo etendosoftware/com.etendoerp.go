@@ -848,6 +848,13 @@ public class GoodsShipmentHeaderHandlerTest {
 
       linker.verify(() -> InvoiceLineLinker.refreshDraftMatchQuantities("ship-1",
           InOutInvoiceLinks.MatchTable.SALES));
+
+      // A failed refresh is not swallowed (review M2): on PostgreSQL the transaction is already
+      // aborted, so completing would only fail later with a misleading error.
+      linker.when(() -> InvoiceLineLinker.refreshDraftMatchQuantities("ship-1",
+          InOutInvoiceLinks.MatchTable.SALES)).thenThrow(new IllegalStateException("update failed"));
+      org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+          () -> new GoodsShipmentHeaderHandler().handle(ctx));
     }
   }
 
@@ -866,8 +873,11 @@ public class GoodsShipmentHeaderHandlerTest {
    */
   @Test
   public void handleDocumentActionReanchorsLineToHeaderWarehouseDefaultLocator() {
+    // The draft-match refresh (ETP-6002 M4) runs on the same hook and lets a failure propagate;
+    // it has its own test, so it is stubbed out here.
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 

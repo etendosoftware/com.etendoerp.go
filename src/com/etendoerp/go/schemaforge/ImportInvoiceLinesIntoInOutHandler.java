@@ -21,6 +21,7 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -63,7 +64,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li><b>Which lines.</b> Active, other than the total-discount line, in line order.</li>
  *   <li><b>How much</b>, by the header's {@link SourcePolicy}. Goods shipment
  *       ({@link SourcePolicy#byDirectLinks}, ETP-6002 CP-22 and review M2): exactly the pending of
- *       the invoice's own «Create shipment» follow-up ({@link #followUpPending},
+ *       the invoice's own «Create shipment» follow-up ({@link #loadFollowUpSources},
  *       {@link InvoicePendingResolver}) — {@code invoiced - moved} by the invoice line's OWN links
  *       ({@code C_InvoiceLine.M_InOutLine_ID} or the match table, drafts included), capped by its
  *       order line's {@code QtyOrdered - QtyDelivered - draft lines}, shared out in line order.
@@ -135,8 +136,9 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     }
 
     /**
-     * A line pends as the invoice's follow-up computes it ({@link #followUpPending}): by its own
-     * links (draft and completed movement lines, the target's included), capped by its order
+     * A line pends as the invoice's follow-up computes it
+     * ({@link ImportInvoiceLinesIntoInOutHandler#loadFollowUpSources}): by its own links (draft and
+     * completed movement lines, the target's included), capped by its order
      * line's {@code QtyOrdered - QtyDelivered - drafts}. A movement line linked to the invoice
      * line counts whatever order line it carries, or none, so a line created by the window's popup
      * and one created through the MCP with only {@code invoiceLineId} give the same pending.
@@ -263,11 +265,14 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     String currencyId = currencyOf(target);
     List<Invoice> candidates = findCandidateInvoices(partnerId, sales, currencyId, request.offset,
         request.scan);
+    Map<String, PendingResolver.Source> followUp = preloadFollowUp(candidates, policy, sales,
+        classic);
     return discover(candidates, invoice -> {
       if (!policy.offered.test(invoice)) {
         return null;
       }
-      List<LineState> lines = statesOfSourceInvoice(target, invoice, policy, classic);
+      List<LineState> lines = classic ? classicLineStates(invoice)
+          : lineStates(target, invoice, policy, followUp, false);
       int pendingLines = countPendingLines(lines);
       if (pendingLines == 0 && !(request.includeCovered && !lines.isEmpty())) {
         return null;
@@ -296,6 +301,24 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     int precision = currency == null || currency.getStandardPrecision() == null ? 2
         : currency.getStandardPrecision().intValue();
     return sum.setScale(precision, RoundingMode.HALF_UP);
+  }
+
+  /**
+   * The follow-up verdicts of every offered candidate in ONE statement (review M1, performance),
+   * when the policy pends by direct links; empty otherwise (nothing reads it).
+   */
+  private Map<String, PendingResolver.Source> preloadFollowUp(List<Invoice> candidates,
+      SourcePolicy policy, boolean sales, boolean classic) {
+    if (classic || !policy.pendsByDirectLinks) {
+      return Collections.emptyMap();
+    }
+    List<String> ids = new ArrayList<>();
+    for (Invoice invoice : candidates) {
+      if (policy.offered.test(invoice)) {
+        ids.add(invoice.getId());
+      }
+    }
+    return loadFollowUpSources(ids, sales);
   }
 
   /** The listed lines of {@code invoice} under the requested pending basis. */
@@ -385,15 +408,31 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
 
   /** The listed lines of {@code invoice} with their pending, as the class comment states. */
   List<LineState> lineStates(ShipmentInOut target, Invoice invoice, SourcePolicy policy) {
+    return lineStates(target, invoice, policy, null, true);
+  }
+
+  /**
+   * @param followUp the follow-up verdicts already read for the page ({@code availableInvoices}),
+   *     or {@code null} to read this invoice's
+   * @param withDraftNotes whether {@code inDraftDocuments} is needed: under the direct-link rule
+   *     the drafts only feed that note, which {@code availableInvoices} does not show, so it skips
+   *     their query
+   */
+  private List<LineState> lineStates(ShipmentInOut target, Invoice invoice, SourcePolicy policy,
+      Map<String, PendingResolver.Source> followUp, boolean withDraftNotes) {
     List<InvoiceLine> lines = listedLines(invoice);
     Map<String, OrderLine> orderLineOf = orderLinesOfInvoiceLines(lines,
         headerOrderLinesByProduct(invoice));
     Set<String> orderLineIds = new LinkedHashSet<>();
     orderLineOf.values().forEach(ol -> orderLineIds.add(ol.getId()));
-    DraftTotals drafts = draftTotals(target, orderLineIds, policy);
     if (policy.pendsByDirectLinks) {
-      return directLinkLineStates(target, invoice, lines, orderLineOf, drafts);
+      Map<String, Set<String>> others = withDraftNotes
+          ? draftTotals(target, orderLineIds, policy).others : Collections.emptyMap();
+      PendingResolver.Source source = followUp != null ? followUp.get(invoice.getId())
+          : loadFollowUpSources(List.of(invoice.getId()), isSales(target)).get(invoice.getId());
+      return directLinkLineStates(lines, orderLineOf, pendingByLine(source), others);
     }
+    DraftTotals drafts = draftTotals(target, orderLineIds, policy);
     List<LineState> states = new ArrayList<>();
     for (InvoiceLine line : lines) {
       OrderLine orderLine = orderLineOf.get(line.getId());
@@ -472,25 +511,40 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   // ---------------------------------------------------------------------------
 
   /**
-   * The lines of {@code invoice} under {@link SourcePolicy#byDirectLinks}: each at the pending the
-   * invoice's own «Create shipment» follow-up computes ({@link #followUpPending}, one rule for the
-   * popup, the MCP listing and {@code createShipment} — ETP-6002 review M2). A listed line the
-   * follow-up does not carry (no product, nothing pending) is at 0. The draft note is the same as
-   * under the order-line rule.
+   * The lines of an invoice under {@link SourcePolicy#byDirectLinks}: each at the pending the
+   * invoice's own «Create shipment» follow-up computes ({@link #loadFollowUpSources}, one rule
+   * for the popup, the MCP listing and {@code createShipment} — ETP-6002 review M2). A listed
+   * line the follow-up does not carry (no product, nothing pending) is at 0. The draft note is
+   * the same as under the order-line rule.
    */
-  private List<LineState> directLinkLineStates(ShipmentInOut target, Invoice invoice,
-      List<InvoiceLine> lines, Map<String, OrderLine> orderLineOf, DraftTotals drafts) {
-    Map<String, BigDecimal> pendingByLine = followUpPending(invoice.getId(), isSales(target));
+  private static List<LineState> directLinkLineStates(List<InvoiceLine> lines,
+      Map<String, OrderLine> orderLineOf, Map<String, BigDecimal> pendingByLine,
+      Map<String, Set<String>> otherDrafts) {
     List<LineState> states = new ArrayList<>();
     for (InvoiceLine line : lines) {
       OrderLine orderLine = orderLineOf.get(line.getId());
       BigDecimal pending = pendingByLine.getOrDefault(line.getId(), BigDecimal.ZERO)
           .max(BigDecimal.ZERO);
       states.add(new LineState(line, orderLine == null ? null : orderLine.getId(), pending,
-          orderLine == null ? Set.of()
-              : drafts.others.getOrDefault(orderLine.getId(), Set.of())));
+          orderLine == null ? Set.of() : otherDrafts.getOrDefault(orderLine.getId(), Set.of())));
     }
     return states;
+  }
+
+  /**
+   * The follow-up's verdict on one invoice as invoice line id to pending (review M3): every
+   * carried line with its quantity; none for a missing verdict or one that carries no line
+   * (nothing pending, or not eligible).
+   */
+  static Map<String, BigDecimal> pendingByLine(PendingResolver.Source source) {
+    Map<String, BigDecimal> pending = new HashMap<>();
+    if (source == null) {
+      return pending;
+    }
+    for (PendingResolver.SourceLine line : source.getLines()) {
+      pending.put(line.getSourceLineId(), line.getPendingQty());
+    }
+    return pending;
   }
 
   /**
@@ -661,29 +715,26 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   }
 
   /**
-   * What each line of {@code invoiceId} still has to move, as the invoice's «Create shipment» /
-   * «Create receipt» follow-up computes it ({@link InvoicePendingResolver#loadSources}): per invoice
-   * line, {@code QtyInvoiced} minus what the movement lines linked to it (column or match table,
-   * drafts included, voided and returns excluded) moved, capped by its order line's
+   * What each line of the invoices still has to move, as the invoice's «Create shipment» /
+   * «Create receipt» follow-up computes it ({@link InvoicePendingResolver#loadSources}): per
+   * invoice line, {@code QtyInvoiced} minus what the movement lines linked to it (column or match
+   * table, drafts included, voided and returns excluded) moved, capped by its order line's
    * {@code QtyOrdered - QtyDelivered - draft movement lines on it}, shared out in line order. Only
-   * the lines with something pending are returned. The eligibility verdict of the follow-up is not
-   * used here: the listing decides which invoices it offers by its own policy.
+   * the lines with something pending are returned. Its document-type check is switched off (the
+   * listing decides which invoices it offers by its own policy); an invoice of the other
+   * direction or not completed carries no line.
    *
-   * @return invoice line id to its pending; absent when nothing is pending
+   * <p>One statement for every id ({@code availableInvoices} passes the whole scanned page).
+   *
+   * @return invoice id to the follow-up's verdict on it; an invoice it does not know is absent
    */
-  protected Map<String, BigDecimal> followUpPending(String invoiceId, boolean sales) {
-    InvoicePendingResolver resolver = new InvoicePendingResolver(
-        sales ? InOutTargetBuilder.Direction.SALES : InOutTargetBuilder.Direction.PURCHASE,
-        docTypeId -> true);
-    Map<String, BigDecimal> pending = new HashMap<>();
-    PendingResolver.Source source = resolver.loadSources(List.of(invoiceId)).get(invoiceId);
-    if (source != null) {
-      for (PendingResolver.SourceLine line : source.getLines()) {
-        pending.put(line.getSourceLineId(), line.getPendingQty());
-      }
+  protected Map<String, PendingResolver.Source> loadFollowUpSources(Collection<String> invoiceIds,
+      boolean sales) {
+    if (invoiceIds.isEmpty()) {
+      return Collections.emptyMap();
     }
-    return pending;
-  }
-    return value instanceof BigDecimal ? (BigDecimal) value : new BigDecimal(value.toString());
+    return new InvoicePendingResolver(
+        sales ? InOutTargetBuilder.Direction.SALES : InOutTargetBuilder.Direction.PURCHASE,
+        docTypeId -> true).loadSources(invoiceIds);
   }
 }

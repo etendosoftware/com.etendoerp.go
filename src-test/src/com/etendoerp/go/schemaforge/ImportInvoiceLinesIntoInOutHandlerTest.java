@@ -124,7 +124,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     /** What the invoice's follow-up ({@code InvoicePendingResolver}) leaves on each line. */
     final Map<String, BigDecimal> followUp = new java.util.HashMap<>();
     Boolean followUpSales;
-    final List<String> followUpAskedFor = new ArrayList<>();
+    /** The invoice ids of each follow-up read, one entry per call. */
+    final List<List<String>> followUpCalls = new ArrayList<>();
 
     @Override
     protected void enterAdminMode() {
@@ -180,11 +181,19 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       return held;
     }
 
+    /** Every asked invoice carries the {@link #followUp} lines (only its own are ever read). */
     @Override
-    protected Map<String, BigDecimal> followUpPending(String invoiceId, boolean sales) {
+    protected Map<String, PendingResolver.Source> loadFollowUpSources(
+        Collection<String> invoiceIds, boolean sales) {
       followUpSales = sales;
-      followUpAskedFor.add(invoiceId);
-      return followUp;
+      followUpCalls.add(new ArrayList<>(invoiceIds));
+      List<PendingResolver.SourceLine> lines = new ArrayList<>();
+      followUp.forEach((lineId, qty) -> lines.add(new PendingResolver.SourceLine(lineId, qty)));
+      Map<String, PendingResolver.Source> sources = new java.util.HashMap<>();
+      for (String id : invoiceIds) {
+        sources.put(id, PendingResolver.Source.available(id, lines));
+      }
+      return sources;
     }
   }
 
@@ -274,7 +283,7 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
   /**
    * Goods shipment (ETP-6002 CP-22, review M2): a line pends exactly what the invoice's own
-   * «Create shipment» follow-up leaves on it ({@code followUpPending}, i.e.
+   * «Create shipment» follow-up leaves on it ({@code loadFollowUpSources}, i.e.
    * {@code InvoicePendingResolver}), never the order-line rule: CP-22's quotation line delivered 0
    * of 5 but already shipped through the invoice-line link pends 0 here because the follow-up
    * says so, where the old rule offered 5 again. A listed line the follow-up does not carry is at
@@ -322,7 +331,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
         .toString());
     assertTrue("the follow-up and the drafts are read on the sales side",
         probe.followUpSales && probe.holdingsSales);
-    assertEquals(List.of("inv1"), probe.followUpAskedFor);
+    assertEquals("one follow-up read for the invoice", List.of(List.of("inv1")),
+        probe.followUpCalls);
     assertEquals("without includeCovered only what pends", List.of("il2", "il3"),
         ids(rows(run(probe, LINES, linesOf("inv1", false), SHIPMENT))));
   }
@@ -419,6 +429,29 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("the same source under the receipt policy is refused",
         DocumentLineImport.ERROR_SOURCE_NOT_STANDARD,
         errorCode(run(probe, LINES, linesOf("inv1", true), RECEIPT)));
+  }
+
+  /**
+   * Review M3: the follow-up's verdict becomes invoice line id to pending — every carried line
+   * with its quantity; nothing for a missing verdict or one that carries no line (nothing
+   * pending, or not eligible: {@code Source.fromLines} drops the lines then).
+   */
+  @Test
+  public void pendingByLine_translatesTheFollowUpVerdict() {
+    PendingResolver.Source carried = PendingResolver.Source.available("inv1", List.of(
+        new PendingResolver.SourceLine("il1", bd("2")),
+        new PendingResolver.SourceLine("il2", bd("0.5"))));
+    Map<String, BigDecimal> pending = ImportInvoiceLinesIntoInOutHandler.pendingByLine(carried);
+    assertEquals(2, pending.size());
+    assertEquals(0, bd("2").compareTo(pending.get("il1")));
+    assertEquals(0, bd("0.5").compareTo(pending.get("il2")));
+
+    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(null).isEmpty());
+    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(PendingResolver.Source.fromLines(
+        "inv1", null, List.of())).isEmpty());
+    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(PendingResolver.Source.fromLines(
+        "inv1", FollowUpException.Reason.NOT_COMPLETED,
+        List.of(new PendingResolver.SourceLine("il1", bd("2"))))).isEmpty());
   }
 
   // ── refusals ──────────────────────────────────────────────────────────────
@@ -526,6 +559,10 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     JSONArray plain = rows(run(probe, INVOICES, null, SHIPMENT));
     assertEquals(List.of("open"), ids(plain));
+    assertEquals("ONE follow-up read for every offered invoice of the page (review M1); the "
+        + "rectificative is not offered, so not read", List.of(List.of("open", "covered",
+            "onlyDiscount")), probe.followUpCalls);
+    assertNull("no draft query: the listing shows no draft note", probe.holdingsSales);
     assertEquals(2, plain.getJSONObject(0).getInt("pendingLines"));
     assertEquals("o1", plain.getJSONObject(0).getString("order"));
     assertFalse("no detail, no creationDate", plain.getJSONObject(0).has("creationDate"));

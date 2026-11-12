@@ -13257,7 +13257,8 @@ header order's line of the same product (the last one wins, as the popup). `pend
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
 - **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
   invoice's own «Crear albarán» follow-up** (`createShipment`, `InvoicePendingResolver.loadSources`, read through
-  `ImportInvoiceLinesIntoInOutHandler#followUpPending`), so the popup, `availableInvoiceLines` on MCP and
+  `ImportInvoiceLinesIntoInOutHandler#loadFollowUpSources`; `availableInvoices` reads the whole scanned page in ONE
+  statement and skips the draft-holdings query, which only feeds the `inDraftDocuments` note of the lines), so the popup, `availableInvoiceLines` on MCP and
   `createShipment` never disagree on the same invoice. Per invoice line: `QtyInvoiced − moved`, where `moved` is the
   quantity of the movement lines linked to THAT invoice line (`C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`; active,
   not voided, not a return; a DRAFT one counts, the target's own included) — never another invoice's shipments of the
@@ -13299,8 +13300,9 @@ column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Bindin
 froze the line quantity of that moment. `GoodsShipmentHeaderHandler#handle` (the `documentAction` POST, before the
 native completion) calls `InvoiceLineLinker.refreshDraftMatchQuantities(shipment, SALES)`, which sets `qty =
 MovementQty` on the unposted rows of that DRAFT shipment's lines, so `M_INOUT_POST` (`QtyInvoiced`,
-`IsCompletelyInvoiced`) and `ETGO_GET_DELIVERY_STATUS` read the final quantity; a failure is logged and completion
-goes on (the pending readers use `MovementQty`, not the row's). Life cycle, verified on the schema: deleting the
+`IsCompletelyInvoiced`) and `ETGO_GET_DELIVERY_STATUS` read the final quantity. A failure propagates and the
+completion is refused: on PostgreSQL a failed statement aborts the transaction, so carrying on would only fail later
+with a misleading "current transaction is aborted". Life cycle, verified on the schema: deleting the
 draft line or the draft shipment cascade-deletes the row (`m_matchsi_m_inoutline` `ON DELETE CASCADE`; the column is
 `ON DELETE SET NULL`); `M_MATCHSI_TRG` only refuses deleting a POSTED row, which a draft one never is; voiding a
 draft or a completed shipment leaves the rows on a `VO` movement, which every reader skips (`io.docstatus <> 'VO'` in
