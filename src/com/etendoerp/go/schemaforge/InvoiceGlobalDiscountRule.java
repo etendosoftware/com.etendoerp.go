@@ -149,7 +149,8 @@ final class InvoiceGlobalDiscountRule {
 
   /**
    * What a successful import did with the global discount, as the popup's toast says it
-   * ("descuento global del X % aplicado a la factura"): {@code {applied:true, percent, reason:null}}
+   * ("Descuento total del X % aplicado a la factura": the order's global discount, carried, is the
+   * invoice's total discount, ETP-5828 QA UI-5): {@code {applied:true, percent, reason:null}}
    * when the invoice's total discount holds the orders' % after the call (set now or already
    * there), else {@code {applied:false, percent:null, reason}} with {@value #REASON_NOT_REQUESTED}
    * or {@value #REASON_NO_ORDER_DISCOUNT}. A conflict never gets here: it is the 422.
