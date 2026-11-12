@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -45,11 +46,15 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  */
 public enum PortalDocumentKind {
 
-  QUOTATION("C_Order", "sales-quotation", id -> ref(OBDal.getInstance().get(Order.class, id))),
-  ORDER("C_Order", "sales-order", id -> ref(OBDal.getInstance().get(Order.class, id))),
-  SHIPMENT("M_InOut", "goods-shipment",
+  QUOTATION("C_Order", "sales-quotation", Order.ENTITY_NAME, Order.PROPERTY_ORDERDATE, true,
+      id -> ref(OBDal.getInstance().get(Order.class, id))),
+  ORDER("C_Order", "sales-order", Order.ENTITY_NAME, Order.PROPERTY_ORDERDATE, true,
+      id -> ref(OBDal.getInstance().get(Order.class, id))),
+  SHIPMENT("M_InOut", "goods-shipment", ShipmentInOut.ENTITY_NAME,
+      ShipmentInOut.PROPERTY_MOVEMENTDATE, false,
       id -> ref(OBDal.getInstance().get(ShipmentInOut.class, id))),
-  INVOICE("C_Invoice", "sales-invoice", id -> ref(OBDal.getInstance().get(Invoice.class, id)));
+  INVOICE("C_Invoice", "sales-invoice", Invoice.ENTITY_NAME, Invoice.PROPERTY_INVOICEDATE, true,
+      id -> ref(OBDal.getInstance().get(Invoice.class, id)));
 
   private static final String COPY_KEY_CREDIT_NOTE = "CREDIT_NOTE";
   private static final String CATEGORY_CREDIT_MEMO = "ARC";
@@ -58,13 +63,87 @@ public enum PortalDocumentKind {
 
   private final String tableName;
   private final String specName;
+  private final String entityName;
+  private final String dateProperty;
+  private final boolean amounts;
   private final Function<String, Optional<Owner>> loader;
 
-  PortalDocumentKind(String tableName, String specName,
-      Function<String, Optional<Owner>> loader) {
+  // A private value-per-constant constructor; a builder would add a type and no safety.
+  @SuppressWarnings("java:S107")
+  PortalDocumentKind(String tableName, String specName, String entityName, String dateProperty,
+      boolean amounts, Function<String, Optional<Owner>> loader) {
     this.tableName = tableName;
     this.specName = specName;
+    this.entityName = entityName;
+    this.dateProperty = dateProperty;
+    this.amounts = amounts;
     this.loader = loader;
+  }
+
+  /**
+   * @return the DAL entity the document's header is
+   */
+  String getEntityName() {
+    return entityName;
+  }
+
+  /**
+   * @return the property holding the document date the portal lists and filters by
+   */
+  String getDateProperty() {
+    return dateProperty;
+  }
+
+  /**
+   * @return {@code true} when the document carries amounts (a shipment carries none)
+   */
+  boolean hasAmounts() {
+    return amounts;
+  }
+
+  /**
+   * The kind a loaded header entity belongs to. Quotation and order share {@code Order}; this
+   * answers {@link #ORDER} for both, so use it only where the two behave alike (dates, amounts).
+   *
+   * @param entityName a DAL entity name
+   * @return the kind, or {@code null}
+   */
+  static PortalDocumentKind ofEntity(String entityName) {
+    for (PortalDocumentKind kind : new PortalDocumentKind[] { ORDER, SHIPMENT, INVOICE }) {
+      if (kind.entityName.equals(entityName)) {
+        return kind;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The kind of a loaded document: telling a quotation from an order by its document sub-type.
+   *
+   * @param document an {@code Order}, {@code ShipmentInOut} or {@code Invoice}
+   * @return the kind, or {@code null} for anything else
+   */
+  static PortalDocumentKind of(BaseOBObject document) {
+    if (document instanceof Order) {
+      DocumentType type = ((Order) document).getTransactionDocument();
+      String subType = type == null ? null : type.getSOSubType();
+      return "OB".equals(subType) || "ON".equals(subType) ? QUOTATION : ORDER;
+    }
+    return document == null ? null : ofEntity(document.getEntityName());
+  }
+
+  /**
+   * Whether an invoice is a credit note (rectificativa), by its document type.
+   *
+   * @param document any portal document
+   * @return {@code true} only for a rectificative invoice
+   */
+  static boolean isCreditNote(BaseOBObject document) {
+    if (!(document instanceof Invoice)) {
+      return false;
+    }
+    DocumentType documentType = ((Invoice) document).getTransactionDocument();
+    return documentType != null && isRectificative(documentType);
   }
 
   /**

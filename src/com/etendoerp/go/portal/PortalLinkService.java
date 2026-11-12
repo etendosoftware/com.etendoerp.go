@@ -331,6 +331,16 @@ public class PortalLinkService {
    * @return the state; unknown, pending, deactivated and blank tokens are all {@link State#INVALID}
    */
   public Validation validate(String rawToken) {
+    // S1: in admin mode on its own, like mintForSend, so it never depends on the caller's mode.
+    OBContext.setAdminMode(true);
+    try {
+      return validateInAdminMode(rawToken);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private Validation validateInAdminMode(String rawToken) {
     Optional<PortalLink> sent = findSentLink(rawToken);
     if (!sent.isPresent()) {
       return new Validation(State.INVALID, null);
@@ -367,6 +377,7 @@ public class PortalLinkService {
     if (tokenHash == null) {
       return Optional.empty();
     }
+    OBContext.setAdminMode(true);
     try {
       BaseOBObject row = PortalLinkDal.findByTokenHash(tokenHash);
       if (row == null) {
@@ -381,6 +392,8 @@ public class PortalLinkService {
       // an unknown token to whoever is holding it.
       log.error("Portal token lookup failed", e);
       return Optional.empty();
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -413,10 +426,27 @@ public class PortalLinkService {
    * answers "recently sent". A renewal whose email did not leave deactivates its pending row before
    * its transaction ends, so a failed attempt never blocks the next one.
    *
+   * <p><b>The row lock is held across the provider call</b> (review W-b, chosen over a
+   * {@code lock_timeout}): from {@code lockForRenewal} until the send's own commit, which comes
+   * after the email provider answered. A second open of the same expired link therefore waits at
+   * most one provider round trip — bounded by the provider adapter's own HTTP timeout — and then
+   * answers "recently sent". Only that one link's row is locked, and only renewals take it, so no
+   * other portal request or document send ever waits on it. A {@code lock_timeout} was not chosen
+   * because the waiting request would fail with an error instead of the correct answer.
+   *
    * @param rawToken the expired token the customer opened
    * @return what happened
    */
   public RenewalOutcome renew(String rawToken) {
+    OBContext.setAdminMode(true);
+    try {
+      return renewInAdminMode(rawToken);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private RenewalOutcome renewInAdminMode(String rawToken) {
     Optional<PortalLink> sent = findSentLink(rawToken);
     if (!sent.isPresent()) {
       return RenewalOutcome.INVALID;

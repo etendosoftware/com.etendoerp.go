@@ -58,7 +58,13 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * GET  /sws/portal/invoices                     completed sales invoices + outstanding balance
  * GET  /sws/portal/invoices/{invoiceId}/pdf     the invoice's main attachment, streamed
  * GET  /sws/portal/logo                         the issuing company's logo
+ * GET  /sws/portal/home                         balances, per-kind tiles, recent documents
+ * GET  /sws/portal/documents?type=…             one document kind, filtered and paged
+ * GET  /sws/portal/documents/{kind}/{id}[/pdf]  one document's detail, or its printable
  * </pre>
+ *
+ * <p>{@code /invoices} and {@code /invoices/{id}/pdf} are the MVP's and are kept for existing
+ * callers; the Part B portal page reads {@code /home} and {@code /documents} only.
  *
  * <p><b>One link per document email, valid for a fixed time</b> ({@link PortalLinkService}). On
  * {@code /me} a link is valid, expired, unavailable (customer blocked or inactive, or the issuing
@@ -119,6 +125,9 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String PATH_ME = "/me";
   private static final String PATH_RENEW = "/renew";
   private static final String PATH_INVOICES = "/invoices";
+  /** ETP-6209 Part B: the home aggregates and the per-kind documents. */
+  private static final String PATH_HOME = "/home";
+  private static final String PATH_DOCUMENTS = "/documents";
   private static final String PDF_SUFFIX = "/pdf";
 
   /** Tenant logo, so the page can show whose portal this is. Takes no parameters. */
@@ -227,6 +236,12 @@ public class PortalServlet extends HttpBaseServlet {
       OBContext.setAdminMode(true);
       if (path.equals(PATH_ME) || path.startsWith(PATH_ME + "/")) {
         handleMe(request, response);
+      } else if (path.equals(PATH_HOME)) {
+        handleHome(request, response);
+      } else if (path.equals(PATH_DOCUMENTS)) {
+        handleDocuments(request, response);
+      } else if (path.startsWith(PATH_DOCUMENTS + "/")) {
+        handleDocument(request, response, path.substring(PATH_DOCUMENTS.length() + 1));
       } else if (path.equals(PATH_INVOICES)) {
         handleInvoices(request, response);
       } else if (path.startsWith(PATH_INVOICES + "/") && path.endsWith(PDF_SUFFIX)) {
@@ -506,6 +521,76 @@ public class PortalServlet extends HttpBaseServlet {
     }
     NeoAttachmentsDownloader.handleDownload(attachmentId, response);
     PortalUsageEvents.downloaded(validated, invoice.getId());
+  }
+
+  /** The home's balances, per-kind tiles and recent documents ({@link PortalDocumentsEndpoint}). */
+  private void handleHome(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    sendJson(response, HttpServletResponse.SC_OK, PortalDocumentsEndpoint.home(session.get()));
+  }
+
+  /** One page of one document kind; an unknown {@code type} answers 404. */
+  private void handleDocuments(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    JSONObject body = PortalDocumentsEndpoint.list(session.get(), request.getParameter("type"),
+        request.getParameter("status"), request.getParameter("dateFrom"),
+        request.getParameter("dateTo"), request.getParameter("q"),
+        request.getParameter(PARAM_LIMIT), request.getParameter(PARAM_OFFSET));
+    if (body == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+      return;
+    }
+    sendJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /**
+   * {@code {kind}/{id}} answers the document's detail and {@code {kind}/{id}/pdf} streams its
+   * printable: the main attachment, the same file the email's download link serves (plan §B.7).
+   * Anything out of scope, hidden, mistyped or without a printable answers 404.
+   */
+  private void handleDocument(HttpServletRequest request, HttpServletResponse response,
+      String rest) throws IOException, JSONException {
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    String[] parts = rest.split("/");
+    boolean pdf = parts.length == 3 && PDF_SUFFIX.equals("/" + parts[2]);
+    if (parts.length != 2 && !pdf) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+      return;
+    }
+    PortalSession validated = session.get();
+    if (!pdf) {
+      JSONObject body = PortalDocumentsEndpoint.detail(validated, parts[0], parts[1]);
+      if (body == null) {
+        sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+        return;
+      }
+      sendJson(response, HttpServletResponse.SC_OK, body);
+      return;
+    }
+    PortalDocumentKind kind = PortalDocumentsEndpoint.kindOf(parts[0]);
+    String attachmentId = kind == null
+        || PortalDocumentQuery.findInScope(validated, kind, parts[1]) == null ? null
+        : PortalDocumentsEndpoint.mainAttachmentId(validated, kind, parts[1]);
+    if (attachmentId == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+      return;
+    }
+    NeoAttachmentsDownloader.handleDownload(attachmentId, response);
+    PortalUsageEvents.downloaded(validated, parts[1]);
   }
 
   private String resolveMainAttachmentId(String invoiceId) {
