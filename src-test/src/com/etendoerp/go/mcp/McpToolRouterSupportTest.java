@@ -46,6 +46,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -2233,8 +2235,8 @@ class McpToolRouterSupportTest {
     }
 
     /** Columns: requested offset | core startRow, endRow, totalRows, rows | replaced? */
-    @org.junit.jupiter.params.ParameterizedTest(name = "[{index}] offset {0}, core startRow {1} -> replaced {5}")
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest(name = "[{index}] offset {0}, core startRow {1} -> replaced {5}")
+    @CsvSource({
         // the QA repro: offset == totalRows, core fell back to the first page
         "7,  0, 6, 7, 7, true",
         // far past the end, same fallback
