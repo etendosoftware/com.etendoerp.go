@@ -545,6 +545,10 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     when(pendingB.getUnitPrice()).thenReturn(bd("1.255"));
     when(shipped.getUnitPrice()).thenReturn(bd("100"));
     Invoice open = invoice(probe, "open", true, pendingA, pendingB, shipped);
+    // A Currency mock answers 0 for its Long standard precision (Mockito's default for a numeric
+    // wrapper), which would round the amount to units; a euro has 2.
+    Currency euro = open.getCurrency();
+    when(euro.getStandardPrecision()).thenReturn(2L);
     probe.followUp.put("io1", bd("3"));
     probe.followUp.put("io2", bd("2"));
     Order header = mock(Order.class);
