@@ -840,24 +840,21 @@ public class TenantEnvironmentLifecycleService {
   private String readPreference(String attribute, String clientId) {
     OBContext.setAdminMode();
     try {
-      return readPreferenceValue(attribute, clientId);
+      OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
+          "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
+              + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :"
+              + PARAM_CLIENT_ID + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE
+              + " = true");
+      query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
+      query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      Preference preference = query.uniqueResult();
+      return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  private String readPreferenceValue(String attribute, String clientId) {
-    OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
-        "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
-            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
-    query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
-    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    query.setMaxResult(1);
-    Preference preference = query.uniqueResult();
-    return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
   }
 
   /**
