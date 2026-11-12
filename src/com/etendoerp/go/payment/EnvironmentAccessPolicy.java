@@ -88,13 +88,15 @@ public final class EnvironmentAccessPolicy {
     private final Instant trialStartedAt;
     private final Instant renewalDueAt;
     private final boolean associatedWithProductive;
+    private final Instant trialEndsAt;
 
     private Environment(EnvironmentType type, Instant trialStartedAt, Instant renewalDueAt,
-        boolean associatedWithProductive) {
+        boolean associatedWithProductive, Instant trialEndsAt) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
       this.renewalDueAt = renewalDueAt;
       this.associatedWithProductive = associatedWithProductive;
+      this.trialEndsAt = trialEndsAt;
     }
 
     /**
@@ -115,10 +117,26 @@ public final class EnvironmentAccessPolicy {
      * @return a demo environment
      */
     public static Environment demo(Instant trialStartedAt, Instant renewalDueAt) {
+      return demo(trialStartedAt, renewalDueAt, null);
+    }
+
+    /**
+     * ETP-6223 — creates a demo whose trial end was edited by hand (the account's
+     * {@code ETGO_ACCOUNT.DEMO_EXPIRES_AT}), without a productive association.
+     *
+     * @param trialStartedAt instant when the demo trial started
+     * @param renewalDueAt instant when the renewal is due
+     * @param trialEndsAt the edited trial end, which replaces the start plus the configured trial
+     *     days; null for the standard trial
+     * @return a demo environment
+     */
+    public static Environment demo(Instant trialStartedAt, Instant renewalDueAt,
+        Instant trialEndsAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
       }
-      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, false);
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, false,
+          trialEndsAt);
     }
 
     /**
@@ -130,7 +148,7 @@ public final class EnvironmentAccessPolicy {
      * @return an associated demo environment
      */
     public static Environment associatedDemo(Instant trialStartedAt, Instant renewalDueAt) {
-      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, true);
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, true, null);
     }
 
     /**
@@ -139,7 +157,7 @@ public final class EnvironmentAccessPolicy {
      * @return a productive environment
      */
     public static Environment productive() {
-      return new Environment(EnvironmentType.PRODUCTIVE, null, null, false);
+      return new Environment(EnvironmentType.PRODUCTIVE, null, null, false, null);
     }
 
     /**
@@ -149,7 +167,7 @@ public final class EnvironmentAccessPolicy {
      * @return a productive environment
      */
     public static Environment productive(Instant renewalDueAt) {
-      return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt, false);
+      return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt, false, null);
     }
 
     public EnvironmentType getType() {
@@ -167,10 +185,18 @@ public final class EnvironmentAccessPolicy {
     public boolean isAssociatedWithProductive() {
       return associatedWithProductive;
     }
+
+    /** @return the edited trial end, or null when the standard trial applies */
+    public Instant getTrialEndsAt() {
+      return trialEndsAt;
+    }
   }
 
   /**
-   * Returns the instant at which an environment's configured trial ends.
+   * Returns the instant at which an environment's trial ends: the edited end when the demo has one
+   * (ETP-6223), else its start plus the configured trial days. The access decision, the trial
+   * notices, the trial bar and HubSpot all read the end from here, so an edited end moves all of
+   * them together.
    * @param environment environment facts to evaluate
    * @param configuration configured trial duration
    * @return trial expiration instant, or null for productive environments
@@ -181,6 +207,9 @@ public final class EnvironmentAccessPolicy {
     }
     if (environment.trialStartedAt == null) {
       return null;
+    }
+    if (environment.trialEndsAt != null) {
+      return environment.trialEndsAt;
     }
     return environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);
   }
@@ -259,7 +288,7 @@ public final class EnvironmentAccessPolicy {
       if (isWithinGrace(subscriptionStatus, environment, now, configuration)) {
         return Decision.ALLOWED;
       }
-      Instant expiresAt = environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);
+      Instant expiresAt = trialExpiresAt(environment, configuration);
       return now.isBefore(expiresAt) ? Decision.ALLOWED : Decision.DEMO_TRIAL_EXPIRED;
     }
     if (subscriptionStatus == SubscriptionStatus.CURRENT
