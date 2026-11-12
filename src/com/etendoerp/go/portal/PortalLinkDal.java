@@ -132,8 +132,8 @@ final class PortalLinkDal {
     row.set(PROP_PARENT_LINK, link.parentLinkId);
     row.set(PROP_ROOT_LINK, link.rootLinkId);
     row.set(PROP_CONTRACT_NAME, truncate(link.contractName, LEN_CONTRACT_NAME));
-    row.set(PROP_RECIPIENTS_TO, truncate(join(link.recipientsTo), LEN_RECIPIENTS));
-    row.set(PROP_RECIPIENTS_CC, truncate(join(link.recipientsCc), LEN_RECIPIENTS));
+    row.set(PROP_RECIPIENTS_TO, joinWithin(link.recipientsTo, LEN_RECIPIENTS));
+    row.set(PROP_RECIPIENTS_CC, joinWithin(link.recipientsCc, LEN_RECIPIENTS));
     row.set(PROP_EMAIL_LANGUAGE, truncate(link.language, LEN_LANGUAGE));
     OBDal.getInstance().save(row);
     OBDal.getInstance().flush();
@@ -199,14 +199,31 @@ final class PortalLinkDal {
   }
 
   /**
-   * Counts the confirmed renewals an expired link already produced since an instant — the per-link
-   * cool-down.
+   * Locks an expired link's row until the current transaction ends, so two requests renewing the
+   * same link — on one node or on several — are serialized by the database (see
+   * {@code PortalLinkService#renew}).
+   *
+   * @param linkId the expired link
    */
-  static int countSentRenewalsOf(String parentLinkId, Date since) {
+  static void lockForRenewal(String linkId) {
+    OBDal.getInstance().getSession()
+        .createNativeQuery("SELECT etgo_portal_link_id FROM etgo_portal_link"
+            + " WHERE etgo_portal_link_id = :linkId FOR UPDATE")
+        .setParameter("linkId", linkId)
+        .list();
+  }
+
+  /**
+   * Counts the renewals an expired link produced since an instant — the per-link cool-down. Counted
+   * by creation and including pending rows: a renewal whose email is on its way already counts,
+   * which is what closes the race between two opens of the same link. Inactive rows (an attempt
+   * whose email did not leave, see {@link #deactivatePendingRenewalsOf}) do not count.
+   */
+  static int countRenewalsOf(String parentLinkId, Date since) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
         "as l where l." + PROP_PARENT_LINK + " = :parentLinkId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
-            + " and l." + PROP_SENT_AT + " >= :since");
+            + " and l." + PROP_CREATION_DATE + " >= :since");
     query.setNamedParameter("parentLinkId", parentLinkId);
     query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
     query.setNamedParameter("since", since);
@@ -215,21 +232,43 @@ final class PortalLinkDal {
   }
 
   /**
-   * Counts the confirmed renewals sent for a Business Partner of a tenant since an instant — the
-   * daily ceiling.
+   * Counts the renewals made for a Business Partner of a tenant since an instant — the optional
+   * daily ceiling. Same counting rule as {@link #countRenewalsOf}.
    */
-  static int countSentRenewalsForBusinessPartner(String clientId, String bpartnerId, Date since) {
+  static int countRenewalsForBusinessPartner(String clientId, String bpartnerId, Date since) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
         "as l where l." + PROP_CLIENT + ".id = :clientId"
             + " and l." + PROP_BPARTNER + ".id = :bpartnerId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
-            + " and l." + PROP_SENT_AT + " >= :since");
+            + " and l." + PROP_CREATION_DATE + " >= :since");
     query.setNamedParameter("clientId", clientId);
     query.setNamedParameter("bpartnerId", bpartnerId);
     query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
     query.setNamedParameter("since", since);
     disableTenantFilters(query);
     return query.count();
+  }
+
+  /**
+   * Deactivates the still-pending renewals of an expired link: the ones whose email did not leave.
+   * Pending rows never work as links anyway; deactivating them keeps a failed attempt from
+   * counting against the cool-down.
+   *
+   * @param parentLinkId the expired link
+   */
+  static void deactivatePendingRenewalsOf(String parentLinkId) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
+        "as l where l." + PROP_PARENT_LINK + " = :parentLinkId"
+            + " and l." + PROP_LINK_ORIGIN + " = :origin"
+            + " and l." + PROP_SENT_AT + " is null");
+    query.setNamedParameter("parentLinkId", parentLinkId);
+    query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    disableTenantFilters(query);
+    for (BaseOBObject row : query.list()) {
+      row.set(PROP_ACTIVE, Boolean.FALSE);
+      OBDal.getInstance().save(row);
+    }
+    OBDal.getInstance().flush();
   }
 
   /**
@@ -294,9 +333,30 @@ final class PortalLinkDal {
     return object == null ? null : (String) object.getId();
   }
 
-  private static String join(List<String> addresses) {
-    return addresses == null || addresses.isEmpty() ? null
-        : StringUtils.join(addresses, RECIPIENT_JOIN);
+  /**
+   * Joins whole addresses up to the column width: an address that does not fit is left out
+   * rather than cut in half, so every stored address is a real one.
+   */
+  private static String joinWithin(List<String> addresses, int maxLength) {
+    if (addresses == null || addresses.isEmpty()) {
+      return null;
+    }
+    StringBuilder joined = new StringBuilder();
+    for (String address : addresses) {
+      String normalized = StringUtils.trimToNull(address);
+      if (normalized == null) {
+        continue;
+      }
+      int extra = (joined.length() == 0 ? 0 : RECIPIENT_JOIN.length()) + normalized.length();
+      if (joined.length() + extra > maxLength) {
+        break;
+      }
+      if (joined.length() > 0) {
+        joined.append(RECIPIENT_JOIN);
+      }
+      joined.append(normalized);
+    }
+    return joined.length() == 0 ? null : joined.toString();
   }
 
   private static String truncate(String value, int maxLength) {

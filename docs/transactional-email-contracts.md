@@ -374,9 +374,19 @@ class only asks whether a kind was declared; it names no window or table.
   on a `SENT` outcome only, **after** the history row and the audit row — the DAL safety store has
   already committed both — so a failure while confirming the link can never roll back the send's
   own records. The document contract confirms the link there (`SENT_AT`,
-  `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`); a failed confirmation is logged, its
-  write discarded from the session, and the link stays pending. A throttled, duplicate,
-  suppressed or failed send leaves the link pending, which the portal answers as invalid.
+  `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`) and **commits the confirmation at once**,
+  so a failure later in the same request cannot turn the link the customer already holds into an
+  invalid one. A failed confirmation is logged and rolled back on its own (the session is closed
+  and the next DAL call opens a fresh one) and the link stays pending. Both commits are safe only
+  because both portal contracts carry an idempotency key, so the send's history and audit rows are
+  already committed when `onDelivered` runs. A throttled, duplicate, suppressed or failed send
+  leaves the link pending, which the portal answers as invalid.
+- **Renewal cool-down across requests and nodes.** `PortalLinkService#renew` locks the expired
+  link's row (`SELECT … FOR UPDATE`) before reading the limits and counts renewals by `CREATED`,
+  pending ones included. A second open of the same link waits for the first one's commit (the
+  safety store commits the send together with the pending renewal row) and then answers "recently
+  sent". A renewal whose email did not leave deactivates its pending row before its transaction
+  ends, so it never blocks the next attempt.
 - **Rows are created through the entity's mapping class.** `ETGO_Portal_Link` has a generated
   class, so `PortalLinkDal` instantiates it via `ModelProvider`/`OBProvider`, never as a
   `DynamicOBObject`: a `DynamicOBObject` re-read in the same session by a query fails with

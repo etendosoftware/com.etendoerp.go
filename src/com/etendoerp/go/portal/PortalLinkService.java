@@ -32,6 +32,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.system.Client;
@@ -170,7 +171,6 @@ public class PortalLinkService {
   private static final String ERROR_DAILY_LIMIT = "DAILY_LIMIT";
   private static final String ERROR_SEND_FAILED = "SEND_FAILED";
   private static final Duration ONE_DAY = Duration.ofDays(1);
-  private static final Object[] RENEWAL_LOCKS = createLocks();
 
   private final PortalAccessChecks accessChecks;
   private final Function<PortalLink, String> renewalSender;
@@ -286,8 +286,14 @@ public class PortalLinkService {
    * <p>Called from {@code EmailContract#onDelivered}, i.e. only for a {@code SENT} outcome, after
    * the send's history and audit rows are committed. Never throws into the email service: a failed
    * confirmation leaves the link pending (the customer then sees "invalid") and is logged — the
-   * email itself was delivered and must be reported so. A failed write is also discarded from the
-   * session ({@link #discardFailedWrite}), so it cannot make the rest of the request fail on flush.
+   * email itself was delivered and must be reported so. A failed write is rolled back on its own
+   * ({@link #discardFailedWrite}), so it cannot make the rest of the request fail.
+   *
+   * <p><b>A successful confirmation is committed at once.</b> The customer already holds the email;
+   * whether the link in it works must not depend on what the rest of the request does afterwards.
+   * Committing here sweeps in nothing of the send's own, because both portal contracts carry an
+   * idempotency key and the DAL safety store has already committed the send's history and audit
+   * rows by the time {@code onDelivered} runs.
    *
    * @param linkId the pending link
    * @param sendLogId the {@code etgo_email_send_log} row of that send, may be {@code null}
@@ -304,6 +310,7 @@ public class PortalLinkService {
       PortalLinkDal.confirm(row, Date.from(now), Date.from(now.plus(PortalLinkConfig.ttl())),
           sendLogId);
       PortalLink link = PortalLinkDal.toLink(row);
+      SessionHandler.getInstance().commitAndStart();
       if (PortalLink.ORIGIN_RENEWAL.equals(link.getOrigin())) {
         PortalUsageEvents.renewed(link);
       } else {
@@ -391,11 +398,20 @@ public class PortalLinkService {
   /**
    * Emails a new link for an expired one, to the expired link's own To and CC.
    *
-   * <p>In order: the token must name a sent, expired link; the customer must not be blocked or
-   * inactive and the issuing company's plan must be current (story item 5); the per-link cool-down
-   * (15 minutes by default, decided by the PO) and the optional per-Business-Partner daily ceiling
-   * (off by default) must allow it. Each refusal is
-   * recorded as a {@code portal.link.renewed} error event with its reason.
+   * <p>In order: the token must name a sent link; the customer must not be blocked or inactive and
+   * the issuing company's plan must be current (story item 5) — checked before expiry, so a closed
+   * customer is told "unavailable" whatever the link's age; the link must have expired; the
+   * per-link cool-down (15 minutes by default, decided by the PO) and the optional
+   * per-Business-Partner daily ceiling (off by default) must allow it. Each refusal is recorded as
+   * a {@code portal.link.renewed} error event with its reason.
+   *
+   * <p><b>The cool-down holds across concurrent requests and across nodes.</b> The expired link's
+   * row is locked ({@code SELECT … FOR UPDATE}) before the limits are read, so a second open of the
+   * same link waits until the first one's transaction commits. The first commit happens inside the
+   * send (the safety store commits a successful send together with the pending renewal row), so the
+   * waiting request then counts that renewal — pending rows included, by {@code CREATED} — and
+   * answers "recently sent". A renewal whose email did not leave deactivates its pending row before
+   * its transaction ends, so a failed attempt never blocks the next one.
    *
    * @param rawToken the expired token the customer opened
    * @return what happened
@@ -406,58 +422,65 @@ public class PortalLinkService {
       return RenewalOutcome.INVALID;
     }
     PortalLink expired = sent.get();
-    Instant now = clock.instant();
-    if (!expired.isExpiredAt(now)) {
-      return RenewalOutcome.NOT_EXPIRED;
-    }
     Optional<String> blocked = accessChecks.blockReasonOrClosed(expired.getClientId(),
         expired.getBusinessPartnerId());
     if (blocked.isPresent()) {
-      log.info("Portal link {} expired and was not renewed: {}", expired.getId(), blocked.get());
+      log.info("Portal link {} was not renewed: {}", expired.getId(), blocked.get());
       PortalUsageEvents.renewalRefused(expired, blocked.get());
       return RenewalOutcome.UNAVAILABLE;
     }
-    synchronized (lockFor(expired.getId())) {
-      Optional<String> limited = limitReached(expired, now);
-      if (limited.isPresent()) {
-        PortalUsageEvents.renewalRefused(expired, limited.get());
-        return RenewalOutcome.RECENTLY_SENT;
-      }
-      String status = renewalSender.apply(expired);
-      if (TransactionalEmailService.STATUS_SENT.equals(status)) {
-        return RenewalOutcome.SENT;
-      }
-      if (TransactionalEmailService.STATUS_DUPLICATE.equals(status)
-          || TransactionalEmailService.STATUS_THROTTLED.equals(status)) {
-        PortalUsageEvents.renewalRefused(expired, status);
-        return RenewalOutcome.RECENTLY_SENT;
-      }
-      log.warn("Renewal email for portal link {} was not sent: {}", expired.getId(), status);
-      PortalUsageEvents.renewalRefused(expired, ERROR_SEND_FAILED);
-      return RenewalOutcome.FAILED;
+    if (!expired.isExpiredAt(clock.instant())) {
+      return RenewalOutcome.NOT_EXPIRED;
     }
+    // Held until this request's transaction commits; see the method javadoc.
+    PortalLinkDal.lockForRenewal(expired.getId());
+    Optional<String> limited = limitReached(expired, clock.instant());
+    if (limited.isPresent()) {
+      PortalUsageEvents.renewalRefused(expired, limited.get());
+      return RenewalOutcome.RECENTLY_SENT;
+    }
+    String status = renewalSender.apply(expired);
+    if (TransactionalEmailService.STATUS_SENT.equals(status)) {
+      return RenewalOutcome.SENT;
+    }
+    // The email did not leave: its pending row must not count against the cool-down.
+    PortalLinkDal.deactivatePendingRenewalsOf(expired.getId());
+    if (TransactionalEmailService.STATUS_DUPLICATE.equals(status)
+        || TransactionalEmailService.STATUS_THROTTLED.equals(status)) {
+      PortalUsageEvents.renewalRefused(expired, status);
+      return RenewalOutcome.RECENTLY_SENT;
+    }
+    log.warn("Renewal email for portal link {} was not sent: {}", expired.getId(), status);
+    PortalUsageEvents.renewalRefused(expired, ERROR_SEND_FAILED);
+    return RenewalOutcome.FAILED;
   }
 
   /**
-   * Drops whatever the failed confirmation left in the Hibernate session, which an exception leaves
-   * in an undefined state. Safe here because the send's own rows were committed before
-   * {@link #confirm} ran; without it the request's closing flush would retry the broken write.
+   * Rolls back the failed confirmation and closes the session; the next DAL call opens a fresh
+   * session and transaction. A database-level failure has aborted the PostgreSQL transaction, so
+   * clearing the session alone would leave every later statement failing.
+   *
+   * <p><b>Only safe because both portal contracts ({@code *-send} documents and
+   * {@code portal-link-renewal}) carry an idempotency key:</b> the DAL safety store has therefore
+   * already committed the send's history and audit rows before {@code onDelivered} — and so this
+   * method — runs, and the rollback reaches nothing of the send's own. The caller holds no DAL
+   * entity it reads afterwards: the email service only writes its response.
    */
   private static void discardFailedWrite() {
     try {
-      OBDal.getInstance().getSession().clear();
+      OBDal.getInstance().rollbackAndClose();
     } catch (RuntimeException e) {
-      log.error("Could not discard the failed portal link write", e);
+      log.error("Could not roll back the failed portal link write", e);
     }
   }
 
   private Optional<String> limitReached(PortalLink expired, Instant now) {
     Date cooldownStart = Date.from(now.minus(PortalLinkConfig.renewalCooldown()));
-    if (PortalLinkDal.countSentRenewalsOf(expired.getId(), cooldownStart) > 0) {
+    if (PortalLinkDal.countRenewalsOf(expired.getId(), cooldownStart) > 0) {
       return Optional.of(ERROR_COOLDOWN);
     }
     long maxPerDay = PortalLinkConfig.renewalMaxPerDay();
-    if (maxPerDay > 0 && PortalLinkDal.countSentRenewalsForBusinessPartner(
+    if (maxPerDay > 0 && PortalLinkDal.countRenewalsForBusinessPartner(
         expired.getClientId(), expired.getBusinessPartnerId(),
         Date.from(now.minus(ONE_DAY))) >= maxPerDay) {
       return Optional.of(ERROR_DAILY_LIMIT);
@@ -509,17 +532,5 @@ public class PortalLinkService {
     JSONObject data = response.getBody().optJSONObject(STATUS_PATH_RESPONSE);
     data = data == null ? null : data.optJSONObject(STATUS_PATH_DATA);
     return data == null ? null : data.optString(STATUS_FIELD, null);
-  }
-
-  private static Object lockFor(String linkId) {
-    return RENEWAL_LOCKS[Math.floorMod(String.valueOf(linkId).hashCode(), RENEWAL_LOCKS.length)];
-  }
-
-  private static Object[] createLocks() {
-    Object[] locks = new Object[64];
-    for (int i = 0; i < locks.length; i++) {
-      locks[i] = new Object();
-    }
-    return locks;
   }
 }

@@ -95,7 +95,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *       Centralised in {@link PortalInvoiceQuery}; this servlet composes no invoice query of its
  *       own.</li>
  *   <li><b>The token is never logged.</b> No log statement in this package takes it, not even at
- *       debug. Requests are identified by the access row id, which is safe to log.</li>
+ *       debug. Requests are identified by the link id, which is safe to log.</li>
  *   <li><b>Every response is {@code no-store}.</b> Set in {@link #service} before any handler runs,
  *       so it cannot be forgotten on a new endpoint. Without it a shared cache keyed on path alone
  *       could serve one Business Partner's data to another.</li>

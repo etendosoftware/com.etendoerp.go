@@ -75,7 +75,6 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
   static final String MESSAGE_NO_LINK = "The portal link to renew was not found";
   private static final String CONTENT_TEMPLATE = "custom";
   private static final String KEY_PREFIX = "portal-link-renewal.";
-  private static final String CONTRACT_SUFFIX = "-send";
 
   private final PortalLinkService linkService;
   private final BooleanSupplier renewalCaller;
@@ -162,7 +161,9 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
     PortalLink link = expired.get();
     String language = link.getLanguage();
     String tenantName = StringUtils.defaultString(link.getClientName());
-    String documentType = documentTypeLabel(link.getDocumentKind(), language);
+    // "la factura", "el presupuesto"… — article and lower case, so the sentence reads naturally.
+    String documentType = EmailMessages.get(KEY_PREFIX + "document."
+        + link.getDocumentKind().copyKey(link.getRecordId()), language);
     String documentNumber = link.getDocumentKind().documentNumber(link.getRecordId()).orElse("");
     Instant now = Instant.now();
     long hours = ValidityWindow.hoursUntil(now, now.plus(minted.get().getValidity()));
@@ -177,7 +178,12 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
         .build();
     try {
       JSONObject data = new JSONObject();
-      data.put("name", StringUtils.defaultIfBlank(link.getBusinessPartnerName(), "Customer"));
+      // Gateway traceability only — the "custom" template renders subject and body, never this —
+      // so it is sent when there is a name and omitted otherwise, rather than a made-up one.
+      String businessPartnerName = StringUtils.trimToNull(link.getBusinessPartnerName());
+      if (businessPartnerName != null) {
+        data.put("name", businessPartnerName);
+      }
       data.put("link", minted.get().getUrl());
       data.put("subject", EmailMessages.get(KEY_PREFIX + "subject", language, tenantName));
       data.put("body", EmailLayout.render(content));
@@ -229,15 +235,6 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
   private static String linkId(EmailContractCommand command) {
     return StringUtils.trimToNull(
         EmailContractCommandSupport.text(command, PortalLinkService.FIELD_LINK_ID));
-  }
-
-  /**
-   * The document type label of the original send's contract ({@code sales-order-send.documentType}
-   * and siblings), so the renewal names the document the way its first email did.
-   */
-  private static String documentTypeLabel(PortalDocumentKind kind, String language) {
-    return StringUtils.defaultString(EmailMessages.getOptional(
-        kind.getSpecName() + CONTRACT_SUFFIX + ".documentType", language));
   }
 
   private static List<String> validOnly(List<String> addresses) {

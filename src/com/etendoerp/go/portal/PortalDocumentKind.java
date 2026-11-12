@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
@@ -49,6 +50,11 @@ public enum PortalDocumentKind {
   SHIPMENT("M_InOut", "goods-shipment",
       id -> ref(OBDal.getInstance().get(ShipmentInOut.class, id))),
   INVOICE("C_Invoice", "sales-invoice", id -> ref(OBDal.getInstance().get(Invoice.class, id)));
+
+  private static final String COPY_KEY_CREDIT_NOTE = "CREDIT_NOTE";
+  private static final String CATEGORY_CREDIT_MEMO = "ARC";
+  private static final String CATEGORY_RETURN_MATERIAL = "ARI_RM";
+  private static final String PROPERTY_RECTIFICATIVE = "etsgIsRectificative";
 
   private final String tableName;
   private final String specName;
@@ -118,6 +124,39 @@ public enum PortalDocumentKind {
   public Optional<String> documentNumber(String recordId) {
     return resolveOwner(recordId).map(Owner::getDocumentNo)
         .map(StringUtils::trimToNull);
+  }
+
+  /**
+   * The key the copy of an email names this document with — the kind's own name, or
+   * {@code CREDIT_NOTE} for an invoice whose document type is a rectificative one. The caller runs
+   * in admin mode.
+   *
+   * @param recordId the document id
+   * @return {@code QUOTATION}, {@code ORDER}, {@code SHIPMENT}, {@code INVOICE} or
+   *     {@code CREDIT_NOTE}
+   */
+  public String copyKey(String recordId) {
+    if (this != INVOICE || StringUtils.isBlank(recordId)) {
+      return name();
+    }
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+    DocumentType documentType = invoice == null ? null : invoice.getTransactionDocument();
+    return documentType != null && isRectificative(documentType) ? COPY_KEY_CREDIT_NOTE : name();
+  }
+
+  /**
+   * The same rule as the sales-invoice window's "Facturas rectificativas" subset
+   * ({@code docs/generated-custom-windows/sales-invoice.md}): a legacy {@code ARC} or
+   * {@code ARI_RM} category, or the "Factura Rectificativa" type, which shares {@code ARI} and is
+   * told apart only by the localization module's flag — read only when that module is installed.
+   */
+  private static boolean isRectificative(DocumentType documentType) {
+    String category = documentType.getDocumentCategory();
+    if (CATEGORY_CREDIT_MEMO.equals(category) || CATEGORY_RETURN_MATERIAL.equals(category)) {
+      return true;
+    }
+    return documentType.getEntity().hasProperty(PROPERTY_RECTIFICATIVE)
+        && Boolean.TRUE.equals(documentType.get(PROPERTY_RECTIFICATIVE));
   }
 
   private static Optional<Owner> ref(Order order) {
