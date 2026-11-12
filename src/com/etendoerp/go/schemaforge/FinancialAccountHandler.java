@@ -857,6 +857,20 @@ public class FinancialAccountHandler implements NeoHandler {
   // Update (pre-hook: validate; country clearable unless Bank+IBAN, IBAN pair stays consistent)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Pre-hook of a {@code PUT}/{@code PATCH} on an account: strips the create-only provider keys,
+   * validates the PSD2 import keys when the body touches them
+   * ({@link BankImportSettingsRules#validateImportSettingsUpdate}, ETP-6151, only with the {@code psd2-statement-import-settings} flag on), guards
+   * an archive, then checks the name, the IBAN/SWIFT lengths, the amount tolerance and the
+   * country/IBAN pair.
+   *
+   * @param id   the id of the account being updated
+   * @param body the update body, possibly {@code null} (nothing to validate)
+   * @return {@code null} to let the generic CRUD persist the body, or the 400 that rejects it
+   * @throws JSONException when the body cannot be read or rewritten
+   * @throws org.openbravo.base.exception.OBException with a business message (mapped to 400 by
+   *     {@link #handle}) when a PSD2 import key breaks the rule
+   */
   NeoResponse validateAndEnrichUpdate(String id, JSONObject body) throws JSONException {
     if (body == null) {
       return null;
@@ -864,6 +878,15 @@ public class FinancialAccountHandler implements NeoHandler {
     // The provider keys are create-only (see FinancialAccountProviderEnricher); an update never
     // re-links or re-logos the provider, so strip them before the generic CRUD sees them.
     FinancialAccountProviderEnricher.stripTransientProviderKeys(body);
+    // ETP-6151: the PSD2 import keys follow the same rule as the bank-connection actions
+    // (grouping one of 1BD/1BW/1BM/1BE; no clearing the import-from date of a connected account).
+    // Throws OBException, which handle() turns into a 400; a body without those keys is untouched.
+    // The keys are checked first: an unrelated update (a rename...) never evaluates the flag.
+    if ((body.has(FIN_FinancialAccount.PROPERTY_PSD2STATEMENTFREQUENCY)
+        || body.has(FIN_FinancialAccount.PROPERTY_PSD2IMPORTFROMDATE))
+        && Psd2ImportSettingsFlag.isEnabled()) {
+      BankImportSettingsRules.validateImportSettingsUpdate(body, () -> loadAccount(id));
+    }
     // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
     // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
     // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
