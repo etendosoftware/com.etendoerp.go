@@ -874,8 +874,8 @@ public class GoodsShipmentHeaderHandlerTest {
    */
   @Test
   public void handleDocumentActionReanchorsLineToHeaderWarehouseDefaultLocator() {
-    // The draft-match refresh (ETP-6002 M4) runs on the same hook and lets a failure propagate;
-    // it has its own test, so it is stubbed out here.
+    // The draft match refresh runs on this hook too and is covered by its own test,
+    // so it is stubbed out here
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {

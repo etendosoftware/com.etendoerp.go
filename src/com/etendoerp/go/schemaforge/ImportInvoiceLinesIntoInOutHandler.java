@@ -510,7 +510,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   }
 
   // ---------------------------------------------------------------------------
-  // Pending by direct links (SourcePolicy.byDirectLinks, ETP-6002 CP-22)
+  // Pending by direct links, the goods shipment rule of ETP-6002 CP-22
   // ---------------------------------------------------------------------------
 
   /**

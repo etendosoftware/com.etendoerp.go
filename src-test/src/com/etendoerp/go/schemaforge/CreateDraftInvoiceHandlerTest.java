@@ -2611,7 +2611,7 @@ public class CreateDraftInvoiceHandlerTest {
   @Test
   @SuppressWarnings("unchecked")
   public void testHandleListMergesDeduplicatesAndFormatsRows() throws Exception {
-    // The rectificative flag column is probed with SQL; this test decides by doc category.
+    // The rectificative flag column is probed with SQL, so this test decides by doc category
     RectificativeSupport.setColumnPresentForTests(false);
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
