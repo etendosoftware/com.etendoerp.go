@@ -12056,7 +12056,7 @@ hand links to the user and reach nobody else, so they stay closed-world.
 | `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, `etendo_whoami`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
 | `etendo_delete`, `etendo_delete_attachment` | false | true | true |
-| `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+| `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_routine` (its steps may update and complete documents), `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
 
 Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
 and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
@@ -14908,3 +14908,52 @@ template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reache
 
 Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
 `McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.
+
+#### 4.12.44 Several calls in one: `etendo_routine` (ETP-6236, etendo-ai#51)
+
+A flow whose steps the agent already knows — create a customer, its address and an invoice for it, then
+complete the invoice — used to cost one call per step, each one paying the round trip and the context of the
+answer. `etendo_routine` runs those calls in **one** call, in order, each step able to use what an earlier step
+returned. Design and later phases (saved routines, parameters, stored executions):
+`docs/proposals/mcp-routines.md` in schema_forge. This is phase 1: `mode:"exec"`, inline steps.
+
+- **It owns no business logic.** Each step is `{id, tool, args}` and runs through `McpToolRouter.route` exactly as
+  the separate call would: unknown-argument guard, scope check, spec access, handler, error envelope. A step may
+  call `etendo_list`, `etendo_get`, `etendo_selectors`, `etendo_defaults`, `etendo_create`, `etendo_update` or
+  `etendo_action`; delete, email, uploads and another routine stay separate calls.
+- **Read tier** for the routine itself: every step asks its own scope, so a create step of a read-only session is
+  refused as that step's `forbidden` error. Annotated as modifying.
+- **References.** A string value `"$ref:<id>"` anywhere in `args` is replaced with the earlier step's record id
+  (`data.id` of its result); `"$ref:<id>.<path>"` with any value of its result, keys and `[n]`/`.n` positions,
+  e.g. `"$ref:agua.data[0].id"`. The whole string must be the reference; the value keeps its JSON type.
+  A reference to a step that does not run earlier is refused before anything runs.
+- **Not atomic.** Each step commits when it succeeds (`commitAndClose`, the per-document discipline of
+  `etendo_action_batch`, whose transaction helpers it shares). The first failing step is rolled back and stops the
+  routine.
+- **Refused before anything runs** (422 `validation_error`, `detail` ends with "Nothing was run."): a mode other
+  than `exec`, empty `steps` or more than 20, a step without a valid unique `id`, a tool outside the list, `args`
+  that is not an object, an unknown step key, a `$param.` value (saved routines do not exist yet).
+
+Success:
+
+```json
+{"ok": true,
+ "steps": [{"id": "bp", "tool": "etendo_create", "ok": true, "recordId": "…"},
+           {"id": "addr", "tool": "etendo_create", "ok": true, "recordId": "…"}],
+ "results": {"addr": {"data": {"id": "…"}}}}
+```
+
+`results` carries the full result of the steps marked `returnResult:true`; when none is marked, only the last
+step's. Failure (an MCP error result; `status`/`error` are the failed step's own):
+
+```json
+{"ok": false, "status": 422, "error": "validation_error",
+ "detail": "Step 'addr' (etendo_create, position 1) failed and was rolled back; 1 earlier step(s) are done and stay done, 1 did not run.",
+ "failedAt": {"id": "addr", "index": 1, "tool": "etendo_create"},
+ "stepError": {"…": "the step's own error envelope"},
+ "completed": [{"id": "bp", "tool": "etendo_create", "ok": true, "recordId": "…"}],
+ "pending": ["inv"],
+ "hint": "Fix what stepError names and send the failed step and the pending ones again. …"}
+```
+
+A reference whose path is not in the earlier result fails that step the same way, with the completed steps kept.

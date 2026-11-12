@@ -89,6 +89,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_JOB_CANCEL,
       McpConstants.TOOL_NEO_ACTION,
       McpConstants.TOOL_NEO_ACTION_BATCH,
+      // ETP-6236: its steps may update and complete documents.
+      McpConstants.TOOL_NEO_ROUTINE,
       // ETP-5715: not additive — main:true replaces (deletes) the document's previous main file.
       McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
       // ETP-5715: delivers a real email and records it; sending twice is two emails (or a refusal).
