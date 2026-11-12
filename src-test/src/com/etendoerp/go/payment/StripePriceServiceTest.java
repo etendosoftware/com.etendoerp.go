@@ -218,10 +218,14 @@ class StripePriceServiceTest {
       Plan plan = mock(Plan.class);
       when(plan.getSearchKey()).thenReturn("productive-monthly");
       when(plan.getProviderPriceID()).thenReturn("price_retrieved");
+      when(plan.getDisplayPrice()).thenReturn(new java.math.BigDecimal("12.00"));
+      when(plan.getCurrencyCode()).thenReturn("EUR");
+      when(plan.getBillingInterval()).thenReturn("month");
       PlanCatalogService catalog = mock(PlanCatalogService.class);
       when(catalog.findPurchasablePlan("productive-monthly")).thenReturn(Optional.of(plan));
       when(catalog.hasProviderPrice(plan)).thenReturn(true);
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
       checkout.planCatalogService = catalog;
 
@@ -256,6 +260,7 @@ class StripePriceServiceTest {
       when(store.findStripePriceId("purchase-1")).thenReturn("price_saved");
       when(store.findStripeSessionId("purchase-1")).thenReturn("cs_existing");
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
 
       JSONObject first = checkout.reopenSession("purchase-1", "owner@example.test",
@@ -291,6 +296,7 @@ class StripePriceServiceTest {
       when(store.findStripePriceId("purchase-recovery")).thenReturn("price_saved");
       when(store.findStripeSessionId("purchase-recovery")).thenReturn(null);
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
 
       checkout.reopenSession("purchase-recovery", "owner@example.test", "Acme",
@@ -321,6 +327,7 @@ class StripePriceServiceTest {
       when(store.findStripePriceId("purchase-expired")).thenReturn("price_saved");
       when(store.findStripeSessionId("purchase-expired")).thenReturn("cs_existing");
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
 
       JSONObject replacement = checkout.reopenSession("purchase-expired", "owner@example.test",
@@ -354,6 +361,7 @@ class StripePriceServiceTest {
       CheckoutRequestStore store = mock(CheckoutRequestStore.class);
       when(store.findStripeSessionId("purchase-complete")).thenReturn("cs_existing");
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
 
       JSONObject result = checkout.reopenSession("purchase-complete", "owner@example.test",
@@ -386,6 +394,7 @@ class StripePriceServiceTest {
       CheckoutRequestStore store = mock(CheckoutRequestStore.class);
       when(store.findStripeSessionId("purchase-complete")).thenReturn("cs_existing");
       HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.promotionTerms = mock(CheckoutPromotionTerms.class);
       checkout.checkoutRequestStore = store;
 
       JSONObject result = checkout.reopenSession("purchase-complete", "owner@example.test",

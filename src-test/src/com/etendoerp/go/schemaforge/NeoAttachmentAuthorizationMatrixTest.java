@@ -97,6 +97,8 @@ import org.openbravo.model.ad.utility.Attachment;
  * contract is expressed in group B, disabled until the fix exists. Do not "repair"
  * a group A failure by relaxing it: invert it to the group B expectation.</p>
  *
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsDownloader
  * @see <a href="https://etendoproject.atlassian.net/browse/ETP-4569">ETP-4569</a>
  */
 public class NeoAttachmentAuthorizationMatrixTest {
@@ -217,7 +219,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
     Attachment attachment = foreignAttachment();
     OBDal dal = mock(OBDal.class);
     when(dal.get(Attachment.class, FOREIGN_ATTACHMENT_ID)).thenReturn(attachment);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
          MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
@@ -318,7 +320,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
   }
 
   private static void stubDownloadManager(MockedStatic<WeldUtils> weld) {
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     doAnswer(invocation -> {
       OutputStream target = invocation.getArgument(1);
       target.write(PAYLOAD);

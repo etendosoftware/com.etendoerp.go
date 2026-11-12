@@ -69,8 +69,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -82,6 +85,12 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
  * {@link FinancialAccountSupport}. Both are mocked statically so the tests assert only this
  * handler's orchestration and response envelope.
+ *
+ * <p>{@code sync} (ETP-6154): a sync another one already runs answers {@code IN_PROGRESS} with the
+ * translated "please wait" text of the {@code neo_hints} catalog, a lock that cannot be taken
+ * answers {@code ERROR} with {@code code: BANK_SYNC_LOCK_UNAVAILABLE}, the PSD2 module's
+ * {@code Success} goes on the wire as {@code OK}, and a run whose duplicate check failed keeps its
+ * status but carries {@code code: BANK_SYNC_DUPLICATE_CHECK_FAILED} and the translated text.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
@@ -374,7 +383,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
-  /** sync returns the status and trimmed messages produced by fetchAccountTransactions. */
+  /** sync returns the status and trimmed messages produced by fetchAccountTransactionsWithResult. */
   @Test
   public void testSyncReturnsStatusAndMessage() throws Exception {
     JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
@@ -382,14 +391,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenAnswer(invocation -> {
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenAnswer(invocation -> {
             StringBuilder sb = invocation.getArgument(1);
             sb.append("  Imported 5 statements  ");
-            return "OK";
+            return new AccountTransactionsSync.SyncResult("OK", false);
           });
 
       NeoResponse response = handler.handle(postContext("sync", body));
@@ -411,11 +420,11 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenReturn("OK");
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("OK", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
@@ -432,17 +441,141 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenReturn("ERROR");
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("ERROR", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
       assertTrue(data.has("lastSyncDate"));
       assertTrue(data.isNull("lastSyncDate"));
     }
+  }
+
+  /**
+   * A sync another sync of the account already runs answers 200 IN_PROGRESS with the "please
+   * wait" text in the request language (the PSD2 AD_MESSAGE is English only), never the PSD2
+   * buffer, and still echoes the last sync date.
+   */
+  @Test
+  public void testSyncInProgressAnswersThePleaseWaitTextInTheRequestLanguage() throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, "en_US");
+
+    assertEquals("IN_PROGRESS", spanish.getString("status"));
+    assertEquals("Trayendo extractos, por favor espera\u2026",
+        spanish.getString("message"));
+    assertFalse(spanish.has("code"));
+    assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
+    assertEquals("IN_PROGRESS", english.getString("status"));
+    assertEquals("Fetching statements, please wait\u2026", english.getString("message"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
+  }
+
+  /**
+   * A sync whose lock cannot be taken answers a retriable ERROR carrying
+   * {@code code: BANK_SYNC_LOCK_UNAVAILABLE} and the translated "try again" text.
+   */
+  @Test
+  public void testSyncLockUnavailableAnswersARetriableErrorCode() throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, "en_US");
+
+    assertEquals("ERROR", spanish.getString("status"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", spanish.getString("code"));
+    assertEquals("No se pudieron traer los extractos en este momento. Por favor, "
+        + "int\u00e9ntalo de nuevo en unos instantes.", spanish.getString("message"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", english.getString("code"));
+    assertEquals("The statements could not be fetched right now. Please try again in a few "
+        + "moments.", english.getString("message"));
+    assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
+  }
+
+  /**
+   * A finished sync reports the PSD2 module's {@code Success} as {@code OK} on the wire, keeps
+   * WARNING and ERROR unchanged, and carries the PSD2 messages, trimmed.
+   */
+  @Test
+  public void testSyncMapsThePsd2SuccessToOk() throws Exception {
+    JSONObject success = syncData(BankIntegrationConstants.SUCCESS, "es_ES");
+    JSONObject warning = syncData(BankIntegrationConstants.WARNING, "es_ES");
+
+    assertEquals("OK", success.getString("status"));
+    assertEquals("PSD2 buffer", success.getString("message"));
+    assertFalse(success.has("code"));
+    assertEquals("WARNING", warning.getString("status"));
+    assertEquals("OK", FinancialAccountBankConnectionHandler.wireSyncStatus("Success"));
+    assertEquals("ERROR", FinancialAccountBankConnectionHandler.wireSyncStatus("ERROR"));
+    assertEquals("IN_PROGRESS", FinancialAccountBankConnectionHandler.wireSyncStatus("IN_PROGRESS"));
+  }
+
+  /**
+   * A run whose "already imported?" check failed keeps its ERROR status and answers the stable
+   * {@code BANK_SYNC_DUPLICATE_CHECK_FAILED} code with the translated "retry" text in the request
+   * language, instead of the English PSD2 buffer.
+   */
+  @Test
+  public void testSyncDuplicateCheckFailedOnErrorAnswersTheCodeAndTranslatedText()
+      throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.ERROR, true, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.ERROR, true, "en_US");
+
+    assertEquals("ERROR", spanish.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", spanish.getString("code"));
+    assertEquals("No se pudo comprobar si algunos movimientos bancarios ya estaban importados, "
+        + "as\u00ed que no se importaron para evitar duplicados. Por favor, int\u00e9ntalo de nuevo "
+        + "en unos instantes.", spanish.getString("message"));
+    assertEquals("ERROR", english.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", english.getString("code"));
+    assertEquals("Some bank movements could not be checked against the ones already imported, so "
+        + "they were not imported to avoid duplicates. Please try again in a few moments.",
+        english.getString("message"));
+    assertTrue(english.has("lastSyncDate"));
+  }
+
+  /**
+   * When another connection still imported movements the run ends in WARNING: the status stays
+   * WARNING and the duplicate-check code is still answered. A Success with the flag set is
+   * reported as OK on the wire, with the code.
+   */
+  @Test
+  public void testSyncDuplicateCheckFailedOnWarningKeepsWarningWithTheCode() throws Exception {
+    JSONObject warning = syncData(BankIntegrationConstants.WARNING, true, "en_US");
+    JSONObject success = syncData(BankIntegrationConstants.SUCCESS, true, "en_US");
+
+    assertEquals("WARNING", warning.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", warning.getString("code"));
+    assertFalse(warning.getString("message").contains("PSD2 buffer"));
+    assertEquals("OK", success.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", success.getString("code"));
+  }
+
+  /**
+   * Without a duplicate-check failure there is no {@code code}; the sync that did not run
+   * (IN_PROGRESS, lock unavailable) answers as before, whatever the flag says.
+   */
+  @Test
+  public void testSyncWithoutDuplicateCheckFailureHasNoCodeAndNotRunOutcomesAreUnchanged()
+      throws Exception {
+    JSONObject error = syncData(BankIntegrationConstants.ERROR, false, "en_US");
+    JSONObject inProgress = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, true, "en_US");
+    JSONObject unavailable = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, true, "en_US");
+
+    assertEquals("ERROR", error.getString("status"));
+    assertFalse(error.has("code"));
+    assertEquals("PSD2 buffer", error.getString("message"));
+    assertEquals("IN_PROGRESS", inProgress.getString("status"));
+    assertFalse(inProgress.has("code"));
+    assertEquals("Fetching statements, please wait\u2026", inProgress.getString("message"));
+    assertEquals("ERROR", unavailable.getString("status"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", unavailable.getString("code"));
   }
 
   /** sync on a missing account resolves to a 404. */
@@ -1220,6 +1353,55 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * Runs {@code sync} on a found account whose fetch answers {@code fetchStatus} (after writing
+   * "  PSD2 buffer  " to the PSD2 message buffer) in the given request language, and returns the
+   * answer's data after checking it is a 200.
+   *
+   * @param fetchStatus the status {@code fetchAccountTransactionsWithResult} returns
+   * @param language    the request language ({@code NeoLanguage.currentCode()})
+   * @return the {@code response.data} of the answer
+   */
+  private JSONObject syncData(String fetchStatus, String language) throws Exception {
+    return syncData(fetchStatus, false, language);
+  }
+
+  /**
+   * Same as {@link #syncData(String, String)}, with the run's duplicate-check flag.
+   *
+   * @param fetchStatus          the status the sync returns
+   * @param duplicateCheckFailed whether the "already imported?" check failed during the run
+   * @param language             the request language
+   * @return the {@code response.data} of the answer
+   */
+  private JSONObject syncData(String fetchStatus, boolean duplicateCheckFailed, String language)
+      throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class);
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
+      stubObContext(obContext);
+      lang.when(NeoLanguage::currentCode).thenReturn(language);
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenAnswer(invocation -> {
+            StringBuilder sb = invocation.getArgument(1);
+            sb.append("  PSD2 buffer  ");
+            return new AccountTransactionsSync.SyncResult(fetchStatus, duplicateCheckFailed);
+          });
+
+      NeoResponse response = handler.handle(postContext("sync", body));
+
+      assertEquals(200, response.getHttpStatus());
+      syncStatic.verify(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any()));
+      return dataOf(response);
+    }
   }
 
   /**
