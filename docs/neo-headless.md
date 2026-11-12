@@ -13554,12 +13554,19 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   only): `tbaiReverseinvoicecode`. Anything else is a 422 `ETGO_InvoiceSifFieldInvalid`
   (`messageParams.field`); `aeatsiiIsauthorization:true` without an SII authorization number is a 422
   `ETGO_InvoiceSiiAuthorizationUnavailable`.
-- **Defaults for a caller that sends nothing** (MCP, REST): the VERI\*FACTU type of the document type
-  the action uses (`F1` when it has none or has a rectificative code); on a rectificative, `R4` for
-  SII's motive, TicketBAI's code and VERI\*FACTU's type. A key not sent that is not one of those keeps
-  what the creation path gave the invoice. Structural fields follow: SII `R`/`I`, the TicketBAI and
-  VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes, for
-  these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
+- **A field not sent takes its previewed value** (MCP, REST, and the SPA alike): the invoice ends up
+  with exactly what `sifDefaults` shows for every editable field of the active systems, and only the
+  fields sent override it — a caller that sends nothing gets the preview as it is. The preview
+  values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
+  when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
+  customer's own default key, else `F1`), the SII description (the order's, else the organization's
+  default one), the operation date (the order's, else today), and on a rectificative `R4` for SII's
+  motive, TicketBAI's code and VERI\*FACTU's type. (QA BUG-1: an earlier version applied only the
+  corrective ones — type and rectification codes — so a factura rectificativa created without
+  `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
+  document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
+  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes,
+  for these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
   mandatory step before anything is confirmed (decided by the user, ETP-6179).
 - **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
   the header completion (`ETGO_InvoiceRectificationCodeRequired`,

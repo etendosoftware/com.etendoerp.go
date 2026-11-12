@@ -71,8 +71,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   prefills its "Datos fiscales" step from the backend and both sides never disagree.</li>
  *   <li>{@link #applyBeforeCompletion} runs right before the completion: it writes what the caller
  *   sent under {@code sifFields} (validated: only the editable fields of the active systems, only
- *   their allowed codes), applies the corrective defaults a caller that sends nothing still needs
- *   (the document type's VERI*FACTU type; {@code R4} on a rectificative), sets the structural
+ *   their allowed codes) and the previewed value of every field it did not send — so a caller
+ *   that sends nothing gets exactly the preview (the document type's VERI*FACTU type and
+ *   description; {@code R4} on a rectificative; …) — sets the structural
  *   fields (SII {@code R}/{@code I}, the TicketBAI and VERI*FACTU reverse types) and then asks
  *   {@link RectificationFiscalCodeGuard#evaluate} — the same per-system rule and 422 bodies the
  *   header's own completion uses.</li>
@@ -90,8 +91,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   step, and a caller that sends nothing gets the same value the screen would have offered.</li>
  * </ul>
  *
- * <p>A key the caller did not send keeps the value the creation path already gave the invoice,
- * except the corrective defaults above. The SPA always sends every field of the step.
+ * <p>A key the caller did not send takes its previewed value, so the invoice ends up with
+ * exactly what {@code sifDefaults} shows — every editable field of the active systems, not only
+ * the corrective ones (QA BUG-1: the VERI*FACTU description stayed the creation path's "Ventas"
+ * while the preview said the document type's "Rectificaciones de Ventas"). The SPA always sends
+ * every field of the step.
  *
  * <p>Structure only: nothing here names a spec or a table. The direction comes from the
  * invoice's own {@code IsSOTrx}, the rectificative flag from its document type, and each system
@@ -326,10 +330,10 @@ final class InvoiceSifPreset {
   }
 
   /**
-   * The values to write: the caller's {@code sifFields} validated against the editable fields,
-   * plus the corrective defaults of a field the caller did not send (VERI*FACTU type, the
-   * rectification codes). A field the caller did not send that is not corrective is left out,
-   * so the invoice keeps what its creation path gave it.
+   * The values to write: every editable field of the active systems with its previewed value
+   * ({@link #defaults}, exactly what {@code sifDefaults} answers), overridden by the caller's
+   * {@code sifFields}, validated against those fields. A caller that sends nothing gets the
+   * preview as it is.
    *
    * @param f the facts of the invoice
    * @param requested the caller's {@code sifFields}; {@code null} reads as empty
@@ -342,7 +346,9 @@ final class InvoiceSifPreset {
     for (FieldSpec spec : fields(f)) {
       specs.put(spec.name(), spec);
     }
-    Map<String, Object> values = new LinkedHashMap<>();
+    // QA BUG-1: start from EVERY previewed value, so a caller that sends nothing gets exactly
+    // what sifDefaults showed; what the caller sends then overrides field by field.
+    Map<String, Object> values = new LinkedHashMap<>(defaults(f));
     if (requested != null) {
       Iterator<?> keys = requested.keys();
       while (keys.hasNext()) {
@@ -353,11 +359,6 @@ final class InvoiceSifPreset {
               + String.join(", ", systems(f)) + ")");
         }
         values.put(key, coerce(spec, requested.opt(key)));
-      }
-    }
-    for (String corrective : List.of(F_VF_INV_TYPE, F_SII_MOTIVE, F_TBAI_CODE)) {
-      if (specs.containsKey(corrective) && !values.containsKey(corrective)) {
-        values.put(corrective, defaultOf(corrective, f));
       }
     }
     return values;
@@ -520,10 +521,11 @@ final class InvoiceSifPreset {
         "The invoice's SIF fields (\"Datos fiscales\"), {field: value}, written before it is "
             + "completed. Only the editable fields of the fiscal systems active for its "
             + "organization are accepted, with their codes; read them and their defaults with "
-            + ACTION_SIF_DEFAULTS + " first. A field you omit keeps its default; a "
-            + "rectificative invoice gets R4 as the SII motive, TicketBAI code and VERI*FACTU "
-            + "type, a normal one the VERI*FACTU type of its document type (F1 when it has "
-            + "none). Refused with 422 " + MSG_FIELD_INVALID + " for an unknown field or code, "
+            + ACTION_SIF_DEFAULTS + " first. A field you omit takes exactly the value "
+            + ACTION_SIF_DEFAULTS + " shows for it (send nothing to get the preview as it is): "
+            + "a rectificative invoice gets R4 as the SII motive, TicketBAI code and VERI*FACTU "
+            + "type, a normal one the VERI*FACTU type and description of its document type (F1 "
+            + "when it has none). Refused with 422 " + MSG_FIELD_INVALID + " for an unknown field or code, "
             + "and with 422 ETGO_InvoiceRectificationCodeRequired when a rectificative invoice "
             + "is left without a code for an active system.");
   }

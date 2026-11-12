@@ -76,6 +76,37 @@ public class InvoiceSifPresetTest {
     assertFalse(values.containsKey(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
   }
 
+  /**
+   * QA BUG-1: a caller that sends no sifFields (MCP, REST) got only the corrective defaults, so the
+   * invoice kept e.g. the creation path's VERI*FACTU description ("Ventas") while sifDefaults
+   * previewed the document type's ("Rectificaciones de Ventas"). Every previewed field is applied.
+   */
+  @Test
+  public void nothingSentAppliesEveryPreviewedFieldExactly() {
+    InvoiceSifPreset.Facts facts = new InvoiceSifPreset.Facts(true, true, true, true, true, "R1",
+        "Rectificaciones de Ventas", false, false, null, "Devoluciones", "2026-11-12", null, null);
+
+    Map<String, Object> values = InvoiceSifPreset.merge(facts, null);
+
+    assertEquals(InvoiceSifPreset.defaults(facts), values);
+    assertEquals("Rectificaciones de Ventas", values.get(Invoice.PROPERTY_ETVFACVERIFACDESC));
+    assertEquals("Devoluciones", values.get(Invoice.PROPERTY_AEATSIIDESCRIPCIONSII));
+    assertEquals("2026-11-12", values.get(Invoice.PROPERTY_ETSGDATEOPERATION));
+  }
+
+  /** A field that IS sent overrides the preview; the rest still take the preview's value. */
+  @Test
+  public void aSentFieldOverridesThePreviewAndTheRestKeepIt() throws Exception {
+    InvoiceSifPreset.Facts facts = salesFacts(false, "F1");
+
+    Map<String, Object> values = InvoiceSifPreset.merge(facts,
+        new JSONObject().put(Invoice.PROPERTY_ETVFACINVTYPE, "F2"));
+
+    assertEquals("F2", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
+    assertEquals("2026-11-11", values.get(Invoice.PROPERTY_ETSGDATEOPERATION));
+    assertEquals(InvoiceSifPreset.defaults(facts).keySet(), values.keySet());
+  }
+
   /** End to end on the invoice: the rectificative is written R4 before the completion. */
   @Test
   public void applyBeforeCompletionWritesR4OnARectificativeInvoice() throws Exception {
