@@ -13693,7 +13693,12 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
 (invoice-specific, structure only) now runs right before `completeInvoiceOrThrow` in all three:
 
 - **Body key `sifFields`** (optional object, declared in every one of those contracts through
-  `InvoiceSifPreset.sifFieldsParam()`): `{field: value}` with the DAL property names of the SIF tab.
+  `InvoiceSifPreset.sifFieldsParam(sales)`): `{field: value}` with the DAL property names of the SIF tab.
+  The contract text is worded per direction: the sales actions (`createDraftInvoice`, the customer
+  return's `createReturnInvoice`) describe the `R4` rectificative default, the VERI\*FACTU type of
+  the document type and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
+  (`createPurchaseInvoice`, the return to vendor's `createReturnInvoice`) list the five SII fields
+  only and state that there is no rectification code, not even on a purchase rectificative.
   Only the editable fields of the systems active for the invoice's organization are accepted — SII
   (`siiConfigActive`, both directions): `etsgDateOperation`, `aeatsiiClaveTipo` (sales, `F1`/`F2`/`F4`)
   or `aeatsiiMotivoRectif` (sales rectificative, `R1`–`R5`) or `aeatsiiClaveTipoFc` (purchase,
@@ -13708,9 +13713,18 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   fields sent override it — a caller that sends nothing gets the preview as it is. The preview
   values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
   when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
-  customer's own default key, else `F1`), the SII description (the order's, else the organization's
-  default one), the operation date (the order's, else today), and on a rectificative `R4` for SII's
-  motive, TicketBAI's code and VERI\*FACTU's type. (QA BUG-1: an earlier version applied only the
+  customer's own default key, else `F1`; on a purchase always `F1`), the SII description (the
+  order's, else the organization's default one for the direction, `aeatsii_description`), the
+  operation date (the order's, else today), the SII authorization unticked, on a purchase the
+  accounting registration date (today, empty when the SII configuration declares posted invoices),
+  and on a sales rectificative `R4` for SII's motive, TicketBAI's code and VERI\*FACTU's type.
+  **The order is part of the preview only when the invoice header will carry it** (ETP-6179 review
+  W2): the order route and a single shipment/receipt with an order build the header from the order,
+  while several shipments/receipts invoiced together (and a receipt without an order) build it from
+  the first document with no order on it — so their preview takes the organization's SII
+  description and today's operation date, exactly what the creation writes. Sales:
+  `CreateDraftInvoiceHandler.shipmentSifTarget`; purchase: `PurchaseInvoiceSifTarget` (split out of
+  `CreatePurchaseInvoiceHandler`, at Sonar's method-count limit). (QA BUG-1: an earlier version applied only the
   corrective ones — type and rectification codes — so a factura rectificativa created without
   `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
   document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
