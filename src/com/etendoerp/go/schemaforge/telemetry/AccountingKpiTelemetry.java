@@ -83,7 +83,7 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  *
  * <p>No personal data: only the tenant id as {@code account_id}.</p>
  *
- * <p>TODO(ETP-6072): add {@code tenant_type} when it lands. TODO(ETP-6228): add
+ * <p>Follow-up ETP-6072: add {@code tenant_type} when it lands. Follow-up ETP-6228: add
  * {@code ad_client_id} when the common identity lands.</p>
  */
 public final class AccountingKpiTelemetry {
@@ -129,8 +129,15 @@ public final class AccountingKpiTelemetry {
    * The period-controlled document tables: every one has {@code Processed} and {@code Posted}
    * (verified on the AD). The KPI's own definition of "document" — see the class javadoc.
    */
-  static final List<String> DOCUMENT_TABLES = List.of("c_invoice", "m_inout", "fin_payment",
-      "gl_journal", "m_movement", "m_inventory", "fin_bankstatement");
+  /** One constant query per period-controlled table; each binds only the tenant id. */
+  static final List<String> PROBE_QUERIES = List.of(
+      "SELECT 1 FROM c_invoice WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM m_inout WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM fin_payment WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM gl_journal WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM m_movement WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM m_inventory WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1",
+      "SELECT 1 FROM fin_bankstatement WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1");
 
   private static final int QUEUE_CAPACITY = 1000;
   private static final int MAX_DEPTH = 6;
@@ -479,10 +486,7 @@ public final class AccountingKpiTelemetry {
 
   private static boolean hasProcessedDocument(Connection conn, String clientId)
       throws SQLException {
-    for (String table : DOCUMENT_TABLES) {
-      // table names come from the constant list above, never from a request
-      String sql = "SELECT 1 FROM " + table
-          + " WHERE ad_client_id = ? AND (processed = 'Y' OR posted = 'Y') LIMIT 1";
+    for (String sql : PROBE_QUERIES) {
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, clientId);
         try (ResultSet rs = ps.executeQuery()) {

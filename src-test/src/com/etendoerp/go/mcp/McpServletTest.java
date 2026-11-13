@@ -2053,11 +2053,11 @@ public class McpServletTest {
 
   private void invokeRecordToolCall(McpServlet.AuthIdentity identity, String tool,
       JSONObject params, JSONObject result) throws Exception {
-    Method record = McpServlet.class.getDeclaredMethod("recordToolCall",
+    Method recordToolCall = McpServlet.class.getDeclaredMethod("recordToolCall",
         McpServlet.AuthIdentity.class, McpCallObservation.class, String.class, JSONObject.class,
         JSONObject.class, String.class);
-    record.setAccessible(true);
-    record.invoke(servlet, identity, new McpCallObservation("s", "{}", "{}", System.nanoTime()),
+    recordToolCall.setAccessible(true);
+    recordToolCall.invoke(servlet, identity, new McpCallObservation("s", "{}", "{}", System.nanoTime()),
         tool, params, result, null);
   }
 

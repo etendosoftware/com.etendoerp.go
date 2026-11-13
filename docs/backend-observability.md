@@ -243,7 +243,7 @@ manual-open review derives its `source` from the write channel instead; see Limi
 **Population.** Review, first-document and signup events only for tenants carrying
 `ETGO_CalendarReviewRequired` (productive tenants onboarded after ETP-5577; permanent marker; the
 signup event is emitted for every paid onboarding). `backend_period_refused` goes out for every
-tenant. TODO: `tenant_type` when ETP-6072 lands; `ad_client_id` when ETP-6228 lands.
+tenant. Follow-up: `tenant_type` when ETP-6072 lands; `ad_client_id` when ETP-6228 lands.
 
 **Threading.** The hooks only *enqueue* `{clientId, source, entity, operation hint}` (REST:
 `NeoServlet` / `NeoPseudoSpecDispatcher`; MCP: `McpAccountingKpiObserver`, called from

@@ -126,15 +126,23 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
       // ETP-6230: a manual open counts as a calendar review (confirm). Queued for after the commit
       // (dropped when a batch rolls back, so no false event and no permanent marker). shortcut: a
       // single request commits after this returns, so a failing commit there costs one stray event.
-      String channel = NeoWriteChannel.current();
-      String source = channel.endsWith("_batch") ? AccountingKpiTelemetry.SOURCE_BATCH
-          : channel.startsWith(NeoWriteChannel.MCP) ? AccountingKpiTelemetry.SOURCE_MCP
-          : AccountingKpiTelemetry.SOURCE_CALENDAR_WINDOW;
+      String source = manualOpenSource(NeoWriteChannel.current());
       String clientId = period.getClient().getId();
       NeoBatchScope.runAfterCommit(() -> AccountingKpiTelemetry.calendarReviewCompleted(clientId,
           AccountingKpiTelemetry.REVIEW_MANUAL_OPEN, AccountingKpiTelemetry.TYPE_CONFIRM, source));
     }
     return result;
+  }
+
+  /** The KPI {@code source} of a manual open: batch rule first, then MCP, else the window. */
+  private static String manualOpenSource(String channel) {
+    if (channel.endsWith("_batch")) {
+      return AccountingKpiTelemetry.SOURCE_BATCH;
+    }
+    if (channel.startsWith(NeoWriteChannel.MCP)) {
+      return AccountingKpiTelemetry.SOURCE_MCP;
+    }
+    return AccountingKpiTelemetry.SOURCE_CALENDAR_WINDOW;
   }
 
   @Override
