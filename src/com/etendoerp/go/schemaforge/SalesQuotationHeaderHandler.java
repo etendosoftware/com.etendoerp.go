@@ -108,6 +108,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  /** The defaults endpoint's object of field values. */
+  private static final String KEY_DEFAULTS = "defaults";
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
   /** Reactivate, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -195,6 +198,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     NeoResponse result = super.afterHandle(context);
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return withoutRejectReasonDefault(context, result);
+    }
     if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
       return result;
     }
@@ -209,6 +215,26 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       return result;
     }
     QuotationShipmentLinks.enrich(rec, context.getRecordId());
+    return NeoResponse.ok(effective.getBody());
+  }
+
+  /**
+   * A new quotation never gets a reject reason by default (ETP-6209). The field is editable since
+   * the seller sets the tenant's internal reason on a rejected quotation, and an editable
+   * table-reference field receives the defaults' first-option fallback: every new draft (app and
+   * MCP {@code etendo_defaults}) would carry the first reject reason, hidden by its display logic —
+   * the ETP-4006 regression. The reason is only ever set by the reject action or by the seller on
+   * a rejected quotation.
+   */
+  private static NeoResponse withoutRejectReasonDefault(NeoContext context, NeoResponse result) {
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    JSONObject defaults = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_DEFAULTS);
+    if (defaults == null || !defaults.has(Order.PROPERTY_REJECTREASON)) {
+      return result;
+    }
+    defaults.remove(Order.PROPERTY_REJECTREASON);
+    defaults.remove(Order.PROPERTY_REJECTREASON + IDENTIFIER_SUFFIX);
     return NeoResponse.ok(effective.getBody());
   }
 
