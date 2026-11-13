@@ -78,6 +78,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * per-entity field metadata load used by etendo_schema.</p>
  *
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpPathFieldSchema
  * @covers com.etendoerp.go.mcp.McpUserRequiredOverride
  * @covers com.etendoerp.go.mcp.McpFieldLabels
  */
@@ -2916,7 +2917,7 @@ class McpSchemaFieldBuilderTest {
         filters.when(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(sfEntity,
             "REM_RemittanceLine")).thenReturn(filter);
         dalStatic.when(OBDal::getInstance).thenReturn(dal);
-        return McpSchemaFieldBuilder.buildPropertyPathFieldsArray(sfEntity, dalEntity);
+        return McpPathFieldSchema.build(sfEntity, dalEntity);
       }
     }
 
@@ -2972,9 +2973,9 @@ class McpSchemaFieldBuilderTest {
     @Test
     @DisplayName("nothing without an entity")
     void nothingWithoutAnEntity() throws Exception {
-      assertEquals(0, McpSchemaFieldBuilder.buildPropertyPathFieldsArray(null,
+      assertEquals(0, McpPathFieldSchema.build(null,
           mock(Entity.class)).length());
-      assertEquals(0, McpSchemaFieldBuilder.buildPropertyPathFieldsArray(
+      assertEquals(0, McpPathFieldSchema.build(
           mock(com.etendoerp.go.schemaforge.data.SFEntity.class), null).length());
     }
   }

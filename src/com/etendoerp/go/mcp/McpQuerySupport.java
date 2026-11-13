@@ -240,36 +240,62 @@ final class McpQuerySupport {
     excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
-    NeoPropertyPaths propertyPaths = knownPaths;
+    PathFieldLookup pathFields = new PathFieldLookup(sfEntity, dalEntity, knownPaths);
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = filters.get(key);
-      if (McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key) && value instanceof String
-          && appendStatusCondition(where, sfEntity, (String) value, log)) {
-        continue;
-      }
-      // ETP-6148: a property-path field's API key is never a property of the entity, so the
-      // paths are only looked up (one query) for a key that is not one.
-      if (dalEntity.getPropertyByColumnName(key, false) == null && !dalEntity.hasProperty(key)) {
-        if (propertyPaths == null) {
-          propertyPaths = propertyPathsOf(sfEntity, dalEntity);
-        }
-        NeoPropertyPaths.PathField pathField = propertyPaths.get(key);
-        if (pathField != null) {
-          appendPathCondition(where, pathField, key, value);
-          continue;
-        }
-      }
-      Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
-      Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
-      if (value instanceof JSONObject) {
-        appendOperatorConditions(where, prop, target, key, (JSONObject) value);
-      } else {
-        appendEqualityCondition(where, key, prop, target, value);
+      boolean statusApplied = McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key)
+          && value instanceof String
+          && appendStatusCondition(where, sfEntity, (String) value, log);
+      NeoPropertyPaths.PathField pathField = statusApplied ? null : pathFields.of(key);
+      if (pathField != null) {
+        McpHqlConditions.appendPathCondition(where, pathField, key, value);
+      } else if (!statusApplied) {
+        Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+        appendPropertyCondition(where, prop, aliasTarget(dalEntity, prop, aliases, excluded,
+            applied), key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * ETP-6148: the property-path field a filter key names, looked up lazily — a property-path
+   * field's API key is never a property of the entity, so the paths are only read (one query) for
+   * the first key that is not one, and never when the caller already has them.
+   */
+  private static final class PathFieldLookup {
+    private final SFEntity sfEntity;
+    private final Entity dalEntity;
+    private NeoPropertyPaths paths;
+
+    PathFieldLookup(SFEntity sfEntity, Entity dalEntity, NeoPropertyPaths knownPaths) {
+      this.sfEntity = sfEntity;
+      this.dalEntity = dalEntity;
+      this.paths = knownPaths;
+    }
+
+    /** @return the path field named {@code key}, or {@code null} for a property of the entity */
+    NeoPropertyPaths.PathField of(String key) {
+      if (dalEntity.getPropertyByColumnName(key, false) != null || dalEntity.hasProperty(key)) {
+        return null;
+      }
+      if (paths == null) {
+        paths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+      }
+      return paths.get(key);
+    }
+  }
+
+  /** The condition of a filter on a property of the entity, evaluated on its alias target. */
+  private static void appendPropertyCondition(StringBuilder where, Property prop, Property target,
+      String key, Object value) throws JSONException {
+    if (value instanceof JSONObject) {
+      appendOperatorConditions(where, prop, target, key, (JSONObject) value);
+    } else {
+      appendEqualityCondition(where, key, prop, target, value);
+    }
   }
 
   /**
@@ -712,146 +738,15 @@ final class McpQuerySupport {
   private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
       Property target,
       Object value) {
-    appendEqualityAt(where, key, prop, filterPath(prop, target, ""),
+    McpHqlConditions.appendEqualityAt(where, key, prop, filterPath(prop, target, ""),
         filterPath(prop, target, ".id"), value);
-  }
-
-  /**
-   * Append {@code <path> = value}, or {@code <idPath> = 'value'} for a reference.
-   *
-   * @param path   the HQL expression of the value
-   * @param idPath the HQL expression of the referenced id ({@code path + ".id"})
-   */
-  private static void appendEqualityAt(StringBuilder where, String key, Property prop,
-      String path, String idPath, Object value) {
-    appendAnd(where);
-    if (!prop.isPrimitive()) {
-      where.append(idPath).append('=')
-          .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
-    } else {
-      where.append(path).append('=').append(
-          McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
-    }
-  }
-
-  /**
-   * ETP-6148: the condition on a property-path field, compared on the property its path ends on.
-   * Same operators and refusals as a column field. The path is joined implicitly, which drops a
-   * row whose path is broken: every operator offered here (equality, ranges, {@code between},
-   * {@code contains}, {@code in}) is false on a null value anyway, so the result is the one the
-   * REST grid's left-joined criteria give.
-   */
-  private static void appendPathCondition(StringBuilder where,
-      NeoPropertyPaths.PathField pathField, String key, Object value) throws JSONException {
-    Property prop = pathField.getTarget();
-    String path = pathField.hqlPath("e");
-    String idPath = path + ".id";
-    if (value instanceof JSONObject) {
-      appendOperatorConditionsAt(where, prop, path, idPath, key, (JSONObject) value);
-    } else {
-      appendEqualityAt(where, key, prop, path, idPath, value);
-    }
-  }
-
-  /**
-   * The entity's property-path fields (ETP-6148), from the same filter the read applies.
-   *
-   * @param sfEntity  the SchemaForge entity, or {@code null}
-   * @param dalEntity the DAL entity
-   * @return the fields, possibly empty
-   */
-  static NeoPropertyPaths propertyPathsOf(SFEntity sfEntity, Entity dalEntity) {
-    // forEntity answers an inactive filter, with no path, for a null entity.
-    return NeoPropertyPaths.of(NeoFieldFilter.forEntity(sfEntity, dalEntity.getName()));
   }
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Property prop,
       Property target, String key, JSONObject operators) throws JSONException {
-    appendOperatorConditionsAt(where, prop, filterPath(prop, target, ""),
+    McpHqlConditions.appendOperatorConditionsAt(where, prop, filterPath(prop, target, ""),
         filterPath(prop, target, ".id"), key, operators);
-  }
-
-  /**
-   * As {@link #appendOperatorConditions}, on given HQL expressions.
-   *
-   * @param path   the HQL expression of the value
-   * @param idPath the HQL expression of the referenced id, used by {@code in} on a reference
-   */
-  private static void appendOperatorConditionsAt(StringBuilder where, Property prop,
-      String path, String idPath, String key, JSONObject operators) throws JSONException {
-    Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
-    java.util.Iterator<String> ops = operators.keys();
-    while (ops.hasNext()) {
-      String op = ops.next();
-      appendAnd(where);
-      if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
-        where.append(betweenCondition(path, prop, type, key, operators.optJSONArray(op)));
-      } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
-        where.append(containsCondition(path, prop, type, key, operators.get(op)));
-      } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        String inPath = prop.isPrimitive() ? path : idPath;
-        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
-            inValues(key, operators.optJSONArray(op))));
-      } else {
-        String sql = McpBusinessFilters.operatorToSql(op);
-        if (sql == null) {
-          throw McpRoutingException.unknownFilterOperator(key, op,
-              McpBusinessFilters.operatorKeys());
-        }
-        where.append(path).append(' ').append(sql).append(' ')
-            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
-      }
-    }
-  }
-
-  private static String betweenCondition(String path, Property prop, Class<?> type, String key,
-      JSONArray bounds) throws JSONException {
-    if (bounds == null || bounds.length() != 2) {
-      // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
-      // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
-      // the opposite of the narrowing the caller asked for.
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_BETWEEN,
-          "the 'between' operator takes a two-element [from, to] array");
-    }
-    return path + " between "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0))
-        + " and "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1));
-  }
-
-  /**
-   * ETP-5852: partial text search. Only on a text column — on a number, date, boolean or foreign
-   * key a substring match is meaningless, so it is refused instead of guessed.
-   */
-  private static String containsCondition(String path, Property prop, Class<?> type, String key,
-      Object text) {
-    if (!prop.isPrimitive()) {
-      throw McpRequestRefusals.containsOnReference(key, text);
-    }
-    if (!String.class.equals(type)) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "'contains' works only on text fields; use exact match, 'in' or a range here");
-    }
-    if (!(text instanceof String) || ((String) text).isEmpty()) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "the 'contains' operator takes a non-empty text value");
-    }
-    return McpBusinessFilters.containsCondition(path, text);
-  }
-
-  /** ETP-5852: the values of an {@code in}, one request for several exact values. */
-  private static java.util.List<Object> inValues(String key, JSONArray values)
-      throws JSONException {
-    if (values == null || values.length() == 0) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_IN,
-          "the 'in' operator takes a non-empty array of values");
-    }
-    java.util.List<Object> list = new java.util.ArrayList<>();
-    for (int i = 0; i < values.length(); i++) {
-      list.add(values.get(i));
-    }
-    return list;
   }
 
   /**
@@ -882,15 +777,9 @@ final class McpQuerySupport {
           McpNamedFilters.summarize(sfEntity.getNamedFilters()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
-    appendAnd(where);
+    McpHqlConditions.appendAnd(where);
     where.append('(').append(fragment).append(')');
     return true;
-  }
-
-  private static void appendAnd(StringBuilder where) {
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
   }
 
   /**
@@ -1002,7 +891,7 @@ final class McpQuerySupport {
       String path = NeoFieldFilter.propertyPathOf(sfField);
       if (col == null && path != null) {
         if (propertyPaths == null) {
-          propertyPaths = propertyPathsOf(sfEntity, dalEntity);
+          propertyPaths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
         }
         NeoPropertyPaths.PathField pathField = propertyPaths.byPath(path);
         if (pathField != null) {

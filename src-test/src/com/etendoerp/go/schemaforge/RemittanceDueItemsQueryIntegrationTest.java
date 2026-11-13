@@ -81,7 +81,7 @@ public class RemittanceDueItemsQueryIntegrationTest extends OBBaseTest {
       // Provisioned, but the account is not linked yet: no link means no direction filter.
       RemittanceSepaProvisioning.ensureClient(client);
       Remittance remittance = remittance(RemittanceSepaProvisioning.SCHEME_CORE);
-      assertEquals(null, RemittanceDueItems.direction(account,
+      assertEquals(RemittanceDueItems.Direction.ANY, RemittanceDueItems.direction(account,
           remittance.getRemittanceType().getPaymentMethod()));
 
       assertListObeysTheFixtureFreeRules(RemittanceDueItems.available(remittance,
@@ -99,7 +99,7 @@ public class RemittanceDueItemsQueryIntegrationTest extends OBBaseTest {
       RemittanceSepaProvisioning.ensureAccountLinks(account);
 
       Remittance collection = remittance(RemittanceSepaProvisioning.SCHEME_CORE);
-      assertEquals(Boolean.TRUE, RemittanceDueItems.direction(account,
+      assertEquals(RemittanceDueItems.Direction.SALES, RemittanceDueItems.direction(account,
           collection.getRemittanceType().getPaymentMethod()));
       assertListObeysTheFixtureFreeRules(RemittanceDueItems.available(collection,
           new JSONObject()));
@@ -107,7 +107,7 @@ public class RemittanceDueItemsQueryIntegrationTest extends OBBaseTest {
           new JSONObject().put("search", "a").put("page", 2).put("pageSize", 5)));
 
       Remittance payment = remittance(RemittanceSepaProvisioning.SCHEME_SCT);
-      assertEquals(Boolean.FALSE, RemittanceDueItems.direction(account,
+      assertEquals(RemittanceDueItems.Direction.PURCHASE, RemittanceDueItems.direction(account,
           payment.getRemittanceType().getPaymentMethod()));
       assertListObeysTheFixtureFreeRules(RemittanceDueItems.available(payment,
           new JSONObject().put("search", "zzz-no-such-invoice")));

@@ -67,6 +67,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * every test rolls back.
  *
  * @covers com.etendoerp.go.mcp.McpQuerySupport
+ * @covers com.etendoerp.go.mcp.McpHqlConditions
  */
 public class McpPropertyPathFilterIntegrationTest extends WeldBaseTest {
 

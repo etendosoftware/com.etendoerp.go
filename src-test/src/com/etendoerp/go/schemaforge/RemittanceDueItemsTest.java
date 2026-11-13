@@ -84,6 +84,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * rules; {@code RemittanceHeaderHandlerTest} pins only how the header routes the actions to it.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceDueItems
+ * @covers com.etendoerp.go.schemaforge.RemittanceDueSelection
  */
 class RemittanceDueItemsTest {
 
@@ -599,21 +600,21 @@ class RemittanceDueItemsTest {
 
   @Test
   void failureTextReadsTheShapesTheClassicAnswerCanTake() throws Exception {
-    assertEquals("No response", RemittanceDueItems.failureText(null));
-    assertEquals("No response", RemittanceDueItems.failureText(new NeoResponse(200, null)));
-    assertEquals("boom", RemittanceDueItems.failureText(
+    assertEquals("No response", RemittanceDueSelection.failureText(null));
+    assertEquals("No response", RemittanceDueSelection.failureText(new NeoResponse(200, null)));
+    assertEquals("boom", RemittanceDueSelection.failureText(
         new NeoResponse(500, new JSONObject().put("message", "boom"))));
-    assertEquals("Process failed", RemittanceDueItems.failureText(
+    assertEquals("Process failed", RemittanceDueSelection.failureText(
         new NeoResponse(500, new JSONObject())));
-    assertEquals("bad", RemittanceDueItems.failureText(viewMessage("error", "bad")));
-    assertEquals("Process failed", RemittanceDueItems.failureText(viewMessage("ERROR", "")));
+    assertEquals("bad", RemittanceDueSelection.failureText(viewMessage("error", "bad")));
+    assertEquals("Process failed", RemittanceDueSelection.failureText(viewMessage("ERROR", "")));
     JSONObject processView = new JSONObject().put("responseActions", new JSONArray()
         .put(new JSONObject().put("showMsgInProcessView",
             new JSONObject().put("msgType", "error").put("msgText", "process view"))));
     assertEquals("process view",
-        RemittanceDueItems.failureText(new NeoResponse(200, processView)));
-    assertNull(RemittanceDueItems.failureText(viewMessage("success", "ok")));
-    assertNull(RemittanceDueItems.failureText(NeoResponse.ok(new JSONObject())));
+        RemittanceDueSelection.failureText(new NeoResponse(200, processView)));
+    assertNull(RemittanceDueSelection.failureText(viewMessage("success", "ok")));
+    assertNull(RemittanceDueSelection.failureText(NeoResponse.ok(new JSONObject())));
   }
 
   @Test

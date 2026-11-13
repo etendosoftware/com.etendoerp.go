@@ -405,11 +405,11 @@ class NeoPropertyPathsTest {
     @Test
     void aReferenceIdUnderTheDottedKeyAndItsIdentifierAreHandedBackUnderTheApiKey()
         throws Exception {
-      JSONObject record = new JSONObject().put("id", "LINE-1")
+      JSONObject row = new JSONObject().put("id", "LINE-1")
           .put(PATH_PARTNER, "BP-1")
           .put(JOINED_PARTNER + "$_identifier", "Acme");
 
-      Map<String, Object> captured = paths.capture(record);
+      Map<String, Object> captured = paths.capture(row);
       JSONObject filtered = new JSONObject().put("id", "LINE-1");
       paths.restore(filtered, captured);
 
@@ -420,10 +420,10 @@ class NeoPropertyPathsTest {
 
     @Test
     void aNullReferenceUnderTheJoinedKeyIsHandedBackAsNull() throws Exception {
-      JSONObject record = new JSONObject().put(JOINED_PARTNER, JSONObject.NULL);
+      JSONObject row = new JSONObject().put(JOINED_PARTNER, JSONObject.NULL);
 
       JSONObject filtered = new JSONObject();
-      paths.restore(filtered, paths.capture(record));
+      paths.restore(filtered, paths.capture(row));
 
       assertTrue(filtered.has(KEY_PARTNER));
       assertTrue(filtered.isNull(KEY_PARTNER));
@@ -431,20 +431,20 @@ class NeoPropertyPathsTest {
 
     @Test
     void aPrimitiveValueIsHandedBackWithoutIdentifier() throws Exception {
-      JSONObject record = new JSONObject().put(JOINED_AMOUNT, 12.5);
+      JSONObject row = new JSONObject().put(JOINED_AMOUNT, 12.5);
 
-      Map<String, Object> captured = paths.capture(record);
+      Map<String, Object> captured = paths.capture(row);
 
       assertEquals(Map.of(KEY_AMOUNT, 12.5), captured);
     }
 
     @Test
     void aMissingValueAddsNothing() throws Exception {
-      JSONObject record = new JSONObject().put("id", "LINE-1").put("documentNo", "1");
+      JSONObject row = new JSONObject().put("id", "LINE-1").put("documentNo", "1");
 
-      assertTrue(paths.capture(record).isEmpty(), "a write echo did not ask for the paths");
+      assertTrue(paths.capture(row).isEmpty(), "a write echo did not ask for the paths");
       JSONObject filtered = new JSONObject().put("id", "LINE-1");
-      paths.restore(filtered, paths.capture(record));
+      paths.restore(filtered, paths.capture(row));
       assertEquals(1, filtered.length());
     }
 

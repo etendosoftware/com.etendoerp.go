@@ -1699,7 +1699,7 @@ public class McpToolRouterTest {
         McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema"))
         .replaceAll("\\s+", "");
     int paths = body.indexOf("McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,"
-        + "McpSchemaFieldBuilder.buildPropertyPathFieldsArray(sfEntity,dalEntity));");
+        + "McpPathFieldSchema.build(sfEntity,dalEntity));");
     int preconditions = body.indexOf("McpSchemaFieldBuilder.applyPreconditionRequirements(");
     assertTrue("handleSchema no longer appends the property-path descriptors", paths >= 0);
     assertTrue("the path descriptors must be in the array the views are built from",

@@ -96,6 +96,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * nothing about a missing exemption is visible in a signature.</p>
  *
  * @covers com.etendoerp.go.mcp.McpQuerySupport
+ * @covers com.etendoerp.go.mcp.McpHqlConditions
  * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @ExtendWith(MockitoExtension.class)

@@ -1640,7 +1640,7 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
     // ETP-6148: the property-path fields, read-only, at the same point and for the same reason.
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
-        McpSchemaFieldBuilder.buildPropertyPathFieldsArray(sfEntity, dalEntity));
+        McpPathFieldSchema.build(sfEntity, dalEntity));
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // ETP-5473: what the entity's customization refuses a create without, although AD and
     // etendo_defaults do not say so. Flagged on the full array so every view agrees.

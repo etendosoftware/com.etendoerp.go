@@ -116,6 +116,10 @@ final class RemittanceDueItems {
   static final String MSG_SELECTION_FAILED = "ETGO_RemittanceDueItemsSelectionFailed";
   static final String MSG_NOT_INCLUDED = "ETGO_RemittanceDueItemNotIncluded";
   private static final String KEY_INVALID_IDS = "invalidIds";
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_MESSAGE = "message";
+  /** HQL parameter of the remittance id. */
+  private static final String Q_REMITTANCE = "remittance";
 
   /** Classic's «Select Invoices and Orders» process and its handler. */
   static final String SELECT_PROCESS_ID = "99E532BA0306450A839F5DE238375238";
@@ -240,7 +244,7 @@ final class RemittanceDueItems {
     }
     Long total = count.uniqueResult();
     JSONObject body = new JSONObject();
-    body.put("items", items);
+    body.put(P_ITEMS, items);
     body.put("total", total != null ? total : 0L);
     return NeoResponse.ok(body);
   }
@@ -274,23 +278,18 @@ final class RemittanceDueItems {
       String id = (String) row[0];
       found.add(id);
       BigDecimal amount = toBigDecimal(row[4]);
-      selection.put(selectionRow(id, amount, amount));
+      selection.put(RemittanceDueSelection.row(id, amount, amount));
     }
     List<String> invalid = new ArrayList<>(ids);
     invalid.removeAll(found);
     if (!invalid.isEmpty()) {
-      NeoResponse refusal =
-          NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_NOT_AVAILABLE);
-      JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error") : null;
-      if (error != null) {
-        error.put("invalidIds", new JSONArray(invalid));
-      }
-      return refusal;
+      return withInvalidIds(
+          NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_NOT_AVAILABLE), invalid);
     }
 
     long before = countLines(remittance);
-    NeoResponse result = runClassicSelection(selectionParams(remittance, selection));
-    String failure = failureText(result);
+    NeoResponse result = RemittanceDueSelection.run(RemittanceDueSelection.params(remittance, selection));
+    String failure = RemittanceDueSelection.failureText(result);
     if (failure != null) {
       log.warn("selectDueItems on remittance {} refused by REM: {}", remittance.getId(), failure);
       // REM may have created some lines before failing; they must not commit with our 422.
@@ -301,7 +300,7 @@ final class RemittanceDueItems {
     long created = Math.max(0L, countLines(remittance) - before);
     JSONObject body = new JSONObject();
     body.put("created", created);
-    body.put("message", successText(result, created));
+    body.put(KEY_MESSAGE, RemittanceDueSelection.successText(result, created));
     return NeoResponse.ok(body);
   }
 
@@ -430,7 +429,7 @@ final class RemittanceDueItems {
         plan.lineIdsToDelete.addAll(due.lineIds);
         plan.updated++;
       }
-      plan.selection.put(selectionRow(entry.getKey(), entry.getValue(),
+      plan.selection.put(RemittanceDueSelection.row(entry.getKey(), entry.getValue(),
           outstanding.get(entry.getKey())));
     }
   }
@@ -449,21 +448,21 @@ final class RemittanceDueItems {
     OBDal.getInstance().flush();
     String message = "";
     if (plan.selection.length() > 0) {
-      NeoResponse result = runClassicSelection(selectionParams(remittance, plan.selection));
-      String failure = failureText(result);
+      NeoResponse result = RemittanceDueSelection.run(RemittanceDueSelection.params(remittance, plan.selection));
+      String failure = RemittanceDueSelection.failureText(result);
       if (failure != null) {
         log.warn("syncDueItems on remittance {} refused by REM: {}", remittance.getId(), failure);
         rollback();
         return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_SELECTION_FAILED,
             failure);
       }
-      message = successText(result, plan.created + (long) plan.updated);
+      message = RemittanceDueSelection.successText(result, plan.created + (long) plan.updated);
     }
     JSONObject body = new JSONObject();
     body.put("created", plan.created);
     body.put("updated", plan.updated);
     body.put("removed", plan.removed);
-    body.put("message", message);
+    body.put(KEY_MESSAGE, message);
     return NeoResponse.ok(body);
   }
 
@@ -501,7 +500,7 @@ final class RemittanceDueItems {
         .append(" and not exists (select 1 from ").append(RemittanceLine.ENTITY_NAME)
         .append(" as other where other.paymentScheduleDetail.id = psd.id")
         .append(" and other.remittance.id <> :remittance and other.remittance.processed = false)");
-    if (criteria.salesTransaction != null) {
+    if (criteria.direction != Direction.ANY) {
       where.append(" and inv.salesTransaction = :sales");
     }
     return where;
@@ -514,16 +513,16 @@ final class RemittanceDueItems {
     private final Collection<String> organizations;
     private final Date dueDateLimit;
     private final String currencyId;
-    private final Boolean salesTransaction;
+    private final Direction direction;
 
     private Criteria(String clientId, String remittanceId, Collection<String> organizations,
-        Date dueDateLimit, String currencyId, Boolean salesTransaction) {
+        Date dueDateLimit, String currencyId, Direction direction) {
       this.clientId = clientId;
       this.remittanceId = remittanceId;
       this.organizations = organizations;
       this.dueDateLimit = dueDateLimit;
       this.currencyId = currencyId;
-      this.salesTransaction = salesTransaction;
+      this.direction = direction;
     }
 
     /** @return the criteria, or {@code null} when the remittance has no type, account or date */
@@ -543,16 +542,27 @@ final class RemittanceDueItems {
           direction(account, method));
     }
 
+    /** The start of the day after {@code date}: candidates expected before it are in. */
+    private static Date dayAfter(Date date) {
+      LocalDate next = toLocalDate(date).plusDays(1);
+      return Date.from(next.atStartOfDay(ZoneId.systemDefault()).toInstant());
+    }
+
     void bind(Query<?> query) {
       query.setParameter("client", clientId);
-      query.setParameter("remittance", remittanceId);
+      query.setParameter(Q_REMITTANCE, remittanceId);
       query.setParameterList("orgs", organizations);
       query.setParameter("dueDateLimit", dueDateLimit);
       query.setParameter("currency", currencyId);
-      if (salesTransaction != null) {
-        query.setParameter("sales", salesTransaction);
+      if (direction != Direction.ANY) {
+        query.setParameter("sales", direction == Direction.SALES);
       }
     }
+  }
+
+  /** Which invoices a remittance takes: sales, purchase, or both (no filter). */
+  enum Direction {
+    SALES, PURCHASE, ANY
   }
 
   /**
@@ -560,7 +570,7 @@ final class RemittanceDueItems {
    * account's link to the type's method: pay-in only → sales invoices, pay-out only → purchase
    * invoices, otherwise (both, neither, no link) no filter.
    */
-  static Boolean direction(FIN_FinancialAccount account, FIN_PaymentMethod method) {
+  static Direction direction(FIN_FinancialAccount account, FIN_PaymentMethod method) {
     List<FinAccPaymentMethod> links = session().createQuery(
         "from " + FinAccPaymentMethod.ENTITY_NAME + " as l where l.account.id = :account"
             + " and l.paymentMethod.id = :method order by l.creationDate desc",
@@ -570,17 +580,17 @@ final class RemittanceDueItems {
         .setMaxResults(1)
         .list();
     if (links.isEmpty()) {
-      return null;
+      return Direction.ANY;
     }
     boolean in = Boolean.TRUE.equals(links.get(0).isPayinAllow());
     boolean out = Boolean.TRUE.equals(links.get(0).isPayoutAllow());
     if (in && !out) {
-      return Boolean.TRUE;
+      return Direction.SALES;
     }
     if (out && !in) {
-      return Boolean.FALSE;
+      return Direction.PURCHASE;
     }
-    return null;
+    return Direction.ANY;
   }
 
   /** A due already in the remittance: its lines and their total amount. */
@@ -597,7 +607,7 @@ final class RemittanceDueItems {
             + " and rl.paymentScheduleDetail.invoicePaymentSchedule is not null"
             + " order by rl.lineNo",
         Object[].class)
-        .setParameter("remittance", remittance.getId())
+        .setParameter(Q_REMITTANCE, remittance.getId())
         .list();
     Map<String, IncludedDue> dues = new LinkedHashMap<>();
     for (Object[] row : rows) {
@@ -653,31 +663,9 @@ final class RemittanceDueItems {
     }
   }
 
-  private static JSONObject selectionRow(String id, BigDecimal amount, BigDecimal outstanding)
-      throws JSONException {
-    JSONObject selected = new JSONObject();
-    selected.put("paymentScheduleID", id);
-    selected.put("realpayment", amount.toPlainString());
-    selected.put("outstandingamount", outstanding.toPlainString());
-    selected.put("rest", "0");
-    return selected;
-  }
-
-  /** The Classic handler's parameters; no {@code _allRows}, so REM never deletes a line itself. */
-  private static JSONObject selectionParams(Remittance remittance, JSONArray selection)
-      throws JSONException {
-    JSONObject grid = new JSONObject();
-    grid.put("_selection", selection);
-    JSONObject processParams = new JSONObject();
-    processParams.put("inpRecordId", remittance.getId());
-    processParams.put("inpTabId", HEADER_TAB_ID);
-    processParams.put(GRID_PARAMETER, grid);
-    return processParams;
-  }
-
   private static NeoResponse withInvalidIds(NeoResponse refusal, List<String> ids)
       throws JSONException {
-    JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error") : null;
+    JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject(KEY_ERROR) : null;
     if (error != null) {
       error.put(KEY_INVALID_IDS, new JSONArray(ids));
     }
@@ -688,7 +676,7 @@ final class RemittanceDueItems {
     OBDal.getInstance().flush();
     Long count = session().createQuery("select count(rl.id) from " + RemittanceLine.ENTITY_NAME
         + " as rl where rl.remittance.id = :remittance", Long.class)
-        .setParameter("remittance", remittance.getId())
+        .setParameter(Q_REMITTANCE, remittance.getId())
         .uniqueResult();
     return count != null ? count : 0L;
   }
@@ -697,12 +685,12 @@ final class RemittanceDueItems {
       LocalDate today) throws JSONException {
     JSONObject item = new JSONObject();
     String id = (String) row[0];
-    LocalDate dueDate = row[3] instanceof Date ? toDay((Date) row[3]) : null;
+    LocalDate dueDate = row[3] instanceof Date ? toLocalDate((Date) row[3]) : null;
     item.put("id", id);
     item.put("documentNo", row[1]);
     item.put("invoiceId", row[6]);
     item.put("salesTransaction", Boolean.TRUE.equals(row[7]));
-    item.put("invoiceDate", row[8] instanceof Date ? toDay((Date) row[8]).toString()
+    item.put("invoiceDate", row[8] instanceof Date ? toLocalDate((Date) row[8]).toString()
         : JSONObject.NULL);
     item.put("dueDate", dueDate != null ? dueDate.toString() : JSONObject.NULL);
     item.put("dueStatus", dueStatus(dueDate, today));
@@ -726,69 +714,15 @@ final class RemittanceDueItems {
       return DUE_PENDING;
     }
     int cmp = dueDate.compareTo(today);
-    return cmp < 0 ? DUE_OVERDUE : cmp == 0 ? DUE_TODAY : DUE_PENDING;
+    if (cmp < 0) {
+      return DUE_OVERDUE;
+    }
+    return cmp == 0 ? DUE_TODAY : DUE_PENDING;
   }
 
   /** Seam: the server's calendar day (JVM zone), as the remittance due-date rule uses. */
   static LocalDate today() {
     return LocalDate.now();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Classic handler
-  // ---------------------------------------------------------------------------
-
-  /** Seam: the Classic handler run. */
-  static NeoResponse runClassicSelection(JSONObject processParams) {
-    return NeoProcessService.executeObuiappClass(SELECT_HANDLER_CLASS, SELECT_PROCESS_ID,
-        processParams);
-  }
-
-  /**
-   * The error text of REM's answer, or {@code null} on success. REM reports through
-   * {@code showMsgInView} (not {@code showMsgInProcessView}), which the generic translation does not
-   * read as a failure, so it is read here.
-   */
-  static String failureText(NeoResponse result) {
-    if (result == null || result.getBody() == null) {
-      return "No response";
-    }
-    if (result.getHttpStatus() >= 400) {
-      return StringUtils.defaultIfBlank(result.getBody().optString("message", null),
-          "Process failed");
-    }
-    JSONObject message = viewMessage(result.getBody());
-    if (message != null && "error".equalsIgnoreCase(message.optString("msgType"))) {
-      return StringUtils.defaultIfBlank(message.optString("msgText", null), "Process failed");
-    }
-    return null;
-  }
-
-  private static String successText(NeoResponse result, long created) {
-    JSONObject message = result != null && result.getBody() != null
-        ? viewMessage(result.getBody())
-        : null;
-    String text = message != null ? StringUtils.trimToNull(message.optString("msgText", null))
-        : null;
-    return text != null ? text : String.valueOf(created);
-  }
-
-  private static JSONObject viewMessage(JSONObject body) {
-    JSONArray actions = body.optJSONArray("responseActions");
-    if (actions == null) {
-      return null;
-    }
-    for (int i = 0; i < actions.length(); i++) {
-      JSONObject action = actions.optJSONObject(i);
-      JSONObject message = action != null ? action.optJSONObject("showMsgInView") : null;
-      if (message == null && action != null) {
-        message = action.optJSONObject("showMsgInProcessView");
-      }
-      if (message != null) {
-        return message;
-      }
-    }
-    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -816,12 +750,7 @@ final class RemittanceDueItems {
     return ids;
   }
 
-  private static Date dayAfter(Date date) {
-    LocalDate next = toDay(date).plusDays(1);
-    return Date.from(next.atStartOfDay(ZoneId.systemDefault()).toInstant());
-  }
-
-  private static LocalDate toDay(Date date) {
+  static LocalDate toLocalDate(Date date) {
     if (date instanceof java.sql.Date) {
       return ((java.sql.Date) date).toLocalDate();
     }

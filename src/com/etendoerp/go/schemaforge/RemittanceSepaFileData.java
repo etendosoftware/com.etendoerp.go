@@ -68,6 +68,8 @@ final class RemittanceSepaFileData {
   static final String MISSING_IBAN = "iban";
   static final String MISSING_TAX_ID = "orgTaxId";
   static final String MISSING_COUNTRY = "country";
+  /** Response key of the organization's country (the same word as {@link #MISSING_COUNTRY}). */
+  private static final String KEY_COUNTRY = MISSING_COUNTRY;
   static final String MISSING_BUSINESS_CODE = "creditorBusinessCode";
 
   private static final int BUSINESS_CODE_LENGTH = 3;
@@ -172,7 +174,7 @@ final class RemittanceSepaFileData {
     body.put("iban", iban != null ? iban : JSONObject.NULL);
     body.put("ibanValid", ibanValid);
     body.put(P_ORGANIZATION_ID, organizationId != null ? organizationId : JSONObject.NULL);
-    body.put("country", country != null ? country : JSONObject.NULL);
+    body.put(KEY_COUNTRY, country != null ? country : JSONObject.NULL);
     body.put("creditorId", creditorId != null ? creditorId : JSONObject.NULL);
     body.put("creditorIdAvailable", creditorId != null);
     body.put("missing", missing);

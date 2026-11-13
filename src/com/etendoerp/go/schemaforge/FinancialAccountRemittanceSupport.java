@@ -21,6 +21,10 @@ import java.sql.SQLException;
 
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -62,6 +66,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * the rules without the DAL.
  */
 class FinancialAccountRemittanceSupport {
+
+  private static final Logger log = LogManager.getLogger(FinancialAccountRemittanceSupport.class);
 
   static final String MSG_PROVISIONING_CONFLICT = "ETGO_RemittanceProvisioningConflict";
   static final String MSG_TYPE_CHANGE_BLOCKED = "ETGO_RemittanceAccountTypeChangeBlocked";
@@ -189,6 +195,116 @@ class FinancialAccountRemittanceSupport {
       return;
     }
     deactivateAccountLinks(account);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The financial-account hooks (moved out of FinancialAccountHandler, Sonar java:S1448). They
+  // read the account, the type and the admin mode through the handler's seams.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update pre-hook: a Bank account with open SEPA remittances cannot leave Bank
+   * ({@link #checkTypeChange}). Loads the account only when the body carries the type, so an
+   * ordinary partial update never reaches the DAL here.
+   *
+   * @param handler the financial-account customization (its seams)
+   * @param body    the update body
+   * @param id      the account id
+   * @return the refusal, or {@code null} to continue
+   */
+  NeoResponse validateTypeChange(FinancialAccountHandler handler, JSONObject body, String id) {
+    if (!body.has(FinancialAccountHandler.FIELD_TYPE)) {
+      return null;
+    }
+    FIN_FinancialAccount stored = handler.loadAccount(id);
+    if (stored == null) {
+      return null;
+    }
+    String effectiveType =
+        handler.normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
+    return checkTypeChange(stored, effectiveType);
+  }
+
+  /**
+   * Update pre-hook, after every validation passed: records on the context that this update takes
+   * a Bank account to another type, so {@link #deactivateLinksAfterUpdate} deactivates its
+   * remittance links once the update succeeded. Nothing is written here: the generic CRUD may
+   * still refuse the update ({@code missing_updated}, a stale record), and the pre-hook does not
+   * roll back.
+   *
+   * @param handler the financial-account customization (its seams)
+   * @param context the update request
+   */
+  void markLeavingBank(FinancialAccountHandler handler, NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FinancialAccountHandler.FIELD_TYPE)) {
+      return;
+    }
+    FIN_FinancialAccount stored = handler.loadAccount(context.getRecordId());
+    if (stored != null && leavesBank(stored,
+        handler.normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored)))) {
+      context.setAttribute(FinancialAccountHandler.ATTR_LEAVING_BANK, Boolean.TRUE);
+    }
+  }
+
+  /**
+   * Update post-hook: after an update that took a Bank account to another type succeeded,
+   * deactivates its remittance-method links ({@link #deactivateAfterLeavingBank}). Outside a batch
+   * the update is committed by now, so a failure is logged, not answered: the account keeps
+   * active links, which the remittance window no longer offers (it is not Bank).
+   *
+   * @param handler the financial-account customization (its seams)
+   * @param context the update request, with the generic CRUD's answer
+   */
+  void deactivateLinksAfterUpdate(FinancialAccountHandler handler, NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (!Boolean.TRUE.equals(context.getAttribute(FinancialAccountHandler.ATTR_LEAVING_BANK))
+        || !isSuccess(prev)) {
+      return;
+    }
+    try {
+      handler.enterAdminMode();
+      FIN_FinancialAccount account = handler.loadAccount(context.getRecordId());
+      if (account != null) {
+        handler.refreshAccount(account);
+      }
+      deactivateAfterLeavingBank(account);
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to deactivate the remittance links of {}",
+          context.getRecordId(), e);
+    } finally {
+      handler.exitAdminMode();
+    }
+  }
+
+  /**
+   * Create post-hook: after a successful create, links a new Bank account to the two SEPA
+   * remittance payment methods while the {@code sepa-remittances} flag is on
+   * ({@link #linkNewAccount}). Outside a batch the account is already committed, so a failure is
+   * logged, not answered: the account stays usable, without the remittance methods, and is then
+   * not offered by the remittance window.
+   *
+   * @param handler   the financial-account customization (its seams)
+   * @param context   the create request, with the generic CRUD's answer
+   * @param accountId the created account's id
+   */
+  void linkAfterCreate(FinancialAccountHandler handler, NeoContext context, String accountId) {
+    if (StringUtils.isBlank(accountId) || !isSuccess(context.getPreviousResult())) {
+      return;
+    }
+    try {
+      handler.enterAdminMode();
+      linkNewAccount(handler.loadAccount(accountId));
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to link the remittance methods of {}",
+          accountId, e);
+    } finally {
+      handler.exitAdminMode();
+    }
+  }
+
+  private static boolean isSuccess(NeoResponse response) {
+    return response != null && response.getHttpStatus() >= 200 && response.getHttpStatus() < 300;
   }
 
   static boolean isUniqueViolation(Throwable error) {

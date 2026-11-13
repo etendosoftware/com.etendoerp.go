@@ -453,33 +453,7 @@ final class McpSchemaFieldBuilder {
       return;
     }
     for (int i = 0; i < fieldsArray.length(); i++) {
-      overlayCuratedLabel(fieldsArray.optJSONObject(i), labelsByColumn);
-    }
-  }
-
-  /**
-   * Overlay a single field's curated label/description (helper for {@link #applyCuratedLabels}).
-   * Returns early — leaving the field untouched — when the field, its {@code column}, or a matching
-   * curated entry is absent, or when the curated value is blank.
-   */
-  private static void overlayCuratedLabel(JSONObject field, Map<String, String[]> labelsByColumn)
-      throws JSONException {
-    if (field == null) {
-      return;
-    }
-    String column = field.optString("column", null);
-    if (column == null) {
-      return;
-    }
-    String[] labelDesc = labelsByColumn.get(column.toUpperCase());
-    if (labelDesc == null) {
-      return;
-    }
-    if (StringUtils.isNotBlank(labelDesc[0])) {
-      field.put(McpConstants.KEY_LABEL, labelDesc[0]);
-    }
-    if (StringUtils.isNotBlank(labelDesc[1])) {
-      field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
+      McpFieldLabels.overlayCurated(fieldsArray.optJSONObject(i), labelsByColumn);
     }
   }
 
@@ -623,45 +597,6 @@ final class McpSchemaFieldBuilder {
       virtualFields.put(field);
     }
     return virtualFields;
-  }
-
-  /**
-   * ETP-6148: the descriptors of the entity's property-path fields — values of a related record
-   * reached through a dotted path ({@code NeoPropertyPaths}). Always {@code readOnly:true}: the
-   * write tools refuse them like any read-only field. {@code type} and {@code label} come from the
-   * column the path ends on; {@code propertyPath} says where the value really lives, the way
-   * {@code backingTable} does for a virtual field.
-   *
-   * @param sfEntity  the SchemaForge entity
-   * @param dalEntity the DAL entity of its tab
-   * @return the descriptors, empty when the entity declares none
-   * @throws JSONException if a descriptor cannot be built
-   */
-  static JSONArray buildPropertyPathFieldsArray(SFEntity sfEntity, Entity dalEntity)
-      throws JSONException {
-    JSONArray fields = new JSONArray();
-    if (sfEntity == null || dalEntity == null) {
-      return fields;
-    }
-    for (com.etendoerp.go.schemaforge.NeoPropertyPaths.PathField pathField
-        : McpQuerySupport.propertyPathsOf(sfEntity, dalEntity).fields()) {
-      Property target = pathField.getTarget();
-      Column column = target.getColumnId() == null ? null
-          : OBDal.getInstance().get(Column.class, target.getColumnId());
-      String refId = column != null && column.getReference() != null
-          ? (String) column.getReference().getId() : null;
-      JSONObject field = new JSONObject();
-      field.put("name", pathField.getApiKey());
-      field.put(McpConstants.KEY_LABEL, column != null ? column.getName() : target.getName());
-      field.put("type", mapColumnType(refId));
-      field.put("required", false);
-      field.put(KEY_READ_ONLY, true);
-      field.put(KEY_VISIBILITY, VISIBILITY_READ_ONLY);
-      field.put("propertyPath", pathField.getPath());
-      field.put("businessCritical", false);
-      fields.put(field);
-    }
-    return fields;
   }
 
   /**

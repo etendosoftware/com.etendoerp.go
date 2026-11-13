@@ -265,7 +265,7 @@ final class McpWriteRequestSupport {
       return;
     }
     if (cache[0] == null) {
-      cache[0] = McpQuerySupport.propertyPathsOf(sfEntity, dalEntity);
+      cache[0] = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
     }
     if (cache[0].isPathKey(key)) {
       throw McpRoutingException.readOnlyField(key, sfEntity.getName());

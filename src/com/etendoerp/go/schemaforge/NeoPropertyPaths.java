@@ -206,6 +206,19 @@ public final class NeoPropertyPaths {
   }
 
   /**
+   * The property-path fields of an entity, from the same field filter its reads apply.
+   *
+   * @param sfEntity      the SchemaForge entity, or {@code null} (no paths)
+   * @param dalEntityName the DAL entity name
+   * @return its path fields, or the empty instance
+   */
+  public static NeoPropertyPaths forEntity(com.etendoerp.go.schemaforge.data.SFEntity sfEntity,
+      String dalEntityName) {
+    // forEntity answers an inactive filter, with no path, for a null entity.
+    return of(NeoFieldFilter.forEntity(sfEntity, dalEntityName));
+  }
+
+  /**
    * @param dalEntity the entity the paths start from
    * @return a builder for that entity's fields
    */
@@ -259,6 +272,8 @@ public final class NeoPropertyPaths {
   }
 
   /**
+   * The declared field of an API key.
+   *
    * @param apiKey an API key
    * @return its field, or {@code null}
    */
@@ -267,6 +282,8 @@ public final class NeoPropertyPaths {
   }
 
   /**
+   * The declared field of a dotted path.
+   *
    * @param path a dotted path
    * @return the field declared for it, or {@code null}
    */
@@ -280,6 +297,8 @@ public final class NeoPropertyPaths {
   }
 
   /**
+   * Whether a body key belongs to one of these fields.
+   *
    * @param key a key of a request or response body
    * @return whether it is a path field's key or its identifier key
    */
@@ -497,27 +516,27 @@ public final class NeoPropertyPaths {
   }
 
   /**
-   * Reads the path values core wrote into {@code record}, before the field filter strips the raw
+   * Reads the path values core wrote into {@code row}, before the field filter strips the raw
    * keys. Only the values actually present are taken, so a response that did not ask for the
    * paths (a write's echo) is left alone.
    *
-   * @param record one response record
+   * @param row one response row
    * @return the values by API key, possibly empty
    */
-  Map<String, Object> capture(JSONObject record) {
-    if (byApiKey.isEmpty() || record == null) {
+  Map<String, Object> capture(JSONObject row) {
+    if (byApiKey.isEmpty() || row == null) {
       return Collections.emptyMap();
     }
     Map<String, Object> values = new HashMap<>();
     for (PathField field : byApiKey.values()) {
       String joined = field.joinedPath();
-      if (record.has(field.path)) {
-        values.put(field.apiKey, record.opt(field.path));
-      } else if (record.has(joined)) {
-        values.put(field.apiKey, record.opt(joined));
+      if (row.has(field.path)) {
+        values.put(field.apiKey, row.opt(field.path));
+      } else if (row.has(joined)) {
+        values.put(field.apiKey, row.opt(joined));
       }
-      if (field.isReference() && record.has(joined + IDENTIFIER_SUFFIX)) {
-        values.put(field.apiKey + IDENTIFIER_SUFFIX, record.opt(joined + IDENTIFIER_SUFFIX));
+      if (field.isReference() && row.has(joined + IDENTIFIER_SUFFIX)) {
+        values.put(field.apiKey + IDENTIFIER_SUFFIX, row.opt(joined + IDENTIFIER_SUFFIX));
       }
     }
     return values;
@@ -526,16 +545,16 @@ public final class NeoPropertyPaths {
   /**
    * Writes back what {@link #capture} took, under the API keys.
    *
-   * @param record   the record, after field filtering
+   * @param row   the row, after field filtering
    * @param captured what {@link #capture} returned for it
    */
-  void restore(JSONObject record, Map<String, Object> captured) {
-    if (record == null || captured.isEmpty()) {
+  void restore(JSONObject row, Map<String, Object> captured) {
+    if (row == null || captured.isEmpty()) {
       return;
     }
     for (Map.Entry<String, Object> entry : captured.entrySet()) {
       try {
-        record.put(entry.getKey(), entry.getValue() == null ? JSONObject.NULL : entry.getValue());
+        row.put(entry.getKey(), entry.getValue() == null ? JSONObject.NULL : entry.getValue());
       } catch (JSONException e) {
         log.warn("Could not write property-path value {}: {}", entry.getKey(), e.getMessage());
       }

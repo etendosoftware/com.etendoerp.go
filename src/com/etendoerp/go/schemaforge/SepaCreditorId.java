@@ -67,7 +67,7 @@ public final class SepaCreditorId {
   private static final int NATIONAL_ID_START = 7;
 
   private static final Pattern CI_FORMAT = Pattern
-      .compile("^[A-Z]{2}[0-9]{2}[A-Z0-9]{3}[A-Z0-9]{1,28}$");
+      .compile("^[A-Z]{2}\\d{2}[A-Z0-9]{3}[A-Z0-9]{1,28}$");
   private static final Pattern COUNTRY_FORMAT = Pattern.compile("^[A-Z]{2}$");
   private static final Pattern SUFFIX_FORMAT = Pattern.compile("^[A-Z0-9]{3}$");
   private static final Pattern NATIONAL_ID_FORMAT = Pattern.compile("^[A-Z0-9]{1,28}$");
@@ -139,7 +139,10 @@ public final class SepaCreditorId {
 
   /**
    * Upper-cases and strips every non-alphanumeric character (spaces, dashes, dots). Same
-   * normalisation {@code SEPAUtil} applies to the tax id. Never returns null.
+   * normalisation {@code SEPAUtil} applies to the tax id.
+   *
+   * @param raw the value as typed, may be {@code null}
+   * @return the normalised value, never {@code null} (empty for {@code null})
    */
   public static String normalize(String raw) {
     if (raw == null) {
@@ -148,7 +151,12 @@ public final class SepaCreditorId {
     return NON_ALPHANUMERIC.matcher(raw).replaceAll("").toUpperCase(Locale.ROOT);
   }
 
-  /** Normalises {@code raw} and validates format, then check digits. */
+  /**
+   * Normalises {@code raw} and validates format, then check digits.
+   *
+   * @param raw the creditor identifier as typed, may be {@code null}
+   * @return the outcome, with the normalised value and, when invalid, the reason
+   */
   public static Result validate(String raw) {
     String ci = normalize(raw);
     if (ci.isEmpty()) {
@@ -164,7 +172,12 @@ public final class SepaCreditorId {
     return new Result(ci, null, null);
   }
 
-  /** Shorthand for {@code validate(raw).isValid()}. */
+  /**
+   * Shorthand for {@code validate(raw).isValid()}.
+   *
+   * @param raw the creditor identifier as typed, may be {@code null}
+   * @return whether it is a valid creditor identifier
+   */
   public static boolean isValid(String raw) {
     return validate(raw).isValid();
   }
@@ -174,6 +187,9 @@ public final class SepaCreditorId {
    * normalised: {@code 98 - (nationalId + country + "00" mod 97)}, zero-padded. Always in
    * {@code 02..98}.
    *
+   * @param country the country ISO code, two upper-case letters
+   * @param nationalId the national identifier, 1-28 upper-case alphanumerics
+   * @return the two check digits
    * @throws IllegalArgumentException
    *           when {@code country} is not two letters or {@code nationalId} is not 1-28
    *           alphanumerics
@@ -204,6 +220,9 @@ public final class SepaCreditorId {
    * {@code country + checkDigits + suffix + taxId}. Every part is normalised first; a blank
    * {@code suffix} becomes {@link #DEFAULT_SUFFIX}.
    *
+   * @param countryIso the country ISO code
+   * @param suffix the creditor business code, blank for {@link #DEFAULT_SUFFIX}
+   * @param taxId the tax id (national identifier)
    * @return the CI, or null when the parts cannot form one (blank tax id — the same answer
    *         {@code SEPAUtil} gives — or a country that is not two letters, a suffix that is not
    *         three alphanumerics, a tax id longer than 28 characters)
@@ -222,30 +241,50 @@ public final class SepaCreditorId {
     return country + computeCheckDigits(country, nationalId) + code + nationalId;
   }
 
-  // ---------------------------------------------------------------------------
-  // Split helpers — callers pass a normalised CI that passed the format check;
-  // anything shorter than the part asked for yields null.
-  // ---------------------------------------------------------------------------
+  /*
+   * Split helpers. Callers pass a normalised CI that passed the format check, and anything
+   * shorter than the part asked for yields null.
+   */
 
-  /** Positions 0-1, the country ISO code. */
+  /**
+   * Positions 0-1, the country ISO code.
+   *
+   * @param ci a normalised creditor identifier, may be {@code null}
+   * @return the country code, or {@code null} when {@code ci} is too short
+   */
   public static String countryOf(String ci) {
     return ci == null || ci.length() < CHECK_DIGITS_START ? null
         : ci.substring(0, CHECK_DIGITS_START);
   }
 
-  /** Positions 2-3, the check digits. */
+  /**
+   * Positions 2-3, the check digits.
+   *
+   * @param ci a normalised creditor identifier, may be {@code null}
+   * @return the check digits, or {@code null} when {@code ci} is too short
+   */
   public static String checkDigitsOf(String ci) {
     return ci == null || ci.length() < SUFFIX_START ? null
         : ci.substring(CHECK_DIGITS_START, SUFFIX_START);
   }
 
-  /** Positions 4-6, the creditor business code (suffix). */
+  /**
+   * Positions 4-6, the creditor business code (suffix).
+   *
+   * @param ci a normalised creditor identifier, may be {@code null}
+   * @return the suffix, or {@code null} when {@code ci} is too short
+   */
   public static String suffixOf(String ci) {
     return ci == null || ci.length() < NATIONAL_ID_START ? null
         : ci.substring(SUFFIX_START, NATIONAL_ID_START);
   }
 
-  /** Positions 7+, the national identifier (tax id). */
+  /**
+   * Positions 7+, the national identifier (tax id).
+   *
+   * @param ci a normalised creditor identifier, may be {@code null}
+   * @return the national identifier, or {@code null} when {@code ci} is too short
+   */
   public static String nationalIdOf(String ci) {
     return ci == null || ci.length() <= NATIONAL_ID_START ? null
         : ci.substring(NATIONAL_ID_START);

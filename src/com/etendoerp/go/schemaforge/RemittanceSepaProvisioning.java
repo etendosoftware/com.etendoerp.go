@@ -97,6 +97,9 @@ public final class RemittanceSepaProvisioning {
   public static final String PARAM_SCHEME = "ETGO_SEPA_SCHEME";
   /** HQL parameter the {@link #activeRemittanceLinkExists} fragment binds the marker name to. */
   public static final String PARAM_MARKER = "marker";
+  /** HQL parameter names shared by the lookups of this class. */
+  private static final String Q_CLIENT = "client";
+  private static final String Q_ACCOUNT = "account";
 
   /** Marker value of the SEPA direct debit (collection) type. */
   public static final String SCHEME_CORE = "CORE";
@@ -177,7 +180,7 @@ public final class RemittanceSepaProvisioning {
     OBQuery<PaymentExecutionProcess> query = OBDal.getInstance().createQuery(
         PaymentExecutionProcess.class,
         "as p where p.client.id = :client and p.javaClassName = :className order by p.creationDate");
-    query.setNamedParameter("client", client.getId());
+    query.setNamedParameter(Q_CLIENT, client.getId());
     query.setNamedParameter("className", IN_REMITTANCE_CLASS);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -224,7 +227,7 @@ public final class RemittanceSepaProvisioning {
     // the AD default of REM_Remittance.C_DocType_ID only offers active ones.
     OBQuery<DocumentType> query = OBDal.getInstance().createQuery(DocumentType.class,
         "as d where d.client.id = :client and d.documentCategory = :category and d.active = true");
-    query.setNamedParameter("client", client.getId());
+    query.setNamedParameter(Q_CLIENT, client.getId());
     query.setNamedParameter("category", DOC_CATEGORY_REMITTANCE);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -299,7 +302,7 @@ public final class RemittanceSepaProvisioning {
   private static boolean documentTypeNameTaken(Client client, Organization star, String name) {
     OBQuery<DocumentType> query = OBDal.getInstance().createQuery(DocumentType.class,
         "as d where d.client.id = :client and d.organization.id = :org and d.name = :name");
-    query.setNamedParameter("client", client.getId());
+    query.setNamedParameter(Q_CLIENT, client.getId());
     query.setNamedParameter("org", star.getId());
     query.setNamedParameter("name", name);
     query.setFilterOnReadableClients(false);
@@ -312,7 +315,7 @@ public final class RemittanceSepaProvisioning {
   private static GLCategory defaultGlCategory(Client client) {
     OBQuery<GLCategory> query = OBDal.getInstance().createQuery(GLCategory.class,
         "as g where g.client.id = :client order by g.default desc, g.name");
-    query.setNamedParameter("client", client.getId());
+    query.setNamedParameter(Q_CLIENT, client.getId());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
@@ -421,7 +424,7 @@ public final class RemittanceSepaProvisioning {
             + "order by p.creationDate");
     query.setNamedParameter("name", PARAM_SCHEME);
     query.setNamedParameter("scheme", scheme);
-    query.setNamedParameter("client", client.getId());
+    query.setNamedParameter(Q_CLIENT, client.getId());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setFilterOnActive(false);
@@ -511,9 +514,9 @@ public final class RemittanceSepaProvisioning {
         + " and exists (select 1 from " + RemittanceTypeParameter.ENTITY_NAME + " as p"
         + "   where p.remittanceType.id = r.remittanceType.id and p.name = :marker)";
     Long count = OBDal.getInstance().getSession().createQuery(hql, Long.class)
-        .setParameter("account", account.getId())
+        .setParameter(Q_ACCOUNT, account.getId())
         .setParameterList("open", OPEN_STATUSES)
-        .setParameter("marker", PARAM_SCHEME)
+        .setParameter(PARAM_MARKER, PARAM_SCHEME)
         .uniqueResult();
     return count != null ? count : 0L;
   }
@@ -582,7 +585,7 @@ public final class RemittanceSepaProvisioning {
     String hql = "select count(a.id) from " + FIN_FinancialAccount.ENTITY_NAME + " as a"
         + " where a.id = :account and " + activeRemittanceLinkExists("a");
     Long count = OBDal.getInstance().getSession().createQuery(hql, Long.class)
-        .setParameter("account", account.getId())
+        .setParameter(Q_ACCOUNT, account.getId())
         .setParameter(PARAM_MARKER, PARAM_SCHEME)
         .uniqueResult();
     return count != null && count > 0;
@@ -629,7 +632,7 @@ public final class RemittanceSepaProvisioning {
         + PARAM_MARKER + ")";
     List<FinAccPaymentMethod> links = OBDal.getInstance().getSession()
         .createQuery(hql, FinAccPaymentMethod.class)
-        .setParameter("account", account.getId())
+        .setParameter(Q_ACCOUNT, account.getId())
         .setParameter(PARAM_MARKER, PARAM_SCHEME)
         .list();
     for (FinAccPaymentMethod link : links) {
@@ -699,7 +702,7 @@ public final class RemittanceSepaProvisioning {
     }
     OBQuery<FinAccPaymentMethod> query = OBDal.getInstance().createQuery(FinAccPaymentMethod.class,
         "as l where l.account.id = :account and l.paymentMethod.id = :method");
-    query.setNamedParameter("account", account.getId());
+    query.setNamedParameter(Q_ACCOUNT, account.getId());
     query.setNamedParameter("method", method.getId());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);

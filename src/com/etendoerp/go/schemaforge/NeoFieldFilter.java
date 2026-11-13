@@ -342,23 +342,17 @@ public class NeoFieldFilter {
       // collected apart, never into the column maps or the writable set.
       String qualifier = sfField.getJavaQualifier();
       String propertyPath = propertyPathOf(sfField);
+      Property prop = propertyPath == null
+          ? resolveProperty(sfField, dalEntity, dalEntityName)
+          : null;
       if (propertyPath != null) {
-        if (Boolean.TRUE.equals(sfField.isIncluded())) {
-          pathBuilder.add(qualifier, propertyPath);
-        }
-        continue;
+        collectPropertyPath(pathBuilder, sfField, qualifier, propertyPath);
       }
-      Property prop = resolveProperty(sfField, dalEntity, dalEntityName);
       if (prop == null) {
         continue;
       }
-
       String propName = prop.getName();
-
-      if (qualifier != null && !qualifier.equals(propName)) {
-        apiKeyMap.put(qualifier, propName);
-        propToApiMap.put(propName, qualifier);
-      }
+      mapApiKey(apiKeyMap, propToApiMap, qualifier, propName);
 
       if (Boolean.TRUE.equals(sfField.isIncluded())) {
         included.add(propName);
@@ -376,6 +370,23 @@ public class NeoFieldFilter {
           rejectableOnCreate.add(propName);
         }
       }
+    }
+  }
+
+  /** Adds an included property-path field to {@code pathBuilder}, under its API key. */
+  private static void collectPropertyPath(NeoPropertyPaths.Builder pathBuilder, SFField sfField,
+      String apiKey, String propertyPath) {
+    if (Boolean.TRUE.equals(sfField.isIncluded())) {
+      pathBuilder.add(apiKey, propertyPath);
+    }
+  }
+
+  /** Maps a field's API key to its DAL property, both ways, when they differ. */
+  private static void mapApiKey(Map<String, String> apiKeyMap, Map<String, String> propToApiMap,
+      String qualifier, String propName) {
+    if (qualifier != null && !qualifier.equals(propName)) {
+      apiKeyMap.put(qualifier, propName);
+      propToApiMap.put(propName, qualifier);
     }
   }
 

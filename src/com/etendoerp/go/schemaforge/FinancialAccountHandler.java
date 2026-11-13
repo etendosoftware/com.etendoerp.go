@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -41,7 +42,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
-import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
@@ -105,14 +105,14 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String METHOD_DELETE = "DELETE";
 
   private static final String FIELD_NAME = "name";
-  private static final String FIELD_CURRENCY = "currency";
+  static final String FIELD_CURRENCY = "currency";
   /** Package-private (not private) so {@link FinancialAccountCountrySupport}'s
    *  {@code rawEffectiveType}/{@code effectiveIban} resolvers read the same body keys this class
    *  writes, instead of re-declaring the literals on their side. */
   static final String FIELD_TYPE = "type";
   static final String FIELD_IBAN = "iBAN";
   private static final String FIELD_SWIFT_CODE = "swiftCode";
-  private static final String FIELD_COUNTRY = "country";
+  static final String FIELD_COUNTRY = "country";
   /** ETP-5473 country refusals: {@code AD_MESSAGE} values of this module, answered in the request
    *  language through {@link NeoMessageText} (English base text {@code "Country is required"} /
    *  {@code "Invalid country"}, Spanish in {@code messages/neo_hints_es.properties}) and published
@@ -208,7 +208,7 @@ public class FinancialAccountHandler implements NeoHandler {
    *  the new defaults keys, since {@code afterHandle}'s DEFAULTS branch has no entity guard). */
   private static final String ENTITY_ACCOUNT = "account";
   private static final String KEY_DEFAULTS = "defaults";
-  private static final String SUFFIX_IDENTIFIER = "$_identifier";
+  static final String SUFFIX_IDENTIFIER = "$_identifier";
   /** The &le;45-country IBAN-metadata catalog (ETP-4896), attached as a sibling of {@code
    *  defaults} on the {@code account} entity's defaults response — see
    *  {@link FinancialAccountCountrySupport#buildIbanRules}. */
@@ -290,19 +290,9 @@ public class FinancialAccountHandler implements NeoHandler {
     if (!SPEC.equals(context.getSpecName())) {
       return null;
     }
-    if (ENTITY_ACCOUNT.equals(context.getEntityName())) {
-      NeoResponse movement = movementActions.handle(context);
-      if (movement != null) {
-        return movement;
-      }
-      NeoResponse transfer = transferActions.handle(context);
-      if (transfer != null) {
-        return transfer;
-      }
-      NeoResponse bankConnection = bankConnectionActions.handle(context);
-      if (bankConnection != null) {
-        return bankConnection;
-      }
+    NeoResponse accountAction = accountAction(context);
+    if (accountAction != null) {
+      return accountAction;
     }
     if (!NeoEndpointTypes.isCrud(context)) {
       // Button actions, callouts, display logic and selectors are not account writes: let the
@@ -319,7 +309,7 @@ public class FinancialAccountHandler implements NeoHandler {
         NeoResponse refusal =
             validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
         if (refusal == null) {
-          markLeavingBank(context);
+          remittanceSupport.markLeavingBank(this, context);
         }
         return refusal;
       }
@@ -348,8 +338,24 @@ public class FinancialAccountHandler implements NeoHandler {
   // Post-hook: auto-assign default payment methods by account type on create
   // ---------------------------------------------------------------------------
 
-  private static boolean isUpdateMethod(String method) {
-    return METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
+  /**
+   * The account's own declared actions (movements, funds transfers, bank connection), tried in
+   * that order; {@code null} when the request is none of them or is not on the {@code account}
+   * entity.
+   */
+  private NeoResponse accountAction(NeoContext context) {
+    if (!ENTITY_ACCOUNT.equals(context.getEntityName())) {
+      return null;
+    }
+    List<Function<NeoContext, NeoResponse>> chain = List.of(movementActions::handle,
+        transferActions::handle, bankConnectionActions::handle);
+    for (Function<NeoContext, NeoResponse> actions : chain) {
+      NeoResponse answer = actions.apply(context);
+      if (answer != null) {
+        return answer;
+      }
+    }
+    return null;
   }
 
   /**
@@ -416,12 +422,13 @@ public class FinancialAccountHandler implements NeoHandler {
     if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return injectHasTransactions(context);
     }
-    if (isUpdateMethod(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+    if (FinancialAccountSupport.isUpdateMethod(context.getHttpMethod())
+        && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       if (!ENTITY_ACCOUNT.equals(context.getEntityName())) {
         return null;
       }
       addImportFromAdvisory(context);
-      deactivateRemittanceLinksAfterLeavingBank(context);
+      remittanceSupport.deactivateLinksAfterUpdate(this, context);
       return null;
     }
     if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
@@ -451,78 +458,9 @@ public class FinancialAccountHandler implements NeoHandler {
     // payment methods, accounting defaults), best-effort. The remittance links apply to Bank
     // accounts only, while the sepa-remittances flag is on, and their client setup already ran in
     // the pre-hook (validateAndEnrichCreate), in the account's own transaction.
-    linkRemittanceMethods(context, extractCreatedId(context));
+    remittanceSupport.linkAfterCreate(this, context, extractCreatedId(context));
     // Keep the original CRUD response untouched.
     return null;
-  }
-
-  /**
-   * ETP-6148: records on the context that this update takes a Bank account to another type, so
-   * {@link #deactivateRemittanceLinksAfterLeavingBank} deactivates its remittance links once the
-   * update succeeded. Nothing is written here: the generic CRUD may still refuse the update
-   * ({@code missing_updated}, a stale record), and the pre-hook does not roll back.
-   */
-  private void markLeavingBank(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null || !body.has(FIELD_TYPE)) {
-      return;
-    }
-    FIN_FinancialAccount stored = loadAccount(context.getRecordId());
-    if (stored != null && remittanceSupport.leavesBank(stored,
-        normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored)))) {
-      context.setAttribute(ATTR_LEAVING_BANK, Boolean.TRUE);
-    }
-  }
-
-  /**
-   * ETP-6148: after an update that took a Bank account to another type succeeded, deactivates its
-   * remittance-method links ({@link FinancialAccountRemittanceSupport#deactivateAfterLeavingBank}).
-   * Outside a batch the update is committed by now, so a failure is logged, not answered: the
-   * account keeps active links, which the remittance window no longer offers (it is not Bank).
-   */
-  private void deactivateRemittanceLinksAfterLeavingBank(NeoContext context) {
-    NeoResponse prev = context.getPreviousResult();
-    if (!Boolean.TRUE.equals(context.getAttribute(ATTR_LEAVING_BANK)) || prev == null
-        || prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
-      return;
-    }
-    try {
-      enterAdminMode();
-      FIN_FinancialAccount account = loadAccount(context.getRecordId());
-      if (account != null) {
-        refreshAccount(account);
-      }
-      remittanceSupport.deactivateAfterLeavingBank(account);
-    } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to deactivate the remittance links of {}",
-          context.getRecordId(), e);
-    } finally {
-      exitAdminMode();
-    }
-  }
-
-  /**
-   * ETP-6148: after a successful create, links a new Bank account to the two SEPA remittance
-   * payment methods while the {@code sepa-remittances} flag is on
-   * ({@link FinancialAccountRemittanceSupport#linkNewAccount}). Outside a batch the account is
-   * already committed, so a failure is logged, not answered: the account stays usable, without
-   * the remittance methods, and is then not offered by the remittance window.
-   */
-  private void linkRemittanceMethods(NeoContext context, String accountId) {
-    NeoResponse prev = context.getPreviousResult();
-    if (StringUtils.isBlank(accountId) || prev == null || prev.getHttpStatus() < 200
-        || prev.getHttpStatus() >= 300) {
-      return;
-    }
-    try {
-      enterAdminMode();
-      remittanceSupport.linkNewAccount(loadAccount(accountId));
-    } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to link the remittance methods of {}",
-          accountId, e);
-    } finally {
-      exitAdminMode();
-    }
   }
 
   /**
@@ -550,9 +488,9 @@ public class FinancialAccountHandler implements NeoHandler {
         defaults = new JSONObject();
         body.put(KEY_DEFAULTS, defaults);
       }
-      applyClientCurrencyDefault(defaults);
+      FinancialAccountSupport.applyClientCurrencyDefault(defaults);
       if (ENTITY_ACCOUNT.equals(context.getEntityName())) {
-        applyOrgCountryDefault(defaults);
+        FinancialAccountSupport.applyOrgCountryDefault(defaults, resolveOrgCountry());
         body.put(FIELD_COUNTRY_IBAN_RULES, FinancialAccountCountrySupport.buildIbanRules());
       }
       return NeoResponse.ok(body);
@@ -562,54 +500,6 @@ public class FinancialAccountHandler implements NeoHandler {
     } finally {
       exitAdminMode();
     }
-  }
-
-  /**
-   * Overwrites {@code defaults.currency} with the client's accounting-schema currency (e.g. EUR
-   * for GOClient). Verbatim behavior moved out of the former {@code injectClientCurrencyDefault}.
-   *
-   * <p>The {@code C_Currency_ID} column has no AD default-value expression, so
-   * {@code NeoDefaultsService}'s generic fallback ({@code resolveFirstComboOption}) picks
-   * whichever active currency sorts first alphabetically (AED) — a real, non-null value, so it
-   * is never left blank for the New Account Wizard to fill in itself. That column is shared by
-   * many core windows, so fixing this dictionary-wide would risk unrelated side effects; scoping
-   * the fix to this handler's post-hook only affects the financial-account spec's own defaults.
-   */
-  private void applyClientCurrencyDefault(JSONObject defaults) throws JSONException {
-    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
-        OBContext.getOBContext().getCurrentClient().getId()));
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-    crit.setMaxResults(1);
-    AcctSchema schema = (AcctSchema) crit.uniqueResult();
-    Currency clientCurrency = schema != null ? schema.getCurrency() : null;
-    if (clientCurrency == null) {
-      return;
-    }
-    defaults.put(FIELD_CURRENCY, clientCurrency.getId());
-    defaults.put(FIELD_CURRENCY + SUFFIX_IDENTIFIER, clientCurrency.getISOCode());
-  }
-
-  /**
-   * Sets {@code defaults.country} to the active organization's country (ETP-4896 requirement 1),
-   * mirroring the {@code currency} / {@code currency$_identifier} pair above so the frontend's
-   * defaults consumer needs no new shape. Never emits the AD-seeded {@code ISDEFAULT='Y'} country
-   * (United States, no IBAN metadata): {@link #resolveOrgCountry} only returns a usable value or
-   * {@code null}, and {@code null} here means the key is simply omitted rather than written as a
-   * plausible-but-wrong default.
-   */
-  private void applyOrgCountryDefault(JSONObject defaults) throws JSONException {
-    Country orgCountry = resolveOrgCountry();
-    if (orgCountry == null) {
-      return;
-    }
-    defaults.put(FIELD_COUNTRY, orgCountry.getId());
-    // ETP-5579: getIdentifier(), NOT getName() — same reason as ETP-5022 in
-    // ContactsLocationAddressHandler. getName() is the plain Hibernate getter and never consults
-    // C_Country_Trl ("Spain" for an es_ES user); getIdentifier() resolves the translation in the
-    // OBContext language. Country's identifier is the single Name column, so only the language
-    // of the text changes.
-    defaults.put(FIELD_COUNTRY + SUFFIX_IDENTIFIER, orgCountry.getIdentifier());
   }
 
   /**
@@ -919,25 +809,7 @@ public class FinancialAccountHandler implements NeoHandler {
     if (countryError != null) {
       return countryError;
     }
-    return validateTypeChange(body, id);
-  }
-
-  /**
-   * ETP-6148: a Bank account with open SEPA remittances cannot leave Bank
-   * ({@link FinancialAccountRemittanceSupport#checkTypeChange}). Loads the account only when the
-   * body carries the type, so an ordinary partial update never reaches the DAL here.
-   */
-  private NeoResponse validateTypeChange(JSONObject body, String id) {
-    if (!body.has(FIELD_TYPE)) {
-      return null;
-    }
-    FIN_FinancialAccount stored = loadAccount(id);
-    if (stored == null) {
-      return null;
-    }
-    String effectiveType =
-        normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
-    return remittanceSupport.checkTypeChange(stored, effectiveType);
+    return remittanceSupport.validateTypeChange(this, body, id);
   }
 
   // ---------------------------------------------------------------------------

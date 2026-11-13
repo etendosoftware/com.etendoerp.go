@@ -1462,22 +1462,22 @@ class NeoFieldFilterTest {
     @Test
     @DisplayName("a GET hands the path value back under the API key, never the raw keys")
     void getResponseCarriesTheApiKeys() throws Exception {
-      JSONObject record = new JSONObject()
+      JSONObject row = new JSONObject()
           .put("id", "LINE-1")
           .put("documentNo", "1001")
           .put(NeoPropertyPathsTestSupport.PATH_PARTNER, "BP-1")
           .put("paymentScheduleDetail$businessPartner$_identifier", "Acme");
       JSONObject response = new JSONObject().put("response",
-          new JSONObject().put("data", new JSONArray().put(record)));
+          new JSONObject().put("data", new JSONArray().put(row)));
 
       buildFilter().filterGetResponse(response);
 
-      assertEquals("BP-1", record.getString(NeoPropertyPathsTestSupport.KEY_PARTNER));
+      assertEquals("BP-1", row.getString(NeoPropertyPathsTestSupport.KEY_PARTNER));
       assertEquals("Acme",
-          record.getString(NeoPropertyPathsTestSupport.KEY_PARTNER + "$_identifier"));
-      assertEquals("1001", record.getString("documentNo"));
-      assertFalse(record.has(NeoPropertyPathsTestSupport.PATH_PARTNER));
-      assertFalse(record.has("paymentScheduleDetail$businessPartner$_identifier"));
+          row.getString(NeoPropertyPathsTestSupport.KEY_PARTNER + "$_identifier"));
+      assertEquals("1001", row.getString("documentNo"));
+      assertFalse(row.has(NeoPropertyPathsTestSupport.PATH_PARTNER));
+      assertFalse(row.has("paymentScheduleDetail$businessPartner$_identifier"));
     }
 
     @Test

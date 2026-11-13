@@ -77,6 +77,11 @@ import org.openbravo.module.remittance.RemittanceType;
  * every query and its parameters.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.RemittanceHeaderWrites
+ * @covers com.etendoerp.go.schemaforge.RemittanceHeaderSelectors
+ * @covers com.etendoerp.go.schemaforge.RemittanceNameCallout
+ * @covers com.etendoerp.go.schemaforge.RemittanceSepaFileDataAction
+ * @covers com.etendoerp.go.schemaforge.RemittanceRequestParams
  */
 class RemittanceHeaderHandlerTest {
 
