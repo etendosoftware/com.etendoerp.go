@@ -691,6 +691,11 @@ public class PortalServlet extends HttpBaseServlet {
       // the MCP uses and store it as the main attachment (ETP-6209). Any failure answers the same
       // 404, and the page shows the data sheet.
       attachment = PortalPrintable.renderAndFind(validated, kind, document);
+    } else if (attachment != null && PortalPrintable.isStale(kind, parts[1])) {
+      // The stored printable predates the document (a confirmed decision changed the quotation's
+      // status and notes, Part C): render it again; if that fails, the stored one is still served.
+      Attachment fresh = PortalPrintable.renderAndFind(validated, kind, document);
+      attachment = fresh != null ? fresh : attachment;
     }
     if (attachment == null) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);

@@ -29,6 +29,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.NeoAttachmentTarget;
+import com.etendoerp.go.schemaforge.NeoDocumentPdf;
 import com.etendoerp.go.schemaforge.NeoPdfSourceConfig;
 import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoPrintableRenderer;
@@ -134,6 +136,28 @@ final class PortalPrintable {
       log.warn("[portal] {}/{}: the PDF render failed: {}", kind.name(), document.getId(),
           e.getClass().getSimpleName());
       return null;
+    }
+  }
+
+  /**
+   * Whether the document's stored PDF predates the document: a confirmed portal decision (Part C)
+   * moves the quotation's {@code updated}, and its stored printable must not be served as it was.
+   * The app's own freshness rule ({@code NeoDocumentPdf#isStoredStale}); never renders, never
+   * throws (a failed check reads as "not stale", the stored file is served as before).
+   */
+  static boolean isStale(PortalDocumentKind kind, String documentId) {
+    try {
+      SFEntity entity = printableEntity(kind);
+      if (entity == null) {
+        return false;
+      }
+      NeoAttachmentTarget target = NeoAttachmentTarget.resolve(entity.getETGOSFSpec(), entity,
+          documentId, false);
+      return NeoDocumentPdf.isStoredStale(target, entity);
+    } catch (RuntimeException e) {
+      log.debug("[portal] {}/{}: the PDF freshness check failed: {}", kind.name(), documentId,
+          e.getClass().getSimpleName());
+      return false;
     }
   }
 
