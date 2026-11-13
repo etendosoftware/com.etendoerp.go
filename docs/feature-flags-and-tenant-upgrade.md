@@ -187,6 +187,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
 | `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
 | `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
+| `sepa-remittances` | `etendo.go.flags.sepa-remittances` | `ETGO_FLAG_SEPA_REMITTANCES` | absent ⇒ **`false`** (no SEPA remittances: settings and the `remittance` spec refused, mandate keys dropped; per account on a hosted arm only; TTL 2027-03-31, provisional) — see its section below |
 | `psd2-statement-import-settings` | `etendo.go.flags.psd2-statement-import-settings` | `ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS` | absent ⇒ **`false`** (PSD2 import settings, `maxFetchInterval` on `accounts` and deleting statements of connected accounts all as before ETP-6151; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
@@ -838,6 +839,94 @@ the flag gate from `InvoiceInboxHeaderHandler` (the handler stays: it serves `di
 `InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
 section and the configuration-table row, and delete the hosted setting. Keep the registry feature
 entry in `etendo_schema_forge`.
+
+### `sepa-remittances` (ETP-6148) — backend-only, per account, off by default
+
+Gates the **behaviour** of SEPA remittances (epic ETP-3504), never their schema. Positive polarity:
+`true` = remittances are enabled. Default and every failure = `false`.
+
+**What it gates:**
+- the remittance provisioning of a new **Bank** financial account: on, a Bank account created
+  through `financial-account` (REST, batch, MCP — `FinancialAccountHandler` with
+  `FinancialAccountRemittanceSupport`), the bank-connection `createAndLink`, or the onboarding sample
+  data (`OnboardingRemittanceSetupService`, flag read for the receiving account) gets the two
+  remittance payment methods, running the lazy per-client provisioning
+  (`RemittanceSepaProvisioning.ensureClient`) on first use; off, the account is created as before.
+  There is no per-account switch and no backfill: accounts created before, or with the flag off,
+  never get the methods, and the remittance window does not offer them
+  (`ETGO_RemittanceAccountNotAllowed`). Cash and Card accounts never get them;
+- the default SEPA mandate of a customer (`EM_OBSEPAD_Mandate_Identifier` / `_Date`, owned by
+  `org.openbravo.sepa.iso20022.coredirectdebit.customertobank`), applied by `BusinessPartnerHandler`
+  through `ContactSepaMandateDefaults` on a contacts `businessPartner` create or update: on, a
+  customer created with a blank mandate stores its tax ID as mandate ID and today as signature
+  date, any later save of a customer fills each mandate field empty in the database and not sent
+  (so existing contacts get it when next saved; an explicit clear holds only for that save; a
+  stored value is never overwritten), a value the caller sends wins, and the DEFAULTS of a new contact prefill the date (`neo-headless.md`
+  §4.6c); **off, the two keys are dropped from the
+  write body** (never persisted, never refused — the `structured-address-for-sepa` contract, not a
+  403, because the MCP schema still advertises the two fields while the flag is off);
+- the `remittance` spec (`RemittanceHeaderHandler`, `RemittanceLinesHandler`), its `sepaFileData`
+  read action included, refused with `403 feature_disabled` when off;
+- `SFWindowAccessMap`, which publishes `capabilities.sepaRemittances` for the UI (menu entry, page
+  guard, contact mandate section).
+
+**Not gated:** the messages, the DAL observer `RemittanceMethodLinkObserver` (a remittance
+payment method can only be linked to a Bank account, on every channel including Classic), and the
+refusal to change a Bank account with open remittances to another type
+(`ETGO_RemittanceAccountTypeChangeBlocked`: the remittances exist whatever the flag says now) and
+the deactivation of its remittance-method links when it leaves Bank with none open. An
+observer cannot read a per-account flag, and remittance methods only exist where the flag was on.
+The module adds no column for remittances.
+The remittance status is not this module's: `REM_REMITTANCE.REMITTANCE_STATUS` (list
+`REM_RemittanceStatus`: `PE` pending, `PR` processed, `CT`/`PT` collected/paid, `CP`/`PP`
+partially, `AN` voided) is the remittance module's `REMITTANCE_STATUS` (added by ETP-6148), owned
+by `org.openbravo.module.remittance` and set by its own processes at every transition. It is not
+backfilled: a remittance that existed before the column keeps the default `'PE'` until one of
+REM's transitions (process, reactivate, settle, return or their undo) refreshes it.
+
+**Classic data, no marker columns.** Everything else reuses Classic's remittance model. The
+provisioned remittance types carry the type parameter `ETGO_SEPA_SCHEME` = `CORE` / `SCT`; a payment
+method is a remittance method when such a type points at it — that is how provisioning finds its own
+rows again (never by name), how the observer recognises a remittance link, and how the remittance
+selectors filter. The CORE type also gets the OBSEPAD parameter `Creditor_Business_Code` = `000`, so
+the SEPA XML (another team) can build the creditor identifier from the organization's tax ID with
+`SepaCreditorId` — the identifier is not stored anywhere. The remittance header's `sepaFileData`
+action computes it the same way, reading that parameter (`000` when missing or blank).
+
+**The one gate.** `SepaRemittancesFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
+`GoFeatureFlags.FLAG_SEPA_REMITTANCES`. Same API as `InvoiceInboxFlag`: `isEnabled()` (request user's
+account and tenant), `isEnabled(accountEmail, clientId)` and `isEnabledFor(accountEmail)` (used by
+`SFWindowAccessMap`). Evaluate at request entry.
+
+**Targeting.** Per account on the hosted arms, exactly as `invoice-inbox`: the context carries the
+account email (targeting key, `Email` and lowercase `email`) and `clientId`; write Datadog rules on
+the lowercase `email` attribute only. The browser has no flag key: it reads
+`capabilities.sepaRemittances`.
+
+**Turning it on locally:** `etendo.go.flags.sepa-remittances=true` in `Openbravo.properties` (or
+`-Detendo.go.flags.sepa-remittances=true`, or `ETGO_FLAG_SEPA_REMITTANCES=true`), with no
+Datadog/ConfigCat arm selected, then restart Tomcat.
+
+**Rollout prerequisite:** create the `sepa-remittances` **boolean** setting in Datadog
+Experimental/Production with default `false` before targeting anyone; an undefined key resolves to
+`false`, so a missing setting looks exactly like "off".
+
+**Module dependency (decision).** `com.etendoerp.go` depends on `org.openbravo.module.remittance`,
+`org.openbravo.sepa.iso20022` and `org.openbravo.sepa.iso20022.coredirectdebit.customertobank` in
+`build.gradle` only, with no `AD_MODULE_DEPENDENCY` row (the same as its PSD2, SII and Verifactu
+extensions). The floor (5.1.1) does not yet guarantee the remittance module's `REMITTANCE_STATUS`
+(added by ETP-6148), which `com.etendoerp.go` reads and filters by: when the remittance module is
+published with that column, raise the range to that version. The status is set by REM's own processes; code outside REM
+that writes settlement or return rows directly must call `RemittanceStatusUtil.refresh` itself.
+
+**Retirement (TTL 2027-03-31, provisional until confirmed with product):** remittances then ship to
+everyone. Unwrap every call to `SepaRemittancesFlag`, delete it and its test, delete
+`FLAG_SEPA_REMITTANCES` from `GoFeatureFlags` and the `SEPA_REMITTANCES` capability from
+`SFWindowAccessMap`, remove this section and the configuration-table row, and delete the hosted
+setting. Keep the registry feature entry in `etendo_schema_forge`. Retiring the flag does not link
+the Bank accounts created before (or with the flag off): they still answer
+`ETGO_RemittanceAccountNotAllowed` in the remittance window. Whether they get a data-fix then is a
+product decision; none exists today.
 
 ### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
 

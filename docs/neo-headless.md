@@ -111,11 +111,12 @@ Represents a column (for window specs) or a process parameter (for process specs
 |--------|------|-------|
 | `ETGO_SF_FIELD_ID` | VARCHAR (PK) | UUID |
 | `ETGO_SF_ENTITY_ID` | VARCHAR (FK) | Parent entity. |
-| `AD_COLUMN_ID` | VARCHAR (FK) | Links to AD_Column. Null for process specs. |
+| `AD_COLUMN_ID` | VARCHAR (FK) | Links to AD_Column. Null for process specs and for a property-path field. |
 | `ISINCLUDED` | CHAR(1) | Only included fields participate in selectors and actions. |
 | `ISREADONLY` | CHAR(1) | Field-level read-only flag. |
 | `DEFAULTVALUE` | VARCHAR | Default value override. For process specs, stores the parameter default. |
-| `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
+| `JAVA_QUALIFIER` | VARCHAR | For a window field: its API key when it differs from the DAL property (required on a property-path field). For process specs: stores the parameter DB column name. |
+| `PROPERTY_PATH` | VARCHAR(255) | Dotted DAL path, relative to the entity, of a read-only field whose value lives on a related record (ETP-6148, §4.3a). Null for a column field. Unique per entity (`ETGO_SF_FIELD_ENT_PATH_UQ`). |
 | `VISIBILITY` | VARCHAR | Curated `editable`/`readOnly`/`system`/`discarded`. Frequently `NULL`; the REST layer does not gate on it, the MCP does. See §4.12.6. |
 | `ISBUSINESSCRITICAL` | CHAR(1) | Marks the field part of the entity's curated summary. |
 | `SEQNO` | NUMERIC | Display/processing order. |
@@ -1452,6 +1453,67 @@ classification.)
   others carry on) also reaches, so every channel behaves the same; MCP reads `status >= 400` and
   the flat body, so the 422 needs no change there. No divergence to declare in §4.12.9.
 
+### 4.3a Property-path fields (ETP-6148)
+
+A **property-path field** shows a value of a related record, reached through a dotted DAL path
+from the entity — the NEO form of a Classic `AD_Field.Property` field. Example, on the remittance
+lines (`REM_RemittanceLine`): `paymentScheduleDetail.invoicePaymentSchedule.invoice.documentNo`
+(invoice number), `paymentScheduleDetail.businessPartner` (customer),
+`paymentScheduleDetail.invoicePaymentSchedule.expectedDate` (due date), with no column added to
+the line table.
+
+**Declaration.** An `ETGO_SF_FIELD` row with `PROPERTY_PATH` set, `AD_COLUMN_ID` **null**, and its
+API key in `JAVA_QUALIFIER` (required). The path may come from a Classic `AD_Field.Property` or be
+declared only in `decisions.json`; the row is the same. `AD_COLUMN_ID` stays null on purpose: some
+thirty readers of `ETGO_SF_FIELD` (defaults, selectors, mandatory checks, callouts, the MCP schema
+and write gate) treat a row's column as "this column's field", and already skip a row without one.
+Push keys the row by `<spec>/<ad_tab_id>/path:<PROPERTY_PATH>`, so two paths sharing their first
+step coexist.
+
+**Validation** (`NeoPropertyPaths`, at filter build; a failing row is skipped with a WARN log,
+never an error to the caller): every step must exist, every step but the last must be a
+many-to-one reference, none may be a collection; the API key must not be a property of the entity
+nor another field's key. Only included rows are served.
+
+**Read** (REST GET list and by id, `etendo_list`, `etendo_get`): the paths are added to core's
+`_extraProperties`, and each value comes back under the API key — `apiKey` for a value
+(a date as `yyyy-MM-dd`), `apiKey` + `apiKey$_identifier` for a reference, like any foreign key.
+Core writes a reference's id under the dotted key (`a.b.c`) and everything else under the
+`$`-joined one (`a$b$c`); NEO reads both and strips the raw keys.
+
+**Filter, sort, distinct, summary.** The caller uses the API key only. NEO rewrites it to the
+`$`-joined path in the grid `criteria` (`fieldName`, any nesting), `_sortBy` (`-` and `name desc`
+kept), `_summary` keys and `?_distinct=`. `apiKey$_identifier` maps to `path$_identifier` (text
+filter on the reference's identifier). A reference sorts by its identifier. Whenever it rewrites
+one of them, NEO also sets `_use_alias=true`: core's `AdvancedQueryBuilder` turns the path into
+left outer joins (wherever a step is optional) **only in alias mode**; without it the join is
+implicit, i.e. inner, and a row whose path is broken (a remittance line from an order has no
+invoice) silently disappears from the sorted or filtered list. The REST list always runs in alias
+mode (its where clause); an `etendo_list` with an `orderBy` and no filter did not, which is why the
+flag is set here, for every caller. `_distinct` projects
+through the path and offers the values of the property it ends on.
+
+**Write.** Never writable, on every method. REST: the key is dropped from the body and logged by
+the read-only warning (ETP-5556), like any read-only field. MCP: `etendo_create`/`etendo_update`
+refuse it with 422 `read_only_field`, like any read-only field.
+
+**MCP.** `etendo_schema` lists each one with `readOnly:true`, `visibility:"readOnly"`, the `type`
+and `label` of the column the path ends on, and `propertyPath`. `etendo_list` filters accept the
+key with the usual operators. **Known limitation, pinned by a test:** an MCP filter is a
+where-clause fragment, so the path is joined implicitly (inner) there, not left-joined as in the
+REST grid. That drops a row whose path is broken, which gives the same rows as REST only because
+every MCP operator today (equality, `gt`/`gte`/`lt`/`lte`, `between`, `contains`, `in`) is false on
+a null value. Adding an operator that can match null (`isNull`, `notEqual`, `notIn`) to the MCP
+filters requires moving path filters to a left-joined form (an `e.id in (select … left join …)`
+subquery) first. An `orderBy` on the key goes
+through core's `_sortBy` in alias mode (above), so it keeps those rows, as REST does. A path field with a list
+position (`GRID_SEQNO`) is part of the default `etendo_list` projection. **No divergence between
+channels.**
+
+**Release order.** `PROPERTY_PATH` must exist in the database (`update.database`) before any
+`push-to-neo` writes a path row; a model generated before the column answers no path, so the
+runtime simply serves no path field until then.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -2331,6 +2393,228 @@ MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 40
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
+
+### 4.6c SEPA remittances: the `remittance` spec and the remittance bank accounts (ETP-6148)
+
+Classic's «Remittance» window (`org.openbravo.module.remittance`, window
+`FF8080812E71F7C7012E71FD0499001B`) served as the spec `remittance`: header `remittance`
+(`REM_Remittance`) and `lines` (`REM_RemittanceLine`, only «A remesar» editable). Behind the per-account flag
+`sepa-remittances` (`SepaRemittancesFlag`, off by default). `com.etendoerp.go` adds no column:
+everything is Classic's model.
+
+- **No per-account switch.** Every **Bank** (`B`) financial account created while the flag is on for
+  the acting user gets the two remittance payment methods; Cash and Card accounts never do. Accounts
+  created before, or with the flag off, are not revisited — there is no backfill and no data-fix.
+  Three creation paths, all through `RemittanceSepaProvisioning`:
+  - `financial-account/account` create (REST single and batch, MCP), `FinancialAccountHandler` with
+    `FinancialAccountRemittanceSupport`: the flag is read in the pre-hook, which runs
+    `ensureClient` last, after every validation, in the transaction that inserts the account — a
+    failure refuses the create and leaves nothing behind (`409 ETGO_RemittanceProvisioningConflict`
+    for a unique conflict, retry). The post-hook links the account, which needs its id; outside a
+    batch it runs after the commit, so a link failure is logged and the account stays without the
+    methods (and is then not offered by the remittance window).
+  - Bank connection `createAndLink` (`FinancialAccountBankConnectionHandler`): setup and links in
+    the handler's own transaction, before the Salt Edge linking; a failure refuses the create.
+  - Onboarding: the base dataset gives a tenant no financial account; the opt-in sample data brings
+    «Cuenta de Banco» (Bank, no IBAN). `OnboardingRemittanceSetupService` runs after the sample data,
+    after the commit, best effort, reading the flag for the account receiving the tenant (the
+    onboarding runs as System, so a DAL observer could not read it).
+- **Type change.** A Bank account with open remittances (REM status `PE`/`PR`/`CP`/`PP`, of a
+  provisioned type) cannot leave Bank: an update that changes `type` away from `B` answers
+  `422 ETGO_RemittanceAccountTypeChangeBlocked` with the count
+  (`FinancialAccountRemittanceSupport.checkTypeChange`, `RemittanceSepaProvisioning.countOpenRemittances`).
+  Not gated by the flag: the remittances exist whatever the flag says now, and only provisioned
+  types are counted, which exist only where the flag was on. With no open remittance the change
+  is allowed, and the account's remittance-method links (`FIN_FinAcc_PaymentMethod` rows to a
+  method a `ETGO_SEPA_SCHEME`-marked type points at) are deactivated by the post-hook, only once
+  the generic CRUD answered the update with success and the re-read account is no longer Bank
+  (`FinancialAccountRemittanceSupport.deactivateAfterLeavingBank` →
+  `RemittanceSepaProvisioning.deactivateAccountLinks`). The pre-hook only refuses or marks the
+  change (context attribute `financialAccount.leavingBank`): it writes nothing, because the generic
+  CRUD may still refuse the update (`missing_updated`, a stale record) and a pre-hook write would
+  then be committed with the refusal. Outside a batch the post-hook runs after the update is
+  committed, so a failure there is logged and the account keeps active links (registry debt
+  `remittance-link-failure-after-commit`). The remittance window then stops offering the account.
+  If the account becomes Bank again the links are **not** reactivated automatically.
+- **Lazy provisioning.** The first remittance account of a client runs
+  `RemittanceSepaProvisioning.ensureClient`: the «In Remittance» execution process, an active
+  `REM_REM` document type and sequence, two payment methods (SEPA direct debit collection, SEPA
+  credit transfer payment) and their `REM_Remittance_Type` rows, marked by the type parameter
+  `ETGO_SEPA_SCHEME` = `CORE` / `SCT` — the only way they are found again, never by name.
+  Serialized per client by a PostgreSQL advisory lock. Both methods are linked to the account with
+  the setup Classic's `checkPMSetup` requires; links are never removed, only deactivated when the
+  account leaves Bank (above).
+- **Header** (`RemittanceHeaderHandler`, `@NeoExtension(spec = "remittance", entity =
+  "remittance")`): flag off is `403 feature_disabled` on every surface. A **remittance account** is a
+  Bank account (else `422 ETGO_RemittanceAccountNotBank`) with a valid IBAN for its country — the
+  account form's own pair check, `FinancialAccountCountrySupport.validateIbanCountryPair` (else
+  `422 ETGO_RemittanceAccountIbanRequired`) — and an active link to a remittance method (else
+  `422 ETGO_RemittanceAccountNotAllowed`). The link requirement keeps out the Bank accounts created
+  before the feature, which have no methods and would only fail later, at «Procesar», in
+  `checkPMSetup`. Writes need a remittance account and a provisioned type linked to it (`422`); a
+  processed remittance is not editable (`422`). Selectors are served in `handle()`:
+  `financialAccount` offers the active Bank accounts with an active remittance-method link, **with
+  or without a valid IBAN** (the header lets the user give the account one, below); the link
+  condition is `RemittanceSepaProvisioning.activeRemittanceLinkExists`, the same one
+  `hasRemittanceMethodLink` runs, and every item is `{id, label, iban (raw or null), ibanValid}`
+  (`ibanValid` = the account form's pair check); `totalCount`/`hasMore` come from the same list as
+  the items. `remittanceType` offers only the provisioned types linked to the request's
+  `FIN_Financial_Account_ID`. Writes stay strict: saving with an account without a valid IBAN is
+  `422 ETGO_RemittanceAccountIbanRequired`. DEFAULTS keep the strict rule too and never prefill an
+  account that is not a remittance account, an IBAN-less one included. Interactive
+  callouts never reach Classic's `REM_RemittanceType_FinAccount` (it runs type → account, the
+  reverse of this window, and fails on a cleared type); the handler answers them itself.
+- **«Datos para el fichero SEPA»** — declared read action `sepaFileData` of the header
+  (`RemittanceSepaFileData`). It reads the account, not the remittance, so it answers for a
+  remittance not saved yet: the SPA calls `POST …/remittance/remittance/new/action/sepaFileData`
+  (sentinel id `new`, never loaded; the generic `NeoActionRecordGuard` lets it through, it is not a
+  row) or the saved id, body `{accountId, organizationId?}` (GET with the same query parameters
+  also works). The organization is `organizationId` when sent, else the saved remittance's, else the
+  account's. Answer: `{accountId, accountName, iban (raw or null), ibanValid, organizationId,
+  country, creditorId, creditorIdAvailable, missing[]}`. `country` is the **organization's** ISO
+  code and `creditorId` the SEPA creditor identifier (AT-02) computed as Classic's
+  `SEPAUtil.getAT02Identification` does (`SepaCreditorId.build`), from the organization's own
+  `AD_OrgInfo` location country and tax ID — where Classic's `SEPA_RemittanceCreateFile` reads
+  them, no parent-organization fallback — and the **creditor business code** (positions 4-6): the
+  `Creditor_Business_Code` parameter of the client's provisioned collection type (`CORE`, found by
+  the `ETGO_SEPA_SCHEME` marker; the client is the account's), the parameter Classic's
+  `CoreDirectDebit` reads when it writes the file
+  (`RemittanceSepaProvisioning.creditorBusinessCode`). It is normalized as Classic does
+  (whitespace removed, first three characters) and is `000` when the parameter is missing or blank
+  (`RemittanceSepaFileData.suffixOf`), so the block shows what the file will contain. `missing`
+  lists, in this order, `iban` (no valid IBAN), `orgTaxId` (none, or one that cannot form an
+  identifier), `country`, and `creditorBusinessCode` when the stored code is not three letters or
+  digits. No BIC. 404 for an account or organization the tenant does not own; 422
+  `ETGO_RemittanceAccountNotBank` / `ETGO_RemittanceAccountNotAllowed` for an account that cannot
+  be used at all; 403 with the flag off. Not injected into the header GET (no `afterHandle`
+  enrichment): it is an action on purpose.
+- **Saving the IBAN on the account.** The IBAN typed in that block is saved on the **account**, not
+  on the remittance, through the financial-account spec so its validation and window access apply:
+  `GET /sws/neo/financial-account/account/{id}` then `PATCH` it with `{iBAN, updated}`
+  (`FinancialAccountHandler.validateCountryAndIban`, then `FIN_FINANCIAL_ACCOUNT_TRG2`). The
+  remittance handler never writes the account. **The account needs a country first:** the country is
+  never derived from the IBAN (ETP-5473), so on an account stored without one (legacy and
+  sample-data Bank accounts) the PATCH answers `400 ETGO_FinAccIbanRequiresCountry` and nothing is
+  saved; the user sets the country in the account's edit form, then saves the IBAN.
+- **Customer SEPA mandate** (contacts `businessPartner`, `BusinessPartnerHandler` →
+  `ContactSepaMandateDefaults`, every write channel: REST single, `/batch`, MCP). The OBSEPAD
+  columns `EM_Obsepad_Mandate_Identifier` (`obsepadMandateIdentifier`, max 35) and
+  `EM_Obsepad_Mandate_Date` (`obsepadMandateDate`) are **stored**, not only used as a fallback,
+  behind `sepa-remittances`:
+  - **create** of a customer (`customer` absent counts as customer, its AD default): a blank
+    identifier (absent, `null` or empty) takes the tax ID (`taxID`, cut to 35) when there is one,
+    a blank date takes today;
+  - **update** of a customer — any save, so contacts created before the feature or with the flag
+    off get it on their next save: each mandate field that is empty **in the database** and that
+    the body does **not send** is filled, the identifier with the current tax ID (the body's, else
+    the stored one, cut to 35) when there is one, the date with the contact's `Created` date;
+  - a value the caller sends always wins, and a stored non-empty value is never overwritten — a
+    later change of the tax ID keeps the identifier, which must stay a stable mandate reference;
+  - **limitation — a clear is not remembered.** A body that sends a mandate key empty or `null`
+    clears it for that save, but no column records that the clear was intended, so the next save
+    that does not send the key fills it again from the tax ID / creation date. A mandate cannot be
+    left empty for good on a customer while the flag is on. Accepted (ETP-6148); a marker column
+    was ruled out;
+  - a non-customer gets nothing: a **create** of a non-customer drops both keys (they can only come
+    from the form's DEFAULTS, fetched before the user picks the type); an update of one keeps what
+    it carries;
+  - **DEFAULTS** of a new contact prefill `obsepadMandateDate` with today (flag on, OBSEPAD
+    installed); the identifier is not prefilled, the tax ID is not known when the form opens;
+  - flag off: both keys are dropped from the write body (never persisted, never refused).
+- **Name suggestion.** On a new remittance, a callout for `dueDate` or `remittanceType` answers
+  `updates.name = {value, suggested: true}` with «Cobros noviembre 2026» (pay-in type), «Pagos
+  noviembre 2026» (pay-out type) or «Remesa noviembre 2026» (no type yet); English «Collections /
+  Payments / Remittance November 2026». Words from the `neo_hints` catalog
+  (`ETGO_RemittanceName{Collections,Payments,Generic}`), month from the JDK, both in the request
+  language; at most 60 characters (`RemittanceNameSuggestion`). Not offered when the form carries an
+  `id` (an existing remittance keeps its name) or when its name is not itself a suggestion (a name
+  the user typed). `suggested: true` asks the SPA to apply it only to a name field the user never
+  edited in that form session, cleared included. Every other callout answers empty. A create
+  without a name but with a `dueDate` — REST, and MCP through `resolveServerCreateFields` — gets
+  the suggestion; a name the caller sends always wins, and updates are never touched.
+- **Lines** (`RemittanceLinesHandler`): `GET`, and `DELETE` while the remittance is not processed
+  (the generic delete, which is all REM's `DeleteRemittanceLineActionHandler` does; a processed
+  one is `422 ETGO_RemittanceProcessedNotEditable`, and `REM_REMITTANCELINE_TRG` refuses it too).
+  `POST` is `405 ETGO_RemittanceLinesReadOnly`; lines are only added by `selectDueItems` /
+  `syncDueItems`. DELETE also needs the entity's `ISDELETE` in its NEO configuration.
+- **«A remesar»** (round 3): `PUT`/`PATCH` on a line change `amount`, its only editable field
+  (`ETGO_SF_FIELD.ISREADONLY = 'N'` on `Amount`, every other field and every path row read-only;
+  the entity's `ISPUT`/`ISPATCH`). A whole-row body is fine: REST drops the read-only and path keys
+  and logs them (ETP-5556); MCP refuses them with `read_only_field`, as for any read-only field. The
+  pre-hook, on both channels: a processed remittance is `422 ETGO_RemittanceProcessedNotEditable`;
+  a line with no due (a payment line) is `422 ETGO_RemittanceLineAmountNotEditable`; the amount must
+  have the sign of the due and `0 < |amount| ≤ |outstanding|`, where the outstanding is the amount
+  of the payment schedule detail the line points to — exactly REM's own `REM_OutOfRangeAmount`
+  check at processing — else `422 ETGO_RemittanceLineAmountInvalid` (`{0}` and `error.max` = the
+  outstanding). The rule lives in `RemittanceLineAmount`, shared with `syncDueItems`.
+  **Partial amounts are REM-native:** processing a line of 20.00 on a due of 53.24 creates a 20.00
+  payment and splits the schedule detail into 20.00 (paid by it) + 33.24 (still open); after
+  settlement the invoice shows paid 20.00, outstanding 33.24, and the 33.24 is a candidate for
+  another remittance (verified in a rolled-back DAL run, ETP-6148 round 3).
+- **«Procesar»** — declared action `process` of the header (`RemittanceProcessAction`), POST, body
+  `{"fieldValues": {grouping?: "P" | "GGPD"}}` (default `P`, one payment per line; `GGPD` per
+  business partner and due date). Both remittance actions are declared `withFieldValuesBody()`:
+  the SPA presses them through its generic process dialog, which posts `fieldValues`, and
+  `etendo_action` wraps the agent's flat parameters the same way; a flat body is still accepted.
+  Runs Classic's `REMRemittanceProcess` (the «Process Remittance» button) directly, so window
+  write access is enough, as for the button. REM checks lines, repeated payments, amounts and the
+  account ↔ method link (`checkPMSetup`, which the provisioned links satisfy), creates the
+  payments, marks the remittance processed and refreshes its status → `{status, message}`. 422
+  `ETGO_RemittanceAlreadyProcessed`, `ETGO_RemittanceNoLines`, or `ETGO_RemittanceProcessFailed`
+  with REM's text.
+- **«Reactivar»** — declared action `reactivate` of the header, POST, no parameters (body
+  `{"fieldValues": {}}` or empty): the same `REMRemittanceProcess` with action `R`. REM refuses a
+  posted remittance, one with settled or returned lines, or one whose payments cannot be
+  reactivated; on success it removes the payments the processing created and its status returns
+  to `PE` → `{status, message}`. 422 `ETGO_RemittanceNotProcessed` (not processed) or
+  `ETGO_RemittanceReactivateFailed` with REM's text.
+- **«Seleccionar desde factura»** — declared actions of the header (`RemittanceDueItems`), record id
+  = the remittance, flag-gated (403), refused on a processed remittance (422
+  `ETGO_RemittanceProcessedNotEditable`) or one without type, account or due date (422
+  `ETGO_RemittanceTypeOrAccountMissing`):
+  - `availableDueItems` (read; params `search`, `page` from 1, `pageSize` default 50, max 200) →
+    `{items: [{id (FIN_Payment_Schedule), documentNo, invoiceId, salesTransaction, invoiceDate,
+    dueDate (expected date, yyyy-MM-dd), dueStatus (`OVERDUE` / `DUE_TODAY` / `PENDING` against
+    the server's day), businessPartner, businessPartnerId, grandTotalAmount,
+    outstandingAmount (the most that can be remitted), currency (ISO), alreadyInRemittance,
+    lineAmount + lineIds (only when already in it; a due with several open details has one line
+    each)}], total}`, ordered by dueDate then documentNo. The dues already in this remittance are
+    always listed, even when its due date has moved before theirs. Candidates follow Classic's «Select Invoices and Orders» rules
+    without its default payment-method filter: unpaid, not cancelled, not invoice-paid, invoice
+    schedules only, with a business partner, organization in the remittance org's child tree,
+    expected date ≤ the remittance due date, direction from the account ↔ type-method link
+    (pay-in → sales, pay-out → purchase, both → any); plus the invoice currency = the account
+    currency and not already a line of another unprocessed remittance. One row per invoice payment
+    schedule.
+  - `selectDueItems` (POST; body `{ids: [...]}`) re-checks every id against the same rules (422
+    `ETGO_RemittanceDueItemNotAvailable` with `error.invalidIds`), then runs Classic's
+    `REMSelectInvoicesAndOrders` (process `99E532BA0306450A839F5DE238375238`) through
+    `NeoProcessService.executeObuiappClass` with each schedule's full outstanding amount and no
+    `_allRows`, so existing lines are never deleted → `{created, message}`. A refusal by REM is 422
+    `ETGO_RemittanceDueItemsSelectionFailed`.
+  - `syncDueItems` (POST; body `{items: [{id, amount}], remove: [id…]}`) applies the dialog as a
+    manager of the remittance's documents, in one transaction: validate everything first (a
+    `remove` id not in the remittance, or also in `items` → 422 `ETGO_RemittanceDueItemNotIncluded`;
+    an `items` id that is not a candidate → 422 `ETGO_RemittanceDueItemNotAvailable`; an amount
+    failing the «A remesar» rule against the due's outstanding → 422
+    `ETGO_RemittanceLineAmountInvalid`; all with `error.invalidIds`), then remove the lines of the
+    `remove` dues, replace the lines of an included due whose amount changed, and add the new and
+    changed dues through the same `REMSelectInvoicesAndOrders` run with their amount (Classic
+    spreads it over the due's open details). An included due sent with its current amount is left
+    alone. A REM refusal rolls everything back (422 `ETGO_RemittanceDueItemsSelectionFailed`) →
+    `{created, updated, removed, message}`, counted in dues. Removal is explicit on purpose: the
+    dialog is paginated and searchable, so "whatever is not in the list" would drop every due off
+    the loaded page.
+- **Status.** `REM_REMITTANCE.REMITTANCE_STATUS` (field `remittanceStatus`, list
+  `REM_RemittanceStatus`: `PE`, `PR`, `CT`/`PT`, `CP`/`PP`, `AN`) belongs to the remittance module
+  (`org.openbravo.module.remittance`, the remittance module's `REMITTANCE_STATUS` added by
+  ETP-6148): its own processes set it at every transition (process, reactivate, settle, return and
+  their undo) through `RemittanceStatusUtil`. It is not backfilled: a remittance that existed
+  before the column keeps the default `'PE'` until one of those transitions refreshes it.
+  `com.etendoerp.go` only reads it (list, filter). `RemittanceMethodLinkObserver` refuses an active
+  remittance-method link on a non-Bank account, on every channel, Classic included.
+
+Flag, debt and retirement: `docs/feature-flags-and-tenant-upgrade.md` → `sepa-remittances`.
 
 ### 4.7 Preview File Endpoint — retired for preview panels, pending removal (ETP-4315 Phase 9)
 
@@ -4172,7 +4456,9 @@ again. Calling `syncBank` again after `BANK_SYNC_LOCK_UNAVAILABLE` or
 `FinancialAccountHandler` enforces on every channel (REST single, `/batch`, MCP) what the SPA's
 account forms enforce: on **create** `country` is mandatory for every type (Bank, Cash, Card); on
 **update** clearing it is refused on a Bank account that keeps an IBAN. The IBAN is never used to
-derive a country.
+derive a country: an IBAN cannot be saved on an account that has no country (`400
+ETGO_FinAccIbanRequiresCountry`), whoever sends it — the remittance window's «Datos para el fichero
+SEPA» block included (§4.6c). ETP-6148 briefly derived it from the IBAN prefix; that was reverted.
 
 **Refusals the handler answers.** Two `AD_MESSAGE`s of this module, built with **400** (on MCP the
 nested `error` is flattened into the tool envelope, `messageKeys` included, as for any handler

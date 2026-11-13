@@ -85,6 +85,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="PROPERTY_PATH" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_FLD_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -103,6 +107,10 @@
       <unique name="ETGO_SF_FIELD_ENT_COL_UQ">
         <unique-column name="ETGO_SF_ENTITY_ID"/>
         <unique-column name="AD_COLUMN_ID"/>
+      </unique>
+      <unique name="ETGO_SF_FIELD_ENT_PATH_UQ">
+        <unique-column name="ETGO_SF_ENTITY_ID"/>
+        <unique-column name="PROPERTY_PATH"/>
       </unique>
       <check name="ETGO_SF_FLD_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_FLD_ISBIZC"><![CDATA[ISBUSINESSCRITICAL IN ('Y', 'N')]]></check>

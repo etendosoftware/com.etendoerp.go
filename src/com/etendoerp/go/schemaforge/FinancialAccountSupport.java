@@ -29,14 +29,18 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
@@ -412,5 +416,72 @@ final class FinancialAccountSupport {
     } catch (java.time.format.DateTimeParseException e) {
       return null;
     }
+  }
+
+  /**
+   * Whether an HTTP method updates a record.
+   *
+   * @param method the HTTP method
+   * @return {@code true} for {@code PUT} and {@code PATCH}
+   */
+  static boolean isUpdateMethod(String method) {
+    return "PUT".equals(method) || "PATCH".equals(method);
+  }
+
+  /**
+   * Overwrites {@code defaults.currency} with the client's accounting-schema currency (e.g. EUR
+   * for GOClient). Moved out of {@code FinancialAccountHandler} (Sonar java:S1448).
+   *
+   * <p>The {@code C_Currency_ID} column has no AD default-value expression, so
+   * {@code NeoDefaultsService}'s generic fallback ({@code resolveFirstComboOption}) picks
+   * whichever active currency sorts first alphabetically (AED) — a real, non-null value, so it
+   * is never left blank for the New Account Wizard to fill in itself. That column is shared by
+   * many core windows, so fixing this dictionary-wide would risk unrelated side effects; scoping
+   * the fix to the financial-account post-hook only affects that spec's own defaults.
+   *
+   * @param defaults the {@code defaults} object of the DEFAULTS response, mutated in place
+   * @throws JSONException if the currency cannot be written
+   */
+  static void applyClientCurrencyDefault(JSONObject defaults) throws JSONException {
+    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
+        OBContext.getOBContext().getCurrentClient().getId()));
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    AcctSchema schema = (AcctSchema) crit.uniqueResult();
+    Currency clientCurrency = schema != null ? schema.getCurrency() : null;
+    if (clientCurrency == null) {
+      return;
+    }
+    defaults.put(FinancialAccountHandler.FIELD_CURRENCY, clientCurrency.getId());
+    defaults.put(FinancialAccountHandler.FIELD_CURRENCY + FinancialAccountHandler.SUFFIX_IDENTIFIER,
+        clientCurrency.getISOCode());
+  }
+
+  /**
+   * Sets {@code defaults.country} to the active organization's country (ETP-4896 requirement 1),
+   * mirroring the {@code currency} / {@code currency$_identifier} pair so the frontend's defaults
+   * consumer needs no new shape. Never emits the AD-seeded {@code ISDEFAULT='Y'} country (United
+   * States, no IBAN metadata): {@code FinancialAccountHandler#resolveOrgCountry} only returns a
+   * usable value or {@code null}, and {@code null} here means the key is simply omitted rather
+   * than written as a plausible-but-wrong default.
+   *
+   * @param defaults   the {@code defaults} object of the DEFAULTS response, mutated in place
+   * @param orgCountry the organization's country, or {@code null}
+   * @throws JSONException if the country cannot be written
+   */
+  static void applyOrgCountryDefault(JSONObject defaults, Country orgCountry)
+      throws JSONException {
+    if (orgCountry == null) {
+      return;
+    }
+    defaults.put(FinancialAccountHandler.FIELD_COUNTRY, orgCountry.getId());
+    // ETP-5579: getIdentifier(), NOT getName() — same reason as ETP-5022 in
+    // ContactsLocationAddressHandler. getName() is the plain Hibernate getter and never consults
+    // C_Country_Trl ("Spain" for an es_ES user); getIdentifier() resolves the translation in the
+    // OBContext language. Country's identifier is the single Name column, so only the language
+    // of the text changes.
+    defaults.put(FinancialAccountHandler.FIELD_COUNTRY + FinancialAccountHandler.SUFFIX_IDENTIFIER,
+        orgCountry.getIdentifier());
   }
 }

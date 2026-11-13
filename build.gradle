@@ -81,6 +81,26 @@ dependencies {
     implementation('com.etendoerp:accounting.dimensions.assets:[3.0.0,)')
     implementation('com.etendoerp:accounting.dimensions.assets.template:[3.0.0,)')
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
+    // ETP-6148 — SEPA remittances. com.etendoerp.go points ETGO_SF_* rows at the Classic Remittance
+    // window, reads and filters by REM_REMITTANCE.REMITTANCE_STATUS (added and maintained by the
+    // remittance module itself, ETP-6148) and reads the OBSEPAD mandate columns of C_BPARTNER. It adds
+    // no column to the REM tables. The floor is the version org.openbravo.sepa.iso20022 2.0.0 itself
+    // requires (5.1.1); it does NOT yet guarantee REMITTANCE_STATUS: raise it to the remittance
+    // version that publishes that column when the module is released. By decision the dependency is
+    // declared ONLY here: there is no AD_MODULE_DEPENDENCY row (the same as the PSD2, SII and
+    // Verifactu extensions), so every build that installs com.etendoerp.go must also install these
+    // modules.
+    implementation('org.openbravo:module.remittance:[5.1.1,)')
+    implementation('org.openbravo:sepa.iso20022:[2.0.0,)')
+    implementation('org.openbravo:sepa.iso20022.coredirectdebit.customertobank:[2.0.0,)')
+    // ETP-6148 — the remittance spec's ETGO_SF_FIELD rows reference columns of the automated
+    // remittance module (REM_Remittance.EM_Etar_Automaticprocess,
+    // REM_RemittanceLine_Cancel.EM_Etar_ReturnReceipt),
+    // and the automated-remittance work (returns and settlements) is planned on top of it. Without
+    // the module installed, update.database fails on ETGO_SF_FLD_COL_FK. Same Gradle-only pattern
+    // as the remittance module above: no AD_MODULE_DEPENDENCY row. It pins
+    // org.openbravo:module.remittance:5.2.0 exactly, which the range above resolves to.
+    implementation('com.etendoerp:automated.remittance:[3.2.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
     // Feature flags: OpenFeature is the application-facing API. GoFeatureFlags.createProvider() is
     // the single registration point that chooses the control plane — Datadog when switched on and

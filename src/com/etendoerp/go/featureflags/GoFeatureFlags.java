@@ -465,6 +465,36 @@ public final class GoFeatureFlags {
   public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
+   * ETP-6148 (epic ETP-3504, "SEPA remittances") — gates the <b>behaviour</b> of SEPA remittances,
+   * never their schema. Positive polarity: {@code true} = remittances are enabled. Strictly off by
+   * default: an unconfigured flag, an unreachable control plane and any evaluation error all read
+   * as {@code false}.
+   *
+   * <p><b>What it gates.</b> The remittance provisioning of a new Bank financial account — on,
+   * a Bank account created through NEO (REST, batch, MCP), the bank-connection flow or the
+   * onboarding sample data gets the two SEPA remittance payment methods, provisioning the client
+   * on first use; off, it is created as before; existing accounts are never revisited — the default
+   * SEPA mandate of a customer — off, its keys are dropped from the write body; and the
+   * {@code remittance} spec (header and lines) — off, 403 {@code feature_disabled}. <b>Not
+   * gated:</b> the messages, and the DAL observer that keeps remittance methods on Bank accounts —
+   * an observer cannot read a per-account flag, and remittance data only exists where the flag was
+   * on. The
+   * remittance status is not this module's: it is {@code REM_REMITTANCE.REMITTANCE_STATUS}, owned
+   * and maintained by {@code org.openbravo.module.remittance} (added by ETP-6148).
+   *
+   * <p><b>One reader.</b> Only {@code SepaRemittancesFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the context carries the {@code ETGO_ACCOUNT}
+   * email of the request user (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; a Datadog rule must be written on the lowercase {@code email} attribute alone.
+   * Locally {@code etendo.go.flags.sepa-remittances} / {@code ETGO_FLAG_SEPA_REMITTANCES}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. The web client reads
+   * {@code capabilities.sepaRemittances} off {@code SFWindowAccessMap} and never evaluates the flag.
+   * TTL 2027-03-31 (provisional, to confirm with product).
+   */
+  public static final String FLAG_SEPA_REMITTANCES = "sepa-remittances";
+
+  /**
    * ETP-6151 — the <b>PSD2 statement import settings</b> of bank-connected financial accounts.
    * Positive polarity: {@code true} = the new behaviour; the default and every failure read
    * {@code false}, which is the behaviour before ETP-6151.
