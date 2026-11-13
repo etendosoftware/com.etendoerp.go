@@ -321,6 +321,19 @@ because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unles
   deployed `WEB-INF` copy (see the findings below).
 - Test tenants: SPRING2, SPRING3 (legacy plan), SPRING6, SPRING7, SPRING8 (monthly mini → yearly),
   Springsite. Plans: `PROD_MONTH`, `PROD_MONTH_MINI`, `PROD_YEARLY`, `legacy-productive`.
+- Added 2026-11-13 for chains of changes, three tiers per interval (all prices on the sandbox
+  product `prod_V1t5ck5A6rDPTh`; quotas copied from the matching tier):
+
+  | Tier | Monthly | Yearly |
+  |---|---|---|
+  | Mini | `PROD_MONTH_MINI` €12.50 (3, block) | `PROD_YEAR_MINI` €125 (3, block) |
+  | Standard | `PROD_MONTH` €55 (100, warn) | `PROD_YEARLY` €490 (no quota) |
+  | Pro | `PROD_MONTH_PRO` €99 (100, warn) | `PROD_YEAR_PRO` €990 (100, warn) |
+
+  Allowed changes follow the seed rule: up a tier `immediate`, down a tier `period_end`, monthly →
+  yearly of the same or a higher tier `immediate`, yearly → monthly of the same tier `period_end`.
+  Weekly and quarterly plans are not possible: `ETGO_PLAN_INTERVAL_CHK` allows only `month` and
+  `year`, and a price with `interval_count` ≠ 1 (a quarter) is refused.
 - Cards: `4242…` (pays at once) and the 3-D Secure test card (`…3184`, asks to authenticate).
 
 ### Scenarios tested
@@ -411,11 +424,14 @@ valuable first.
 
 **The downgrade actually applying**
 
-- [ ] Every test period ends in 2027, so the boundary is never reached. Create a Stripe test price
-  with a daily interval (`stripe prices create --product <prod> --unit-amount 100 --currency eur
-  -d "recurring[interval]=day"`), put it on a test plan in Classic and buy it; the period ends the
-  next day. Watch `customer.subscription.updated` roll the row over, keep the quota-year anchor and
-  clear the pending line. Keep `stripe listen` running overnight.
+- [ ] Every test period ends in 2027, so the boundary is never reached. A daily test price does not
+  help (`day` is refused by `ETGO_PLAN_INTERVAL_CHK`) and Stripe test clocks need a customer created
+  on the clock, which Checkout does not do. Instead schedule a downgrade, then move the end of the
+  schedule's current phase a few minutes ahead: `stripe subscription_schedules update <sched>` with
+  every phase repeated, `phases[0][end_date]=<now + 300>` and `proration_behavior=none`. When the
+  phase ends Stripe switches the price and sends `customer.subscription.updated`: the row rolls
+  over, the quota-year anchor is kept and the pending line clears. Not tried yet; this exercises
+  the rollover, not a real period boundary (the billing anchor does not move).
 
 **Quotas**
 
