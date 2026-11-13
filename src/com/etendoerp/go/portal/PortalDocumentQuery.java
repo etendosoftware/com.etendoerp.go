@@ -59,7 +59,7 @@ final class PortalDocumentQuery {
 
   static {
     VISIBLE_STATUSES.put(PortalDocumentKind.QUOTATION,
-        List.of("UE", "CO", "CA", "ETGO_CI", "CL", "CJ", "VO"));
+        List.of("UE", "CO", "ETGO_AC", "CA", "ETGO_CI", "CL", "CJ", "VO"));
     VISIBLE_STATUSES.put(PortalDocumentKind.ORDER, List.of("CO", "CL", "VO"));
     VISIBLE_STATUSES.put(PortalDocumentKind.SHIPMENT, List.of("CO", "CL", "VO"));
     VISIBLE_STATUSES.put(PortalDocumentKind.INVOICE, List.of("CO", "CL", "VO"));
@@ -87,7 +87,8 @@ final class PortalDocumentQuery {
     // CO is a quotation completed but not yet answered, the same "awaiting" the app's convert and
     // reject actions accept (QuotationTopbarActions: CO or UE). CL and VO show under "all" only.
     quotation.put("awaiting", new Group(List.of("UE", "CO"), null));
-    quotation.put("accepted", new Group(List.of("CA", "ETGO_CI"), null));
+    // ETGO_AC: accepted by the customer from the portal, not yet converted (Part C, PO Q1).
+    quotation.put("accepted", new Group(List.of("ETGO_AC", "CA", "ETGO_CI"), null));
     quotation.put("rejected", new Group(List.of("CJ"), null));
     GROUPS.put(PortalDocumentKind.QUOTATION, quotation);
 

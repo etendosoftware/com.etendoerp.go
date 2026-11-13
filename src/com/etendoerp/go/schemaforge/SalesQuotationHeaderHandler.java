@@ -117,8 +117,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:RE} is unavailable on every quotation (ETP-6026). */
   static final String REASON_REACTIVATE_NOT_OFFERED = "The app does not offer Reactivate on a "
       + "quotation, so documentAction RE is refused on every quotation. A quotation Under "
-      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; to "
-      + "quote again after a voided or rejected one, create a new quotation.";
+      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; one "
+      + "Accepted by the customer from the portal (ETGO_AC) is converted with Convertquotation or "
+      + "createDraftInvoice; to quote again after a voided or rejected one, create a new "
+      + "quotation.";
   /** Void, a {@code documentAction} value the quotation window never offers (ETP-6026). */
   static final String DOC_ACTION_VOID = "VO";
   /** Close, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -134,7 +136,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:CL} is unavailable on every quotation (ETP-6026). */
   static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
       + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
-      + "accepted with Convertquotation or rejected with rejectQuotation.";
+      + "accepted with Convertquotation or rejected with rejectQuotation; one Accepted (ETGO_AC) "
+      + "is converted with Convertquotation or createDraftInvoice.";
   /** The 400 for any other value the window does not offer in the quotation's status (ETP-6026). */
   static final String MSG_ACTION_NOT_OFFERED = "ETGO_QuotationActionNotOffered";
   /**
@@ -367,7 +370,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
     return "The app does not offer documentAction " + value + " on a quotation in this status: "
         + "it sends a draft to evaluation (CO) and rejects one Under evaluation (RJ, or "
-        + "rejectQuotation); acceptance is the Convertquotation action.";
+        + "rejectQuotation); acceptance is the Convertquotation action, also on a quotation the "
+        + "customer Accepted from the portal (ETGO_AC), which can no longer be rejected.";
   }
 
   /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */

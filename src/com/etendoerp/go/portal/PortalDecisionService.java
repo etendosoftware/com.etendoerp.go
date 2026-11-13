@@ -56,7 +56,7 @@ import com.etendoerp.go.schemaforge.email.render.EmailMessages;
  * <ol>
  *   <li><b>Request</b> ({@link #request}): the customer, inside a valid portal session, asks to
  *       accept or reject a quotation of their scope. The quotation must be decidable
- *       ({@link QuotationDecisions#isDecidable}, PO question Q3), not expired (no
+ *       ({@link QuotationDecisions#isDecidable}, Under evaluation: PO answer to Q3), not expired (no
  *       {@code ValidUntil} = not expired, user decision) and the link's root send must have a To
  *       recipient. A per-quotation cool-down keeps the button from flooding the customer's inbox.
  *       The confirmation email goes to the <b>first To</b> of the root send only, never CC (user
@@ -103,12 +103,12 @@ public class PortalDecisionService {
   static final int MAX_REASON_TEXT = 2000;
 
   /**
-   * <b>PO question Q1 (Jira comment 149513).</b> Accepting is implemented
-   * ({@link QuotationDecisions#accept}) but refused until the PO fixes the accept status, so no
-   * unknown status is ever written to real data. Flip to {@code true} together with the status's
-   * list value and the app's convert gate (plan C.1).
+   * Whether the portal offers "Aceptar" (PO answer to Q1, ETP-6209: a confirmed accept moves the
+   * quotation to {@link QuotationDecisions#STATUS_ACCEPTED}, which the app can still convert). Kept
+   * as a switch: {@code false} refuses accepts with {@code accept_unavailable} and hides the button
+   * through the detail's {@code acceptAvailable}.
    */
-  public static final boolean ACCEPT_AVAILABLE = false;
+  public static final boolean ACCEPT_AVAILABLE = true;
 
   static final String STATUS_PENDING = "PENDING";
   static final String STATUS_CONFIRMED = "CONFIRMED";

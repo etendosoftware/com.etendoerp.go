@@ -38,20 +38,24 @@ public final class QuotationDecisions {
   /** Closed - Rejected. */
   public static final String STATUS_REJECTED = "CJ";
   /**
-   * <b>PO question Q1 (ETP-6209, Jira comment 149513) — the accept status.</b> The planned module
-   * value "Aceptado" (like {@code ETGO_CI}). Its {@code AD_REF_LIST} row is <b>not</b> added yet, and
-   * nothing reaches {@link #accept} until Q1 is answered (the portal refuses accepts:
-   * {@code PortalDecisionService.ACCEPT_AVAILABLE}). Answering Q1 is this constant, the list value
-   * with its translations, and the app's convert gate for it.
+   * Accepted by the customer from the portal, without an order (PO answer to Q1, ETP-6209): the
+   * module's own value "Aceptado" / "Accepted" in the order status list, like {@code ETGO_CI}. The
+   * quotation stays convertible: the app's Confirmar (order or invoice) and the MCP accept it like
+   * {@code UE} ({@code CreateDraftInvoiceHandler#requireQuotationInvoiceable}; the order path,
+   * {@code Convertquotation}, checks no status). It is not decidable again: neither the app's reject nor the
+   * portal offers anything on it.
    */
   public static final String STATUS_ACCEPTED = "ETGO_AC";
+
+  /** Completed: a legacy quotation, convertible like one Under evaluation. */
+  public static final String STATUS_COMPLETED = "CO";
 
   private QuotationDecisions() {
   }
 
   /**
-   * <b>PO question Q3 — which quotations can be decided.</b> Only Under evaluation, the app's reject
-   * rule. One predicate for the app's reject and the portal.
+   * Which quotations can be decided (PO answer to Q3, ETP-6209): only Under evaluation, the app's
+   * reject rule; the portal adds "not expired". One predicate for the app's reject and the portal.
    */
   public static boolean isDecidable(Order quotation) {
     return quotation != null && STATUS_UNDER_EVALUATION.equals(quotation.getDocumentStatus());
@@ -61,8 +65,9 @@ public final class QuotationDecisions {
    * Closes the quotation as rejected.
    *
    * @param quotation the quotation, already checked with {@link #isDecidable}
-   * @param reason the rejection reason, or {@code null} when the caller has none (the portal until
-   *     PO question Q2 is answered: its reason is kept in the notes instead)
+   * @param reason the tenant's rejection reason, or {@code null} when the caller has none (the
+   *     portal never has one: its reason goes to the notes, see
+   *     {@code PortalDecisionService#rejectReasonFor})
    */
   public static void reject(Order quotation, RejectReason reason) {
     if (reason != null) {
@@ -75,8 +80,8 @@ public final class QuotationDecisions {
   }
 
   /**
-   * Marks the quotation as accepted by the customer, without generating an order (PO spec).
-   * Unreachable until PO question Q1 is answered (see {@link #STATUS_ACCEPTED}).
+   * Marks the quotation as accepted by the customer, without generating an order (PO spec): status
+   * {@link #STATUS_ACCEPTED}, {@code Processed = Y}, like the reject.
    *
    * @param quotation the quotation, already checked with {@link #isDecidable}
    */
