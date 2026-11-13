@@ -60,7 +60,10 @@ import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
  * Unit tests for {@link NeoFieldFilter}.
- * Exercises filtering, renaming, and metadata key logic via reflection on internal methods.
+ * Exercises filtering, renaming, and metadata key logic via reflection on internal methods, and
+ * the property-path fields (ETP-6148) through {@code forEntity}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoFieldFilter
  */
 class NeoFieldFilterTest {
 
@@ -1372,6 +1375,164 @@ class NeoFieldFilterTest {
           "the parent-FK exemption must not disarm clause 2 for the rest of the entity —"
               + " without this the fix would be a silent blanket disable");
       assertEquals("creditCardType", ex.getFieldName());
+    }
+  }
+
+  /**
+   * ETP-6148 — property-path fields: an {@code ETGO_SF_FIELD} row with {@code PROPERTY_PATH} and no
+   * column is collected apart from the column fields, never writable, and its value is handed back
+   * in a GET under its API key. Built through {@code forEntity} on the mocked remittance-line
+   * model of {@link NeoPropertyPathsTestSupport}.
+   */
+  @Nested
+  @DisplayName("forEntity: property-path fields (ETP-6148)")
+  class PropertyPathFields {
+
+    private SFField columnField(String dbColumn, String qualifier, boolean readOnly) {
+      Column col = mock(Column.class);
+      when(col.getDBColumnName()).thenReturn(dbColumn);
+      SFField f = mock(SFField.class);
+      when(f.getADColumn()).thenReturn(col);
+      when(f.isIncluded()).thenReturn(true);
+      when(f.isReadOnly()).thenReturn(readOnly);
+      when(f.getJavaQualifier()).thenReturn(qualifier);
+      return f;
+    }
+
+    private SFField pathField(String apiKey, String path, boolean included) {
+      Entity fieldEntity = mock(Entity.class);
+      when(fieldEntity.hasProperty(NeoFieldFilter.PROPERTY_PATH)).thenReturn(true);
+      SFField f = mock(SFField.class);
+      when(f.getEntity()).thenReturn(fieldEntity);
+      when(f.get(NeoFieldFilter.PROPERTY_PATH)).thenReturn(path);
+      when(f.isIncluded()).thenReturn(included);
+      when(f.isReadOnly()).thenReturn(true);
+      when(f.getJavaQualifier()).thenReturn(apiKey);
+      return f;
+    }
+
+    private NeoFieldFilter buildFilter() {
+      Entity root = NeoPropertyPathsTestSupport.remittanceLineModel();
+      Property documentNo = mock(Property.class);
+      when(documentNo.getName()).thenReturn("documentNo");
+      when(documentNo.isPrimitive()).thenReturn(true);
+      when(root.getPropertyByColumnName("DocumentNo")).thenReturn(documentNo);
+
+      Table table = mock(Table.class);
+      when(table.getADColumnList()).thenReturn(List.of());
+      Tab tab = mock(Tab.class);
+      when(tab.getTable()).thenReturn(table);
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("ENT-LINES");
+      when(sfEntity.getName()).thenReturn("lines");
+      when(sfEntity.getADTab()).thenReturn(tab);
+
+      List<SFField> rows = List.of(
+          columnField("DocumentNo", "documentNo", false),
+          pathField(NeoPropertyPathsTestSupport.KEY_PARTNER,
+              NeoPropertyPathsTestSupport.PATH_PARTNER, true),
+          pathField("notOnTheSurface", NeoPropertyPathsTestSupport.PATH_AMOUNT, false));
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      when(crit.list()).thenReturn(rows);
+      OBDal dal = mock(OBDal.class);
+      when(dal.createCriteria(SFField.class)).thenReturn(crit);
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntity(NeoPropertyPathsTestSupport.ROOT)).thenReturn(root);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class)) {
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+        return NeoFieldFilter.forEntity(sfEntity, NeoPropertyPathsTestSupport.ROOT);
+      }
+    }
+
+    @Test
+    @DisplayName("an included path row becomes a path field; an excluded one does not")
+    void includedPathRowsBecomePathFields() {
+      NeoPropertyPaths paths = buildFilter().propertyPaths();
+
+      assertEquals(1, paths.fields().size());
+      assertEquals(NeoPropertyPathsTestSupport.PATH_PARTNER,
+          paths.get(NeoPropertyPathsTestSupport.KEY_PARTNER).getPath());
+      assertNull(paths.get("notOnTheSurface"));
+    }
+
+    @Test
+    @DisplayName("a GET hands the path value back under the API key, never the raw keys")
+    void getResponseCarriesTheApiKeys() throws Exception {
+      JSONObject row = new JSONObject()
+          .put("id", "LINE-1")
+          .put("documentNo", "1001")
+          .put(NeoPropertyPathsTestSupport.PATH_PARTNER, "BP-1")
+          .put("paymentScheduleDetail$businessPartner$_identifier", "Acme");
+      JSONObject response = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(row)));
+
+      buildFilter().filterGetResponse(response);
+
+      assertEquals("BP-1", row.getString(NeoPropertyPathsTestSupport.KEY_PARTNER));
+      assertEquals("Acme",
+          row.getString(NeoPropertyPathsTestSupport.KEY_PARTNER + "$_identifier"));
+      assertEquals("1001", row.getString("documentNo"));
+      assertFalse(row.has(NeoPropertyPathsTestSupport.PATH_PARTNER));
+      assertFalse(row.has("paymentScheduleDetail$businessPartner$_identifier"));
+    }
+
+    @Test
+    @DisplayName("a write body loses the path key, which is reported as client read-only")
+    void aPathKeyIsNeverWritable() throws Exception {
+      NeoFieldFilter filter = buildFilter();
+
+      for (String method : new String[] { "POST", "PUT", "PATCH" }) {
+        JSONObject body = new JSONObject().put("documentNo", "1001")
+            .put(NeoPropertyPathsTestSupport.KEY_PARTNER, "BP-2")
+            .put(NeoPropertyPathsTestSupport.KEY_PARTNER + "$_identifier", "Other");
+        List<String> readOnly = filter.findClientReadOnlyFields(body, method);
+        assertTrue(readOnly.contains(NeoPropertyPathsTestSupport.KEY_PARTNER), method);
+        assertFalse(readOnly.contains("documentNo"), method);
+      }
+
+      JSONObject body = new JSONObject().put("documentNo", "1001")
+          .put(NeoPropertyPathsTestSupport.KEY_PARTNER, "BP-2");
+      JSONObject filtered = filter.filterWriteRequest(body);
+      assertFalse(filtered.has(NeoPropertyPathsTestSupport.KEY_PARTNER));
+      assertEquals("1001", filtered.getString("documentNo"));
+    }
+
+    @Test
+    @DisplayName("the emittable response keys include the path keys")
+    void emittableResponseKeysIncludeThePathKeys() {
+      Set<String> keys = buildFilter().emittableResponseKeys().orElseThrow();
+
+      assertTrue(keys.contains(NeoPropertyPathsTestSupport.KEY_PARTNER));
+      assertTrue(keys.contains(NeoPropertyPathsTestSupport.KEY_PARTNER + "$_identifier"));
+      assertFalse(keys.contains(NeoPropertyPathsTestSupport.PATH_PARTNER));
+    }
+
+    @Test
+    @DisplayName("propertyPathOf is null for an old model, a bare mock, a null row or a blank path")
+    void propertyPathOfIsNullWhenThereIsNone() {
+      assertNull(NeoFieldFilter.propertyPathOf(null));
+      assertNull(NeoFieldFilter.propertyPathOf(mock(SFField.class)), "a mock has no entity");
+
+      Entity oldModel = mock(Entity.class);
+      SFField beforeTheColumn = mock(SFField.class);
+      when(beforeTheColumn.getEntity()).thenReturn(oldModel);
+      assertNull(NeoFieldFilter.propertyPathOf(beforeTheColumn),
+          "a model generated before PROPERTY_PATH existed");
+
+      assertNull(NeoFieldFilter.propertyPathOf(pathField("k", "   ", true)));
+      assertNull(NeoFieldFilter.propertyPathOf(pathField("k", null, true)));
+      assertEquals(NeoPropertyPathsTestSupport.PATH_PARTNER, NeoFieldFilter.propertyPathOf(
+          pathField("k", " " + NeoPropertyPathsTestSupport.PATH_PARTNER + " ", true)));
+    }
+
+    @Test
+    @DisplayName("an inactive filter has no path field")
+    void anInactiveFilterHasNoPathField() {
+      assertTrue(NeoFieldFilter.forEntity(null, "Order").propertyPaths().isEmpty());
     }
   }
 }

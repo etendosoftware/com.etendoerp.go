@@ -53,7 +53,8 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  *   <li>{@code invoicedQuantity} — already-invoiced qty across completed invoices.</li>
  * </ul>
  *
- * Subclasses only need to declare {@code @Named}.
+ * Subclasses only need to declare their binding ({@code @NeoExtension}, or the legacy
+ * {@code @Named}); one may override {@link #linkInvoiceLine} (ETP-6002).
  */
 public abstract class AbstractInOutLineHandler implements NeoHandler {
 
@@ -187,16 +188,29 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
       String newLineId = dataArr.getJSONObject(0).optString("id", null);
       if (newLineId == null || newLineId.isEmpty()) return;
 
-      OBDal.getInstance().getSession()
-          .createNativeQuery(
-              "UPDATE c_invoiceline SET m_inoutline_id = :lineId, updated = now() "
-              + "WHERE c_invoiceline_id = :invLineId AND m_inoutline_id IS NULL")
-          .setParameter("lineId", newLineId)
-          .setParameter("invLineId", invoiceLineId)
-          .executeUpdate();
+      linkInvoiceLine(invoiceLineId, newLineId);
     } catch (Exception e) {
       log.warn("Could not link invoice line after inout line creation: {}", e.getMessage());
     }
+  }
+
+  /**
+   * Links the source invoice line of a just-created movement line to it. By default only the first
+   * movement line is recorded, in {@code C_InvoiceLine.M_InOutLine_ID}, left untouched once set. A
+   * subclass whose listings also read a later partial movement from the match table overrides it
+   * (ETP-6002: {@link GoodsShipmentLineHandler}).
+   *
+   * @param invoiceLineId the source invoice line, already checked to be the caller's own
+   * @param newLineId the movement line just created
+   */
+  protected void linkInvoiceLine(String invoiceLineId, String newLineId) {
+    OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "UPDATE c_invoiceline SET m_inoutline_id = :lineId, updated = now() "
+            + "WHERE c_invoiceline_id = :invLineId AND m_inoutline_id IS NULL")
+        .setParameter("lineId", newLineId)
+        .setParameter("invLineId", invoiceLineId)
+        .executeUpdate();
   }
 
   // placeholders contains only "?" literals and the match tables are fixed enum literals — no

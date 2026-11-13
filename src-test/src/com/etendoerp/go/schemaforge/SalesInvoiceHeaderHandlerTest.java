@@ -1515,9 +1515,11 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Runs {@code flow.createTarget} with {@link InvoiceInOutMapping#map} answering one
+   * Runs {@code flow.createTarget} with {@link InvoiceInOutMapping#mapDeliverableOrders} — the
+   * sales mapper since ETP-6002 CP-14, which carries no quotation order line — answering one
    * {@code line} and {@link InOutTargetBuilder#build} mocked, and returns the arguments the
-   * builder received (direction, header, lines, linker).
+   * builder received (direction, header, lines, linker). The purchase mapper {@code map} is not
+   * stubbed: a sales flow that still called it would get no mapping and fail here.
    */
   private static Object[] createThroughFlow(FollowUpFlow flow, InOutTargetBuilder.Line line) {
     List<PendingResolver.SourceLine> pending = Collections.singletonList(
@@ -1530,8 +1532,8 @@ public class SalesInvoiceHeaderHandlerTest {
     AtomicReference<Object[]> buildArgs = new AtomicReference<>();
     try (MockedStatic<InvoiceInOutMapping> mappingMock = Mockito.mockStatic(InvoiceInOutMapping.class);
          MockedStatic<InOutTargetBuilder> builderMock = Mockito.mockStatic(InOutTargetBuilder.class)) {
-      mappingMock.when(() -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()))
-          .thenReturn(mapping);
+      mappingMock.when(() -> InvoiceInOutMapping.mapDeliverableOrders("inv-1", pending,
+          FollowUpInputs.none())).thenReturn(mapping);
       builderMock.when(() -> InOutTargetBuilder.build(any(), any(), any(), any()))
           .thenAnswer(inv -> {
             buildArgs.set(inv.getArguments());
@@ -1539,6 +1541,7 @@ public class SalesInvoiceHeaderHandlerTest {
           });
 
       assertEquals("io-1", flow.createTarget("inv-1", pending, FollowUpInputs.none()).getId());
+      mappingMock.verify(() -> InvoiceInOutMapping.map(any(), any(), any()), Mockito.never());
     }
     return buildArgs.get();
   }

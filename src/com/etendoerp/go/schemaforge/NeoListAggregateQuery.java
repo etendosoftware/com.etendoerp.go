@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.hibernate.query.Query;
 import org.openbravo.base.structure.BaseOBObject;
@@ -180,6 +181,37 @@ public final class NeoListAggregateQuery {
     Query<Object> query = obq.createQuery(Object.class);
     QueryTimeOutUtil.getInstance().setQueryTimeOut(query, QUERY_PROFILE);
     return query.list();
+  }
+
+  /**
+   * One page of record ids of the filtered set, in an order the DAL sort cannot express (the
+   * {@code _sortBy} grammar only knows property paths). Used by {@link NeoOrderedListPage}.
+   *
+   * @param orderByClause server-side constant HQL order-by expressions on {@code e}; it may embed
+   *     integers and constants the server validated, never text derived from the request
+   * @param firstResult zero-based offset of the page
+   * @param maxResults maximum ids to return
+   * @return the ids of the page, in the requested order
+   */
+  public List<String> orderedIds(String orderByClause, int firstResult, int maxResults) {
+    DataEntityQueryService service = createService();
+    OBQuery<BaseOBObject> obq = buildQuery(service,
+        service.getWhereClause() + " order by " + orderByClause);
+    obq.setSelectClause("e.id");
+    obq.setFirstResult(firstResult);
+    obq.setMaxResult(maxResults);
+    Query<Object> query = obq.createQuery(Object.class);
+    QueryTimeOutUtil.getInstance().setQueryTimeOut(query, QUERY_PROFILE);
+    return query.list().stream().map(String::valueOf).collect(Collectors.toList());
+  }
+
+  /**
+   * Number of records of the filtered set (no sort, no paging).
+   *
+   * @return the total
+   */
+  public int count() {
+    return buildQuery().count();
   }
 
   private DataEntityQueryService createService() {

@@ -4,10 +4,13 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (617)
+# --- con mocks (626)
+com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.payment.CheckoutPromotionTermsTest
 com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
 com.etendoerp.go.payment.PromotionRecoveryTest
+com.etendoerp.go.accounts.AccountDemoExpiryHandlerTest
+com.etendoerp.go.accounts.AccountGroupKeyHandlerTest
 com.etendoerp.go.agentchat.AgentChatConversationsServletTest
 com.etendoerp.go.apps.AppsServletTest
 com.etendoerp.go.apps.JwtIssuerServiceTest
@@ -213,6 +216,7 @@ com.etendoerp.go.payment.StripeListPagerTest
 com.etendoerp.go.payment.StripePriceServiceTest
 com.etendoerp.go.payment.StripeResponseTest
 com.etendoerp.go.payment.StripeSubscriptionPeriodReaderTest
+com.etendoerp.go.payment.SubscriptionBillingCalendarTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierPeriodTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierTest
 com.etendoerp.go.payment.SubscriptionLifecycleCorrelationTest
@@ -388,6 +392,7 @@ com.etendoerp.go.schemaforge.NeoProcessServiceExtractErrorTest
 com.etendoerp.go.schemaforge.NeoProcessServiceMessageKeysTest
 com.etendoerp.go.schemaforge.NeoProcessServiceTest
 com.etendoerp.go.schemaforge.NeoProcessServiceValidationTest
+com.etendoerp.go.schemaforge.NeoPropertyPathsTest
 com.etendoerp.go.schemaforge.NeoPseudoSpecDispatcherTest
 com.etendoerp.go.schemaforge.NeoPublicApiUsageTest
 com.etendoerp.go.schemaforge.NeoQuotaCreateCheckTest
@@ -629,8 +634,11 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (46)
+# --- integración (BD) (50)
+com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
+com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
+com.etendoerp.go.mcp.McpPropertyPathFilterIntegrationTest
 com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest
 com.etendoerp.go.oauth2.PublicApiKeyStoreIntegrationTest
 com.etendoerp.go.onboarding.BusinessPartnerTransactionalSequenceIntegrationTest
@@ -662,6 +670,7 @@ com.etendoerp.go.roles.UserRoleCompositionServiceRealAccessControlIntegrationTes
 com.etendoerp.go.schemaforge.DocActionIdempotencyIntegrationTest
 com.etendoerp.go.schemaforge.DocTemplateConfigStoreIntegrationTest
 com.etendoerp.go.schemaforge.NativeWriteIsolationIntegrationTest
+com.etendoerp.go.schemaforge.NeoPropertyPathsQueryIntegrationTest
 com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest
 com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest
