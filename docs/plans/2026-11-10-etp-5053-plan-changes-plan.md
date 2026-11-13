@@ -1,7 +1,8 @@
 # Plan Upgrade and Downgrade (ETP-5053) Implementation Plan
 
-> Steps use checkbox (`- [ ]`) syntax for tracking. Tasks 1–8 are implemented on
+> Steps use checkbox (`- [ ]`) syntax for tracking. Tasks 1–8 and 11 are implemented on
 > `feature/ETP-5053` and checked; Tasks 9–10 are what remains before the change is merged and live.
+> What was tested by hand and fixed since: [Local verification and fixes](#local-verification-and-fixes-2026-11-09--2026-11-13).
 
 **Goal:** Let a customer move between plans at any moment: upgrades apply now, downgrades apply at
 the end of the current billing period, and the yearly quota (ETP-5051) renews on the billing
@@ -304,6 +305,87 @@ surfaced: `phases[].iterations` was removed (2025-09-30.clover, the downgrade an
 - [x] Dialog: charge line, confirm waits for the quote, "Complete the payment" link; Classic button
   warns with `ETGO_PlanChangePaymentRequired`; copy for monthly → annual corrected in 3 locales.
 - [x] Docs: `plan-changes.md` §1, §3, §4, §5; functional flows §3.2a-sexies.
+
+## Local verification and fixes (2026-11-09 – 2026-11-13)
+
+What was tested by hand against Stripe test mode on a local install, what broke, and what changed
+because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unless marked **SF** for
+`etendo_schema_forge`); a fix folded into an earlier commit during a rebase names that commit.
+
+### Setup used
+
+- Local Tomcat (`CATALINA_HOME=~/myapps/apache/apache-tomcat-9.0.24`), SPA with `make dev`
+  (http://localhost:3100), Stripe API version `2026-07-29.dahlia`, flexible billing mode.
+- Webhooks through `stripe listen --forward-to localhost:8080/etendo/sws/go/checkout/webhook`; its
+  secret must equal `etendo.go.checkout.webhook.secret` in `config/Openbravo.properties` **and** the
+  deployed `WEB-INF` copy (see the findings below).
+- Test tenants: SPRING2, SPRING3 (legacy plan), SPRING6, SPRING7, SPRING8 (monthly mini → yearly),
+  Springsite. Plans: `PROD_MONTH`, `PROD_MONTH_MINI`, `PROD_YEARLY`, `legacy-productive`.
+- Cards: `4242…` (pays at once) and the 3-D Secure test card (`…3184`, asks to authenticate).
+
+### Scenarios tested
+
+| # | Scenario | Result | Fix |
+|---|---|---|---|
+| 1 | Onboard a new tenant (sample data) | Failed first: the `CHANGE_PLAN` button column existed in the AD but not physically | Column added to `ETGO_SUBSCRIPTION.xml` (folded into `d51ad7407`) |
+| 2 | Downgrade yearly → monthly (period end) | Stripe `400 parameter_unknown` on `phases[].iterations` (removed in `2025-09-30.clover`) | `duration[interval]`/`duration[interval_count]` (folded into `f7ddd9e10`) |
+| 3 | Upgrade monthly mini → yearly | Charged the saved card silently, no amount shown; a failed or 3-D Secure charge would still change the plan | Option B: quote + `pending_if_incomplete` + invoice page (`eb1c1497d`, **SF** `1d4aef299`) — Task 11 |
+| 4 | Monthly → yearly keeps the billing date | Confirmed: flexible billing does not reset the anchor; the quota year follows it | Copy corrected in 3 locales (**SF** `1d4aef299`), `plan-changes.md` |
+| 5 | Confirmation after a change | The dialog vanished for ~0.5 s and came back on the option list | Silent refresh that does not unmount the section (**SF** `e89318f44`) |
+| 6 | Change back to yearly while a downgrade is pending | Not possible: the offer listed the scheduled target, never the current plan | Offer starts from the pending plan; "keep current plan" releases the schedule (`1f2245a96`, **SF** `15a5c024c`) |
+| 7 | Dialog labels | Raw label keys shown | Stale label slices in the dev server: restart `make dev` after locale edits (no code change) |
+| 8 | Selected option hard to see | — | Highlighted selection (**SF** `f52aea27c`) |
+| 9 | Confirmation title | — | "Plan changed", no subtitle (**SF** `7fc39dfc6`) |
+| 10 | Downgrade again after cancelling one | Bare `400`: the schedule idempotency key replayed the released schedule for 24 h | Key carries the request second; Stripe's message kept with the code (`6f4a22add`) |
+| 11 | SPRING8 shown past due, upgrade "couldn't calculate the amount" | Missed webhooks (secret mismatch) left the row `past_due`; the quote was refused | Events replayed; the dialog now says a past-due subscription cannot change plan and refuses to confirm (**SF** `7c7b8ad73`) |
+| 12 | Cancel a subscription with a pending downgrade (portal) | The pending plan stayed on the row and the page | Dropped when a cancellation is scheduled (`f0654d6b2`); change action hidden while cancelling (**SF** `cbd52f51d`) |
+| 13 | Legacy plan → monthly | Read as an interval change (legacy had no billing interval) | `EnsureLegacyPlanScript` sets/fills `month` (`b1707c19b`) |
+| 14 | Legacy → monthly with the 3-D Secure card | Paid on Stripe's invoice page, which never redirects back; the app tab kept saying payment pending | Recheck when the tab is shown again, then "Plan changed"; return hint under the button (**SF** `9ee49777a`, `61ddc58b8`) |
+| 15 | Classic **Change Plan** on SPRING3 | Target Plan combo empty: a Table reference on a process parameter fails in `ComboTableDatasourceService` | Selector + HQL_JS validation listing the allowed targets (`366cc66f2`) |
+| 16 | Downgrade then upgrade back (question, 2026-11-12) | The upgrade releases the schedule and clears the pending columns | Covered by `anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
+
+### Findings that needed no code change
+
+- **Webhook secret mismatch fails silently.** A `stripe listen` secret that differs from the
+  configured one makes every event fail its signature: nothing reaches `etgo_billing_event`, while
+  plan changes still look fine because the API applies Stripe's answer directly. Check with
+  `stripe listen --print-secret`, fix both property copies, restart Tomcat, replay missed events
+  oldest first with `stripe events resend <evt>`. This was the cause of SPRING8's past-due state.
+- **"Pending plan is empty for every tenant"** was correct: the Tomcat log shows each scheduled
+  downgrade was later cancelled by "keep current plan" (SPRING6, SPRING7) or by a cancellation
+  (SPRING8). Nothing clears it on `update.database`.
+- **Legacy plan transitions are operator configuration.** Whether the seed should add
+  `legacy-productive → <plan>` rows was considered and rejected: the operator maintains the
+  Allowed Plan Changes tab anyway and adds them (timing `immediate`, to move tenants off the
+  grandfathered plan at once). Legacy → a cheaper plan immediately credits the unused part.
+- **The seed runs once per environment in practice**: on every `update.database`, but only into an
+  empty `ETGO_PLAN_CHANGE`, i.e. the first update that creates the table.
+- **New AD references need a Tomcat restart**: UI definitions are cached at startup; before the
+  restart the Subscriptions window failed with a FreeMarker `get(width)` error.
+
+### Tests added for these fixes
+
+| Area | Tests |
+|---|---|
+| Quote and payment | `PlanChangeServiceTest.aPreviewQuotesTheChargeAndTheCardAndChangesNothing`, `aDowngradePreviewChargesNothingAndSaysWhenItApplies`, `aPreviewRefusesWhatTheChangeWouldRefuse`, `anUpgradeIsChargedAtTheQuotedProrationDateOnlyWhileItIsRecent`, `anUpgradeWhoseInvoiceIsUnpaidWaitsForThePaymentAndChangesNothingLocally`; `SubscriptionLifecycleApplierTest.aFailedPlanChangeInvoiceIsNotARenewalFailure`; `SubscriptionPlanChangeActionHandlerTest.anUpgradeWaitingForItsPaymentSaysSoWithTheInvoicePage` |
+| Pending plan and keep | `PlanChangeServiceTest.whileADowngradeIsPendingTheOfferStartsFromThePlanItMovesTo`, `keepingTheCurrentPlanCancelsTheScheduledDowngradeAndChargesNothing`, `aRefusedReleaseKeepsTheScheduledDowngradeOnBothSides`; `SubscriptionPlanChangeActionHandlerTest.keepingTheCurrentPlanSaysTheScheduledChangeWasCancelled` |
+| Cancellation | `SubscriptionServiceTest.aScheduledCancellationDropsThePendingPlanChange` |
+| Schedule key / provider errors | `PlanChangeServiceTest.aSecondDowngradeToAnotherPlanUpdatesTheExistingScheduleInsteadOfCreatingOne`, `aProviderRefusalIsACodedRefusalNeverAnUnhandledError` (updated) |
+| Legacy interval | `EnsureLegacyPlanScriptTest.anExistingLegacyPlanWithoutIntervalGetsTheMonthlyOneButAnOperatorValueStays` |
+| SPA (`PlanChangeDialog.vitest.jsx`, `SubscriptionSection.vitest.jsx`, `api` tests) | quote and card before confirming; generic charge line when the amount is unknown; no preview for a downgrade; invoice link when the payment waits; recheck on returning to the tab then "Plan changed"; keep current plan while a downgrade is pending; selected option marked; refresh without unmounting the confirmation; past-due says it cannot change and offers nothing; refused quote blocks confirming; no pending line or change action while cancelling; locale parity for every new key |
+
+Last runs: `PlanChangeServiceTest` 24, `SubscriptionPlanChangeActionHandlerTest` 9,
+`SubscriptionServiceTest` 103, `SubscriptionLifecycleApplierTest` 43, `EnsureLegacyPlanScriptTest` 8,
+all green; SPA account and locale tests 114 green.
+
+### Still to verify by hand
+
+- [ ] Classic **Change Plan** dialog shows the filtered Target Plan list (the selector answered
+  correctly when called directly: SPRING3 → Month Mini, Yearly; SPRING7 → Monthly).
+- [ ] A new 3-D Secure upgrade: pay in the Stripe tab, return, dialog turns into "Plan changed".
+- [ ] Legacy → yearly (the `legacy-productive → PROD_YEARLY` row exists locally).
+- [ ] `~/mytmp/ETP-5053-e2e-stripe-testing.md` still describes monthly → annual as restarting the
+  billing date; update it before handing it to QA.
 
 ## Acceptance criteria → evidence
 
