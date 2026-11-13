@@ -2049,6 +2049,56 @@ public class McpServletTest {
     assertEquals(0, result.length());
   }
 
+  // ── Accounting KPI observer (ETP-6230) ──────────────────────────────────
+
+  private void invokeRecordToolCall(McpServlet.AuthIdentity identity, String tool,
+      JSONObject params, JSONObject result) throws Exception {
+    Method recordToolCall = McpServlet.class.getDeclaredMethod("recordToolCall",
+        McpServlet.AuthIdentity.class, McpCallObservation.class, String.class, JSONObject.class,
+        JSONObject.class, String.class);
+    recordToolCall.setAccessible(true);
+    recordToolCall.invoke(servlet, identity, new McpCallObservation("s", "{}", "{}", System.nanoTime()),
+        tool, params, result, null);
+  }
+
+  /** The KPI observer runs even when the usage log is switched off, and sees the identity tenant. */
+  @Test
+  public void recordToolCallFeedsTheKpiObserverEvenWhenTheUsageLogIsDisabled() throws Exception {
+    JSONObject params = new JSONObject().put("arguments", new JSONObject());
+    JSONObject result = new JSONObject();
+    try (MockedStatic<McpAccountingKpiObserver> kpi = mockStatic(McpAccountingKpiObserver.class);
+         MockedStatic<McpUsageLogger> logger = mockStatic(McpUsageLogger.class)) {
+      logger.when(McpUsageLogger::isEnabled).thenReturn(false);
+
+      invokeRecordToolCall(new McpServlet.AuthIdentity("u", "r", "CLIENT-ID", "o", "s"),
+          "etendo_create", params, result);
+
+      kpi.verify(() -> McpAccountingKpiObserver.observe("CLIENT-ID", "etendo_create", params,
+          result));
+      logger.verify(() -> McpUsageLogger.enqueue(any()), never());
+    }
+  }
+
+  /** The tenant resolved for the call wins over the token's (wildcard) client. */
+  @Test
+  public void recordToolCallPrefersTheResolvedTenantForTheKpi() throws Exception {
+    JSONObject params = new JSONObject();
+    JSONObject result = new JSONObject();
+    McpUsageTelemetry.setCurrentTenant("RESOLVED", "org");
+    try (MockedStatic<McpAccountingKpiObserver> kpi = mockStatic(McpAccountingKpiObserver.class);
+         MockedStatic<McpUsageLogger> logger = mockStatic(McpUsageLogger.class)) {
+      logger.when(McpUsageLogger::isEnabled).thenReturn(false);
+
+      invokeRecordToolCall(new McpServlet.AuthIdentity("u", "r", "0", "o", "s"), "etendo_update",
+          params, result);
+
+      kpi.verify(() -> McpAccountingKpiObserver.observe("RESOLVED", "etendo_update", params,
+          result));
+    } finally {
+      McpUsageTelemetry.clearCurrentTenant();
+    }
+  }
+
   // ── Telemetry tenant (ETP-5594) ─────────────────────────────────────────
 
   /**
