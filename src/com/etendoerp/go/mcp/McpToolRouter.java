@@ -283,6 +283,11 @@ public class McpToolRouter {
             return McpWhoamiTool.handle(arguments, scopes);
           // ETP-6236: every step is a call of this same router, under the same role and scopes.
           case McpConstants.TOOL_NEO_ROUTINE:
+            // Off: refused like any withdrawn tool, so an agent that learned the name elsewhere
+            // gets a stable answer instead of a silent success on a path the flag withholds.
+            if (!McpRoutinesFlag.isEnabled()) {
+              return wrapAsErrorContent(McpRouterErrorBodies.routinesDisabled());
+            }
             return new McpRoutineTool(new McpRoutineJdbcStore(), McpRoutineStore.Owner::current,
                 (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes)).handle(arguments);
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:

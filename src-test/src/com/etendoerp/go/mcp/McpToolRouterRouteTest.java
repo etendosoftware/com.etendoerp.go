@@ -2683,6 +2683,42 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── etendo_routine (ETP-6236) ─────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — etendo_routine behind its flag")
+  class RoutineFlagTests {
+
+    @Test
+    @DisplayName("with the flag off a call is refused as tool_disabled and nothing runs")
+    void routineRefusedWhileFlagOff() throws Exception {
+      try (MockedStatic<McpRoutinesFlag> flag = mockStatic(McpRoutinesFlag.class)) {
+        flag.when(McpRoutinesFlag::isEnabled).thenReturn(false);
+        JSONObject result = router.route(McpConstants.TOOL_NEO_ROUTINE,
+            new JSONObject().put("mode", "help"), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertEquals(McpConstants.ERROR_TOOL_DISABLED, body.getString("error"));
+      }
+    }
+
+    @Test
+    @DisplayName("with the flag on the same call is answered by the tool")
+    void routineRoutedWhileFlagOn() throws Exception {
+      try (MockedStatic<McpRoutinesFlag> flag = mockStatic(McpRoutinesFlag.class)) {
+        flag.when(McpRoutinesFlag::isEnabled).thenReturn(true);
+        JSONObject result = router.route(McpConstants.TOOL_NEO_ROUTINE,
+            new JSONObject().put("mode", "help"), READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError", false), result.toString());
+        assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text")
+            .contains("examples"));
+      }
+    }
+  }
+
   // ── docs ────────────────────────────────────────────────────────────────
 
   @Nested

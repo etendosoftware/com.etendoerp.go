@@ -103,8 +103,11 @@ public class ToolRegistry {
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
       tools.add(buildFeedbackTool());
-      // ETP-6236: offered to every session that can read; each step asks its own scope.
-      tools.add(McpRoutineTool.definition());
+      // ETP-6236: offered to every session that can read, behind its flag; each step asks its own
+      // scope.
+      if (McpRoutinesFlag.isEnabled()) {
+        tools.add(McpRoutineTool.definition());
+      }
     }
 
     // Query all active specs

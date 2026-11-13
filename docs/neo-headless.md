@@ -14914,7 +14914,9 @@ Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`,
 A flow whose steps the agent already knows — create a customer, its address and an invoice for it, then
 complete the invoice — used to cost one call per step, each one paying the round trip and the context of the
 answer. `etendo_routine` runs those calls in **one** call, in order, each step able to use what an earlier step
-returned, and saves a flow as a **routine** the same user runs again with new values. Design and decisions:
+returned, and saves a flow as a **routine** the same user runs again with new values. Behind the
+per-account flag `mcp-routines` (off by default; `docs/feature-flags-and-tenant-upgrade.md`): with it
+off the tool is neither listed nor routed (`tool_disabled`). Design and decisions:
 `docs/proposals/mcp-routines.md` in schema_forge.
 
 | `mode` | Arguments | What it does |

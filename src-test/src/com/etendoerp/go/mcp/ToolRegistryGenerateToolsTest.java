@@ -93,6 +93,8 @@ class ToolRegistryGenerateToolsTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<NeoAccessUtils> accessMock;
+  /** ETP-6236: etendo_routine is behind its flag; off unless a test turns it on. */
+  private MockedStatic<McpRoutinesFlag> routinesFlagMock;
 
   private ToolRegistry registry;
 
@@ -115,6 +117,8 @@ class ToolRegistryGenerateToolsTest {
     // access denial override this with a spec-specific stub.
     accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(any(), anyString()))
         .thenReturn(true);
+    routinesFlagMock = mockStatic(McpRoutinesFlag.class);
+    routinesFlagMock.when(McpRoutinesFlag::isEnabled).thenReturn(false);
     registry = new ToolRegistry();
   }
 
@@ -125,6 +129,9 @@ class ToolRegistryGenerateToolsTest {
     }
     if (accessMock != null) {
       accessMock.close();
+    }
+    if (routinesFlagMock != null) {
+      routinesFlagMock.close();
     }
   }
 
@@ -232,15 +239,28 @@ class ToolRegistryGenerateToolsTest {
 
       List<String> names = toolNames(tools);
       // Read access always yields etendo_whoami + etendo_discover + docs + etendo_widget +
-      // etendo_vector_search + etendo_feedback + etendo_routine when no specs exist. These are
-      // built-in read tools (ETP-4284 / ETP-5123 / ETP-5306 / etendo-ai#53 / ETP-6236).
+      // etendo_vector_search + etendo_feedback when no specs exist. These are built-in read tools
+      // (ETP-4284 / ETP-5123 / ETP-5306 / etendo-ai#53).
       assertTrue(names.contains(McpConstants.TOOL_NEO_WHOAMI), names.toString());
       assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(7, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
+    }
+
+    @Test
+    @DisplayName("etendo_routine is listed after the read built-ins only while its flag is on")
+    void routineToolFollowsItsFlag() {
+      mockSpecCriteria(Collections.emptyList());
+      assertFalse(toolNames(registry.generateTools(scopesOf("neo:read")))
+          .contains(McpConstants.TOOL_NEO_ROUTINE));
+
+      routinesFlagMock.when(McpRoutinesFlag::isEnabled).thenReturn(true);
+      List<String> names = toolNames(registry.generateTools(scopesOf("neo:read")));
+      assertEquals(names.indexOf(McpConstants.TOOL_NEO_FEEDBACK) + 1,
+          names.indexOf(McpConstants.TOOL_NEO_ROUTINE), names.toString());
     }
 
     @Test
@@ -409,7 +429,7 @@ class ToolRegistryGenerateToolsTest {
 
       // No CRUD tools since there are no accessible window specs; only the read-scope baseline
       // tools (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
-      // etendo_feedback + etendo_routine) are present.
+      // etendo_feedback) are present.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_get"));
       assertFalse(names.contains("etendo_create"));
@@ -419,7 +439,7 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(7, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
     }
 
     @Test
@@ -446,7 +466,7 @@ class ToolRegistryGenerateToolsTest {
 
       // No CRUD tools since there are no accessible window specs; only the read-scope baseline
       // tools (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
-      // etendo_feedback + etendo_routine) are present.
+      // etendo_feedback) are present.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_get"));
       assertFalse(names.contains("etendo_create"));
@@ -456,7 +476,7 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(7, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
     }
 
     @Test
@@ -575,8 +595,8 @@ class ToolRegistryGenerateToolsTest {
 
       // No window specs => no CRUD/window tools. What remains is the read-scope baseline
       // (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
-      // etendo_feedback + etendo_routine) plus the three write-scope image-upload tools
-      // (ETP-5184), which are built-in and not gated on any spec.
+      // etendo_feedback) plus the three write-scope image-upload tools (ETP-5184), which are
+      // built-in and not gated on any spec.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_create"));
       assertFalse(names.contains("etendo_update"));
@@ -590,7 +610,7 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD));
       assertTrue(names.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE));
       assertTrue(names.contains(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD));
-      assertEquals(10, tools.size(), names.toString());
+      assertEquals(9, tools.size(), names.toString());
     }
   }
 
@@ -1029,8 +1049,8 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(first);
       assertEquals(List.of(McpConstants.TOOL_NEO_WHOAMI, "etendo_discover", "docs",
           McpConstants.TOOL_NEO_WIDGET, McpConstants.TOOL_NEO_VECTOR_SEARCH,
-          McpConstants.TOOL_NEO_FEEDBACK, McpConstants.TOOL_NEO_ROUTINE),
-          names.subList(0, 7), "built-ins first, in a fixed order: " + names);
+          McpConstants.TOOL_NEO_FEEDBACK),
+          names.subList(0, 6), "built-ins first, in a fixed order: " + names);
       assertTrue(names.indexOf("complete_order") < names.indexOf("etendo_list"),
           "process tools before the CRUD tools: " + names);
       Map<String, Object> listSchema = first.get(names.indexOf("etendo_list")).getInputSchema();

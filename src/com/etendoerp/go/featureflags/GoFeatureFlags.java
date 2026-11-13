@@ -465,6 +465,22 @@ public final class GoFeatureFlags {
   public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
+   * ETP-6236 — whether the MCP offers {@code etendo_routine}: several tool calls in one call, and
+   * personal, versioned routines saved to run them again. <b>Positive polarity, off by default</b>:
+   * unset, unreachable or not a boolean reads {@code false}, and the tool is neither listed in
+   * {@code tools/list} nor routed (a call by name answers {@code tool_disabled}). Saved routines
+   * and executions stay in their tables while it is off.
+   *
+   * <p><b>Per account</b> on a hosted arm (Datadog or ConfigCat), evaluated for the
+   * {@code ETGO_ACCOUNT} email of the request user; locally {@code etendo.go.flags.mcp-routines} /
+   * {@code ETGO_FLAG_MCP_ROUTINES} is a plain per-environment boolean. Its only evaluator is
+   * {@code McpRoutinesFlag}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. TTL 2027-03-31 (placeholder).
+   */
+  public static final String FLAG_MCP_ROUTINES = "mcp-routines";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
