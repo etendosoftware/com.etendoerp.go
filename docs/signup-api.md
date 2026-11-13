@@ -182,7 +182,11 @@ Answers `200` with the day the demo now expires, read back as the access check r
 ```
 
 The date is `ETGO_ACCOUNT.DEMO_EXPIRES_AT`, editable in Classic in the **Etendo GO Accounts**
-window (*Demo Expires At*); both see the same value.
+window (*Demo Expires At*); both see the same value. Classic applies the same rule as the API
+(`AccountDemoExpiryHandler`): setting a date on an account that owns no running demo is refused
+with *This account has no running demo…*. Clearing the date is always allowed there, so a date left
+on an account whose demo became productive can be removed. That window only edits accounts: it
+does not create or delete them (tab pattern *Edit Only*).
 
 ## Groups
 
@@ -194,6 +198,11 @@ with an *Accounts* child tab) and shows each account's groups in **Etendo GO Acc
 
 A group key has lowercase letters, digits, `-` and `_`, starts with a letter or a digit, and is at
 most 60 characters. It never changes: it is what callers (and, later, Datadog) refer to.
+
+Classic enforces the same rules on the group's *Search Key* (`AccountGroupKeyHandler`, one rule in
+`AccountGroupService.isValidKey`): an invalid key is refused, the key of an existing group cannot be
+edited, and a group shipped with a module (`AD_MODULE_ID` set, such as `beta`) cannot be deleted —
+deactivate it instead.
 
 ### `POST /groups`
 

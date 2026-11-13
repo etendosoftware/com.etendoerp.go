@@ -127,6 +127,21 @@ public class DemoExpiryService {
     });
   }
 
+  /**
+   * Tells whether an account owns a running demo, the only kind of environment whose expiry can
+   * be edited. Classic ({@code AccountDemoExpiryHandler}) asks it before saving an edited date, so
+   * both entry points refuse the same accounts.
+   *
+   * @param account the account
+   * @return true when at least one demo it owns is running
+   */
+  public boolean ownsDemo(Account account) {
+    if (account == null) {
+      return false;
+    }
+    return SystemContext.call(OPERATION, () -> !demoClientIds(account).isEmpty());
+  }
+
   private List<String> demoClientIds(Account account) {
     List<String> demos = new ArrayList<>();
     for (String clientId : demoExpiry.findOwnedClientIds(account.getEmail())) {

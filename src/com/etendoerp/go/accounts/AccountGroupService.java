@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
@@ -56,6 +57,13 @@ public class AccountGroupService {
   private static final String PARAM_ACCOUNT = "account";
   private static final String ID_EQUALS = ".id = :";
 
+  /**
+   * A group key: lowercase letters, digits, {@code -} and {@code _}, starting with a letter or a
+   * digit, at most 60 characters. The signup API and Classic ({@code AccountGroupKeyHandler})
+   * enforce the same rule, so every key is reachable from the API.
+   */
+  private static final Pattern KEY = Pattern.compile("[a-z0-9][a-z0-9_-]{0,59}");
+
   /** A group as the API reports it. */
   public record GroupInfo(String key, String name, String description, boolean active) {
   }
@@ -72,6 +80,16 @@ public class AccountGroupService {
     CHANGED,
     /** Nothing to do: the account already was (or already was not) a member. */
     UNCHANGED
+  }
+
+  /**
+   * Tells whether a text is a valid group key.
+   *
+   * @param key the candidate key
+   * @return true when it matches the group key rule
+   */
+  public static boolean isValidKey(String key) {
+    return key != null && KEY.matcher(key).matches();
   }
 
   /**

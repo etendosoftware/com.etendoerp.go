@@ -25,6 +25,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.accounts.AccountGroupService;
 import com.etendoerp.go.rest.OnboardingFieldLimits;
 
 /**
@@ -47,8 +48,6 @@ final class SignupAdminRequests {
   static final int NAME_MAX_LENGTH = 120;
   static final int DESCRIPTION_MAX_LENGTH = 255;
 
-  /** Lowercase letters, digits, {@code -} and {@code _}, starting with a letter or a digit. */
-  static final Pattern GROUP_KEY = Pattern.compile("[a-z0-9][a-z0-9_-]{0,59}");
   private static final Pattern ISO_DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
 
   private SignupAdminRequests() {
@@ -103,7 +102,7 @@ final class SignupAdminRequests {
     if (key.length() > KEY_MAX_LENGTH) {
       throw tooLong(FIELD_KEY, KEY_MAX_LENGTH);
     }
-    if (!GROUP_KEY.matcher(key).matches()) {
+    if (!AccountGroupService.isValidKey(key)) {
       throw SignupRequest.badRequest(CODE_INVALID_GROUP_KEY, FIELD_KEY,
           "A group key has lowercase letters, digits, '-' and '_' only, and starts with a letter"
               + " or a digit");

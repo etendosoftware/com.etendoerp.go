@@ -18,6 +18,7 @@
 package com.etendoerp.go.accounts;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -148,6 +149,10 @@ public class DemoExpiryIntegrationTest extends OBBaseTest {
 
       assertEquals(DemoExpiryService.Outcome.NO_DEMO, result.outcome());
       assertNull(OBDal.getInstance().get(Account.class, lonelyId).getDemoExpiresAt());
+      // Classic asks the same question before saving an edited date (AccountDemoExpiryHandler).
+      assertFalse(new DemoExpiryService()
+          .ownsDemo(OBDal.getInstance().get(Account.class, lonelyId)));
+      assertFalse(new DemoExpiryService().ownsDemo(null));
     } finally {
       OBDal.getInstance().getSession()
           .createNativeQuery("DELETE FROM etgo_account WHERE etgo_account_id = :id")
