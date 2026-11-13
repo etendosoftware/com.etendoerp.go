@@ -182,7 +182,9 @@ portal (ETP-6209)*.
 |---|---|
 | `GET /me` | 30 |
 | `POST /renew` | 30 |
-| `GET /home`, `GET /search`, `GET /documents*` (shared) | 120 |
+| `GET /home`, `GET /search`, `GET /documents*`, `POST /quotations/{id}/decision` (shared) | 120 |
+| `GET /decisions/view` (with `/me`'s counter) | 30 |
+| `POST /decisions/confirm` (with `/renew`'s counter) | 30 |
 
 **Production (review W6, resolved by infra with no code change).** Traffic goes browser →
 CloudFront → ALB → Tomcat. Infra added `RemoteIpValve` to the Tomcat image, live from the next
@@ -191,6 +193,40 @@ production deploy: `getRemoteAddr()` then returns the real client IP, so the lim
 deploy), so the counters are effectively fleet-wide and reset on every deploy; scaling out would
 make each task count on its own. Do not parse `X-Forwarded-For` in the portal — the valve is the
 one trusted place that reads it.
+
+## 6b. Accept / reject a quotation (Part C)
+
+A customer can reject (and, once the PO fixes the accept status, accept) a quotation of their scope,
+confirmed by email. Plan: `etendo_schema_forge` plan, *Part C*.
+
+- **`POST /quotations/{id}/decision`** `{decision, reasonCode?, reasonText?}` with `X-Portal-Token`.
+  Same scope as the reads (`findInScope`), data rate limit, and a per-quotation cool-down
+  (`etendo.go.portal.decision.cooldownMinutes`, default 2). Decidable = `UE` only
+  (`QuotationDecisions.isDecidable`, PO Q3) and not expired (no `ValidUntil` = not expired). Reject
+  needs one of `PRICE`, `DELIVERY`, `PAYMENT_TERMS`, `OTHER_SUPPLIER`, `NOT_NEEDED`, `OTHER` (text
+  required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
+  `expired` / `no_recipient` / `accept_unavailable`, 422 `invalid_reason`, 429 `cooldown`, 503.
+- **Recipient:** the confirmation goes to the **first To of the link's root send** only, never CC.
+  No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`.
+- **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
+  a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
+  usable only once its email left). Single use, never expires.
+- **Landing** (`/portal/decision/<token>` in the SPA): `GET /decisions/view` and
+  `POST /decisions/confirm`, the token in **`X-Portal-Decision-Token`**. The view never writes
+  (mail scanners). Confirm, in one transaction: `C_Order` row `FOR UPDATE`, then the decision row;
+  not pending → its state again; quotation re-checked (decidable, not expired) else `NOT_APPLIED`;
+  else applied through `QuotationDecisions` (the app's own reject writes, `UE` → `CJ`, plus the
+  reason in the notes), `CONFIRMED`, every other pending request of the quotation `VOIDED`, commit;
+  then the seller's notice. States: `pending`, `confirmed`, `voided`, `not_pending`, `expired`;
+  unknown token → the generic 401.
+- **Writes as System:** the quotation's audit shows System as updater (the customer is no Etendo
+  user, and writing as the seller would be false).
+- **Seams pending the PO (Jira comment 149513):** Q1 accept status —
+  `QuotationDecisions.STATUS_ACCEPTED` (`ETGO_AC`, list value **not** added) and
+  `PortalDecisionService.ACCEPT_AVAILABLE = false` (accepts refused, 409); Q2 tenant reject reason —
+  `PortalDecisionService#rejectReasonFor` returns `null` (no `C_Reject_Reason` linked, the reason is
+  in the notes); Q3 — `QuotationDecisions.isDecidable`.
+- **KPI:** hook points only, `PortalDecisionEvents` (empty methods), pending the PO's KPI redefinition.
 
 ## 7. KPI events
 
