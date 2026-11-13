@@ -212,7 +212,13 @@ downgrade is pending. Strings in `en_US.json`, `es_ES.json`, `es_AR.json`; amoun
 **Classic** (operators): the **Allowed Plan Changes** tab (§2); on the **Subscription** window the
 **Quota Year Start**, **Pending Plan** and **Pending Effective Date** fields (read-only) and the
 **Change Plan** button (`ETGO_SubscriptionPlanChange`, a process definition on the open row), which
-runs exactly the customer's change through the same service, for assisted cases. When the upgrade
+runs exactly the customer's change through the same service, for assisted cases. Its **Target
+Plan** is a selector (`ETGO Plan Selector`: active plans with a provider price) narrowed by the
+validation `ETGO Allowed Plan Change Targets` to what the account page would offer: the targets the
+Allowed Plan Changes tab lists from the row's plan, or from its pending plan while a change is
+scheduled, plus the current plan in that case (keeping it cancels the change). It reads the row
+through `inpetgoSubscriptionId`. A plain Table reference cannot be used there: the combo datasource
+only serves window fields and fails on a process parameter, leaving the list empty. When the upgrade
 waits for its payment it warns so (`ETGO_PlanChangePaymentRequired`) with the invoice page to send
 to the customer; nothing changed yet.
 
