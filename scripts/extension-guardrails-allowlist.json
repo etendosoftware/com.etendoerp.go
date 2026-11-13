@@ -27,7 +27,6 @@
     "FactAcctHandler",
     "FinancialAccountAccountingHandler",
     "FinancialAccountTransactionsHandler",
-    "FinancialAccountsPageHandler",
     "GeneralLedgerConfigurationHandler",
     "GeneralLedgerReportHandler",
     "GlJournalHeaderHandler",

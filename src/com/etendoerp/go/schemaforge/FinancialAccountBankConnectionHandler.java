@@ -223,6 +223,12 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   /** Resolves the tenant's commercial plan; see {@link #includeSandboxProviders()}. */
   private final TenantPlanService tenantPlanService;
 
+  /**
+   * The SEPA remittance provisioning of a new Bank account (ETP-6148). Package-visible and
+   * non-final so unit tests can swap in one with its flag and DAL seams stubbed.
+   */
+  FinancialAccountRemittanceSupport remittanceSupport = new FinancialAccountRemittanceSupport();
+
   /** CDI requires a no-arg constructor; delegates to the test-injection one. */
   public FinancialAccountBankConnectionHandler() {
     this(new TenantPlanService());
@@ -685,6 +691,14 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     // FIN_FINANCIAL_ACCOUNT_TRG has created the fin_financial_account_acct row the accounting step
     // corrects. Salt Edge linking below stays here — it is path-specific, not shared provisioning.
     FinancialAccountSupport.provisionNewAccount(finAcc);
+    // ETP-6148: a Bank account created with sepa-remittances on gets the remittance payment
+    // methods, in this same transaction (FinancialAccountRemittanceSupport). Not in
+    // provisionNewAccount: that seam is best-effort and unconditional, this is flag-gated and a
+    // failure refuses the create. Before the Salt Edge linking, so a refusal links nothing.
+    NeoResponse remittanceError = remittanceSupport.provisionNewAccount(finAcc);
+    if (remittanceError != null) {
+      return remittanceError;
+    }
 
     if (settings != null) {
       settings.applyTo(finAcc);
