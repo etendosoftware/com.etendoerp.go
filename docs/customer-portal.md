@@ -183,7 +183,7 @@ portal (ETP-6209)*.
 | `GET /me` | 30 |
 | `POST /renew` | 30 |
 | `GET /home`, `GET /search`, `GET /documents*`, `POST /quotations/{id}/decision` (shared) | 120 |
-| `GET /decisions/view` (with `/me`'s counter) | 30 |
+| `GET /decisions/view` (with `/me`'s counter; unused by the SPA since the one-step confirm) | 30 |
 | `POST /decisions/confirm` (with `/renew`'s counter) | 30 |
 
 **Production (review W6, resolved by infra with no code change).** Traffic goes browser →
@@ -196,13 +196,13 @@ one trusted place that reads it.
 
 ## 6b. Accept / reject a quotation (Part C)
 
-A customer can reject (and, once the PO fixes the accept status, accept) a quotation of their scope,
-confirmed by email. Plan: `etendo_schema_forge` plan, *Part C*.
+A customer can accept or reject a quotation of their scope, confirmed by email. Plan:
+`etendo_schema_forge` plan, *Part C* (PO answers applied 2026-11-13).
 
 - **`POST /quotations/{id}/decision`** `{decision, reasonCode?, reasonText?}` with `X-Portal-Token`.
   Same scope as the reads (`findInScope`), data rate limit, and a per-quotation cool-down
   (`etendo.go.portal.decision.cooldownMinutes`, default 2). Decidable = `UE` only
-  (`QuotationDecisions.isDecidable`, PO Q3) and not expired (no `ValidUntil` = not expired). Reject
+  (`QuotationDecisions.isDecidable`, PO answer Q3) and not expired (no `ValidUntil` = not expired). Reject
   needs one of `PRICE`, `DELIVERY`, `PAYMENT_TERMS`, `OTHER_SUPPLIER`, `NOT_NEEDED`, `OTHER` (text
   required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
   `expired` / `no_recipient` / `accept_unavailable`, 422 `invalid_reason`, 429 `cooldown`, 503.
@@ -211,21 +211,39 @@ confirmed by email. Plan: `etendo_schema_forge` plan, *Part C*.
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.
-- **Landing** (`/portal/decision/<token>` in the SPA): `GET /decisions/view` and
-  `POST /decisions/confirm`, the token in **`X-Portal-Decision-Token`**. The view never writes
-  (mail scanners). Confirm, in one transaction: `C_Order` row `FOR UPDATE`, then the decision row;
+- **One step from the email (call with the PO).** The confirmation email's button is explicit
+  ("Confirmar rechazo" / "Confirmar aceptación", `portal-quotation-decision.confirm.cta.<DECISION>`)
+  and opens the landing (`/portal/decision/<token>` in the SPA), whose script sends
+  **`POST /decisions/confirm`** on load and shows the result ("Has rechazado el presupuesto …",
+  already applied, superseded, no longer pending, expired). **A bare GET of the link applies
+  nothing:** a scanner that does not run the page's script never reaches the POST. The token
+  travels in **`X-Portal-Decision-Token`**. `GET /decisions/view` (read-only) is still served but
+  the SPA no longer calls it. Confirm answers `appliedNow: true` only on the call that applied the
+  decision (a re-opened link answers `confirmed` with `appliedNow: false`, and sends no second
+  notice or KPI event). Confirm, in one transaction: `C_Order` row `FOR UPDATE`, then the decision row;
   not pending → its state again; quotation re-checked (decidable, not expired) else `NOT_APPLIED`;
-  else applied through `QuotationDecisions` (the app's own reject writes, `UE` → `CJ`, plus the
-  reason in the notes), `CONFIRMED`, every other pending request of the quotation `VOIDED`, commit;
+  else applied through `QuotationDecisions` — reject: the app's own reject writes, `UE` → `CJ`,
+  plus the reason in the notes; accept: `UE` → **`ETGO_AC` "Aceptado"** (module value of the order
+  status list, `Processed = Y`, no order generated; still converted from the app's Confirmar to an
+  order or an invoice, and over MCP with `Convertquotation` / `createDraftInvoice`) — `CONFIRMED`, every other pending request of the quotation `VOIDED`, commit;
   then the seller's notice. States: `pending`, `confirmed`, `voided`, `not_pending`, `expired`;
   unknown token → the generic 401.
 - **Writes as System:** the quotation's audit shows System as updater (the customer is no Etendo
   user, and writing as the seller would be false).
-- **Seams pending the PO (Jira comment 149513):** Q1 accept status —
-  `QuotationDecisions.STATUS_ACCEPTED` (`ETGO_AC`, list value **not** added) and
-  `PortalDecisionService.ACCEPT_AVAILABLE = false` (accepts refused, 409); Q2 tenant reject reason —
-  `PortalDecisionService#rejectReasonFor` returns `null` (no `C_Reject_Reason` linked, the reason is
-  in the notes); Q3 — `QuotationDecisions.isDecidable`.
+- **PO answers (2026-11-13).** Q1: accept → `ETGO_AC` (`AD_REF_LIST` row of the module, its
+  `es_ES`/`es_AR` name "Aceptado" written by the module script
+  `EnsureDocumentStatusTranslationsScript`, which also fixes `ETGO_CI`'s "Cerrado - Factura
+  creada"; the module ships no translation module, so `export.database` never exports `_TRL`
+  rows). `PortalDecisionService.ACCEPT_AVAILABLE` stays as a switch, now `true`. An `ETGO_AC`
+  quotation shows under the portal's "Aceptados" group and allow-list. Q2: the portal reason is
+  **never** mapped to the tenant's `C_Reject_Reason` (a tenant's reasons can be internal, e.g.
+  "deudor", and must never reach the customer); "Otros" never creates one. The reason and the
+  "Otros" text go to the quotation's notes; the seller can set the internal reason afterwards on
+  the rejected quotation (the field is editable on `CJ` in the app). Q3: only `UE`, not expired.
+- **PDF after a decision.** The decision moves the quotation's `updated`, so its stored printable
+  is stale. `/pdf` re-renders a stale stored PDF before serving it (`PortalPrintable#isStale`, the
+  app's freshness rule via `NeoDocumentPdf#isStoredStale`), keeping the stored file if the render
+  fails. The app's preview already re-renders on its own freshness check.
 - **KPI:** hook points only, `PortalDecisionEvents` (empty methods), pending the PO's KPI redefinition.
 
 ## 7. KPI events
