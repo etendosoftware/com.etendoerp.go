@@ -21,6 +21,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanChange;
@@ -222,7 +224,7 @@ public class PlanChangeService {
     if (keepsCurrentPlan(open, targetPlanKey)) {
       // Cancelling the scheduled downgrade charges nothing.
       return new PlanChangePreview(PlanChangeTiming.IMMEDIATE, open.getPlan(), clock.instant(),
-          null, null, null, null, null);
+          null);
     }
     Resolved change = resolve(open, targetPlanKey);
     JSONObject live = requireSuccess(stripe.get(SUBSCRIPTIONS + encode(change.subscriptionId())
@@ -231,8 +233,7 @@ public class PlanChangeService {
     if (change.timing() == PlanChangeTiming.PERIOD_END) {
       Instant periodEnd = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
           SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
-      return new PlanChangePreview(change.timing(), change.target(), periodEnd, null, null, null,
-          null, null);
+      return new PlanChangePreview(change.timing(), change.target(), periodEnd, null);
     }
     String itemId = firstItemIdOf(live);
     if (itemId == null) {
@@ -254,9 +255,10 @@ public class PlanChangeService {
         : BigDecimal.valueOf(invoice.optLong("amount_due", 0L))
             .movePointLeft(StripeCurrencyScale.exponent(currency));
     JSONObject card = cardOf(live.optJSONObject("default_payment_method"));
-    return new PlanChangePreview(change.timing(), change.target(), clock.instant(), amountDue,
-        currency, prorationDate, card == null ? null : StringUtils.trimToNull(card.optString(
-            "brand", "")), card == null ? null : StringUtils.trimToNull(card.optString("last4", "")));
+    return new PlanChangePreview(change.timing(), change.target(), clock.instant(),
+        new PlanChangePreview.Charge(amountDue, currency, prorationDate,
+            card == null ? null : StringUtils.trimToNull(card.optString("brand", "")),
+            card == null ? null : StringUtils.trimToNull(card.optString("last4", ""))));
   }
 
   /**
@@ -427,7 +429,7 @@ public class PlanChangeService {
       // refusal of the upgrade rolls back the request, and must not bring back a downgrade that
       // the provider no longer has.
       releaseSchedule(subscriptionId, scheduleId);
-      subscriptionService.clearPendingChangeCommitted(open);
+      clearPendingChangeCommitted(open);
     }
     String itemId = firstItemIdOf(live);
     if (itemId == null) {
@@ -587,6 +589,20 @@ public class PlanChangeService {
       throw refused(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT,
           "A subscription that is set to cancel at the period end cannot change plan; renew it"
               + " first");
+    }
+  }
+
+  /**
+   * Clears the pending columns and commits at once, keeping the session open: the release is
+   * already final at the provider, so a refusal of what follows rolls back the request but must not
+   * bring back a downgrade the provider no longer has.
+   */
+  private void clearPendingChangeCommitted(Subscription open) {
+    if (subscriptionService.clearPendingChange(open)) {
+      SystemContext.run("committing a cancelled plan change", () -> {
+        OBDal.getInstance().flush();
+        SessionHandler.getInstance().commitAndStart();
+      });
     }
   }
 

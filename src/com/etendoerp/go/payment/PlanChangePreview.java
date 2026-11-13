@@ -21,26 +21,25 @@ import com.etendoerp.go.schemaforge.data.Plan;
  */
 public final class PlanChangePreview {
 
+  /**
+   * What an upgrade charges today: the amount in major units with its currency, the proration
+   * instant it was computed at, and the card it goes on (brand and last four digits, each null when
+   * unknown).
+   */
+  public record Charge(BigDecimal amountDue, String currency, Long prorationDate, String cardBrand,
+      String cardLast4) {
+  }
+
   private final PlanChangeTiming timing;
   private final Plan targetPlan;
   private final Instant effectiveAt;
-  private final BigDecimal amountDue;
-  private final String currency;
-  private final Long prorationDate;
-  private final String cardBrand;
-  private final String cardLast4;
+  private final Charge charge;
 
-  PlanChangePreview(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
-      BigDecimal amountDue, String currency, Long prorationDate, String cardBrand,
-      String cardLast4) {
+  PlanChangePreview(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt, Charge charge) {
     this.timing = timing;
     this.targetPlan = targetPlan;
     this.effectiveAt = effectiveAt;
-    this.amountDue = amountDue;
-    this.currency = currency;
-    this.prorationDate = prorationDate;
-    this.cardBrand = cardBrand;
-    this.cardLast4 = cardLast4;
+    this.charge = charge;
   }
 
   /** @return when the change would apply */
@@ -60,26 +59,26 @@ public final class PlanChangePreview {
 
   /** @return the amount charged today in major units; null for a downgrade */
   public BigDecimal amountDue() {
-    return amountDue;
+    return charge == null ? null : charge.amountDue();
   }
 
   /** @return the ISO currency code of {@link #amountDue()}, upper case; null for a downgrade */
   public String currency() {
-    return currency;
+    return charge == null ? null : charge.currency();
   }
 
   /** @return the proration instant (epoch seconds) the amount was computed at; null for a downgrade */
   public Long prorationDate() {
-    return prorationDate;
+    return charge == null ? null : charge.prorationDate();
   }
 
   /** @return the brand of the card that will be charged ({@code visa}, ...); null when unknown */
   public String cardBrand() {
-    return cardBrand;
+    return charge == null ? null : charge.cardBrand();
   }
 
   /** @return the last four digits of that card; null when unknown */
   public String cardLast4() {
-    return cardLast4;
+    return charge == null ? null : charge.cardLast4();
   }
 }

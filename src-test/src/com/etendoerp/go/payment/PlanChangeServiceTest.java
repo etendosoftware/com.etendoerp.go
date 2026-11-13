@@ -31,9 +31,12 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.Subscription;
@@ -256,18 +259,30 @@ class PlanChangeServiceTest {
     when(stripe.postForm(startsWith("/v1/subscriptions/"), anyString(), anyString()))
         .thenReturn(ok(liveSubscription("price_pro", null)));
     when(lifecycle.targetForSubscription(SUB_ID)).thenReturn(null);
+    when(subscriptionService.clearPendingChange(open)).thenReturn(true);
+    OBDal dal = mock(OBDal.class);
+    SessionHandler session = mock(SessionHandler.class);
 
-    try (MockedStatic<SystemContext> system = Mockito.mockStatic(SystemContext.class)) {
+    try (MockedStatic<SystemContext> system = Mockito.mockStatic(SystemContext.class);
+        MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+        MockedStatic<SessionHandler> sessionStatic = Mockito.mockStatic(SessionHandler.class)) {
       system.when(() -> SystemContext.run(anyString(), any())).thenAnswer(invocation -> {
         ((Runnable) invocation.getArgument(1)).run();
         return null;
       });
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      sessionStatic.when(SessionHandler::getInstance).thenReturn(session);
       service.requestChange(CLIENT_ID, "pro");
     }
 
     verify(stripe).postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString());
+    verify(subscriptionService).clearPendingChange(open);
     // Committed at once: a refusal of the upgrade must not bring the released downgrade back.
-    verify(subscriptionService).clearPendingChangeCommitted(open);
+    InOrder committedFirst = Mockito.inOrder(dal, session, stripe);
+    committedFirst.verify(dal).flush();
+    committedFirst.verify(session).commitAndStart();
+    committedFirst.verify(stripe).postForm(startsWith("/v1/subscriptions/"), anyString(),
+        anyString());
   }
 
   @Test
@@ -285,7 +300,7 @@ class PlanChangeServiceTest {
     assertEquals(PlanChangeRefusedException.PROVIDER_REJECTED, refusal.code());
     // Never charged while the provider still downgrades at the period end.
     verify(stripe, never()).postForm(startsWith("/v1/subscriptions/"), anyString(), anyString());
-    verify(subscriptionService, never()).clearPendingChangeCommitted(any());
+    verify(subscriptionService, never()).clearPendingChange(any());
   }
 
   @Test
@@ -309,7 +324,7 @@ class PlanChangeServiceTest {
       });
       assertEquals(PlanChangeTiming.IMMEDIATE, service.requestChange(CLIENT_ID, "pro").timing());
     }
-    verify(subscriptionService).clearPendingChangeCommitted(open);
+    verify(subscriptionService).clearPendingChange(open);
   }
 
   @Test
