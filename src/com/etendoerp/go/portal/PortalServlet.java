@@ -18,13 +18,7 @@
 package com.etendoerp.go.portal;
 
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
@@ -33,21 +27,15 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Image;
-import org.openbravo.model.ad.utility.Attachment;
-import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
 import com.etendoerp.go.schemaforge.NeoAttachmentsDownloader;
-import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
-import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * The customer portal's API, at {@code /sws/portal/*} (ETP-5267, link model ETP-6209).
@@ -55,16 +43,15 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <pre>
  * GET  /sws/portal/me[/{token}]                 the link's state, and who it speaks for when valid
  * POST /sws/portal/renew                        email a new link for an expired one
- * GET  /sws/portal/invoices                     completed sales invoices + outstanding balance
- * GET  /sws/portal/invoices/{invoiceId}/pdf     the invoice's main attachment, streamed
  * GET  /sws/portal/logo                         the issuing company's logo
  * GET  /sws/portal/home                         balances, per-kind tiles, recent documents
  * GET  /sws/portal/documents?type=…             one document kind, filtered and paged
  * GET  /sws/portal/documents/{kind}/{id}[/pdf]  one document's detail, or its printable
  * </pre>
  *
- * <p>{@code /invoices} and {@code /invoices/{id}/pdf} are the MVP's and are kept for existing
- * callers; the Part B portal page reads {@code /home} and {@code /documents} only.
+ * <p>The MVP's {@code /invoices} and {@code /invoices/{id}/pdf} were removed in ETP-6209 Part B:
+ * they applied a second, narrower scope rule (completed invoices only) beside
+ * {@link PortalDocumentQuery}'s, and the page no longer read them.
  *
  * <p><b>One link per document email, valid for a fixed time</b> ({@link PortalLinkService}). On
  * {@code /me} a link is valid, expired, unavailable (customer blocked or inactive, or the issuing
@@ -78,8 +65,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * is the threat model: this is the module's only endpoint family whose caller is an outside party
  * holding nothing but a link. Routing it through an engine designed to expose arbitrary entities to
  * an authenticated employee would make every future NEO feature a potential portal exposure. The one
- * thing it reuses is the invoice PDF pipeline (see {@link #handleInvoicePdf}), which is a read of an
- * already scope-checked record.
+ * thing it reuses is the document attachment pipeline (the main attachment, streamed by
+ * {@link NeoAttachmentsDownloader}), which is a read of an already scope-checked record.
  *
  * <p><b>Reachable with no Etendo session, by design.</b> {@code /sws/portal/*} is a longer
  * path-prefix mapping than {@code /sws/*}, so the container serves it here and the request never
@@ -97,16 +84,17 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *       {@link PortalLinkService#validate} answers {@code INVALID} for all of them, and
  *       {@link #rejectInvalidLink} is the single response — byte-identical to the MVP's. Only a
  *       link that was really emailed can answer {@code expired} or {@code unavailable}.</li>
- *   <li><b>Every invoice read filters tenant + Business Partner + {@code docstatus = 'CO'}.</b>
- *       Centralised in {@link PortalInvoiceQuery}; this servlet composes no invoice query of its
- *       own.</li>
+ *   <li><b>Every document read filters tenant + Business Partner + the kind's status
+ *       allow-list.</b> Centralised in {@link PortalDocumentQuery}; this servlet composes no document
+ *       query of its own.</li>
  *   <li><b>The token is never logged.</b> No log statement in this package takes it, not even at
  *       debug. Requests are identified by the link id, which is safe to log.</li>
  *   <li><b>Every response is {@code no-store}.</b> Set in {@link #service} before any handler runs,
  *       so it cannot be forgotten on a new endpoint. Without it a shared cache keyed on path alone
  *       could serve one Business Partner's data to another.</li>
- *   <li><b>{@code /me} and {@code /renew} are rate limited</b> ({@link PortalRateLimiter}) as
- *       defence in depth.</li>
+ *   <li><b>Every token-validating endpoint is rate limited</b> ({@link PortalRateLimiter}) as
+ *       defence in depth: {@code /me}, {@code /renew} and the data reads ({@code /home},
+ *       {@code /documents*}), each with its own counter.</li>
  *   <li><b>Out of scope answers 404, never 403</b> — a 403 would confirm the record exists.</li>
  * </ol>
  *
@@ -124,7 +112,6 @@ public class PortalServlet extends HttpBaseServlet {
 
   private static final String PATH_ME = "/me";
   private static final String PATH_RENEW = "/renew";
-  private static final String PATH_INVOICES = "/invoices";
   /** ETP-6209 Part B: the home aggregates and the per-kind documents. */
   private static final String PATH_HOME = "/home";
   private static final String PATH_DOCUMENTS = "/documents";
@@ -133,30 +120,10 @@ public class PortalServlet extends HttpBaseServlet {
   /** Tenant logo, so the page can show whose portal this is. Takes no parameters. */
   private static final String PATH_LOGO = "/logo";
 
-  /** Query parameters for paging {@code GET /invoices}. */
+  /** Query parameters for paging {@code GET /documents}; clamped by {@link PortalDocumentsEndpoint}. */
   private static final String PARAM_LIMIT = "limit";
   private static final String PARAM_OFFSET = "offset";
 
-  /** Page size when the caller asks for none. */
-  private static final int DEFAULT_LIMIT = 50;
-
-  /**
-   * Hard ceiling on page size.
-   *
-   * <p>It exists so the page size is <b>ours</b>, not the caller's: without it
-   * {@code ?limit=1000000} makes an unauthenticated request serialize a Business Partner's entire
-   * history, which is a denial-of-service knob handed to whoever holds a link. A caller asking for
-   * more is clamped rather than rejected — the request is still answerable, just not on the
-   * caller's terms.
-   */
-  private static final int MAX_LIMIT = 200;
-  /** JSON field names this servlet writes into more than one response shape. */
-  private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
-
-  /** {@code AD_Table.name} holding sales-invoice attachments, as {@code NeoDocumentDownloadService} maps it. */
-  private static final String TABLE_C_INVOICE = "C_Invoice";
-  private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   /** The portal token's own header, independent of the app's session credential scheme. */
   static final String HEADER_PORTAL_TOKEN = "X-Portal-Token";
@@ -189,6 +156,14 @@ public class PortalServlet extends HttpBaseServlet {
   private final transient PortalLinkService linkService = new PortalLinkService();
   private final transient PortalRateLimiter meRateLimiter = new PortalRateLimiter();
   private final transient PortalRateLimiter renewRateLimiter = new PortalRateLimiter();
+  /**
+   * The data reads ({@code /home}, {@code /documents*}). Its own counter, so a customer paging and
+   * filtering a long history never starves {@code /me} or {@code /renew}, and a higher ceiling
+   * ({@link PortalRateLimiter#MAX_DATA_REQUESTS_PER_WINDOW} per minute), because a single page
+   * visit makes several of these calls.
+   */
+  private final transient PortalRateLimiter dataRateLimiter = new PortalRateLimiter(
+      java.time.Clock.systemUTC(), PortalRateLimiter.MAX_DATA_REQUESTS_PER_WINDOW);
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
@@ -242,10 +217,6 @@ public class PortalServlet extends HttpBaseServlet {
         handleDocuments(request, response);
       } else if (path.startsWith(PATH_DOCUMENTS + "/")) {
         handleDocument(request, response, path.substring(PATH_DOCUMENTS.length() + 1));
-      } else if (path.equals(PATH_INVOICES)) {
-        handleInvoices(request, response);
-      } else if (path.startsWith(PATH_INVOICES + "/") && path.endsWith(PDF_SUFFIX)) {
-        handleInvoicePdf(request, response, invoiceIdFromPdfPath(path));
       } else if (path.equals(PATH_LOGO)) {
         handleLogo(request, response);
       } else {
@@ -412,120 +383,13 @@ public class PortalServlet extends HttpBaseServlet {
     return CompanyLogoResolver.resolve(clientId, null);
   }
 
-  /** Lists the Business Partner's completed sales invoices and their outstanding balance. */
-  private void handleInvoices(HttpServletRequest request, HttpServletResponse response)
-      throws IOException, JSONException {
-    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
-    if (!session.isPresent()) {
-      rejectInvalidLink(response);
-      return;
-    }
-    PortalSession validated = session.get();
-    int limit = clampLimit(request.getParameter(PARAM_LIMIT));
-    int offset = parseOffset(request.getParameter(PARAM_OFFSET));
-
-    // The whole set is read for the aggregates below, then only one page is serialized. The totals
-    // MUST span every invoice, not the page: a balance that shrank as the customer clicked "next"
-    // would be a wrong number presented confidently, which is worse than showing none.
-    List<Invoice> all = PortalInvoiceQuery.listAll(validated);
-    // Accumulated per currency, never summed across them: a tenant that invoices the same Business
-    // Partner in EUR and USD has two balances, and adding them would produce a number that means
-    // nothing. The contract's top-level `currency` + `outstandingAmount` are the single-currency
-    // case — which is the real one for essentially every tenant — and `balances` below carries the
-    // full breakdown for the mixed case. Insertion-ordered, so the first currency encountered
-    // (newest invoice first) is the one promoted to the top level.
-    Map<String, BigDecimal> outstandingByCurrency = new LinkedHashMap<>();
-    for (Invoice invoice : all) {
-      outstandingByCurrency.merge(currencyOf(invoice), amount(invoice.getOutstandingAmount()),
-          BigDecimal::add);
-    }
-
-    JSONArray rows = new JSONArray();
-    int from = Math.min(offset, all.size());
-    int to = Math.min(from + limit, all.size());
-    for (Invoice invoice : all.subList(from, to)) {
-      rows.put(toInvoiceJson(invoice));
-    }
-
-    JSONObject body = new JSONObject();
-    body.put("invoices", rows);
-    // Paging metadata. `totalCount` is what makes the page interpretable — without it the browser
-    // cannot tell a short last page from the end of the list, and `invoices.length` stops being the
-    // count it used to be. Kept additive: a caller that ignores these three keys still renders the
-    // first page correctly.
-    body.put("totalCount", all.size());
-    body.put(PARAM_OFFSET, from);
-    body.put(PARAM_LIMIT, limit);
-    // No `status`, by contract: the browser derives it by comparing outstandingAmount against
-    // grandTotalAmount. That makes PortalInvoiceQuery's docstatus = 'CO' filter load-bearing — the
-    // browser makes no scoping or eligibility decision at all.
-    body.put(FIELD_CURRENCY, primaryCurrency(outstandingByCurrency));
-    body.put(FIELD_OUTSTANDING_AMOUNT, primaryOutstanding(outstandingByCurrency));
-    // Additive, and deliberately outside the agreed contract: extra keys are inert in the frontend,
-    // and dropping the breakdown would silently misreport a mixed-currency Business Partner.
-    body.put("balances", toBalancesJson(outstandingByCurrency));
-    sendJson(response, HttpServletResponse.SC_OK, body);
-  }
-
-  /**
-   * The currency the top-level balance is expressed in: the only one when the Business Partner is
-   * invoiced in a single currency, and the newest invoice's otherwise.
-   */
-  private static String primaryCurrency(Map<String, BigDecimal> outstandingByCurrency) {
-    return outstandingByCurrency.isEmpty() ? ""
-        : outstandingByCurrency.keySet().iterator().next();
-  }
-
-  /**
-   * The top-level outstanding balance, in {@link #primaryCurrency}. Only that currency's total —
-   * never a cross-currency sum.
-   */
-  private static BigDecimal primaryOutstanding(Map<String, BigDecimal> outstandingByCurrency) {
-    return outstandingByCurrency.isEmpty() ? BigDecimal.ZERO
-        : outstandingByCurrency.values().iterator().next();
-  }
-
-  /**
-   * Streams one invoice's PDF.
-   *
-   * <p><b>Reuses the existing invoice PDF pipeline rather than rendering anything.</b> The file
-   * served is the attachment currently marked "main" for the {@code C_Invoice} record — the same
-   * one the backoffice sidebar shows and the same one a signed email download link serves
-   * (ETP-4315). {@link NeoAttachmentsHelper#handleGetMain} resolves it and
-   * {@link NeoAttachmentsDownloader#handleDownload} streams it; both are the public entry points that
-   * {@code NeoDocumentDownloadService} sits beside, so there is one implementation of "this
-   * document's file" for all three callers.
-   *
-   * <p>Scope is checked twice on purpose: {@link PortalInvoiceQuery#findInScope} first, so an id
-   * outside the token's scope never reaches the attachment layer at all, and then the resolved
-   * attachment's own client, mirroring {@code NeoDocumentDownloadService#resolveMainAttachment}.
-   * Both misses answer {@code 404}.
-   */
-  private void handleInvoicePdf(HttpServletRequest request, HttpServletResponse response,
-      String invoiceId) throws IOException, JSONException {
-    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
-    if (!session.isPresent()) {
-      rejectInvalidLink(response);
-      return;
-    }
-    PortalSession validated = session.get();
-    Invoice invoice = PortalInvoiceQuery.findInScope(validated, invoiceId);
-    if (invoice == null) {
-      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
-      return;
-    }
-    String attachmentId = resolveMainAttachmentId(invoice.getId());
-    if (attachmentId == null || !belongsToClient(attachmentId, validated.getClientId())) {
-      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
-      return;
-    }
-    NeoAttachmentsDownloader.handleDownload(attachmentId, response);
-    PortalUsageEvents.downloaded(validated, invoice.getId());
-  }
-
   /** The home's balances, per-kind tiles and recent documents ({@link PortalDocumentsEndpoint}). */
   private void handleHome(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
+    if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
     if (!session.isPresent()) {
       rejectInvalidLink(response);
@@ -537,6 +401,10 @@ public class PortalServlet extends HttpBaseServlet {
   /** One page of one document kind; an unknown {@code type} answers 404. */
   private void handleDocuments(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
+    if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
     if (!session.isPresent()) {
       rejectInvalidLink(response);
@@ -560,6 +428,10 @@ public class PortalServlet extends HttpBaseServlet {
    */
   private void handleDocument(HttpServletRequest request, HttpServletResponse response,
       String rest) throws IOException, JSONException {
+    if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
     if (!session.isPresent()) {
       rejectInvalidLink(response);
@@ -591,21 +463,6 @@ public class PortalServlet extends HttpBaseServlet {
     }
     NeoAttachmentsDownloader.handleDownload(attachmentId, response);
     PortalUsageEvents.downloaded(validated, parts[1]);
-  }
-
-  private String resolveMainAttachmentId(String invoiceId) {
-    NeoResponse main = NeoAttachmentsHelper.handleGetMain(TABLE_C_INVOICE, invoiceId);
-    if (main == null || main.getHttpStatus() != HttpServletResponse.SC_OK
-        || main.getBody() == null) {
-      return null;
-    }
-    return StringUtils.trimToNull(main.getBody().optString("id"));
-  }
-
-  private boolean belongsToClient(String attachmentId, String clientId) {
-    Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
-    return attachment != null && attachment.getClient() != null
-        && attachment.getClient().getId().equals(clientId);
   }
 
   /**
@@ -641,71 +498,6 @@ public class PortalServlet extends HttpBaseServlet {
     return null;
   }
 
-  private static String invoiceIdFromPdfPath(String path) {
-    String withoutPrefix = path.substring((PATH_INVOICES + "/").length());
-    return StringUtils.trimToNull(
-        withoutPrefix.substring(0, withoutPrefix.length() - PDF_SUFFIX.length()));
-  }
-
-  /**
-   * Serializes one invoice row to the agreed payload contract.
-   *
-   * <p><b>Amounts are JSON numbers, and they get there as {@link BigDecimal}.</b> The browser
-   * derives each invoice's status by comparing {@code outstandingAmount} against
-   * {@code grandTotalAmount}, so a quoted string would break that comparison while still rendering
-   * a plausible amount — a silent failure. Handing jettison the {@code BigDecimal} itself (verified
-   * against jettison 1.3: {@code 1210.50} serializes as the bare number {@code 1210.5}) keeps the
-   * exact decimal digits, unlike {@code doubleValue()}, which is the other way this module has
-   * emitted amounts and which introduces a binary-floating-point round trip.
-   *
-   * <p>Amounts are never <em>formatted</em> here. Choosing separators is the browser's job through
-   * {@code formatCurrency}, which reads the instance-wide configuration; the backend must not pick
-   * a locale on the customer's behalf.
-   */
-  private static JSONObject toInvoiceJson(Invoice invoice) throws JSONException {
-    JSONObject json = new JSONObject();
-    json.put("id", invoice.getId());
-    json.put("documentNo", StringUtils.defaultString(invoice.getDocumentNo()));
-    json.put("invoiceDate", formatDate(invoice.getInvoiceDate()));
-    json.put("dueDate", formatDate(invoice.getETGODueDate()));
-    json.put(FIELD_CURRENCY, currencyOf(invoice));
-    json.put("grandTotalAmount", amount(invoice.getGrandTotalAmount()));
-    json.put(FIELD_OUTSTANDING_AMOUNT, amount(invoice.getOutstandingAmount()));
-    return json;
-  }
-
-  private static JSONArray toBalancesJson(Map<String, BigDecimal> outstandingByCurrency)
-      throws JSONException {
-    JSONArray balances = new JSONArray();
-    for (Map.Entry<String, BigDecimal> entry : outstandingByCurrency.entrySet()) {
-      JSONObject balance = new JSONObject();
-      balance.put(FIELD_CURRENCY, entry.getKey());
-      balance.put(FIELD_OUTSTANDING_AMOUNT, entry.getValue());
-      balances.put(balance);
-    }
-    return balances;
-  }
-
-  private static String currencyOf(Invoice invoice) {
-    return invoice.getCurrency() == null ? ""
-        : StringUtils.defaultString(invoice.getCurrency().getISOCode());
-  }
-
-  private static BigDecimal amount(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
-  }
-
-  /**
-   * Formats a business date as {@code yyyy-MM-dd}.
-   *
-   * <p>Date-only on purpose: an invoice date is a calendar day, and sending it as an instant is
-   * what makes it render one day early in a negative-UTC-offset timezone. The frontend parses this
-   * with {@code parseCalendarDate}, which relies on exactly this prefix.
-   */
-  private static String formatDate(Date value) {
-    return value == null ? "" : new SimpleDateFormat(DATE_FORMAT).format(value);
-  }
-
   /**
    * The single response for every rejected token: unknown, pending, deactivated, malformed or
    * absent.
@@ -725,36 +517,6 @@ public class PortalServlet extends HttpBaseServlet {
       throw new IllegalStateException("Could not build the portal error body", e);
     }
     sendJson(response, status, body);
-  }
-
-  /**
-   * Resolves the requested page size into {@code [1, MAX_LIMIT]}.
-   *
-   * <p>Anything unusable — absent, blank, non-numeric, zero or negative — becomes
-   * {@value #DEFAULT_LIMIT} rather than an error. A malformed paging parameter is not worth failing
-   * a customer's page over, and there is no security decision here to get wrong: the scope is fixed
-   * by the token, so this only decides how much of an already-authorised list is serialized.
-   */
-  private static int clampLimit(String raw) {
-    int requested = parsePositiveInt(raw, DEFAULT_LIMIT);
-    return Math.min(Math.max(requested, 1), MAX_LIMIT);
-  }
-
-  /** Resolves the requested offset, treating anything unusable as the first page. */
-  private static int parseOffset(String raw) {
-    return Math.max(parsePositiveInt(raw, 0), 0);
-  }
-
-  private static int parsePositiveInt(String raw, int fallback) {
-    String normalized = StringUtils.trimToNull(raw);
-    if (normalized == null) {
-      return fallback;
-    }
-    try {
-      return Integer.parseInt(normalized);
-    } catch (NumberFormatException e) {
-      return fallback;
-    }
   }
 
   private static void sendJson(HttpServletResponse response, int status, JSONObject body)

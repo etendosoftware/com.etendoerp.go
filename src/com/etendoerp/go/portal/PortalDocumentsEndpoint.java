@@ -484,6 +484,14 @@ final class PortalDocumentsEndpoint {
     }
   }
 
+  /**
+   * Today's calendar day on the server, the cut-off for the home's overdue aggregates and the row
+   * {@code overdue} flag: a due date before it is overdue. Aggregates (the overdue balance and the
+   * "overdue" highlight) can only be computed here, so they use the server's day. The per-document
+   * badge and due-date dot do not read the row flag: the UI decides overdue in the browser's local
+   * calendar day exactly like the app's invoice list ({@code getCalendarDateRelation}). Around
+   * midnight the two may therefore differ by one day for a customer in another time zone; accepted.
+   */
   private static Date today() {
     return toDate(LocalDate.now());
   }

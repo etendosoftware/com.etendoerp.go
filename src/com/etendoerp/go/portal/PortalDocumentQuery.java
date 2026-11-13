@@ -66,6 +66,11 @@ final class PortalDocumentQuery {
 
   /** Quotation and proposal sub-types of {@code C_DocType.DocSubTypeSO}. */
   private static final String QUOTATION_SUBTYPES = "('OB', 'ON')";
+  /**
+   * Sub-types the order list never shows: the quotations (their own kind) and the return-material
+   * orders ({@code RM}), which are out of the portal's scope (PO decision, ETP-6209).
+   */
+  private static final String NON_ORDER_SUBTYPES = "('OB', 'ON', 'RM')";
   /** {@code M_InOut.MovementType} of a customer shipment (outbound). */
   private static final String CUSTOMER_SHIPMENT = "C-";
 
@@ -288,7 +293,7 @@ final class PortalDocumentQuery {
         return "e.transactionDocument.sOSubType in " + QUOTATION_SUBTYPES;
       case ORDER:
         return "(e.transactionDocument.sOSubType is null or e.transactionDocument.sOSubType not in "
-            + QUOTATION_SUBTYPES + ")";
+            + NON_ORDER_SUBTYPES + ")";
       case SHIPMENT:
         return "e.movementType = '" + CUSTOMER_SHIPMENT + "'";
       default:
