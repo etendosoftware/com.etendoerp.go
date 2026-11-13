@@ -189,8 +189,20 @@ final class FiscalAeatValidationOutcome {
    * readable one, {@link #UNCODED} otherwise. Never any AEAT text.
    */
   List<String> loggedErrorCodes() {
+    return loggedCodes(errors);
+  }
+
+  /**
+   * The AEAT warnings ({@code avisos}) for the attempt log, by the rules of
+   * {@link #loggedErrorCodes()}. The classic parser reads warnings on an accepted answer only.
+   */
+  List<String> loggedWarningCodes() {
+    return loggedCodes(warnings);
+  }
+
+  private static List<String> loggedCodes(List<String> rawEntries) {
     List<String> codes = new ArrayList<>();
-    for (String raw : new LinkedHashSet<>(errors)) {
+    for (String raw : new LinkedHashSet<>(rawEntries)) {
       String code = FiscalDeclCrudHandler.splitAeatError(raw)[0];
       codes.add(LOGGABLE_CODE.matcher(code).matches() ? code : UNCODED);
     }

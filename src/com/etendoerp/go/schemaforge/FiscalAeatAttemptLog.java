@@ -42,8 +42,9 @@ import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
  * <p><b>Best-effort.</b> {@link #record} never throws: a failure is logged and the attempt goes
  * on.
  *
- * <p><b>Codes only.</b> {@code Error_Codes} holds the AEAT error codes
- * ({@link FiscalAeatValidationOutcome#loggedErrorCodes()}), never their text, which can carry
+ * <p><b>Codes only.</b> {@code Error_Codes} / {@code Warning_Codes} hold the AEAT codes
+ * ({@link FiscalAeatValidationOutcome#loggedErrorCodes()} /
+ * {@link FiscalAeatValidationOutcome#loggedWarningCodes()}), never their text, which can carry
  * fiscal data.
  *
  * <p>Not exposed anywhere (no window, no NEO spec, no MCP): it is read by SQL. Reference:
@@ -55,11 +56,16 @@ class FiscalAeatAttemptLog {
   static final String ENV_PRODUCTION = "production";
   /**
    * {@code Environment}: a presentation routed elsewhere (the AEAT pre-production host forced by
-   * {@code ETSG_ForceTestMode}, or an endpoint configured by preference) — not a real filing.
+   * {@code ETSG_ForceTestMode}, or another AEAT endpoint set by preference) — not a real filing.
    */
   static final String ENV_PREPRODUCTION = "preproduction";
   /** {@code Environment}: the validation service (ServValiDos); nothing is ever filed. */
   static final String ENV_VALIDATION = "validation";
+  /**
+   * {@code Environment}: the attempt went to a host that is not the AEAT's (an endpoint
+   * preference pointing at a stub or a proxy) — not an AEAT verdict.
+   */
+  static final String ENV_OVERRIDE = "override";
   /** {@code Environment}: the endpoint could not be resolved. */
   static final String ENV_UNKNOWN = "unknown";
 
@@ -68,11 +74,19 @@ class FiscalAeatAttemptLog {
   private static final int LEN_ERROR_CODES = 2000;
   private static final String CODE_SEPARATOR = ",";
 
-  static final String INSERT_SQL = "INSERT INTO etgo_fiscal_aeat_attempt"
+  private static final String INSERT_HEAD = "INSERT INTO etgo_fiscal_aeat_attempt"
       + " (etgo_fiscal_aeat_attempt_id, ad_client_id, ad_org_id, isactive, created, createdby,"
       + " updated, updatedby, model, fiscal_year, period, fiscal_decl_uuid, attempt_path,"
-      + " istestmode, environment, aeat_host, outcome, error_count, error_codes)"
-      + " VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      + " istestmode, environment, aeat_host, outcome, error_count, error_codes";
+  private static final String INSERT_VALUES =
+      ") VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+  static final String INSERT_SQL = INSERT_HEAD + ", warning_count, warning_codes" + INSERT_VALUES
+      + ", ?, ?)";
+  /**
+   * The row without the warning columns: the fallback for a database whose table predates them
+   * (the dictionary change not applied yet), so the attempt is still recorded there.
+   */
+  static final String INSERT_SQL_NO_WARNINGS = INSERT_HEAD + INSERT_VALUES + ")";
 
   /** What identifies the declaration of an attempt; kept on the row, no foreign key. */
   record Declaration(String model, int year, String period, String declId, String orgId) {
@@ -89,34 +103,52 @@ class FiscalAeatAttemptLog {
     try {
       OBContext ctx = OBContext.getOBContext();
       String userId = ctx.getUser().getId();
-      List<String> codes = outcome.loggedErrorCodes();
-      try (Connection connection = openConnection();
-          PreparedStatement ps = connection.prepareStatement(INSERT_SQL)) {
-        int i = 0;
-        ps.setString(++i, ctx.getCurrentClient().getId());
-        ps.setString(++i, declaration.orgId());
-        ps.setString(++i, userId);
-        ps.setString(++i, userId);
-        ps.setString(++i, truncate(declaration.model(), LEN_TEXT));
-        ps.setInt(++i, declaration.year());
-        ps.setString(++i, truncate(declaration.period(), LEN_TEXT));
-        ps.setString(++i, truncate(declaration.declId(), LEN_DECL));
-        ps.setString(++i, outcome.path().key());
-        ps.setString(++i, outcome.testMode() ? "Y" : "N");
-        ps.setString(++i, environmentOf(outcome, endpoint));
-        ps.setString(++i, truncate(hostOf(endpoint), LEN_TEXT));
-        ps.setString(++i, outcome.outcome().key());
-        ps.setInt(++i, codes.size());
-        ps.setString(++i, joinCodes(codes));
-        ps.executeUpdate();
-        if (!connection.getAutoCommit()) {
-          connection.commit();
-        }
+      String clientId = ctx.getCurrentClient().getId();
+      try {
+        insert(INSERT_SQL, true, clientId, userId, declaration, outcome, endpoint);
+      } catch (SQLException e) {
+        AbstractFiscalHandler.log.warn("AEAT attempt log: retrying without the warning columns ("
+            + e.getMessage() + ")");
+        insert(INSERT_SQL_NO_WARNINGS, false, clientId, userId, declaration, outcome, endpoint);
       }
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not record the AEAT attempt of declaration "
           + declaration.declId() + " (model " + declaration.model() + ", " + declaration.year()
           + ")", e);
+    }
+  }
+
+  private void insert(String sql, boolean withWarnings, String clientId, String userId,
+      Declaration declaration, FiscalAeatValidationOutcome outcome, String endpoint)
+      throws SQLException {
+    List<String> codes = outcome.loggedErrorCodes();
+    try (Connection connection = openConnection();
+        PreparedStatement ps = connection.prepareStatement(sql)) {
+      int i = 0;
+      ps.setString(++i, clientId);
+      ps.setString(++i, declaration.orgId());
+      ps.setString(++i, userId);
+      ps.setString(++i, userId);
+      ps.setString(++i, truncate(declaration.model(), LEN_TEXT));
+      ps.setInt(++i, declaration.year());
+      ps.setString(++i, truncate(declaration.period(), LEN_TEXT));
+      ps.setString(++i, truncate(declaration.declId(), LEN_DECL));
+      ps.setString(++i, outcome.path().key());
+      ps.setString(++i, outcome.testMode() ? "Y" : "N");
+      ps.setString(++i, environmentOf(outcome, endpoint));
+      ps.setString(++i, truncate(hostOf(endpoint), LEN_TEXT));
+      ps.setString(++i, outcome.outcome().key());
+      ps.setInt(++i, codes.size());
+      ps.setString(++i, joinCodes(codes));
+      if (withWarnings) {
+        List<String> warningCodes = outcome.loggedWarningCodes();
+        ps.setInt(++i, warningCodes.size());
+        ps.setString(++i, joinCodes(warningCodes));
+      }
+      ps.executeUpdate();
+      if (!connection.getAutoCommit()) {
+        connection.commit();
+      }
     }
   }
 
@@ -142,14 +174,23 @@ class FiscalAeatAttemptLog {
 
   /** See the {@code ENV_*} constants. */
   static String environmentOf(FiscalAeatValidationOutcome outcome, String endpoint) {
+    if (StringUtils.isBlank(endpoint)) {
+      return outcome.testMode() ? ENV_VALIDATION : ENV_UNKNOWN;
+    }
+    if (!isAeatHost(hostOf(endpoint))) {
+      return ENV_OVERRIDE;
+    }
     if (outcome.testMode()) {
       return ENV_VALIDATION;
     }
-    if (StringUtils.isBlank(endpoint)) {
-      return ENV_UNKNOWN;
-    }
     return AEAT303SubmissionService.DEFAULT_PRODUCTION_ENDPOINT.equals(endpoint.trim())
         ? ENV_PRODUCTION : ENV_PREPRODUCTION;
+  }
+
+  /** True for a host of the AEAT ({@code *.aeat.es}, {@code *.agenciatributaria.gob.es}). */
+  static boolean isAeatHost(String host) {
+    String h = StringUtils.lowerCase(StringUtils.trimToEmpty(host));
+    return h.endsWith(".aeat.es") || h.endsWith(".agenciatributaria.gob.es");
   }
 
   /** The host of {@code endpoint}, or null when there is none to read. */

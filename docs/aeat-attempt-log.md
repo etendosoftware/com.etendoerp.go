@@ -36,11 +36,13 @@ the AEAT.
 | `Fiscal_Decl_UUID` | `VARCHAR(32)` | yes | `ETGO_Fiscal_Decl_ID` of the declaration — **no foreign key** |
 | `Attempt_Path` | `VARCHAR(200)` | no | `direct_submission`, `manual_validation`, `download` |
 | `IsTestMode` | `CHAR(1)` | no | `Y` when the validation service was asked (nothing is filed), `N` for a presentation |
-| `Environment` | `VARCHAR(200)` | yes | `production` (the AEAT production endpoint: a real filing), `preproduction` (a presentation routed elsewhere: `ETSG_ForceTestMode` or an endpoint preference), `validation` (ServValiDos), `unknown` |
+| `Environment` | `VARCHAR(200)` | yes | `production` (the AEAT production endpoint: a real filing), `preproduction` (a presentation routed to another AEAT host: `ETSG_ForceTestMode` or an endpoint preference), `validation` (the AEAT validation service, ServValiDos), `override` (a host that is not the AEAT's: an endpoint preference pointing at a stub or proxy), `unknown` |
 | `Aeat_Host` | `VARCHAR(200)` | yes | host of the endpoint the attempt went to |
 | `Outcome` | `VARCHAR(200)` | no | `accepted`, `rejected`, `connection_failure`, `not_validated` |
 | `Error_Count` | `NUMERIC` | no | number of distinct AEAT errors of the answer |
 | `Error_Codes` | `VARCHAR(2000)` | yes | the AEAT error codes, comma-separated, one per error; `UNCODED` for an error without a readable code |
+| `Warning_Count` | `NUMERIC` | no (default 0) | number of distinct AEAT warnings (`avisos`) of the answer |
+| `Warning_Codes` | `VARCHAR(2000)` | yes | the AEAT warning codes, same rules as `Error_Codes` |
 
 Indexes: `ETGO_FISCAL_AEAT_ATT_MODEL (Model, Fiscal_Year, Attempt_Path)`,
 `ETGO_FISCAL_AEAT_ATT_DECL (Fiscal_Decl_UUID)`. Foreign keys: client and organization only.
@@ -59,29 +61,73 @@ Indexes: `ETGO_FISCAL_AEAT_ATT_MODEL (Model, Fiscal_Year, Attempt_Path)`,
   breaks or blocks the attempt.
 - **Codes only.** The AEAT text can carry fiscal data and is never stored. A code is kept when
   it is alphanumeric and at most 20 characters; anything else becomes `UNCODED`.
+- **Warnings** come from the validator's `avisos`. The classic parser reads them on an accepted
+  answer only, so a rejected attempt always has `Warning_Count = 0`. A database whose table
+  predates the two warning columns still gets the row, without them (the insert is retried).
+- **`override` rows** exist only from the version that added the value; earlier rows of a local
+  endpoint override say `validation`. Filter on `Aeat_Host` to keep real AEAT verdicts.
 - **A real filing** is `Attempt_Path = 'direct_submission' AND Environment = 'production'`.
 
-## Example: % of 390 files the AEAT accepts without errors
+## KPI: % of 390 files the AEAT accepts without errors
+
+Definition:
+
+- **Population:** model 390, path `download`, attempts that reached a real AEAT host. The filter
+  is on `Aeat_Host`, not on `Environment`: rows written before the `override` value existed say
+  `validation` for a local endpoint override too.
+- **One row per declaration:** its FIRST attempt that got an AEAT verdict (`accepted` or
+  `rejected`). Attempts without a verdict (`connection_failure`, `not_validated`) are skipped when
+  picking the first and reported apart (`unanswered_attempts`).
+- **KPI:** accepted first attempts / (accepted + rejected first attempts), per fiscal year.
 
 ```sql
-SELECT fiscal_year,
-       count(*) FILTER (WHERE outcome IN ('accepted', 'rejected'))              AS validated,
-       count(*) FILTER (WHERE outcome = 'accepted')                             AS accepted,
-       round(100.0 * count(*) FILTER (WHERE outcome = 'accepted')
-             / NULLIF(count(*) FILTER (WHERE outcome IN ('accepted', 'rejected')), 0), 1)
-                                                                                AS pct_accepted,
-       count(*) FILTER (WHERE outcome IN ('connection_failure', 'not_validated')) AS unanswered
-  FROM etgo_fiscal_aeat_attempt
- WHERE model = '390' AND attempt_path = 'download'
- GROUP BY fiscal_year
- ORDER BY fiscal_year;
+WITH verdicts AS (
+  SELECT a.*,
+         row_number() OVER (PARTITION BY fiscal_decl_uuid ORDER BY created) AS n
+    FROM etgo_fiscal_aeat_attempt a
+   WHERE model = '390' AND attempt_path = 'download'
+     AND (aeat_host LIKE '%.aeat.es' OR aeat_host LIKE '%.agenciatributaria.gob.es')
+     AND outcome IN ('accepted', 'rejected')
+), unanswered AS (
+  SELECT fiscal_year, count(*) AS unanswered_attempts
+    FROM etgo_fiscal_aeat_attempt
+   WHERE model = '390' AND attempt_path = 'download'
+     AND (aeat_host LIKE '%.aeat.es' OR aeat_host LIKE '%.agenciatributaria.gob.es')
+     AND outcome IN ('connection_failure', 'not_validated')
+   GROUP BY fiscal_year
+)
+SELECT v.fiscal_year,
+       count(*)                                        AS declarations,
+       count(*) FILTER (WHERE v.outcome = 'accepted')  AS accepted_first,
+       count(*) FILTER (WHERE v.outcome = 'rejected')  AS rejected_first,
+       round(100.0 * count(*) FILTER (WHERE v.outcome = 'accepted') / count(*), 1) AS pct_accepted_first,
+       coalesce(max(u.unanswered_attempts), 0)         AS unanswered_attempts
+  FROM verdicts v
+  LEFT JOIN unanswered u ON u.fiscal_year = v.fiscal_year
+ WHERE v.n = 1
+ GROUP BY v.fiscal_year
+ ORDER BY v.fiscal_year;
 ```
 
-Most frequent AEAT error codes:
+Most frequent error and warning codes on those first attempts — the validations Etendo is
+missing on its side:
 
 ```sql
-SELECT code, count(*)
-  FROM etgo_fiscal_aeat_attempt, unnest(string_to_array(error_codes, ',')) AS code
- WHERE model = '390'
- GROUP BY code ORDER BY 2 DESC;
+WITH firsts AS (
+  SELECT *
+    FROM (SELECT a.*, row_number() OVER (PARTITION BY fiscal_decl_uuid ORDER BY created) AS n
+            FROM etgo_fiscal_aeat_attempt a
+           WHERE model = '390' AND attempt_path = 'download'
+             AND (aeat_host LIKE '%.aeat.es' OR aeat_host LIKE '%.agenciatributaria.gob.es')
+             AND outcome IN ('accepted', 'rejected')) x
+   WHERE n = 1
+)
+SELECT 'error' AS kind, code, count(*) AS first_attempts
+  FROM firsts, unnest(string_to_array(error_codes, ',')) AS code
+ GROUP BY code
+UNION ALL
+SELECT 'warning', code, count(*)
+  FROM firsts, unnest(string_to_array(warning_codes, ',')) AS code
+ GROUP BY code
+ ORDER BY kind, first_attempts DESC, code;
 ```
