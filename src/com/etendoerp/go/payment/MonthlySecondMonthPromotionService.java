@@ -30,6 +30,7 @@ public class MonthlySecondMonthPromotionService {
   private static final String PROVIDER_UNAVAILABLE = "Promotion provider unavailable";
   private static final String DISCOUNTS = "discounts";
   private static final String COUPON_FIELD = "coupon";
+  private static final String ADD_INVOICE_ITEMS = "add_invoice_items";
   StripeApiClient stripe = new HttpUrlConnectionStripeApiClient();
   CheckoutPromotionTerms termsStore = new CheckoutPromotionTerms();
   BillingEventStore events = new BillingEventStore();
@@ -225,12 +226,12 @@ public class MonthlySecondMonthPromotionService {
       for (int index = 0; index < 3; index++) {
         JSONObject copy = new JSONObject(phase.toString());
         copy.remove("currency"); // Derived from items; not an update parameter.
-        JSONArray invoiceItems = copy.optJSONArray("add_invoice_items");
-        if (invoiceItems != null && invoiceItems.length() == 0) copy.remove("add_invoice_items");
+        JSONArray invoiceItems = copy.optJSONArray(ADD_INVOICE_ITEMS);
+        if (invoiceItems != null && invoiceItems.length() == 0) copy.remove(ADD_INVOICE_ITEMS);
         if (index > 0) {
           copy.remove("start_date");
           copy.remove("end_date");
-          copy.remove("add_invoice_items");
+          copy.remove(ADD_INVOICE_ITEMS);
           copy.remove("trial_end");
           copy.put("iterations", 1); // Compatible with the existing unversioned API contract.
         }
