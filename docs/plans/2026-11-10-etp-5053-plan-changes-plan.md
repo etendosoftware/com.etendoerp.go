@@ -385,10 +385,11 @@ cases tested on purpose on 2026-11-13, all passing with no further code change.
 - **"Pending plan is empty for every tenant"** was correct: the Tomcat log shows each scheduled
   downgrade was later cancelled by "keep current plan" (SPRING6, SPRING7) or by a cancellation
   (SPRING8). Nothing clears it on `update.database`.
-- **Legacy plan transitions are operator configuration.** Whether the seed should add
-  `legacy-productive → <plan>` rows was considered and rejected: the operator maintains the
-  Allowed Plan Changes tab anyway and adds them (timing `immediate`, to move tenants off the
-  grandfathered plan at once). Legacy → a cheaper plan immediately credits the unused part.
+- **Legacy plan transitions are seeded too** (decided 2026-11-13, reversing an earlier "operator
+  configuration only"). Since the ticket asks for seeded rows, the seed also adds
+  `legacy-productive → <every active priced plan>`, monthly and annual, timing `immediate`, to
+  move tenants off the grandfathered plan at once; legacy → a cheaper plan credits the unused part.
+  Checked against the local catalog in a rolled-back transaction: 18 tier rows + 6 legacy rows.
 - **The seed runs once per environment in practice**: on every `update.database`, but only into an
   empty `ETGO_PLAN_CHANGE`, i.e. the first update that creates the table.
 - **New AD references need a Tomcat restart**: UI definitions are cached at startup; before the

@@ -35,8 +35,14 @@ import org.openbravo.modulescript.ModuleScript;
  * display price within its interval and currency — the proxy that the ticket forbids at
  * <em>run time</em> is acceptable once, at seed time, because the operator reviews the result in
  * the Plans window. Only active plans with a provider price, a display price and a currency take
- * part: the grandfathered legacy plan has none and is skipped, and plans in different currencies
- * are never joined.
+ * part, and plans in different currencies are never joined.
+ *
+ * <p><b>The grandfathered legacy plan</b> ({@code legacy-productive}, monthly, no price — see
+ * {@link EnsureLegacyPlanScript}, which runs first) has no tier to rank, so the rule above cannot
+ * place it. It gets its own rows: to every active priced plan, monthly or annual, timing
+ * {@code immediate}, because the point of offering it a change is to move the tenant onto the
+ * current catalog now. A cheaper target therefore applies at once with a prorated credit; the
+ * operator adjusts or deactivates any of these rows like the others.
  */
 public class SeedAllowedPlanChangesScript extends ModuleScript {
 
@@ -46,6 +52,8 @@ public class SeedAllowedPlanChangesScript extends ModuleScript {
    * One statement, guarded twice: the {@code NOT EXISTS} makes it a no-op when a row already
    * exists, so a concurrent or repeated run can never add to an operator's rows.
    */
+  static final String LEGACY_PLAN_KEY = "legacy-productive";
+
   static final String SEED_SQL = "INSERT INTO etgo_plan_change (etgo_plan_change_id, ad_client_id,"
       + " ad_org_id, isactive, created, createdby, updated, updatedby, etgo_plan_id,"
       + " target_plan_id, timing)"
@@ -73,6 +81,16 @@ public class SeedAllowedPlanChangesScript extends ModuleScript {
       + " WHERE ((f.billing_interval = t.billing_interval AND f.tier <> t.tier)"
       + "   OR (f.billing_interval = 'month' AND t.billing_interval = 'year'"
       + "     AND t.tier >= f.tier))"
+      + "   AND NOT EXISTS (SELECT 1 FROM etgo_plan_change)"
+      // The legacy plan: to every active priced plan, now.
+      + " UNION ALL"
+      + " SELECT get_uuid(), '0', '0', 'Y', now(), '0', now(), '0', l.etgo_plan_id, t.etgo_plan_id,"
+      + " 'immediate'"
+      + " FROM etgo_plan l JOIN etgo_plan t ON t.etgo_plan_id <> l.etgo_plan_id"
+      + " WHERE l.value = '" + LEGACY_PLAN_KEY + "' AND l.isactive = 'Y'"
+      + "   AND t.isactive = 'Y' AND t.provider_price_id IS NOT NULL"
+      + "   AND t.display_price IS NOT NULL AND t.currency_code IS NOT NULL"
+      + "   AND t.billing_interval IN ('month', 'year')"
       + "   AND NOT EXISTS (SELECT 1 FROM etgo_plan_change)";
 
   @Override

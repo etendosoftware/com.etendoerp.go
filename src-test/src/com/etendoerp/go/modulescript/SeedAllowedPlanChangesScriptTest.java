@@ -155,6 +155,22 @@ class SeedAllowedPlanChangesScriptTest {
   }
 
   @Test
+  void theLegacyPlanGetsAnImmediateRowToEveryActivePricedPlanUnderTheSameGuard() throws Exception {
+    String sql = constant("SEED_SQL").replaceAll("\\s+", " ");
+    String legacy = sql.substring(sql.indexOf(" UNION ALL "));
+    assertEquals("legacy-productive", constant("LEGACY_PLAN_KEY"));
+    assertTrue(legacy.contains("l.value = 'legacy-productive' AND l.isactive = 'Y'"), legacy);
+    assertTrue(legacy.contains("'immediate' FROM etgo_plan l JOIN etgo_plan t"), legacy);
+    // Monthly and annual targets alike, priced and active, never the legacy plan itself.
+    assertTrue(legacy.contains("t.isactive = 'Y' AND t.provider_price_id IS NOT NULL"), legacy);
+    assertTrue(legacy.contains("t.billing_interval IN ('month', 'year')"), legacy);
+    assertTrue(legacy.contains("t.etgo_plan_id <> l.etgo_plan_id"), legacy);
+    // Seeded into an empty table only, like the tier rows.
+    assertTrue(legacy.endsWith("AND NOT EXISTS (SELECT 1 FROM etgo_plan_change)"), legacy);
+    assertFalse(legacy.contains("period_end"), legacy);
+  }
+
+  @Test
   void theCompiledScriptIsCommittedSoUpdateDatabaseRunsIt() {
     Path compiled = moduleRoot.resolve(Paths.get("build", "classes", "com", "etendoerp", "go",
         "modulescript", "SeedAllowedPlanChangesScript.class"));

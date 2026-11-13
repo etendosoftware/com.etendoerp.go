@@ -65,8 +65,11 @@ them: a table emptied by hand is seeded again on the next `update.database`.
 derives its interval, but transitions compare intervals: `EnsureLegacyPlanScript` gives it
 `Billing_Interval = month` (the legacy price fallback sells a monthly subscription) on insert, and
 fills it on every `update.database` while it is empty, so a value set in the Plans window stays.
-The seed above adds no rows from it (it is unpriced): an operator who wants legacy tenants to
-change plan adds those rows by hand.
+It has no tier to rank, so the seed gives it rows of its own: **legacy → every active priced plan,
+monthly and annual, `immediate`**, because offering a legacy tenant a change is meant to move it
+onto the current catalog now (a cheaper target applies at once, with a prorated credit). Like every
+seeded row, the operator adjusts or deactivates them in the tab; an environment whose table already
+has rows gets none of them and adds them by hand.
 
 ## 3. Mechanics at the provider
 
