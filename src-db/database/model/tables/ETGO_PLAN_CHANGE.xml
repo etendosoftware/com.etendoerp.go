@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_PLAN_CHANGE">
+    <table name="ETGO_PLAN_CHANGE" primaryKey="ETGO_PLNCHG_PK">
+      <column name="ETGO_PLAN_CHANGE_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_PLAN_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TARGET_PLAN_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TIMING" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_PLNCHG_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_PLNCHG_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_PLNCHG_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PLAN" name="ETGO_PLNCHG_PLAN_FK">
+        <reference local="ETGO_PLAN_ID" foreign="ETGO_PLAN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PLAN" name="ETGO_PLNCHG_TARGET_FK">
+        <reference local="TARGET_PLAN_ID" foreign="ETGO_PLAN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_PLNCHG_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <unique name="ETGO_PLNCHG_PLAN_TARGET_UQ">
+        <unique-column name="ETGO_PLAN_ID"/>
+        <unique-column name="TARGET_PLAN_ID"/>
+      </unique>
+      <check name="ETGO_PLNCHG_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_PLNCHG_SELF_CHK"><![CDATA[ETGO_PLAN_ID <> TARGET_PLAN_ID]]></check>
+      <check name="ETGO_PLNCHG_TIMING_CHK"><![CDATA[TIMING IN ('immediate', 'period_end')]]></check>
+    </table>
+  </database>

@@ -5,6 +5,7 @@ import java.time.Instant;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
@@ -32,6 +33,8 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAID = "invoice.paid";
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
+  static final String BILLING_REASON_SUBSCRIPTION_UPDATE = "subscription_update";
+  static final String PLAN_CHANGE_INVOICE = "plan change invoice";
   /** The provider's scheduled-cancellation flag on a subscription object (display-only). */
   static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   /**
@@ -45,6 +48,8 @@ public class SubscriptionLifecycleApplier {
   public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
 
   static final String CURRENT_PERIOD_START = "current_period_start";
+  private static final String FIELD_CREATED = "created";
+  private static final String FIELD_PRICE = "price";
   static final String CURRENT_PERIOD_END = "current_period_end";
 
   private static final String MISSING_PERIOD_END = "missing period end";
@@ -93,6 +98,13 @@ public class SubscriptionLifecycleApplier {
       case INVOICE_PAID:
         return invoicePaid(object);
       case INVOICE_PAYMENT_FAILED:
+        if (BILLING_REASON_SUBSCRIPTION_UPDATE.equals(object.optString("billing_reason", ""))) {
+          // ETP-5053 — the invoice of a plan change (an upgrade's prorated difference). The
+          // change waits for it as a pending update and the subscription stays current on its
+          // plan, so it is no failed renewal. Without a pending update Stripe itself moves the
+          // subscription to past_due and says so in customer.subscription.updated.
+          return SubscriptionEventOutcome.ignore(PLAN_CHANGE_INVOICE);
+        }
         return pastDue(epochSeconds(object, "period_end"));
       case SUBSCRIPTION_DELETED:
         return SubscriptionEventOutcome.apply(
@@ -105,7 +117,8 @@ public class SubscriptionLifecycleApplier {
         return fromSubscriptionStatus(object, current)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
                 subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
-            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object));
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object))
+            .withProviderPrice(itemPriceIdOf(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
@@ -221,7 +234,7 @@ public class SubscriptionLifecycleApplier {
       return asserted;
     }
     Instant start = epochSeconds(subscription, "start_date");
-    return start != null ? start : epochSeconds(subscription, "created");
+    return start != null ? start : epochSeconds(subscription, FIELD_CREATED);
   }
 
   private static Instant latestInvoicePaidAt(JSONObject subscription) {
@@ -271,13 +284,34 @@ public class SubscriptionLifecycleApplier {
    * @return the creation instant, or null when the envelope carries none
    */
   public static Instant eventCreatedAt(JSONObject event) {
-    return event == null ? null : epochSeconds(event, "created");
+    return event == null ? null : epochSeconds(event, FIELD_CREATED);
   }
 
   /**
    * Reads a subscription period boundary from the top level or, from API 2025-03-31, from the
    * first subscription item.
    */
+  /**
+   * ETP-5053 — the Stripe price of the subscription's first item, {@code items.data[0].price}:
+   * an object with an {@code id} when expanded, else the bare id string. The item is what a plan
+   * change updates, so this is where an applied upgrade, or a downgrade phase reached at the
+   * period boundary, shows up in {@code customer.subscription.updated}.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the price id, or null when the object carries no item or no price
+   */
+  public static String itemPriceIdOf(JSONObject subscription) {
+    JSONObject items = subscription == null ? null : subscription.optJSONObject("items");
+    JSONArray data = items == null ? null : items.optJSONArray("data");
+    JSONObject first = data == null ? null : data.optJSONObject(0);
+    if (first == null || !first.has(FIELD_PRICE) || first.isNull(FIELD_PRICE)) {
+      return null;
+    }
+    JSONObject price = first.optJSONObject(FIELD_PRICE);
+    String id = price != null ? StripeJson.text(price, "id") : StripeJson.text(first, FIELD_PRICE);
+    return StringUtils.trimToNull(id);
+  }
+
   static Instant subscriptionPeriodBoundary(JSONObject subscription, String field) {
     Instant topLevel = epochSeconds(subscription, field);
     if (topLevel != null) {
@@ -395,6 +429,34 @@ public class SubscriptionLifecycleApplier {
     }
     return SubscriptionEventOutcome.apply(
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, paidPeriodEnd);
+  }
+
+  /**
+   * ETP-5048 / ETP-5053 — a Stripe subscription object, as read back or returned by the
+   * provider, wrapped as a {@code customer.subscription.updated} event created at {@code at}, so
+   * the stale check orders it against the stored watermark exactly as it orders a webhook event.
+   * Shared by the billing reconciliation and the plan-change service, which applies the
+   * provider's answer to an upgrade the moment it has it. No {@code created} when no instant is
+   * known.
+   *
+   * @param subscription the Stripe subscription object
+   * @param at the provider instant the object's state is asserted at, may be null
+   * @return the event envelope
+   */
+  public static JSONObject syntheticSubscriptionUpdated(JSONObject subscription, Instant at) {
+    try {
+      JSONObject data = new JSONObject();
+      data.put("object", subscription);
+      JSONObject event = new JSONObject();
+      event.put("type", SUBSCRIPTION_UPDATED);
+      if (at != null) {
+        event.put(FIELD_CREATED, at.getEpochSecond());
+      }
+      event.put("data", data);
+      return event;
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the subscription event", e);
+    }
   }
 
   private static JSONObject eventObject(JSONObject event) {

@@ -228,7 +228,7 @@
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <NAME><![CDATA[Quotas]]></NAME>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <DESCRIPTION><![CDATA[Resource allowances granted by the plan]]></DESCRIPTION>
-<!--37BBC059BC9E4449B356ABE86CD39163-->  <HELP><![CDATA[One row per billing resource included in the plan. The absence of a row, or an inactive row, means the resource is unlimited, so deleting or deactivating the last row is how the unlimited state is restored. A quota is consumed over the subscription billing period of the plan: on a yearly plan the included quantity is a yearly quantity, consumed over the whole year, not per month.]]></HELP>
+<!--37BBC059BC9E4449B356ABE86CD39163-->  <HELP><![CDATA[One row per billing resource included in the plan. The absence of a row, or an inactive row, means the resource is unlimited, so deleting or deactivating the last row is how the unlimited state is restored. A quota is consumed over the subscription year, whatever the billing interval: the year that starts on each anniversary of the subscription's Quota Year Start (its Start Date unless a plan change set another anchor). The included quantity is therefore always a yearly quantity, also on a monthly-paid plan, which can reach it in its first month.]]></HELP>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <AD_TABLE_ID><![CDATA[C2DF98CC43D74F39988C581ECDE34852]]></AD_TABLE_ID>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <AD_WINDOW_ID><![CDATA[98824E1FB32949F8B07F1FE52FF909F2]]></AD_WINDOW_ID>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <SEQNO><![CDATA[20]]></SEQNO>
@@ -286,6 +286,33 @@
 <!--3B148775972C48DA8496753953A76E1D-->  <EM_OBUIAPP_SHOW_CLONE_BUTTON><![CDATA[N]]></EM_OBUIAPP_SHOW_CLONE_BUTTON>
 <!--3B148775972C48DA8496753953A76E1D-->  <EM_OBUIAPP_CLONE_CHILDREN><![CDATA[Y]]></EM_OBUIAPP_CLONE_CHILDREN>
 <!--3B148775972C48DA8496753953A76E1D--></AD_TAB>
+
+<!--3F26D7287F5E42628AF0FD15101BCEFB--><AD_TAB>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_TAB_ID><![CDATA[3F26D7287F5E42628AF0FD15101BCEFB]]></AD_TAB_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <NAME><![CDATA[Allowed Plan Changes]]></NAME>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <DESCRIPTION><![CDATA[Plan changes a customer on this plan may ask for]]></DESCRIPTION>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <HELP><![CDATA[Which plan changes a customer on this plan may ask for, and when each applies (ETP-5053). immediate rows are upgrades applied now; period_end rows are downgrades applied at the end of the current billing period. A change with no active row here is refused by the API and not offered on the account page, so this tab is the only place a transition is enabled or withdrawn; no code change is needed. The direction is what the row says, never what the prices suggest. The first deployment seeds the obvious rows from the catalog (same interval: higher tier immediate, lower tier at period end; monthly to annual of the same or a higher tier immediate; nothing from annual to monthly).]]></HELP>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_TABLE_ID><![CDATA[ACECBA79BE884963BE028EDD90E63DF7]]></AD_TABLE_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_WINDOW_ID><![CDATA[98824E1FB32949F8B07F1FE52FF909F2]]></AD_WINDOW_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <TABLEVEL><![CDATA[1]]></TABLEVEL>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISSINGLEROW><![CDATA[N]]></ISSINGLEROW>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISINFOTAB><![CDATA[N]]></ISINFOTAB>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISTRANSLATIONTAB><![CDATA[N]]></ISTRANSLATIONTAB>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <HASTREE><![CDATA[N]]></HASTREE>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <PROCESSING><![CDATA[N]]></PROCESSING>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <IMPORTFIELDS><![CDATA[N]]></IMPORTFIELDS>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISSORTTAB><![CDATA[N]]></ISSORTTAB>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <UIPATTERN><![CDATA[STD]]></UIPATTERN>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <SHOWPARENTBUTTONS><![CDATA[Y]]></SHOWPARENTBUTTONS>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <DISABLE_PARENT_KEY_PROPERTY><![CDATA[N]]></DISABLE_PARENT_KEY_PROPERTY>
+<!--3F26D7287F5E42628AF0FD15101BCEFB-->  <ISREADONLYTREE><![CDATA[N]]></ISREADONLYTREE>
+<!--3F26D7287F5E42628AF0FD15101BCEFB--></AD_TAB>
 
 <!--45453F895E984169AB4CC0BBAA3F9683--><AD_TAB>
 <!--45453F895E984169AB4CC0BBAA3F9683-->  <AD_TAB_ID><![CDATA[45453F895E984169AB4CC0BBAA3F9683]]></AD_TAB_ID>

@@ -56,6 +56,24 @@ public class SubscriptionLifecycleApplierTest {
     assertEquals(Instant.ofEpochSecond(1793750400L), outcome.dueAt());
   }
 
+  /**
+   * ETP-5053 — the unpaid invoice of a plan change is no failed renewal: the change waits for it
+   * as a pending update and the subscription stays current on its plan.
+   */
+  @Test
+  public void aFailedPlanChangeInvoiceIsNotARenewalFailure() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_update\"}}}"));
+    assertTrue(outcome.isIgnored());
+    assertEquals(SubscriptionLifecycleApplier.PLAN_CHANGE_INVOICE, outcome.reason());
+
+    SubscriptionEventOutcome renewal = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_cycle\"}}}"));
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, renewal.status());
+  }
+
   @Test
   public void paymentFailedWithoutAPeriodEndIsIgnoredRatherThanBlocking() throws Exception {
     SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",
@@ -112,6 +130,26 @@ public class SubscriptionLifecycleApplierTest {
     assertEquals(CancelAtPeriodEnd.CLEARED, applier.evaluate("customer.subscription.updated",
         event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
             + "\"cancel_at_period_end\":false,\"cancel_at\":null}}}")).cancelAtPeriodEnd());
+  }
+
+  @Test
+  public void aSubscriptionUpdateCarriesTheItemPriceExpandedOrBare() throws Exception {
+    // ETP-5053 — the item price is how an applied plan change shows up; the price may arrive
+    // expanded (an object) or as its bare id.
+    SubscriptionEventOutcome expanded = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":{\"id\":\"price_pro\"}}]}}}}"));
+    SubscriptionEventOutcome bare = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":\"price_core\"}]}}}}"));
+    SubscriptionEventOutcome none = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\"}}}"));
+    assertEquals("price_pro", expanded.providerPriceId());
+    assertEquals("price_core", bare.providerPriceId());
+    assertNull(none.providerPriceId());
+    // A paid invoice names no item price: nothing to compare, nothing rolled over.
+    assertNull(applier.evaluate("invoice.paid",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\"}}}")).providerPriceId());
   }
 
   @Test

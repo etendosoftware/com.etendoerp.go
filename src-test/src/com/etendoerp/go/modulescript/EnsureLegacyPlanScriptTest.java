@@ -102,10 +102,14 @@ class EnsureLegacyPlanScriptTest {
   void insertsTheLegacyPlanWhenItIsMissing() throws Exception {
     ConnectionProvider cp = mock(ConnectionProvider.class);
     PreparedStatement insert = mock(PreparedStatement.class);
+    PreparedStatement fill = mock(PreparedStatement.class);
     when(cp.getPreparedStatement(constant("INSERT_IF_MISSING_SQL"))).thenReturn(insert);
+    when(cp.getPreparedStatement(constant("FILL_INTERVAL_IF_EMPTY_SQL"))).thenReturn(fill);
     when(insert.executeUpdate()).thenReturn(1);
 
     assertEquals(1, ensureLegacyPlan(cp));
+    // A new install gets the monthly interval with the row itself.
+    assertTrue(constant("INSERT_IF_MISSING_SQL").contains("'month'"));
 
     verify(insert, times(1)).executeUpdate();
     verify(insert).setString(1, "219D5C8E15C64E97B2F553B228D30DD0");
@@ -122,9 +126,11 @@ class EnsureLegacyPlanScriptTest {
     ConnectionProvider cp = mock(ConnectionProvider.class);
     PreparedStatement insert = mock(PreparedStatement.class);
     PreparedStatement keyLookup = mock(PreparedStatement.class);
+    PreparedStatement fill = mock(PreparedStatement.class);
     ResultSet found = mock(ResultSet.class);
     when(cp.getPreparedStatement(constant("INSERT_IF_MISSING_SQL"))).thenReturn(insert);
     when(cp.getPreparedStatement(constant("KEY_EXISTS_SQL"))).thenReturn(keyLookup);
+    when(cp.getPreparedStatement(constant("FILL_INTERVAL_IF_EMPTY_SQL"))).thenReturn(fill);
     when(insert.executeUpdate()).thenReturn(0);
     when(keyLookup.executeQuery()).thenReturn(found);
     when(found.next()).thenReturn(true);
@@ -133,6 +139,33 @@ class EnsureLegacyPlanScriptTest {
 
     verify(insert, times(1)).executeUpdate();
     verify(keyLookup).setString(1, PlanCatalogService.LEGACY_PLAN_KEY);
+  }
+
+  @Test
+  void anExistingLegacyPlanWithoutIntervalGetsTheMonthlyOneButAnOperatorValueStays()
+      throws Exception {
+    ConnectionProvider cp = mock(ConnectionProvider.class);
+    PreparedStatement insert = mock(PreparedStatement.class);
+    PreparedStatement fill = mock(PreparedStatement.class);
+    PreparedStatement keyLookup = mock(PreparedStatement.class);
+    ResultSet found = mock(ResultSet.class);
+    when(cp.getPreparedStatement(constant("INSERT_IF_MISSING_SQL"))).thenReturn(insert);
+    when(cp.getPreparedStatement(constant("FILL_INTERVAL_IF_EMPTY_SQL"))).thenReturn(fill);
+    when(cp.getPreparedStatement(constant("KEY_EXISTS_SQL"))).thenReturn(keyLookup);
+    when(insert.executeUpdate()).thenReturn(0);
+    when(fill.executeUpdate()).thenReturn(1);
+    when(keyLookup.executeQuery()).thenReturn(found);
+    when(found.next()).thenReturn(true);
+
+    assertEquals(0, ensureLegacyPlan(cp));
+
+    verify(fill).setString(1, "month");
+    verify(fill).setString(2, "219D5C8E15C64E97B2F553B228D30DD0");
+    verify(fill, times(1)).executeUpdate();
+    String sql = constant("FILL_INTERVAL_IF_EMPTY_SQL").replaceAll("\\s+", " ");
+    // Only an empty interval is filled: a value set in the Plans window is never overwritten.
+    assertTrue(sql.contains("Billing_Interval IS NULL"), sql);
+    assertTrue(sql.contains("WHERE ETGO_Plan_ID = ?"), sql);
   }
 
   @Test
