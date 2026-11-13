@@ -292,6 +292,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** ETP-5053 — the timing of a plan change ({@code immediate} / {@code period_end}). */
   private static final String FIELD_TIMING = "timing";
   private static final String FIELD_PRORATION_DATE = "prorationDate";
+  /** ETP-5053 — the offered "change" that keeps the current plan, cancelling a pending downgrade. */
+  private static final String TIMING_KEEP = "keep";
   private static final String NO_SUBSCRIPTION_MESSAGE = "No subscription for this account";
   private static final String ACTION_BILLING_PLAN_CHANGE = "billing-plan-change";
   private static final String ACTION_BILLING_PLAN_CHANGE_PREVIEW = "billing-plan-change-preview";
@@ -2023,8 +2025,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             : StringUtils.defaultString(SubscriptionService.effectiveStatusOf(subscription)));
         result.put("pendingChange", pendingChangeJson(subscription));
         JSONArray changes = new JSONArray();
+        // While a downgrade is pending the offer starts from that future plan (every plan
+        // reachable from it), and the current plan is always offered first as "keep": choosing
+        // it cancels the scheduled downgrade.
+        boolean pending = subscription != null && subscription.getPendingPlan() != null
+            && current != null;
+        if (pending) {
+          JSONObject keep = planJson(current);
+          keep.put(FIELD_TIMING, TIMING_KEEP);
+          keep.put("intervalChange", false);
+          keep.put("quotas", new JSONArray());
+          changes.put(keep);
+        }
         for (PlanChange change : planChangeService.allowedChanges(subscription)) {
           Plan target = change.getTargetPlan();
+          if (pending && StringUtils.equals(target.getId(), current.getId())) {
+            continue;
+          }
           JSONObject item = planJson(target);
           item.put(FIELD_TIMING, change.getTiming());
           item.put("intervalChange", current != null && !StringUtils.equalsIgnoreCase(
@@ -2093,6 +2110,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         result.put("paymentRequired", changed.paymentRequired());
         result.put("paymentUrl", changed.paymentUrl() == null ? JSONObject.NULL
             : changed.paymentUrl());
+        result.put("pendingCancelled", changed.pendingCancelled());
         result.put(FIELD_CLIENT_ID, clientId);
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (PlanChangeRefusedException e) {

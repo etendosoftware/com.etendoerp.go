@@ -103,6 +103,23 @@ target again answers `alreadyPending` and asks the provider nothing.
 updated. One intention per subscription. The release comes first, so it stands even when the
 upgrade then waits for a payment that never comes.
 
+**While a downgrade is pending, the offer starts from the plan it moves to.** The customer is
+already heading there, so the offered changes are the Allowed Plan Changes rows **of the pending
+plan** (`PlanChangeService.fromPlanOf`), and the same rule validates the request:
+
+- **The current plan** is always offered first, as `timing: "keep"`: choosing it **cancels the
+  scheduled downgrade** — the schedule is released and the pending columns cleared, nothing is
+  charged (`pendingCancelled: true`). The release must succeed; if Stripe refuses it the request
+  fails (`502 BILLING_PROVIDER_ERROR`) and the pending columns stay, so the app never says "no
+  change" while Stripe still downgrades at the period end. Without a pending downgrade, asking for
+  the current plan stays `409 PLAN_CHANGE_NOT_ALLOWED`.
+- **A `period_end` row of the pending plan** replaces the scheduled target (the same schedule is
+  updated).
+- **An `immediate` row of the pending plan** applies now, from the current plan: the schedule is
+  released and the upgrade charged as above.
+- **The pending target itself** is not offered again; asking for it anyway answers
+  `alreadyPending` and asks the provider nothing.
+
 **Change requested while past due or canceled.** Refused before any provider call
 (`409 SUBSCRIPTION_NOT_CURRENT`). A target plan with no provider price, or a provider that is not
 configured, is `503 CHECKOUT_NOT_CONFIGURED`; a provider 4xx is `502 BILLING_PROVIDER_ERROR` with

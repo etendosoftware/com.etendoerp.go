@@ -332,7 +332,8 @@ class PlanChangeServiceTest {
     Plan mini = plan("MINI", "mini", "price_mini");
     when(planCatalogService.findPurchasablePlan("mini")).thenReturn(Optional.of(mini));
     PlanChange rule8 = rule("period_end");
-    when(planChangeCatalog.findAllowed(pro, mini)).thenReturn(Optional.of(rule8));
+    // Pending: the rules start from the plan the downgrade moves to (core), not from pro.
+    when(planChangeCatalog.findAllowed(core, mini)).thenReturn(Optional.of(rule8));
     when(open.getPlan()).thenReturn(pro);
     when(open.getPendingPlan()).thenReturn(core);
     when(open.getPendingEffectiveDate()).thenReturn(new Date());
@@ -380,6 +381,59 @@ class PlanChangeServiceTest {
     assertTrue(service.allowedChanges(null).isEmpty());
     when(open.getPlan()).thenReturn(null);
     assertTrue(service.allowedChanges(open).isEmpty());
+  }
+
+  @Test
+  void whileADowngradeIsPendingTheOfferStartsFromThePlanItMovesTo() {
+    when(open.getPlan()).thenReturn(pro);
+    when(open.getPendingPlan()).thenReturn(core);
+    PlanChange toPro = rule("immediate");
+    when(toPro.getTargetPlan()).thenReturn(pro);
+    when(planChangeCatalog.listAllowed(core)).thenReturn(List.of(toPro));
+
+    assertEquals(List.of(toPro), service.allowedChanges(open));
+    assertSame(core, PlanChangeService.fromPlanOf(open));
+    verify(planChangeCatalog, never()).listAllowed(pro);
+  }
+
+  @Test
+  void keepingTheCurrentPlanCancelsTheScheduledDowngradeAndChargesNothing() throws Exception {
+    when(open.getPlan()).thenReturn(pro);
+    when(open.getPendingPlan()).thenReturn(core);
+    when(open.getPendingEffectiveDate()).thenReturn(new Date());
+    when(stripe.get(startsWith("/v1/subscriptions/")))
+        .thenReturn(ok(liveSubscription("price_pro", "\"sub_sched_1\"")));
+    when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString()))
+        .thenReturn(ok("{}"));
+
+    PlanChangeResult result = service.requestChange(CLIENT_ID, "pro");
+
+    assertTrue(result.pendingCancelled());
+    assertSame(pro, result.targetPlan());
+    assertFalse(result.paymentRequired());
+    verify(stripe).postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString());
+    verify(subscriptionService).clearPendingChange(open);
+    // No rule lookup and no subscription update: nothing is charged.
+    verify(planChangeCatalog, never()).findAllowed(any(), any());
+    verify(stripe, never()).postForm(startsWith("/v1/subscriptions/"), anyString(), anyString());
+  }
+
+  @Test
+  void aRefusedReleaseKeepsTheScheduledDowngradeOnBothSides() throws Exception {
+    when(open.getPlan()).thenReturn(pro);
+    when(open.getPendingPlan()).thenReturn(core);
+    when(open.getPendingEffectiveDate()).thenReturn(new Date());
+    when(stripe.get(startsWith("/v1/subscriptions/")))
+        .thenReturn(ok(liveSubscription("price_pro", "\"sub_sched_1\"")));
+    when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString()))
+        .thenReturn(new StripeResponse(400, "{\"error\":{\"code\":\"resource_missing\"}}"));
+
+    PlanChangeRefusedException refusal = assertThrows(PlanChangeRefusedException.class,
+        () -> service.requestChange(CLIENT_ID, "pro"));
+
+    assertEquals(PlanChangeRefusedException.PROVIDER_REJECTED, refusal.code());
+    // Clearing here while the provider still downgrades would show "no change" falsely.
+    verify(subscriptionService, never()).clearPendingChange(any());
   }
 
   @Test

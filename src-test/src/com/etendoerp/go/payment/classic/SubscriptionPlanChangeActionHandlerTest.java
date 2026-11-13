@@ -128,6 +128,19 @@ class SubscriptionPlanChangeActionHandlerTest {
   }
 
   @Test
+  void keepingTheCurrentPlanSaysTheScheduledChangeWasCancelled() throws Exception {
+    when(service.requestChange(row, "pro")).thenReturn(new PlanChangeResultFixture()
+        .pendingCancelled(pro, Instant.parse("2026-10-31T10:00:00Z")));
+
+    JSONObject response = handler.doExecute(Map.of(), request(ROW_ID, PLAN_ID));
+
+    assertTrue(response.toString().contains("ETGO_PlanChangePendingCancelled:Pro"),
+        response.toString());
+    assertFalse(response.toString().contains("ETGO_PlanChangeApplied"), response.toString());
+    verify(obDal).commitAndClose();
+  }
+
+  @Test
   void schedulesADowngradeWithItsDate() throws Exception {
     when(service.requestChange(row, "pro")).thenReturn(new PlanChangeResultFixture()
         .scheduled(pro, Instant.parse("2026-12-01T00:00:00Z"), false));
@@ -203,6 +216,15 @@ class SubscriptionPlanChangeActionHandlerTest {
 
     PlanChangeResult scheduled(Plan plan, Instant at, boolean pending) throws Exception {
       return construct(PlanChangeTiming.PERIOD_END, plan, at, pending);
+    }
+
+    PlanChangeResult pendingCancelled(Plan plan, Instant at) throws Exception {
+      java.lang.reflect.Constructor<PlanChangeResult> constructor =
+          PlanChangeResult.class.getDeclaredConstructor(PlanChangeTiming.class, Plan.class,
+              Instant.class, boolean.class, boolean.class, String.class, boolean.class);
+      constructor.setAccessible(true);
+      return constructor.newInstance(PlanChangeTiming.IMMEDIATE, plan, at, false, false, null,
+          true);
     }
 
     PlanChangeResult awaitingPayment(Plan plan, Instant at, String url) throws Exception {

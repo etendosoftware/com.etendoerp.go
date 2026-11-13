@@ -46,6 +46,7 @@ public class SubscriptionPlanChangeActionHandler extends BaseProcessActionHandle
   static final String PARAM_TARGET_PLAN = "target_plan_id";
   static final String MSG_APPLIED = "ETGO_PlanChangeApplied";
   static final String MSG_PAYMENT_REQUIRED = "ETGO_PlanChangePaymentRequired";
+  static final String MSG_PENDING_CANCELLED = "ETGO_PlanChangePendingCancelled";
   static final String MSG_SCHEDULED = "ETGO_PlanChangeScheduled";
   static final String MSG_ALREADY_PENDING = "ETGO_PlanChangeAlreadyPending";
   static final String MSG_REFUSED = "ETGO_PlanChangeRefused";
@@ -133,7 +134,9 @@ public class SubscriptionPlanChangeActionHandler extends BaseProcessActionHandle
           .refreshGrid()
           .build();
     }
-    if (result.timing() == PlanChangeTiming.IMMEDIATE) {
+    if (result.pendingCancelled()) {
+      text = translate(MSG_PENDING_CANCELLED, planName);
+    } else if (result.timing() == PlanChangeTiming.IMMEDIATE) {
       text = translate(MSG_APPLIED, planName);
     } else {
       String when = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)

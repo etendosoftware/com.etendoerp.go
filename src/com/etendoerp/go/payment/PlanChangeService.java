@@ -122,10 +122,11 @@ public class PlanChangeService {
    * @return the offered rows, never null; empty when there is no row, no plan or nothing allowed
    */
   public List<PlanChange> allowedChanges(Subscription open) {
-    if (open == null || open.getPlan() == null) {
+    Plan from = fromPlanOf(open);
+    if (from == null) {
       return List.of();
     }
-    return planChangeCatalog.listAllowed(open.getPlan()).stream()
+    return planChangeCatalog.listAllowed(from).stream()
         .filter(change -> planCatalogService.hasProviderPrice(change.getTargetPlan()))
         .toList();
   }
@@ -185,14 +186,19 @@ public class PlanChangeService {
 
   private PlanChangeResult requestChange(Subscription open, String targetPlanKey,
       Long prorationDate) throws StripeTransportException {
-    Resolved change = resolve(open, targetPlanKey);
-    Plan target = change.target();
-    if (change.timing() == PlanChangeTiming.PERIOD_END && isAlreadyPending(open, target)) {
+    if (keepsCurrentPlan(open, targetPlanKey)) {
+      return cancelPendingChange(open);
+    }
+    if (isAlreadyPending(open, targetPlanKey)) {
+      // The same downgrade again (a double click, a retry): nothing to schedule. Checked before
+      // the rules, which start from the pending plan and so never offer it to itself.
       log.info("Subscription {} already moves to plan '{}' on {}; nothing to schedule",
-          open.getId(), target.getSearchKey(), open.getPendingEffectiveDate());
-      return new PlanChangeResult(change.timing(), target,
+          open.getId(), StringUtils.trim(targetPlanKey), open.getPendingEffectiveDate());
+      return new PlanChangeResult(PlanChangeTiming.PERIOD_END, open.getPendingPlan(),
           open.getPendingEffectiveDate().toInstant(), true);
     }
+    Resolved change = resolve(open, targetPlanKey);
+    Plan target = change.target();
     JSONObject live = readSubscription(change.subscriptionId());
     if (change.timing() == PlanChangeTiming.PERIOD_END) {
       return scheduleDowngrade(open, target, change.subscriptionId(), live);
@@ -218,6 +224,11 @@ public class PlanChangeService {
     Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
         () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
             "The environment has no open subscription"));
+    if (keepsCurrentPlan(open, targetPlanKey)) {
+      // Cancelling the scheduled downgrade charges nothing.
+      return new PlanChangePreview(PlanChangeTiming.IMMEDIATE, open.getPlan(), clock.instant(),
+          null, null, null, null, null);
+    }
     Resolved change = resolve(open, targetPlanKey);
     JSONObject live = requireSuccess(stripe.get(SUBSCRIPTIONS + encode(change.subscriptionId())
         + "?expand%5B%5D=default_payment_method"), "read the subscription");
@@ -250,6 +261,60 @@ public class PlanChangeService {
     return new PlanChangePreview(change.timing(), change.target(), clock.instant(), amountDue,
         currency, prorationDate, card == null ? null : StringUtils.trimToNull(card.optString(
             "brand", "")), card == null ? null : StringUtils.trimToNull(card.optString("last4", "")));
+  }
+
+  /**
+   * The plan the offered changes start from: the plan a pending downgrade moves to — the customer
+   * is already heading there, so what is offered is every plan reachable from it — else the plan
+   * the subscription is on. From the pending plan, a {@code period_end} row replaces the scheduled
+   * target, an {@code immediate} row applies now from the current plan (the schedule is released
+   * first), and the current plan itself means keeping it ({@link #keepsCurrentPlan}).
+   *
+   * @param open the tenant's open row, may be null
+   * @return the plan to read the Allowed plan changes rows of, or null
+   */
+  public static Plan fromPlanOf(Subscription open) {
+    if (open == null) {
+      return null;
+    }
+    return open.getPendingPlan() != null ? open.getPendingPlan() : open.getPlan();
+  }
+
+  /**
+   * A request for the plan the subscription is on while a downgrade is pending: keep it. There is
+   * no Allowed plan changes row from a plan to itself, so without a pending downgrade the same
+   * request stays a {@code PLAN_CHANGE_NOT_ALLOWED} refusal.
+   */
+  static boolean keepsCurrentPlan(Subscription open, String targetPlanKey) {
+    return open != null && open.getPendingPlan() != null && open.getPlan() != null
+        && StringUtils.equals(open.getPlan().getSearchKey(), StringUtils.trim(targetPlanKey));
+  }
+
+  /**
+   * Cancels the scheduled downgrade: the provider's schedule is released and the pending columns
+   * cleared, so the subscription simply renews on its plan. Nothing is charged. The release must
+   * succeed — clearing the columns while the schedule stays would show "no change" here while
+   * the provider still downgrades at the period end.
+   */
+  private PlanChangeResult cancelPendingChange(Subscription open) throws StripeTransportException {
+    String subscriptionId = StringUtils.trimToNull(open.getStripeSubscription());
+    if (subscriptionId != null) {
+      if (!providerConfigured.getAsBoolean()) {
+        throw refused(PlanChangeRefusedException.NOT_CONFIGURED,
+            "The payment provider is not configured");
+      }
+      String scheduleId = scheduleIdOf(readSubscription(subscriptionId));
+      if (scheduleId != null) {
+        requireSuccess(stripe.postForm(SCHEDULES + "/" + encode(scheduleId) + "/release", ""),
+            "cancel the scheduled plan change");
+      }
+    }
+    String cancelled = planKey(open.getPendingPlan());
+    subscriptionService.clearPendingChange(open);
+    log.info("Subscription {} of tenant {} keeps plan '{}'; the change to '{}' is cancelled",
+        open.getId(), clientIdOf(open), planKey(open.getPlan()), cancelled);
+    return new PlanChangeResult(PlanChangeTiming.IMMEDIATE, open.getPlan(), clock.instant(), false,
+        false, null, true);
   }
 
   /** The {@code card} of an expanded payment method; null when it is not expanded or no card. */
@@ -289,9 +354,10 @@ public class PlanChangeService {
     Plan target = planCatalogService.findPurchasablePlan(targetPlanKey).orElseThrow(
         () -> refused(PlanChangeRefusedException.PLAN_NOT_FOUND,
             "No plan is sold under '" + StringUtils.trimToEmpty(targetPlanKey) + "'"));
-    PlanChange rule = planChangeCatalog.findAllowed(open.getPlan(), target).orElseThrow(
+    Plan from = fromPlanOf(open);
+    PlanChange rule = planChangeCatalog.findAllowed(from, target).orElseThrow(
         () -> refused(PlanChangeRefusedException.PLAN_CHANGE_NOT_ALLOWED,
-            "Changing from plan '" + planKey(open.getPlan()) + "' to '" + target.getSearchKey()
+            "Changing from plan '" + planKey(from) + "' to '" + target.getSearchKey()
                 + "' is not offered"));
     if (!planCatalogService.hasProviderPrice(target)) {
       throw refused(PlanChangeRefusedException.NOT_CONFIGURED,
@@ -320,9 +386,9 @@ public class PlanChangeService {
     return interval == null ? "month" : interval;
   }
 
-  private static boolean isAlreadyPending(Subscription open, Plan target) {
-    return open.getPendingPlan() != null && open.getPendingEffectiveDate() != null
-        && StringUtils.equals(open.getPendingPlan().getId(), target.getId());
+  private static boolean isAlreadyPending(Subscription open, String targetPlanKey) {
+    return open != null && open.getPendingPlan() != null && open.getPendingEffectiveDate() != null
+        && StringUtils.equals(open.getPendingPlan().getSearchKey(), StringUtils.trim(targetPlanKey));
   }
 
   // ---------------------------------------------------------------- upgrade (immediate)

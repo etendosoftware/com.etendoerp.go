@@ -22,6 +22,7 @@ public final class PlanChangeResult {
   private final boolean alreadyPending;
   private final boolean paymentRequired;
   private final String paymentUrl;
+  private final boolean pendingCancelled;
 
   PlanChangeResult(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
       boolean alreadyPending) {
@@ -30,12 +31,19 @@ public final class PlanChangeResult {
 
   PlanChangeResult(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
       boolean alreadyPending, boolean paymentRequired, String paymentUrl) {
+    this(timing, targetPlan, effectiveAt, alreadyPending, paymentRequired, paymentUrl, false);
+  }
+
+  PlanChangeResult(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
+      boolean alreadyPending, boolean paymentRequired, String paymentUrl,
+      boolean pendingCancelled) {
     this.timing = timing;
     this.targetPlan = targetPlan;
     this.effectiveAt = effectiveAt;
     this.alreadyPending = alreadyPending;
     this.paymentRequired = paymentRequired;
     this.paymentUrl = paymentUrl;
+    this.pendingCancelled = pendingCancelled;
   }
 
   /** @return how the change applies */
@@ -70,5 +78,13 @@ public final class PlanChangeResult {
   /** @return the provider's hosted page where the customer pays or authenticates; may be null */
   public String paymentUrl() {
     return paymentUrl;
+  }
+
+  /**
+   * @return true when the request kept the current plan: the scheduled downgrade was cancelled and
+   *     {@link #targetPlan()} is the plan the subscription stays on
+   */
+  public boolean pendingCancelled() {
+    return pendingCancelled;
   }
 }
