@@ -14927,8 +14927,15 @@ returned, and saves a flow as a **routine** the same user runs again with new va
 | `update` | `name`, `steps`, `params`?, `description`? | Stores a complete new version and makes it current. |
 | `delete` | `name` | Deletes the routine and all its versions (executions stay). |
 | `execution` | `executionId` | A past `exec`/`run` with every step's full result or error. |
+| `help` | — | The full format with four complete examples (`McpRoutineHelp`): inline `exec`, `save` with `fromExecution`, `save` written directly, `run`. |
 
-An argument the mode does not take is refused (`validation_error` naming it).
+An argument the mode does not take is refused (`validation_error` naming it). Every refusal's `hint` points to `{mode:"help"}`.
+
+The tool description stays short (it is sent on every turn) and carries one example — save a
+customer-with-address routine with two parameters, then run it — plus "call `{mode:'help'}` before
+writing your first routine". `help` is paid for once, in the turn that asks; its examples are real
+calls, which `McpRoutineToolTest` runs through the same validation (exec → save `fromExecution` →
+run, and a direct save).
 
 **Steps** (`McpRoutineSteps`)
 

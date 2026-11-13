@@ -71,8 +71,9 @@ final class McpRoutineTool {
   static final String MODE_DESCRIBE = "describe";
   static final String MODE_DELETE = "delete";
   static final String MODE_EXECUTION = "execution";
+  static final String MODE_HELP = "help";
   static final List<String> MODES = List.of(MODE_EXEC, MODE_RUN, MODE_SAVE, MODE_UPDATE,
-      MODE_LIST, MODE_DESCRIBE, MODE_DELETE, MODE_EXECUTION);
+      MODE_LIST, MODE_DESCRIBE, MODE_DELETE, MODE_EXECUTION, MODE_HELP);
 
   static final String STATUS_OK = "OK";
   static final String STATUS_FAILED = "FAILED";
@@ -110,7 +111,8 @@ final class McpRoutineTool {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(PARAM_MODE, enumProp("What to do: exec runs 'steps' now; save stores them as a "
         + "routine; run runs a saved routine with 'params'; list, describe, update and delete "
-        + "manage your routines; execution reads a past execution.", MODES));
+        + "manage your routines; execution reads a past execution; help returns the full format "
+        + "with complete examples.", MODES));
 
     Map<String, Object> stepProps = new LinkedHashMap<>();
     stepProps.put(McpRoutineSteps.STEP_ID, McpJsonSchema.stringProp("This step's name, unique in "
@@ -173,12 +175,18 @@ final class McpRoutineTool {
         + "save stores one (or, with fromExecution, the steps of a successful exec, turning the "
         + "values named in each parameter's 'from' into parameters), update stores a new version "
         + "and delete removes it. At most " + McpRoutineSteps.MAX_STEPS + " steps; for many "
-        + "records of one kind use etendo_batch. Example — a customer with one address: "
-        + "{mode:'exec', steps:[{id:'bp', tool:'etendo_create', args:{spec:'contacts', "
-        + "entity:'businessPartner', fields:{name:'Acme'}}}, {id:'addr', tool:'etendo_create', "
-        + "args:{spec:'contacts', entity:'locationAddress', parentId:'$ref:bp', "
-        + "fields:{country:'106', addressLine1:'Calle Mayor 1', cityName:'Madrid', "
-        + "postalCode:'28001'}}}]}.";
+        + "records of one kind use etendo_batch. Before writing your first routine call "
+        + "{mode:'help'}: the full format, how to turn a finished exec into a routine, and four "
+        + "complete examples. Example — save a routine that creates a customer with its address, "
+        + "then run it: {mode:'save', name:'customer-with-address', description:'Creates a "
+        + "customer with its address', params:{name:{type:'string', required:true, "
+        + "description:'Customer name'}, city:{type:'string', required:true, "
+        + "description:'City'}}, steps:[{id:'bp', tool:'etendo_create', args:{spec:'contacts', "
+        + "entity:'businessPartner', fields:{name:'$param.name'}}}, {id:'address', "
+        + "tool:'etendo_create', args:{spec:'contacts', entity:'locationAddress', "
+        + "parentId:'$ref:bp', fields:{country:'106', addressLine1:'Calle Mayor 1', "
+        + "cityName:'$param.city'}}}]} then {mode:'run', name:'customer-with-address', "
+        + "params:{name:'Acme', city:'Madrid'}}.";
   }
 
   // ── Dispatch ────────────────────────────────────────────────────────────
@@ -231,6 +239,9 @@ final class McpRoutineTool {
         return describe(args);
       case MODE_DELETE:
         return delete(args);
+      case MODE_HELP:
+        onlyArguments(args);
+        return McpRoutineHelp.body();
       default:
         return execution(args);
     }

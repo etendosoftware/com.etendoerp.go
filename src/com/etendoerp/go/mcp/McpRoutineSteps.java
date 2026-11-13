@@ -553,6 +553,8 @@ final class McpRoutineSteps {
       body.put(McpConstants.PARAM_FIELD, field);
       body.put(McpConstants.KEY_DETAIL, detail);
       body.put(McpConstants.KEY_TOOL, McpConstants.TOOL_NEO_ROUTINE);
+      body.put(McpConstants.KEY_HINT, "Correct what 'detail' names. {mode:'help'} shows the "
+          + "format of a routine with complete examples.");
     } catch (JSONException e) {
       throw new McpToolException("Error building a refusal", e);
     }

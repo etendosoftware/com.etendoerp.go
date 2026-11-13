@@ -497,6 +497,46 @@ class McpRoutineToolTest {
     assertTrue(bodyOf(badPath).getString("detail").contains("bp.args.fields.nombre"));
   }
 
+  // ── help ─────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("help answers the format and four examples, and takes no other argument")
+  void helpAnswersTheFormat() throws Exception {
+    JSONObject body = bodyOf(handle(new JSONObject().put("mode", "help"), scripted()));
+    assertTrue(body.getString("references").contains("$ref:<id>.<path>"));
+    assertEquals(4, body.getJSONArray("examples").length());
+    assertTrue(handle(new JSONObject().put("mode", "help").put("name", "x"), scripted())
+        .getBoolean("isError"));
+  }
+
+  @Test
+  @DisplayName("the help examples are real calls: exec, save fromExecution and run work as shown")
+  void helpExamplesWorkAsShown() throws Exception {
+    JSONObject list = McpToolRouter.wrapAsTextContent(new JSONObject().put("data",
+        new JSONArray().put(new JSONObject().put("id", "ROW1"))));
+    JSONObject done = McpToolRouter.wrapAsTextContent(new JSONObject().put("success", true));
+    JSONObject exec = handle(new JSONObject(McpRoutineHelp.EXAMPLE_EXEC),
+        scripted(list, list, created("INV1"), created("LINE1"), done));
+    assertFalse(exec.optBoolean("isError", false), exec.toString());
+
+    JSONObject save = new JSONObject(McpRoutineHelp.EXAMPLE_SAVE_FROM_EXECUTION)
+        .put("fromExecution", bodyOf(exec).getString("executionId"));
+    JSONObject saved = handle(save, scripted());
+    assertFalse(saved.optBoolean("isError", false), saved.toString());
+
+    calls.clear();
+    JSONObject ran = handle(new JSONObject(McpRoutineHelp.EXAMPLE_RUN),
+        scripted(list, list, created("INV2"), created("LINE2"), done));
+    assertFalse(ran.optBoolean("isError", false), ran.toString());
+    assertEquals("Globex", calls.get(0).getJSONObject("filters").getJSONObject("name")
+        .getString("contains"));
+    assertEquals(3, calls.get(3).getJSONObject("fields").get("invoicedQuantity"));
+    assertEquals(12.5, calls.get(3).getJSONObject("fields").getDouble("unitPrice"));
+
+    JSONObject direct = handle(new JSONObject(McpRoutineHelp.EXAMPLE_SAVE), scripted());
+    assertFalse(direct.optBoolean("isError", false), direct.toString());
+  }
+
   /** The routine tables, in memory, scoped by client and user like the JDBC store. */
   private static final class MemoryStore implements McpRoutineStore {
     private final Map<String, Routine> routines = new HashMap<>();
