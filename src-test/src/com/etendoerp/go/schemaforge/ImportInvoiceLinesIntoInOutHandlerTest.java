@@ -89,6 +89,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DirectLinkPending
  */
 public class ImportInvoiceLinesIntoInOutHandlerTest {
 
@@ -441,15 +442,15 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     PendingResolver.Source carried = PendingResolver.Source.available("inv1", List.of(
         new PendingResolver.SourceLine("il1", bd("2")),
         new PendingResolver.SourceLine("il2", bd("0.5"))));
-    Map<String, BigDecimal> pending = ImportInvoiceLinesIntoInOutHandler.pendingByLine(carried);
+    Map<String, BigDecimal> pending = DirectLinkPending.pendingByLine(carried);
     assertEquals(2, pending.size());
     assertEquals(0, bd("2").compareTo(pending.get("il1")));
     assertEquals(0, bd("0.5").compareTo(pending.get("il2")));
 
-    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(null).isEmpty());
-    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(PendingResolver.Source.fromLines(
+    assertTrue(DirectLinkPending.pendingByLine(null).isEmpty());
+    assertTrue(DirectLinkPending.pendingByLine(PendingResolver.Source.fromLines(
         "inv1", null, List.of())).isEmpty());
-    assertTrue(ImportInvoiceLinesIntoInOutHandler.pendingByLine(PendingResolver.Source.fromLines(
+    assertTrue(DirectLinkPending.pendingByLine(PendingResolver.Source.fromLines(
         "inv1", FollowUpException.Reason.NOT_COMPLETED,
         List.of(new PendingResolver.SourceLine("il1", bd("2"))))).isEmpty());
   }

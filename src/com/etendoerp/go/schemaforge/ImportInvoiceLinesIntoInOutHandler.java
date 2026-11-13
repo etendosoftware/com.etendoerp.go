@@ -17,7 +17,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -36,7 +35,6 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -282,28 +280,10 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       }
       JSONObject row = availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
       if (request.detail && policy.pendsByDirectLinks && !classic) {
-        row.put("amount", pendingAmount(invoice, lines));
+        row.put("amount", DirectLinkPending.pendingAmount(invoice, lines));
       }
       return row;
     }, request);
-  }
-
-  /**
-   * The popup's row total of an invoice (ETP-6002 CP-27): unit price x pending over the lines
-   * with a positive pending, at the invoice currency's precision — the same figure
-   * {@code availableOrders} gives an order ({@code ImportOrderLinesIntoInOutHandler}).
-   */
-  static BigDecimal pendingAmount(Invoice invoice, List<LineState> lines) {
-    BigDecimal sum = BigDecimal.ZERO;
-    for (LineState state : lines) {
-      if (state.pending.signum() > 0) {
-        sum = sum.add(orZero(state.line.getUnitPrice()).multiply(state.pending));
-      }
-    }
-    Currency currency = invoice.getCurrency();
-    int precision = currency == null || currency.getStandardPrecision() == null ? 2
-        : currency.getStandardPrecision().intValue();
-    return sum.setScale(precision, RoundingMode.HALF_UP);
   }
 
   /**
@@ -433,7 +413,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           ? draftTotals(target, orderLineIds, policy).others : Collections.emptyMap();
       PendingResolver.Source source = followUp != null ? followUp.get(invoice.getId())
           : loadFollowUpSources(List.of(invoice.getId()), isSales(target)).get(invoice.getId());
-      return directLinkLineStates(lines, orderLineOf, pendingByLine(source), others);
+      return DirectLinkPending.lineStates(lines, orderLineOf,
+          DirectLinkPending.pendingByLine(source), others);
     }
     DraftTotals drafts = draftTotals(target, orderLineIds, policy);
     List<LineState> states = new ArrayList<>();
@@ -507,47 +488,6 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           .subtract(held.getOrDefault(orderLine.getId(), BigDecimal.ZERO));
     }
     return line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Pending by direct links, the goods shipment rule of ETP-6002 CP-22
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The lines of an invoice under {@link SourcePolicy#byDirectLinks}: each at the pending the
-   * invoice's own «Create shipment» follow-up computes ({@link #loadFollowUpSources}, one rule
-   * for the popup, the MCP listing and {@code createShipment} — ETP-6002 review M2). A listed
-   * line the follow-up does not carry (no product, nothing pending) is at 0. The draft note is
-   * the same as under the order-line rule.
-   */
-  private static List<LineState> directLinkLineStates(List<InvoiceLine> lines,
-      Map<String, OrderLine> orderLineOf, Map<String, BigDecimal> pendingByLine,
-      Map<String, Set<String>> otherDrafts) {
-    List<LineState> states = new ArrayList<>();
-    for (InvoiceLine line : lines) {
-      OrderLine orderLine = orderLineOf.get(line.getId());
-      BigDecimal pending = pendingByLine.getOrDefault(line.getId(), BigDecimal.ZERO)
-          .max(BigDecimal.ZERO);
-      states.add(new LineState(line, orderLine == null ? null : orderLine.getId(), pending,
-          orderLine == null ? Set.of() : otherDrafts.getOrDefault(orderLine.getId(), Set.of())));
-    }
-    return states;
-  }
-
-  /**
-   * The follow-up's verdict on one invoice as invoice line id to pending (review M3): every
-   * carried line with its quantity; none for a missing verdict or one that carries no line
-   * (nothing pending, or not eligible).
-   */
-  static Map<String, BigDecimal> pendingByLine(PendingResolver.Source source) {
-    Map<String, BigDecimal> pending = new HashMap<>();
-    if (source == null) {
-      return pending;
-    }
-    for (PendingResolver.SourceLine line : source.getLines()) {
-      pending.put(line.getSourceLineId(), line.getPendingQty());
-    }
-    return pending;
   }
 
   /**
