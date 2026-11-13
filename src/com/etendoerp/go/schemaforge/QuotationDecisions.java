@@ -66,8 +66,8 @@ public final class QuotationDecisions {
    *
    * @param quotation the quotation, already checked with {@link #isDecidable}
    * @param reason the tenant's rejection reason, or {@code null} when the caller has none (the
-   *     portal never has one: its reason goes to the notes, see
-   *     {@code PortalDecisionService#rejectReasonFor})
+   *     portal never has one: its reason goes to the quotation's notes, and the seller can set an
+   *     internal reason on the rejected quotation afterwards)
    */
   public static void reject(Order quotation, RejectReason reason) {
     if (reason != null) {

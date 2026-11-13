@@ -37,7 +37,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.order.Order;
-import org.openbravo.model.common.order.RejectReason;
 
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.common.PublicUrlResolver;
@@ -517,21 +516,12 @@ public class PortalDecisionService {
       QuotationDecisions.accept(quotation);
       return;
     }
+    // The portal's reason is never mapped to the tenant's C_Reject_Reason (PO decision, ETP-6209):
+    // a tenant's reasons can be internal ("deudor") and must never reach the customer, and a fixed
+    // portal reason, "Otros" included, never creates one. The reason and its text go to the notes;
+    // the seller sets the internal reason on the rejected quotation afterwards, if any.
     appendNote(quotation, decision);
-    QuotationDecisions.reject(quotation, rejectReasonFor(quotation, decision.reasonCode));
-  }
-
-  /**
-   * <b>PO question Q2 (Jira comment 149513) — the tenant's reject reason.</b> The planned answer
-   * finds or creates, in the quotation's client, the {@code C_Reject_Reason} row named after the
-   * fixed reason (the way {@code CreateRejectReasonHandler} creates one). Until the PO answers,
-   * none is linked: the reason, and the "Otros" text, are kept in the quotation's notes
-   * ({@link #appendNote}).
-   *
-   * @return the reason to link, or {@code null}
-   */
-  RejectReason rejectReasonFor(Order quotation, String reasonCode) {
-    return null;
+    QuotationDecisions.reject(quotation, null);
   }
 
   /** The customer's reason in the quotation's notes ({@code Description}, the window's notes). */
