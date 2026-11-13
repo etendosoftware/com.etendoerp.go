@@ -343,6 +343,7 @@ because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unles
 | 14 | Legacy → monthly with the 3-D Secure card | Paid on Stripe's invoice page, which never redirects back; the app tab kept saying payment pending | Recheck when the tab is shown again, then "Plan changed"; return hint under the button (**SF** `9ee49777a`, `61ddc58b8`) |
 | 15 | Classic **Change Plan** on SPRING3 | Target Plan combo empty: a Table reference on a process parameter fails in `ComboTableDatasourceService` | Selector + HQL_JS validation listing the allowed targets (`366cc66f2`) |
 | 16 | Downgrade then upgrade back (question, 2026-11-12) | The upgrade releases the schedule and clears the pending columns | Covered by `anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
+| 17 | Classic **Change Plan**: downgrade from the back office | Works after #15: the Target Plan list shows the allowed targets and the downgrade fills **Pending Plan** / **Pending Effective Date** on the Subscription window | — |
 
 ### Findings that needed no code change
 
@@ -425,8 +426,8 @@ valuable first.
 - [ ] **A missed webhook**: stop `stripe listen`, make a change, restart it and replay (or let the
   reconciliation run); the database catches up. *Seen by accident with SPRING8 (replay worked).*
 - [ ] **Classic Change Plan button**: one upgrade, one downgrade and one keep from the Subscription
-  window. The Target Plan list was empty until `366cc66f2`; the selector answered correctly when
-  called directly (SPRING3 → Month Mini, Yearly; SPRING7 → Monthly), not yet seen in the dialog.
+  window. *Downgrade done (scenario 17: the filtered Target Plan list and the pending plan work);
+  upgrade and keep still to do.*
 - [ ] **Legacy → yearly** (the `legacy-productive → PROD_YEARLY` row exists locally).
 
 **Docs**
