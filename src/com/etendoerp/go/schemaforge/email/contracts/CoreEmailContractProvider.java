@@ -124,6 +124,10 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new DemoTrialNoticeEmailContract(demoTrialNoticeSource),
         // ETP-6209: sent by the customer portal when an expired link is opened, never from the
         // browser (the contract refuses any caller outside PortalRenewalScope).
-        new PortalLinkRenewalEmailContract());
+        new PortalLinkRenewalEmailContract(),
+        // ETP-6209 Part C: the quotation-decision confirmation (to the customer) and the notice (to
+        // the seller), sent by the customer portal only (PortalDecisionScope).
+        new PortalDecisionConfirmEmailContract(),
+        new PortalDecisionNoticeEmailContract());
   }
 }

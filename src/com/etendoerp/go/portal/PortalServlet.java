@@ -121,6 +121,22 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String PATH_DOCUMENTS = "/documents";
   /** The home's header search, across every kind. */
   private static final String PATH_SEARCH = "/search";
+  /**
+   * Part C: a quotation decision is requested at {@code POST /quotations/{id}/decision}; its
+   * confirmation landing reads {@code GET /decisions/view} and confirms with
+   * {@code POST /decisions/confirm}, the decision token in {@value #HEADER_DECISION_TOKEN}.
+   */
+  private static final String PATH_QUOTATIONS = "/quotations/";
+  private static final String DECISION_SUFFIX = "/decision";
+  private static final String PATH_DECISION_VIEW = "/decisions/view";
+  private static final String PATH_DECISION_CONFIRM = "/decisions/confirm";
+  /**
+   * The decision token's own header, like {@link #HEADER_PORTAL_TOKEN}: never in a URL the server
+   * logs. The SPA moves it from the email link's path into this header.
+   */
+  static final String HEADER_DECISION_TOKEN = "X-Portal-Decision-Token";
+  /** Max bytes of a decision request body (a reason text of 2000 characters fits). */
+  private static final int MAX_BODY_BYTES = 16 * 1024;
   private static final String PDF_SUFFIX = "/pdf";
 
   /** Tenant logo, so the page can show whose portal this is. Takes no parameters. */
@@ -160,6 +176,7 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String FIELD_HAS_LOGO = "hasLogo";
 
   private final transient PortalLinkService linkService = new PortalLinkService();
+  private final transient PortalDecisionService decisionService = new PortalDecisionService();
   private final transient PortalRateLimiter meRateLimiter = new PortalRateLimiter();
   private final transient PortalRateLimiter renewRateLimiter = new PortalRateLimiter();
   /**
@@ -179,8 +196,10 @@ public class PortalServlet extends HttpBaseServlet {
     response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
     response.setHeader("Pragma", "no-cache");
     String path = StringUtils.defaultString(request.getPathInfo());
-    // The one write is the renewal; every other endpoint is read-only.
-    if ("POST".equalsIgnoreCase(request.getMethod()) && path.equals(PATH_RENEW)) {
+    // The writes: the renewal and, Part C, a decision request and its confirmation.
+    if ("POST".equalsIgnoreCase(request.getMethod()) && (path.equals(PATH_RENEW)
+        || path.equals(PATH_DECISION_CONFIRM)
+        || path.startsWith(PATH_QUOTATIONS) && path.endsWith(DECISION_SUFFIX))) {
       doPost(request, response);
       return;
     }
@@ -197,7 +216,15 @@ public class PortalServlet extends HttpBaseServlet {
       throws IOException {
     try {
       OBContext.setAdminMode(true);
-      handleRenew(request, response);
+      String path = StringUtils.defaultString(request.getPathInfo());
+      if (path.equals(PATH_DECISION_CONFIRM)) {
+        handleDecisionConfirm(request, response);
+      } else if (path.startsWith(PATH_QUOTATIONS)) {
+        handleDecisionRequest(request, response, path.substring(PATH_QUOTATIONS.length(),
+            path.length() - DECISION_SUFFIX.length()));
+      } else {
+        handleRenew(request, response);
+      }
     } catch (Exception e) {
       log.error("Portal renewal request failed", e);
       if (!response.isCommitted()) {
@@ -219,6 +246,8 @@ public class PortalServlet extends HttpBaseServlet {
         handleMe(request, response);
       } else if (path.equals(PATH_HOME)) {
         handleHome(request, response);
+      } else if (path.equals(PATH_DECISION_VIEW)) {
+        handleDecisionView(request, response);
       } else if (path.equals(PATH_SEARCH)) {
         handleSearch(request, response);
       } else if (path.equals(PATH_DOCUMENTS)) {
@@ -433,6 +462,138 @@ public class PortalServlet extends HttpBaseServlet {
     }
     sendJson(response, HttpServletResponse.SC_OK,
         PortalDocumentsEndpoint.home(session.get(), request.getParameter("months")));
+  }
+
+  /**
+   * Part C: asks to accept or reject a quotation of the session's scope; the confirmation goes by
+   * email to the first To of the link's root send.
+   *
+   * <pre>
+   * 200 {"state": "sent", "maskedEmail": "ju•••@example.com"}
+   * 404                                      not in scope (as every other read)
+   * 409 {"error": "not_pending" | "expired" | "no_recipient" | "accept_unavailable"}
+   * 422 {"error": "invalid_reason"}          a reject without a valid reason / "Otros" text
+   * 429 {"error": "cooldown"}                a request for this quotation went out recently
+   * 503                                      the email could not be sent
+   * </pre>
+   */
+  private void handleDecisionRequest(HttpServletRequest request, HttpServletResponse response,
+      String quotationId) throws IOException, JSONException {
+    if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    JSONObject body = readJson(request);
+    PortalDecisionService.RequestResult result = decisionService.request(session.get(),
+        quotationId, body.optString("decision", null), body.optString("reasonCode", null),
+        body.optString("reasonText", null));
+    switch (result.getOutcome()) {
+      case SENT:
+        JSONObject sent = new JSONObject();
+        sent.put(FIELD_STATE, "sent");
+        sent.put("maskedEmail", StringUtils.defaultString(result.getMaskedEmail()));
+        sendJson(response, HttpServletResponse.SC_OK, sent);
+        return;
+      case NOT_FOUND:
+        sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+        return;
+      case BLOCKED:
+        sendError(response, HttpServletResponse.SC_CONFLICT, result.getBlocked().getCode());
+        return;
+      case ACCEPT_UNAVAILABLE:
+        sendError(response, HttpServletResponse.SC_CONFLICT, "accept_unavailable");
+        return;
+      case INVALID_REASON:
+        sendError(response, 422, "invalid_reason");
+        return;
+      case COOLDOWN:
+        sendError(response, HTTP_TOO_MANY_REQUESTS, "cooldown");
+        return;
+      default:
+        sendError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+            "The portal is temporarily unavailable");
+    }
+  }
+
+  /**
+   * Part C: what the confirmation landing shows. Never applies anything — opening the email's link
+   * (or a scanner pre-fetching it) only reads.
+   *
+   * <pre>
+   * 200 {"state": "pending" | "confirmed" | "voided" | "not_pending" | "expired", "decision",
+   *      "reasonCode"?, "reasonText"?, "documentNo", "tenantName"}
+   * 401                                      unknown, not sent or malformed token
+   * </pre>
+   */
+  private void handleDecisionView(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    if (!meRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
+    sendDecision(response, decisionService.view(request.getHeader(HEADER_DECISION_TOKEN)));
+  }
+
+  /**
+   * Part C: confirms the decision — single use, never expires, the first confirmed request of a
+   * quotation wins. Answers the same shape as the view, with the state reached.
+   */
+  private void handleDecisionConfirm(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    if (!renewRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
+    sendDecision(response, decisionService.confirm(request.getHeader(HEADER_DECISION_TOKEN)));
+  }
+
+  private void sendDecision(HttpServletResponse response, PortalDecisionService.View view)
+      throws IOException, JSONException {
+    if (view.getState() == PortalDecisionService.State.INVALID) {
+      rejectInvalidLink(response);
+      return;
+    }
+    PortalDecisionService.Decision decision = view.getDecision();
+    JSONObject body = new JSONObject();
+    body.put(FIELD_STATE, view.getState().getCode());
+    body.put("decision", decision.getDecision());
+    if (decision.getReasonCode() != null) {
+      body.put("reasonCode", decision.getReasonCode());
+    }
+    if (decision.getReasonText() != null) {
+      body.put("reasonText", decision.getReasonText());
+    }
+    body.put("documentNo", view.getQuotation() == null ? ""
+        : StringUtils.defaultString(view.getQuotation().getDocumentNo()));
+    // The company's name only: the landing carries no portal token, so it cannot fetch /logo.
+    body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
+        .map(PortalLink::getClientName).orElse(""));
+    sendJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /** The request's JSON body, bounded; an empty or malformed body reads as {@code {}}. */
+  private static JSONObject readJson(HttpServletRequest request) throws IOException {
+    StringBuilder raw = new StringBuilder();
+    try (java.io.BufferedReader reader = request.getReader()) {
+      char[] buffer = new char[1024];
+      int read;
+      while ((read = reader.read(buffer)) != -1) {
+        raw.append(buffer, 0, read);
+        if (raw.length() > MAX_BODY_BYTES) {
+          return new JSONObject();
+        }
+      }
+    }
+    try {
+      return raw.length() == 0 ? new JSONObject() : new JSONObject(raw.toString());
+    } catch (JSONException e) {
+      return new JSONObject();
+    }
   }
 
   /** Documents of every kind matching {@code ?q=}, for the home's header search. */

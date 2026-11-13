@@ -59,6 +59,16 @@ public final class PortalLinkConfig {
   public static final String ENV_RENEWAL_MAX_PER_DAY = "ETGO_PORTAL_RENEWAL_MAX_PER_DAY";
   static final long DEFAULT_RENEWAL_MAX_PER_DAY = 0L;
 
+  /**
+   * Minimum time between two quotation-decision requests for the same quotation (ETP-6209 Part C):
+   * each one emails the customer, so the buttons cannot be used to flood their inbox.
+   */
+  public static final String PROP_DECISION_COOLDOWN_MINUTES =
+      "etendo.go.portal.decision.cooldownMinutes";
+  public static final String ENV_DECISION_COOLDOWN_MINUTES =
+      "ETGO_PORTAL_DECISION_COOLDOWN_MINUTES";
+  static final long DEFAULT_DECISION_COOLDOWN_MINUTES = 2L;
+
   private static final Logger log = LogManager.getLogger(PortalLinkConfig.class);
 
   private PortalLinkConfig() {
@@ -76,6 +86,11 @@ public final class PortalLinkConfig {
    * @return the per-link renewal cool-down; a non-positive or malformed override falls back to
    *     15 minutes
    */
+  public static Duration decisionCooldown() {
+    return Duration.ofMinutes(readPositive(PROP_DECISION_COOLDOWN_MINUTES,
+        ENV_DECISION_COOLDOWN_MINUTES, DEFAULT_DECISION_COOLDOWN_MINUTES));
+  }
+
   public static Duration renewalCooldown() {
     return Duration.ofMinutes(readPositive(PROP_RENEWAL_COOLDOWN_MINUTES,
         ENV_RENEWAL_COOLDOWN_MINUTES, DEFAULT_RENEWAL_COOLDOWN_MINUTES));

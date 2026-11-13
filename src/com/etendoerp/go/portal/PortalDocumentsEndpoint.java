@@ -405,7 +405,26 @@ final class PortalDocumentsEndpoint {
     // the page asks for the PDF and falls back to the data sheet if that request answers 404.
     body.put("hasPdf", mainAttachment(session, kind, id) != null
         || PortalPrintable.isRenderable(kind));
+    if (kind == PortalDocumentKind.QUOTATION && document instanceof Order) {
+      body.put("decision", decisionOf(session, (Order) document));
+    }
     return body;
+  }
+
+  /**
+   * Part C: whether the customer can accept / reject this quotation now, and why not. The SPA shows
+   * the buttons only when {@code canDecide}; {@code acceptAvailable} stays {@code false} until the
+   * PO fixes the accept status (Q1, {@link PortalDecisionService#ACCEPT_AVAILABLE}).
+   */
+  private static JSONObject decisionOf(PortalSession session, Order quotation)
+      throws JSONException {
+    PortalDecisionService.Blocked blocked =
+        new PortalDecisionService().blockedReason(session, quotation);
+    JSONObject decision = new JSONObject();
+    decision.put("canDecide", blocked == null);
+    decision.put("blockedReason", blocked == null ? JSONObject.NULL : blocked.getCode());
+    decision.put("acceptAvailable", PortalDecisionService.ACCEPT_AVAILABLE);
+    return decision;
   }
 
   /**

@@ -159,10 +159,18 @@ final class PortalPrintable {
     return null;
   }
 
-  /** The user who sent the document: the creator of the link's root row, unless a system user. */
-  private static String senderOf(PortalSession session) {
+  /**
+   * The user who sent the document: the creator of the link's root row, unless a system user. Also
+   * the recipient of the quotation-decision notice (Part C). Admin mode by the caller.
+   */
+  static String senderOf(PortalSession session) {
+    return senderOfLink(session.getLinkId());
+  }
+
+  /** As {@link #senderOf(PortalSession)}, from any link of the chain. */
+  static String senderOfLink(String linkId) {
     List<?> rows = OBDal.getInstance().getSession().createNativeQuery(ROOT_SENDER_SQL)
-        .setParameter("linkId", session.getLinkId()).list();
+        .setParameter("linkId", linkId).list();
     String userId = rows.isEmpty() ? null : StringUtils.trimToNull((String) rows.get(0));
     return userId == null || SYSTEM_USERS.contains(userId) ? null : userId;
   }
