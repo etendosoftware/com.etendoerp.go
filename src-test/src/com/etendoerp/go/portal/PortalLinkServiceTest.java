@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -502,6 +503,84 @@ public class PortalLinkServiceTest {
       assertEquals("en_US", renewal.language);
       assertEquals(RECORD_ID, renewal.recordId);
       assertEquals(PortalDocumentKind.INVOICE, renewal.kind);
+    }
+  }
+
+  // ── S1: admin mode ──────────────────────────────────────────────────────────
+
+  @Test
+  public void validateFindSentLinkAndRenewRestoreAdminModeEvenWhenTheyThrow() {
+    // The portal has no session to inherit a mode from; each entry point sets its own and gives it
+    // back. Depth counts open admin-mode scopes; the DAL reads must all happen inside one.
+    AtomicInteger depth = new AtomicInteger();
+    AtomicInteger entered = new AtomicInteger();
+    List<Integer> depthAtRead = new ArrayList<>();
+    obContext.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> {
+      depth.incrementAndGet();
+      entered.incrementAndGet();
+      return null;
+    });
+    obContext.when(OBContext::restorePreviousMode).thenAnswer(inv -> {
+      depth.decrementAndGet();
+      return null;
+    });
+    PortalLink valid = sentLink(NOW.plus(Duration.ofHours(1)), true);
+    present(valid);
+    dal.when(() -> PortalLinkDal.findByTokenHash(TOKEN_HASH)).thenAnswer(inv -> {
+      depthAtRead.add(depth.get());
+      return mock(BaseOBObject.class);
+    });
+    dal.when(() -> PortalLinkDal.toLink(any())).thenReturn(valid);
+    doAnswer(inv -> {
+      depthAtRead.add(depth.get());
+      return businessPartner;
+    }).when(obDal).get(BusinessPartner.class, BP_ID);
+    Clock broken = mock(Clock.class);
+    when(broken.instant()).thenThrow(new IllegalStateException("clock"));
+    PortalLinkService throwing = new PortalLinkService(new PortalAccessChecks(() -> guard),
+        expired -> {
+          throw new IllegalStateException("send");
+        }, Clock.fixed(NOW, ZoneOffset.UTC));
+    PortalLinkService brokenClock = new PortalLinkService(new PortalAccessChecks(() -> guard),
+        expired -> TransactionalEmailService.STATUS_SENT, broken);
+
+    // { label, the call }
+    Object[][] calls = {
+        { "findSentLink", (Runnable) () -> service().findSentLink(TOKEN) },
+        { "validate", (Runnable) () -> service().validate(TOKEN) },
+        { "validate throwing", (Runnable) () -> brokenClock.validate(TOKEN) },
+        { "renew throwing", (Runnable) () -> throwingRenewal(throwing) },
+    };
+    for (Object[] c : calls) {
+      entered.set(0);
+      depthAtRead.clear();
+      try {
+        ((Runnable) c[1]).run();
+      } catch (IllegalStateException expected) {
+        // The failure is the caller's to handle; the mode must be back regardless.
+      }
+
+      assertEquals(c[0] + " left admin mode open", 0, depth.get());
+      assertTrue(c[0] + " never entered admin mode", entered.get() >= 1);
+      assertFalse(c[0] + " read nothing", depthAtRead.isEmpty());
+      for (int atRead : depthAtRead) {
+        assertTrue(c[0] + " read outside admin mode", atRead > 0);
+      }
+    }
+    // findSentLink on its own opens exactly one scope.
+    entered.set(0);
+    service().findSentLink(TOKEN);
+    assertEquals(1, entered.get());
+  }
+
+  private void throwingRenewal(PortalLinkService service) {
+    // Expired, so renew reaches the sender, which throws.
+    dal.when(() -> PortalLinkDal.toLink(any())).thenReturn(expiredLink());
+    try {
+      service.renew(TOKEN);
+    } finally {
+      dal.when(() -> PortalLinkDal.toLink(any()))
+          .thenReturn(sentLink(NOW.plus(Duration.ofHours(1)), true));
     }
   }
 

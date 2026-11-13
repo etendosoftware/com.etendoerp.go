@@ -475,7 +475,7 @@ public class DefaultDocumentSendEmailContractTest {
   // ── ETP-6209: the customer portal link ──────────────────────────────────────
 
   @Test
-  public void aPortalContractMintsOnePendingLinkForTheEmailsToAndCc() throws Exception {
+  public void aPortalContractMintsOnePendingLinkAndMakesItTheEmailsButton() throws Exception {
     PortalLinkService portalLinks = mock(PortalLinkService.class);
     PortalLinkService.MintedLink minted = mock(PortalLinkService.MintedLink.class);
     when(minted.getId()).thenReturn("LINK-1");
@@ -496,8 +496,17 @@ public class DefaultDocumentSendEmailContractTest {
     EmailProviderRequest request = resolution.getProviderRequest();
     assertEquals("the send carries the link id onDelivered confirms", "LINK-1",
         request.getSendCorrelationId());
-    assertTrue(request.getData().getString("body")
-        .contains("https://app.example.test/portal/tok"));
+    String body = request.getData().getString("body");
+    // The portal link is the email's one button, and it replaces the download one.
+    assertTrue(body, body.contains("https://app.example.test/portal/tok"));
+    assertTrue(body, body.contains("Ver documento en el portal"));
+    assertFalse("no download button next to the portal one: " + body,
+        body.contains("Descargar documento"));
+    assertFalse("the download link is not offered: " + body, body.contains(DOWNLOAD_LINK));
+    // The intro is a plain sentence; the only link is the button.
+    assertTrue(body, body.contains("<strong>portal de cliente</strong>. El enlace es válido"
+        + " durante 48 horas."));
+    assertFalse("no inline anchor in the intro: " + body, body.contains("sf-link"));
     // Pending until the email is delivered.
     verify(portalLinks, never()).confirm(any(), any(), anyInt());
   }

@@ -56,7 +56,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Attachment;
-import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
 import com.etendoerp.go.schemaforge.NeoAttachmentsDownloader;
@@ -66,9 +65,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /**
  * Unit tests for {@link PortalServlet}, the customer portal's session-less API: where the token is
  * read from, which methods are served, rate limiting, caching headers, the single invalid-link
- * answer and the tenant + Business Partner scope of every invoice read.
+ * answer, the routing of the document reads and the tenant + Business Partner scope they get.
  *
- * <p>The link service and both rate limiters are field-initialised by the servlet, so they are
+ * <p>The link service and the three rate limiters are field-initialised by the servlet, so they are
  * replaced with {@code mockConstruction}; the one test that needs the real service's verdict on a
  * token drives it through a static mock of {@link PortalLinkDal} instead.
  *
@@ -79,6 +78,8 @@ public class PortalServletTest {
   private static final String CLIENT_ID = "CLIENT-1";
   private static final String BP_ID = "BP-1";
   private static final String INVALID_BODY = "{\"error\":\"This link is no longer valid\"}";
+  private static final String[] DATA_PATHS = { "/home", "/documents",
+      "/documents/INVOICE/INV-1", "/documents/INVOICE/INV-1/pdf" };
 
   private MockedStatic<OBContext> obContext;
   private MockedStatic<CompanyLogoResolver> logos;
@@ -88,6 +89,7 @@ public class PortalServletTest {
   private PortalLinkService linkService;
   private PortalRateLimiter meLimiter;
   private PortalRateLimiter renewLimiter;
+  private PortalRateLimiter dataLimiter;
 
   @Before
   public void setUp() {
@@ -99,9 +101,11 @@ public class PortalServletTest {
         MockedConstruction<PortalRateLimiter> limiters = allowingLimiters()) {
       servlet = new PortalServlet();
       linkService = services.constructed().get(0);
-      // Field order in PortalServlet: the /me limiter first, then the /renew one.
+      // Field order in PortalServlet: the /me limiter first, then the /renew one, then the one
+      // shared by the data reads (/home, /documents*).
       meLimiter = limiters.constructed().get(0);
       renewLimiter = limiters.constructed().get(1);
+      dataLimiter = limiters.constructed().get(2);
     }
     when(linkService.validate(any()))
         .thenReturn(new PortalLinkService.Validation(PortalLinkService.State.INVALID, null));
@@ -142,8 +146,9 @@ public class PortalServletTest {
 
   @Test
   public void anyMethodButGetOrPostRenewIsRejectedWith405() throws Exception {
-    String[][] cases = { { "PUT", "/me" }, { "DELETE", "/me" }, { "PATCH", "/invoices" },
-        { "POST", "/me" }, { "POST", "/invoices" }, { "HEAD", "/renew" } };
+    String[][] cases = { { "PUT", "/me" }, { "DELETE", "/me" }, { "PATCH", "/documents" },
+        { "POST", "/me" }, { "POST", "/home" }, { "DELETE", "/documents/INVOICE/INV-1" },
+        { "HEAD", "/renew" } };
     for (String[] c : cases) {
       Call call = new Call();
 
@@ -180,13 +185,30 @@ public class PortalServletTest {
         HttpServletResponse.SC_UNAUTHORIZED, meAgain.status());
     assertEquals(429, renewAgain.status());
     verify(linkService, never()).renew(any());
+
+    // Only the data limiter refuses: every data read is throttled, /me and /renew are served.
+    when(renewLimiter.tryAcquire(anyString())).thenReturn(true);
+    when(dataLimiter.tryAcquire(anyString())).thenReturn(false);
+    clearInvocations(linkService);
+    for (String path : DATA_PATHS) {
+      Call data = new Call();
+      servlet.service(request("GET", path), data.response);
+      assertEquals(path, 429, data.status());
+    }
+    verify(linkService, never()).validate(any());
+    Call meServed = new Call();
+    servlet.service(request("GET", "/me"), meServed.response);
+    Call renewServed = new Call();
+    servlet.service(request("POST", "/renew"), renewServed.response);
+    assertEquals(HttpServletResponse.SC_UNAUTHORIZED, meServed.status());
+    assertEquals(HttpServletResponse.SC_OK, renewServed.status());
   }
 
   @Test
   public void everyResponseIsMarkedNoStore() throws Exception {
     when(linkService.renew(any())).thenReturn(PortalLinkService.RenewalOutcome.SENT);
     String[][] cases = { { "GET", "/me" }, { "PUT", "/me" }, { "GET", "/nowhere" },
-        { "POST", "/renew" }, { "GET", "/invoices" } };
+        { "POST", "/renew" }, { "GET", "/home" }, { "GET", "/documents" } };
     for (String[] c : cases) {
       Call call = new Call();
 
@@ -227,65 +249,45 @@ public class PortalServletTest {
   }
 
   @Test
-  public void anInvoiceOutsideTheLinksScopeIs404AndNeverReachesTheAttachments()
-      throws Exception {
-    validLink();
-    try (MockedStatic<PortalInvoiceQuery> invoices = mockStatic(PortalInvoiceQuery.class);
-        MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class)) {
-      invoices.when(() -> PortalInvoiceQuery.findInScope(any(), eq("OTHER-TENANTS-INVOICE")))
-          .thenReturn(null);
-      Call call = new Call();
+  public void aLinkThatIsNotValidGetsTheSame401OnEveryDataRoute() throws Exception {
+    Date past = new Date(0L);
+    Date future = new Date(System.currentTimeMillis() + 3_600_000L);
+    List<PortalLinkService.Validation> notValid = Arrays.asList(
+        new PortalLinkService.Validation(PortalLinkService.State.INVALID, null),
+        new PortalLinkService.Validation(PortalLinkService.State.EXPIRED,
+            link(past, new Date(1L), true)),
+        new PortalLinkService.Validation(PortalLinkService.State.UNAVAILABLE,
+            link(past, future, true)));
+    try (MockedStatic<PortalDocumentsEndpoint> endpoint =
+        mockStatic(PortalDocumentsEndpoint.class);
+        MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class)) {
+      for (PortalLinkService.Validation validation : notValid) {
+        when(linkService.validate(any())).thenReturn(validation);
+        for (String path : DATA_PATHS) {
+          Call call = new Call();
 
-      servlet.service(request("GET", "/invoices/OTHER-TENANTS-INVOICE/pdf"), call.response);
+          servlet.service(request("GET", path), call.response);
 
-      assertEquals(HttpServletResponse.SC_NOT_FOUND, call.status());
-      ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
-      invoices.verify(() -> PortalInvoiceQuery.findInScope(scope.capture(),
-          eq("OTHER-TENANTS-INVOICE")));
-      assertEquals(CLIENT_ID, scope.getValue().getClientId());
-      assertEquals(BP_ID, scope.getValue().getBusinessPartnerId());
-      attachments.verifyNoInteractions();
+          assertEquals(validation.getState() + " " + path, HttpServletResponse.SC_UNAUTHORIZED,
+              call.status());
+          assertEquals(INVALID_BODY, call.body.toString());
+        }
+      }
+      endpoint.verifyNoInteractions();
+      documents.verifyNoInteractions();
     }
   }
 
   @Test
-  public void anAttachmentOfAnotherTenantIs404AndIsNeverStreamed() throws Exception {
+  public void theDocumentListIsReadWithTheValidatedLinksScopeOnly() throws Exception {
     validLink();
-    Invoice invoice = mock(Invoice.class);
-    when(invoice.getId()).thenReturn("INV-1");
-    Client otherTenant = mock(Client.class);
-    when(otherTenant.getId()).thenReturn("CLIENT-2");
-    Attachment attachment = mock(Attachment.class);
-    when(attachment.getClient()).thenReturn(otherTenant);
-    OBDal obDal = mock(OBDal.class);
-    when(obDal.get(Attachment.class, "ATT-1")).thenReturn(attachment);
-    NeoResponse main = new NeoResponse(200, new JSONObject().put("id", "ATT-1"));
-
-    try (MockedStatic<PortalInvoiceQuery> invoices = mockStatic(PortalInvoiceQuery.class);
-        MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class);
-        MockedStatic<NeoAttachmentsDownloader> downloads =
-            mockStatic(NeoAttachmentsDownloader.class);
-        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
-      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
-      invoices.when(() -> PortalInvoiceQuery.findInScope(any(), eq("INV-1"))).thenReturn(invoice);
-      attachments.when(() -> NeoAttachmentsHelper.handleGetMain("C_Invoice", "INV-1"))
-          .thenReturn(main);
-      Call call = new Call();
-
-      servlet.service(request("GET", "/invoices/INV-1/pdf"), call.response);
-
-      assertEquals(HttpServletResponse.SC_NOT_FOUND, call.status());
-      downloads.verifyNoInteractions();
-    }
-  }
-
-  @Test
-  public void theInvoiceListIsReadWithTheValidatedLinksScopeOnly() throws Exception {
-    validLink();
-    try (MockedStatic<PortalInvoiceQuery> invoices = mockStatic(PortalInvoiceQuery.class)) {
-      invoices.when(() -> PortalInvoiceQuery.listAll(any()))
-          .thenReturn(Collections.<Invoice>emptyList());
-      HttpServletRequest request = request("GET", "/invoices");
+    try (MockedStatic<PortalDocumentsEndpoint> endpoint =
+        mockStatic(PortalDocumentsEndpoint.class)) {
+      JSONObject page = new JSONObject().put("totalCount", 0);
+      endpoint.when(() -> PortalDocumentsEndpoint.list(any(), any(), any(), any(), any(), any(),
+          any(), any())).thenReturn(page);
+      HttpServletRequest request = request("GET", "/documents");
+      when(request.getParameter("type")).thenReturn("invoice");
       // Nothing a caller sends can widen the scope: there is no parameter for it to come from.
       when(request.getParameter("clientId")).thenReturn("CLIENT-2");
       when(request.getParameter("businessPartnerId")).thenReturn("BP-2");
@@ -295,25 +297,94 @@ public class PortalServletTest {
 
       assertEquals(HttpServletResponse.SC_OK, call.status());
       ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
-      invoices.verify(() -> PortalInvoiceQuery.listAll(scope.capture()));
+      endpoint.verify(() -> PortalDocumentsEndpoint.list(scope.capture(), eq("invoice"), any(),
+          any(), any(), any(), any(), any()));
       assertEquals(CLIENT_ID, scope.getValue().getClientId());
       assertEquals(BP_ID, scope.getValue().getBusinessPartnerId());
     }
   }
 
   @Test
-  public void anExpiredLinkSeesNoInvoices() throws Exception {
-    Date sentAt = new Date(0L);
-    when(linkService.validate(any())).thenReturn(new PortalLinkService.Validation(
-        PortalLinkService.State.EXPIRED, link(sentAt, new Date(1L), true)));
-    try (MockedStatic<PortalInvoiceQuery> invoices = mockStatic(PortalInvoiceQuery.class)) {
+  public void anUnknownTypeAMalformedPathOrAnOutOfScopeDetailIs404() throws Exception {
+    validLink();
+    // The endpoint answers null (its "not found") for anything it does not resolve.
+    String[] paths = { "/documents", "/documents/INVOICE", "/documents/INVOICE/INV-1/xml",
+        "/documents/INVOICE/INV-1/pdf/more", "/documents/INVOICE/OTHER-BPS-INVOICE" };
+    try (MockedStatic<PortalDocumentsEndpoint> endpoint =
+        mockStatic(PortalDocumentsEndpoint.class)) {
+      for (String path : paths) {
+        HttpServletRequest request = request("GET", path);
+        when(request.getParameter("type")).thenReturn("receipt");
+        Call call = new Call();
+
+        servlet.service(request, call.response);
+
+        assertEquals(path, HttpServletResponse.SC_NOT_FOUND, call.status());
+      }
+      // Only the well-formed detail path reached the endpoint; the malformed ones never did.
+      endpoint.verify(() -> PortalDocumentsEndpoint.detail(any(), any(), any()));
+      endpoint.verify(() -> PortalDocumentsEndpoint.detail(any(), eq("INVOICE"),
+          eq("OTHER-BPS-INVOICE")));
+    }
+  }
+
+  @Test
+  public void aPdfOutsideTheLinksScopeIs404AndNeverReachesTheAttachments() throws Exception {
+    validLink();
+    try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class);
+        MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class)) {
       Call call = new Call();
 
-      servlet.service(request("GET", "/invoices"), call.response);
+      servlet.service(request("GET", "/documents/INVOICE/OTHER-TENANTS-INVOICE/pdf"),
+          call.response);
 
-      assertEquals(HttpServletResponse.SC_UNAUTHORIZED, call.status());
-      assertEquals(INVALID_BODY, call.body.toString());
-      invoices.verifyNoInteractions();
+      assertEquals(HttpServletResponse.SC_NOT_FOUND, call.status());
+      ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
+      documents.verify(() -> PortalDocumentQuery.findInScope(scope.capture(),
+          eq(PortalDocumentKind.INVOICE), eq("OTHER-TENANTS-INVOICE")));
+      assertEquals(CLIENT_ID, scope.getValue().getClientId());
+      assertEquals(BP_ID, scope.getValue().getBusinessPartnerId());
+      attachments.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void aPdfIsStreamedOnlyWhenItsAttachmentIsTheLinksTenants() throws Exception {
+    validLink();
+    BaseOBObject invoice = mock(BaseOBObject.class);
+    OBDal obDal = mock(OBDal.class);
+    NeoResponse main = new NeoResponse(200, new JSONObject().put("id", "ATT-1"));
+    // { attachment's tenant, streamed }
+    Object[][] cases = { { "CLIENT-2", false }, { CLIENT_ID, true } };
+    for (Object[] c : cases) {
+      Client owner = mock(Client.class);
+      when(owner.getId()).thenReturn((String) c[0]);
+      Attachment attachment = mock(Attachment.class);
+      when(attachment.getClient()).thenReturn(owner);
+      when(obDal.get(Attachment.class, "ATT-1")).thenReturn(attachment);
+      try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class);
+          MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class);
+          MockedStatic<NeoAttachmentsDownloader> downloads =
+              mockStatic(NeoAttachmentsDownloader.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+        documents.when(() -> PortalDocumentQuery.findInScope(any(),
+            eq(PortalDocumentKind.INVOICE), eq("INV-1"))).thenReturn(invoice);
+        attachments.when(() -> NeoAttachmentsHelper.handleGetMain("C_Invoice", "INV-1"))
+            .thenReturn(main);
+        Call call = new Call();
+
+        servlet.service(request("GET", "/documents/INVOICE/INV-1/pdf"), call.response);
+
+        if ((Boolean) c[1]) {
+          downloads.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT-1", call.response));
+          events.verify(() -> PortalUsageEvents.downloaded(any(), eq("INV-1")));
+        } else {
+          assertEquals(HttpServletResponse.SC_NOT_FOUND, call.status());
+          downloads.verifyNoInteractions();
+          events.verify(() -> PortalUsageEvents.downloaded(any(), any()), never());
+        }
+      }
     }
   }
 

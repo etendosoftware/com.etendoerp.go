@@ -183,6 +183,10 @@ public class SalesDocumentEmailContractsTest {
         assertEquals(pair[0].getName(), baseline.getData().toString(),
             gated.getData().toString());
         assertNull(pair[0].getName(), gated.getSendCorrelationId());
+        // The download button stays the email's one button.
+        String body = gated.getData().getString("body");
+        assertTrue(pair[0].getName(), body.contains("Descargar documento"));
+        assertTrue(pair[0].getName(), body.contains("https://app.example.test/doc/doc-1"));
       }
       // The gate was asked once per send — the email is unchanged because it said no.
       policy.verify(PortalLinkPolicy::isLinkEnabled, times(4));
@@ -207,7 +211,9 @@ public class SalesDocumentEmailContractsTest {
         EmailProviderRequest request = resolve(contract);
 
         assertNull(contract.getName(), request.getSendCorrelationId());
-        assertFalse(contract.getName(), request.getData().getString("body").contains("/portal/"));
+        String body = request.getData().getString("body");
+        assertFalse(contract.getName(), body.contains("/portal/"));
+        assertTrue(contract.getName(), body.contains("Descargar documento"));
       }
       policy.verifyNoInteractions();
       portalDal.verifyNoInteractions();
