@@ -282,8 +282,8 @@ final class McpRoutineJdbcStore implements McpRoutineStore {
       }
       int version = rs.getInt(5);
       Integer versionNo = rs.wasNull() ? null : version;
-      return new Execution(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
-          versionNo, rs.getString(6), rs.getString(7), rs.getString(8));
+      return Execution.toRecord(rs.getString(2), rs.getString(3), rs.getString(4), versionNo,
+          rs.getString(6), rs.getString(7)).stored(rs.getString(1), rs.getString(8));
     }
   }
 
@@ -310,19 +310,24 @@ final class McpRoutineJdbcStore implements McpRoutineStore {
   /** Runs several statements as one transaction on their own pooled connection. */
   private static <T> T inTransaction(Work<T> work) {
     try (Connection connection = connection()) {
-      connection.setAutoCommit(false);
-      try {
-        T result = work.apply(connection);
-        connection.commit();
-        return result;
-      } catch (SQLException | RuntimeException e) {
-        connection.rollback();
-        throw e;
-      } finally {
-        connection.setAutoCommit(true);
-      }
+      return commitOrRollback(connection, work);
     } catch (SQLException e) {
       throw failure(e);
+    }
+  }
+
+  /** Runs the work as one transaction: commits when it succeeds, rolls back when it throws. */
+  private static <T> T commitOrRollback(Connection connection, Work<T> work) throws SQLException {
+    connection.setAutoCommit(false);
+    try {
+      T result = work.apply(connection);
+      connection.commit();
+      return result;
+    } catch (SQLException | RuntimeException e) {
+      connection.rollback();
+      throw e;
+    } finally {
+      connection.setAutoCommit(true);
     }
   }
 

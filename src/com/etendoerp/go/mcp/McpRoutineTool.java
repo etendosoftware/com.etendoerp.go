@@ -83,6 +83,7 @@ final class McpRoutineTool {
   private static final String NOTHING_RUN = " Nothing was run.";
   private static final String KEY_ROUTINES = "routines";
   private static final String KEY_CURRENT_VERSION = "currentVersion";
+  private static final String ERROR_BUILDING_ANSWER = "Error building the routine answer";
 
   private final McpRoutineStore store;
   private final Supplier<Owner> owner;
@@ -274,8 +275,9 @@ final class McpRoutineTool {
   private JSONObject execute(List<Step> steps, Map<String, Object> values, String mode,
       String routineName, Integer versionNo, Object sentSteps) throws StepsFailed {
     McpRoutineSteps.Outcome outcome = McpRoutineSteps.run(steps, values, runner);
-    String executionId = record(new Execution(null, mode, outcome.ok ? STATUS_OK : STATUS_FAILED,
-        routineName, versionNo, String.valueOf(sentSteps), outcome.record.toString(), null));
+    String status = outcome.ok ? STATUS_OK : STATUS_FAILED;
+    String executionId = recordExecution(Execution.toRecord(mode, status, routineName, versionNo,
+        String.valueOf(sentSteps), outcome.stepRecords.toString()));
     try {
       if (executionId != null) {
         outcome.body.put(PARAM_EXECUTION_ID, executionId);
@@ -285,7 +287,7 @@ final class McpRoutineTool {
         outcome.body.put(PARAM_VERSION, versionNo);
       }
     } catch (JSONException e) {
-      throw new McpToolException("Error building the routine answer", e);
+      throw new McpToolException(ERROR_BUILDING_ANSWER, e);
     }
     if (!outcome.ok) {
       throw new StepsFailed(outcome.body);
@@ -297,7 +299,7 @@ final class McpRoutineTool {
    * Stores an execution. A failure to store it does not change what the steps did, so it is
    * logged and the answer simply carries no executionId.
    */
-  private String record(Execution execution) {
+  private String recordExecution(Execution execution) {
     try {
       return store.recordExecution(owner.get(), execution);
     } catch (RuntimeException e) {
@@ -470,7 +472,7 @@ final class McpRoutineTool {
       body.put(McpConstants.KEY_HINT, hint);
       return body;
     } catch (JSONException e) {
-      throw new McpToolException("Error building the routine answer", e);
+      throw new McpToolException(ERROR_BUILDING_ANSWER, e);
     }
   }
 
@@ -535,7 +537,7 @@ final class McpRoutineTool {
           + "deleted. Past executions stay readable with mode execution.");
       return body;
     } catch (JSONException e) {
-      throw new McpToolException("Error building the routine answer", e);
+      throw new McpToolException(ERROR_BUILDING_ANSWER, e);
     }
   }
 

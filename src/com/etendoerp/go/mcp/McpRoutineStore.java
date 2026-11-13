@@ -96,34 +96,99 @@ interface McpRoutineStore {
     final String result;
     final String created;
 
-    Execution(String id, String mode, String status, String routineName, Integer version,
-        String steps, String result, String created) {
-      this.id = id;
+    private Execution(String mode, String status, String routineName, Integer version,
+        String steps, String result) {
+      this.id = null;
+      this.created = null;
       this.mode = mode;
       this.status = status;
       this.routineName = routineName;
       this.version = version;
       this.steps = steps;
       this.result = result;
+    }
+
+    private Execution(Execution base, String id, String created) {
+      this.id = id;
       this.created = created;
+      this.mode = base.mode;
+      this.status = base.status;
+      this.routineName = base.routineName;
+      this.version = base.version;
+      this.steps = base.steps;
+      this.result = base.result;
+    }
+
+    /**
+     * An execution about to be recorded: it has no id or date yet.
+     *
+     * @param mode        {@code exec} or {@code run}
+     * @param status      {@code OK} or {@code FAILED}
+     * @param routineName the routine that ran, {@code null} for an inline exec
+     * @param version     its version, {@code null} for an inline exec
+     * @param steps       the steps as sent, JSON text
+     * @param result      every step's result or error, JSON text
+     * @return the execution
+     */
+    static Execution toRecord(String mode, String status, String routineName, Integer version,
+        String steps, String result) {
+      return new Execution(mode, status, routineName, version, steps, result);
+    }
+
+    /**
+     * This execution as read back from storage.
+     *
+     * @param storedId   the id it was stored under
+     * @param storedDate when it was stored, ISO-8601
+     * @return the execution with its id and date
+     */
+    Execution stored(String storedId, String storedDate) {
+      return new Execution(this, storedId, storedDate);
     }
   }
 
-  /** @return the owner's routine with that name, or {@code null} */
+  /**
+   * Finds one of the owner's routines.
+   *
+   * @param owner the calling user
+   * @param name  the routine name
+   * @return the routine, or {@code null} when the owner has none with that name
+   */
   Routine find(Owner owner, String name);
 
-  /** @return the owner's routines, by name */
+  /**
+   * Lists the owner's routines.
+   *
+   * @param owner the calling user
+   * @return the routines, by name
+   */
   List<Routine> list(Owner owner);
 
-  /** @return one version of a routine, or {@code null} when it does not exist */
+  /**
+   * Reads one version of a routine.
+   *
+   * @param routineId the routine
+   * @param number    the version number
+   * @return the version, or {@code null} when it does not exist
+   */
   Version version(String routineId, int number);
 
-  /** @return the version numbers of a routine, ascending */
+  /**
+   * Lists the version numbers of a routine.
+   *
+   * @param routineId the routine
+   * @return the version numbers, ascending
+   */
   List<Integer> versionNumbers(String routineId);
 
   /**
    * Saves a new routine at version 1.
    *
+   * @param owner       the calling user, who owns it
+   * @param name        its name, unique among the owner's routines
+   * @param description what it does
+   * @param params      the declared parameters, JSON text
+   * @param steps       the steps, JSON text
    * @return the new routine
    */
   Routine create(Owner owner, String name, String description, String params, String steps);
@@ -131,20 +196,39 @@ interface McpRoutineStore {
   /**
    * Adds a version to a routine and makes it current.
    *
+   * @param owner       the calling user
+   * @param routine     the routine
+   * @param description its description from now on
+   * @param params      the version's declared parameters, JSON text
+   * @param steps       the version's steps, JSON text
    * @return the new version number
    */
   int addVersion(Owner owner, Routine routine, String description, String params, String steps);
 
-  /** Deletes the owner's routine with all its versions; @return whether it existed */
+  /**
+   * Deletes one of the owner's routines with all its versions.
+   *
+   * @param owner the calling user
+   * @param name  the routine name
+   * @return whether it existed
+   */
   boolean delete(Owner owner, String name);
 
   /**
    * Records one execution.
    *
+   * @param owner     the calling user
+   * @param execution what ran and what it answered
    * @return its id, the {@code executionId} the agent receives
    */
   String recordExecution(Owner owner, Execution execution);
 
-  /** @return the owner's execution with that id, or {@code null} */
+  /**
+   * Reads one of the owner's executions.
+   *
+   * @param owner       the calling user
+   * @param executionId the execution
+   * @return the execution, or {@code null} when the owner has none with that id
+   */
   Execution findExecution(Owner owner, String executionId);
 }

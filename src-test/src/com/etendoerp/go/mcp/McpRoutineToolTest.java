@@ -608,8 +608,7 @@ class McpRoutineToolTest {
     @Override
     public String recordExecution(Owner owner, Execution execution) {
       String id = "E" + (++sequence);
-      executions.put(id, new Execution(id, execution.mode, execution.status,
-          execution.routineName, execution.version, execution.steps, execution.result, "now"));
+      executions.put(id, execution.stored(id, "now"));
       executionOwners.put(id, owner.clientId + "/" + owner.userId);
       return id;
     }

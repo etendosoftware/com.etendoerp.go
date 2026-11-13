@@ -48,7 +48,8 @@ final class McpRoutineParams {
   static final String TYPE_ID = "id";
   static final List<String> TYPES = List.of(TYPE_STRING, TYPE_NUMBER, TYPE_BOOLEAN, TYPE_ID);
 
-  private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,39}");
+  private static final String PARAMETER = "Parameter '";
+  private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z]\\w{0,39}");
 
   private McpRoutineParams() {
   }
@@ -90,7 +91,7 @@ final class McpRoutineParams {
           + "digits or '_', starting with a letter (at most 40 characters).");
     }
     if (!(raw instanceof JSONObject)) {
-      throw McpRoutineSteps.refusal(FIELD_PARAMS, "Parameter '" + name + "' must be an object "
+      throw McpRoutineSteps.refusal(FIELD_PARAMS, PARAMETER + name + "' must be an object "
           + "{type, required, description}.");
     }
     JSONObject source = (JSONObject) raw;
@@ -100,25 +101,25 @@ final class McpRoutineParams {
       boolean known = KEY_TYPE.equals(key) || KEY_REQUIRED.equals(key)
           || McpConstants.KEY_DESCRIPTION.equals(key) || (allowFrom && KEY_FROM.equals(key));
       if (!known) {
-        throw McpRoutineSteps.refusal(FIELD_PARAMS, "Parameter '" + name + "' has an unknown key '"
+        throw McpRoutineSteps.refusal(FIELD_PARAMS, PARAMETER + name + "' has an unknown key '"
             + key + "'. It takes type, required and description"
             + (allowFrom ? ", and from when saving from an execution." : "."));
       }
     }
     String type = source.optString(KEY_TYPE, null);
     if (!TYPES.contains(type)) {
-      throw McpRoutineSteps.refusal(FIELD_PARAMS, "Parameter '" + name + "' needs a 'type': one "
+      throw McpRoutineSteps.refusal(FIELD_PARAMS, PARAMETER + name + "' needs a 'type': one "
           + "of " + TYPES + ".");
     }
     Object required = source.opt(KEY_REQUIRED);
     if (!(required instanceof Boolean)) {
-      throw McpRoutineSteps.refusal(FIELD_PARAMS, "Parameter '" + name + "' needs 'required': "
+      throw McpRoutineSteps.refusal(FIELD_PARAMS, PARAMETER + name + "' needs 'required': "
           + "true or false.");
     }
     String description = StringUtils.trimToNull(source.optString(McpConstants.KEY_DESCRIPTION,
         null));
     if (description == null) {
-      throw McpRoutineSteps.refusal(FIELD_PARAMS, "Parameter '" + name + "' needs a "
+      throw McpRoutineSteps.refusal(FIELD_PARAMS, PARAMETER + name + "' needs a "
           + "'description': what value to send.");
     }
     JSONObject normalized = new JSONObject();
@@ -156,18 +157,9 @@ final class McpRoutineParams {
     }
     Map<String, Object> values = new LinkedHashMap<>();
     for (String name : declared) {
-      JSONObject declaration = declarations.optJSONObject(name);
-      Object value = sent.opt(name);
-      if (value == null || value == JSONObject.NULL) {
-        if (declaration.optBoolean(KEY_REQUIRED)) {
-          problems.append(" '").append(name).append("' is required: ")
-              .append(declaration.optString(McpConstants.KEY_DESCRIPTION)).append('.');
-        }
-      } else if (!matches(declaration.optString(KEY_TYPE), value)) {
-        problems.append(" '").append(name).append("' must be a ")
-            .append(declaration.optString(KEY_TYPE)).append('.');
-      } else {
-        values.put(name, value);
+      String problem = checkValue(name, declarations.optJSONObject(name), sent.opt(name), values);
+      if (problem != null) {
+        problems.append(problem);
       }
     }
     if (problems.length() > 0) {
@@ -175,6 +167,25 @@ final class McpRoutineParams {
           + problems);
     }
     return values;
+  }
+
+  /**
+   * Checks one declared parameter against the value sent, adding it to {@code values} when it
+   * holds; an optional parameter that was not sent is left out.
+   *
+   * @return the problem to report, starting with a space, or {@code null}
+   */
+  private static String checkValue(String name, JSONObject declaration, Object value,
+      Map<String, Object> values) {
+    if (value == null || value == JSONObject.NULL) {
+      return declaration.optBoolean(KEY_REQUIRED) ? " '" + name + "' is required: "
+          + declaration.optString(McpConstants.KEY_DESCRIPTION) + "." : null;
+    }
+    if (!matches(declaration.optString(KEY_TYPE), value)) {
+      return " '" + name + "' must be a " + declaration.optString(KEY_TYPE) + ".";
+    }
+    values.put(name, value);
+    return null;
   }
 
   /** @return the declared parameter names, in declaration order */

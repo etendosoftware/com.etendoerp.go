@@ -82,6 +82,8 @@ final class McpRoutineSteps {
   private static final String KEY_RECORD_ID = "recordId";
   private static final String KEY_DATA = "data";
   private static final String FIELD_STEPS = "steps";
+  private static final String STEP = "Step '";
+  private static final String USES = "' uses '";
 
   private static final Pattern STEP_ID_PATTERN = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,39}");
   private static final Pattern INDEX_PATTERN = Pattern.compile("\\d+");
@@ -145,12 +147,12 @@ final class McpRoutineSteps {
   static final class Outcome {
     final boolean ok;
     final JSONObject body;
-    final JSONArray record;
+    final JSONArray stepRecords;
 
-    Outcome(boolean ok, JSONObject body, JSONArray record) {
+    Outcome(boolean ok, JSONObject body, JSONArray stepRecords) {
       this.ok = ok;
       this.body = body;
-      this.record = record;
+      this.stepRecords = stepRecords;
     }
   }
 
@@ -164,6 +166,13 @@ final class McpRoutineSteps {
       this.step = step;
       this.body = body;
       this.recordId = recordIdOf(body);
+    }
+
+    /** @return {@code data.id} of a step's result when it is one record's id, else {@code null} */
+    private static Object recordIdOf(JSONObject body) {
+      JSONObject data = body.optJSONObject(KEY_DATA);
+      Object id = data == null ? null : data.opt(STEP_ID);
+      return id instanceof String ? id : null;
     }
   }
 
@@ -223,17 +232,17 @@ final class McpRoutineSteps {
     }
     String tool = json.optString(STEP_TOOL, null);
     if (tool == null || !STEP_TOOLS.contains(tool)) {
-      throw refusal(FIELD_STEPS, "Step '" + id + "' calls '" + tool + "', which a routine cannot "
+      throw refusal(FIELD_STEPS, STEP + id + "' calls '" + tool + "', which a routine cannot "
           + "run. A step may call " + STEP_TOOLS + ".");
     }
     Object stepArgs = json.opt(STEP_ARGS);
     if (!(stepArgs instanceof JSONObject)) {
-      throw refusal(FIELD_STEPS, "Step '" + id + "' needs 'args': the arguments object of " + tool
+      throw refusal(FIELD_STEPS, STEP + id + "' needs 'args': the arguments object of " + tool
           + ".");
     }
     Object returnResult = json.opt(STEP_RETURN_RESULT);
     if (returnResult != null && !(returnResult instanceof Boolean)) {
-      throw refusal(FIELD_STEPS, "Step '" + id + "': 'returnResult' must be true or false.");
+      throw refusal(FIELD_STEPS, STEP + id + "': 'returnResult' must be true or false.");
     }
     return new Step(index, id, tool, (JSONObject) stepArgs, Boolean.TRUE.equals(returnResult));
   }
@@ -262,14 +271,14 @@ final class McpRoutineSteps {
     if (text.startsWith(PARAM_PREFIX)) {
       String name = text.substring(PARAM_PREFIX.length());
       if (!declared.contains(name)) {
-        throw refusal(FIELD_STEPS, "Step '" + step.id + "' uses '" + text + "', which is not a "
+        throw refusal(FIELD_STEPS, STEP + step.id + USES + text + "', which is not a "
             + "declared parameter" + (declared.isEmpty()
                 ? ": inline steps take no parameters (save the routine to declare them)."
                 : ". Declared: " + declared + "."));
       }
       used.add(name);
     } else if (text.startsWith(REF_PREFIX) && !earlier.contains(targetOf(text))) {
-      throw refusal(FIELD_STEPS, "Step '" + step.id + "' refers to '" + targetOf(text) + "' in '"
+      throw refusal(FIELD_STEPS, STEP + step.id + "' refers to '" + targetOf(text) + "' in '"
           + text + "', which is not an earlier step. A reference can only use a step that runs "
           + "before it" + (earlier.isEmpty() ? "" : ": " + earlier) + ".");
     }
@@ -288,22 +297,22 @@ final class McpRoutineSteps {
   static Outcome run(List<Step> steps, Map<String, Object> params, StepRunner runner) {
     Map<String, Done> done = new HashMap<>();
     List<Done> completed = new ArrayList<>();
-    JSONArray record = new JSONArray();
+    JSONArray stepRecords = new JSONArray();
     for (Step step : steps) {
       try {
         Done outcome = runStep(step, done, params, runner);
         done.put(step.id, outcome);
         completed.add(outcome);
-        record.put(recordEntry(step, true, outcome.body));
+        stepRecords.put(recordEntry(step, true, outcome.body));
       } catch (Refusal failed) {
         log.info("etendo_routine stopped at step {} ({}) of {}: {}", step.id, step.tool,
             steps.size(), failed.getMessage());
-        record.put(recordEntry(step, false, failed.body));
-        return new Outcome(false, failure(step, failed.body, completed, steps), record);
+        stepRecords.put(recordEntry(step, false, failed.body));
+        return new Outcome(false, failure(step, failed.body, completed, steps), stepRecords);
       }
     }
     log.info("etendo_routine ran {} steps", steps.size());
-    return new Outcome(true, success(steps, completed), record);
+    return new Outcome(true, success(steps, completed), stepRecords);
   }
 
   /**
@@ -317,7 +326,7 @@ final class McpRoutineSteps {
     try {
       resolved = (JSONObject) resolve(new JSONObject(step.args.toString()), done, params, step);
     } catch (JSONException e) {
-      throw refusal(STEP_ARGS, "Step '" + step.id + "': its args could not be read: "
+      throw refusal(STEP_ARGS, STEP + step.id + "': its args could not be read: "
           + e.getMessage() + ".");
     }
     JSONObject content;
@@ -375,44 +384,57 @@ final class McpRoutineSteps {
   private static Object resolve(Object value, Map<String, Done> done, Map<String, Object> params,
       Step step) throws JSONException, Refusal {
     if (value instanceof JSONObject) {
-      JSONObject object = (JSONObject) value;
-      List<String> keys = new ArrayList<>();
-      Iterator<?> it = object.keys();
-      while (it.hasNext()) {
-        keys.add(String.valueOf(it.next()));
-      }
-      for (String key : keys) {
-        Object resolved = resolve(object.get(key), done, params, step);
-        if (resolved == ABSENT) {
-          object.remove(key);
-        } else {
-          object.put(key, resolved);
-        }
-      }
-      return object;
+      return resolveObject((JSONObject) value, done, params, step);
     }
     if (value instanceof JSONArray) {
-      JSONArray source = (JSONArray) value;
-      JSONArray array = new JSONArray();
-      for (int i = 0; i < source.length(); i++) {
-        Object resolved = resolve(source.get(i), done, params, step);
-        if (resolved != ABSENT) {
-          array.put(resolved);
-        }
-      }
-      return array;
+      return resolveArray((JSONArray) value, done, params, step);
     }
     if (value instanceof String) {
-      String text = (String) value;
-      if (text.startsWith(REF_PREFIX)) {
-        return valueOf(text, done, step);
-      }
-      if (text.startsWith(PARAM_PREFIX)) {
-        String name = text.substring(PARAM_PREFIX.length());
-        return params.containsKey(name) ? params.get(name) : ABSENT;
-      }
+      return resolveText((String) value, done, params, step);
     }
     return value;
+  }
+
+  private static JSONObject resolveObject(JSONObject object, Map<String, Done> done,
+      Map<String, Object> params, Step step) throws JSONException, Refusal {
+    List<String> keys = new ArrayList<>();
+    Iterator<?> it = object.keys();
+    while (it.hasNext()) {
+      keys.add(String.valueOf(it.next()));
+    }
+    for (String key : keys) {
+      Object resolved = resolve(object.get(key), done, params, step);
+      if (resolved == ABSENT) {
+        object.remove(key);
+      } else {
+        object.put(key, resolved);
+      }
+    }
+    return object;
+  }
+
+  private static JSONArray resolveArray(JSONArray source, Map<String, Done> done,
+      Map<String, Object> params, Step step) throws JSONException, Refusal {
+    JSONArray array = new JSONArray();
+    for (int i = 0; i < source.length(); i++) {
+      Object resolved = resolve(source.get(i), done, params, step);
+      if (resolved != ABSENT) {
+        array.put(resolved);
+      }
+    }
+    return array;
+  }
+
+  private static Object resolveText(String text, Map<String, Done> done,
+      Map<String, Object> params, Step step) throws Refusal {
+    if (text.startsWith(REF_PREFIX)) {
+      return valueOf(text, done, step);
+    }
+    if (text.startsWith(PARAM_PREFIX)) {
+      String name = text.substring(PARAM_PREFIX.length());
+      return params.containsKey(name) ? params.get(name) : ABSENT;
+    }
+    return text;
   }
 
   /**
@@ -427,7 +449,7 @@ final class McpRoutineSteps {
     String path = reference.substring(REF_PREFIX.length() + target.length());
     if (path.isEmpty()) {
       if (source.recordId == null) {
-        throw refusal(FIELD_STEPS, "Step '" + step.id + "' uses '" + reference + "', but step '"
+        throw refusal(FIELD_STEPS, STEP + step.id + USES + reference + "', but step '"
             + target + "' (" + source.step.tool + ") returned no record id (data.id). Name the "
             + "value with a path, e.g. '" + reference + ".data[0].id'.");
       }
@@ -437,7 +459,7 @@ final class McpRoutineSteps {
     for (String segment : segments(path)) {
       current = child(current, segment);
       if (current == null) {
-        throw refusal(FIELD_STEPS, "Step '" + step.id + "' uses '" + reference + "', but the "
+        throw refusal(FIELD_STEPS, STEP + step.id + USES + reference + "', but the "
             + "result of step '" + target + "' has nothing at '" + segment + "'. Steps before it "
             + "are done; check that result and send the rest again.");
       }
@@ -466,13 +488,6 @@ final class McpRoutineSteps {
       return value == JSONObject.NULL ? null : value;
     }
     return null;
-  }
-
-  /** @return {@code data.id} of a step's result when it is one record's id, else {@code null} */
-  private static Object recordIdOf(JSONObject body) {
-    JSONObject data = body.optJSONObject(KEY_DATA);
-    Object id = data == null ? null : data.opt(STEP_ID);
-    return id instanceof String ? id : null;
   }
 
   // ── Answers ─────────────────────────────────────────────────────────────
@@ -513,7 +528,7 @@ final class McpRoutineSteps {
           McpConstants.STATUS_UNPROCESSABLE));
       body.put(McpConstants.KEY_ERROR, stepError.optString(McpConstants.KEY_ERROR,
           McpConstants.ERROR_VALIDATION));
-      body.put(McpConstants.KEY_DETAIL, "Step '" + step.id + "' (" + step.tool + ", position "
+      body.put(McpConstants.KEY_DETAIL, STEP + step.id + "' (" + step.tool + ", position "
           + step.index + ") failed and was rolled back; " + completed.size() + " earlier step(s) "
           + "are done and stay done, " + pending.length() + " did not run.");
       body.put("failedAt", failedAt);
