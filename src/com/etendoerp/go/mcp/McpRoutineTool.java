@@ -193,6 +193,25 @@ final class McpRoutineTool {
   // ── Dispatch ────────────────────────────────────────────────────────────
 
   /**
+   * Routes one {@code etendo_routine} call: every step is a call of the router, under the same role
+   * and scopes. Behind the {@code mcp-routines} flag — off, it is refused like any withdrawn tool,
+   * so an agent that learned the name elsewhere gets a stable answer instead of a silent success
+   * on a path the flag withholds.
+   *
+   * @param args   the tool arguments
+   * @param runner the router, one tool call per step
+   * @return the MCP content of the mode's answer, or its refusal
+   * @throws JSONException if the refusal body cannot be built
+   */
+  static JSONObject route(JSONObject args, McpRoutineSteps.StepRunner runner)
+      throws JSONException {
+    if (!McpRoutinesFlag.isEnabled()) {
+      return McpToolRouter.wrapAsErrorContent(McpRouterErrorBodies.routinesDisabled());
+    }
+    return new McpRoutineTool(new McpRoutineJdbcStore(), Owner::current, runner).handle(args);
+  }
+
+  /**
    * Handles one {@code etendo_routine} call.
    *
    * @param args the tool arguments
