@@ -18,6 +18,8 @@
 package com.etendoerp.go.portal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
@@ -28,6 +30,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -40,6 +43,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -53,14 +57,10 @@ import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Attachment;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
-import com.etendoerp.go.schemaforge.NeoAttachmentsDownloader;
-import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
-import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
 
 /**
  * Unit tests for {@link PortalServlet}, the customer portal's session-less API: where the token is
@@ -332,7 +332,8 @@ public class PortalServletTest {
   public void aPdfOutsideTheLinksScopeIs404AndNeverReachesTheAttachments() throws Exception {
     validLink();
     try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class);
-        MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class)) {
+        MockedStatic<AnonymousAttachmentStreamer> attachments =
+            mockStatic(AnonymousAttachmentStreamer.class)) {
       Call call = new Call();
 
       servlet.service(request("GET", "/documents/INVOICE/OTHER-TENANTS-INVOICE/pdf"),
@@ -349,43 +350,109 @@ public class PortalServletTest {
   }
 
   @Test
-  public void aPdfIsStreamedOnlyWhenItsAttachmentIsTheLinksTenants() throws Exception {
+  public void aPdfIsCountedAsADownloadOnlyWhenItsFileWasServed() throws Exception {
     validLink();
     BaseOBObject invoice = mock(BaseOBObject.class);
-    OBDal obDal = mock(OBDal.class);
-    NeoResponse main = new NeoResponse(200, new JSONObject().put("id", "ATT-1"));
-    // { attachment's tenant, streamed }
-    Object[][] cases = { { "CLIENT-2", false }, { CLIENT_ID, true } };
+    Attachment attachment = mock(Attachment.class);
+    // { the tenant's main attachment (null: none, or another tenant's), streamed, counted }
+    Object[][] cases = { { null, false, false }, { attachment, false, false },
+        { attachment, true, true } };
     for (Object[] c : cases) {
-      Client owner = mock(Client.class);
-      when(owner.getId()).thenReturn((String) c[0]);
-      Attachment attachment = mock(Attachment.class);
-      when(attachment.getClient()).thenReturn(owner);
-      when(obDal.get(Attachment.class, "ATT-1")).thenReturn(attachment);
       try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class);
-          MockedStatic<NeoAttachmentsHelper> attachments = mockStatic(NeoAttachmentsHelper.class);
-          MockedStatic<NeoAttachmentsDownloader> downloads =
-              mockStatic(NeoAttachmentsDownloader.class);
-          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
-        obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+          MockedStatic<PortalDocumentsEndpoint> endpoint =
+              mockStatic(PortalDocumentsEndpoint.class);
+          MockedStatic<AnonymousAttachmentStreamer> streamer =
+              mockStatic(AnonymousAttachmentStreamer.class)) {
+        events.clearInvocations();
+        endpoint.when(() -> PortalDocumentsEndpoint.kindOf(any())).thenCallRealMethod();
         documents.when(() -> PortalDocumentQuery.findInScope(any(),
             eq(PortalDocumentKind.INVOICE), eq("INV-1"))).thenReturn(invoice);
-        attachments.when(() -> NeoAttachmentsHelper.handleGetMain("C_Invoice", "INV-1"))
-            .thenReturn(main);
+        endpoint.when(() -> PortalDocumentsEndpoint.mainAttachment(any(),
+            eq(PortalDocumentKind.INVOICE), eq("INV-1"))).thenReturn((Attachment) c[0]);
+        streamer.when(() -> AnonymousAttachmentStreamer.stream(any(), any(), anyString()))
+            .thenReturn((Boolean) c[1]);
         Call call = new Call();
 
         servlet.service(request("GET", "/documents/INVOICE/INV-1/pdf"), call.response);
 
-        if ((Boolean) c[1]) {
-          downloads.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT-1", call.response));
-          events.verify(() -> PortalUsageEvents.downloaded(any(), eq("INV-1")));
-        } else {
+        if (c[0] == null) {
           assertEquals(HttpServletResponse.SC_NOT_FOUND, call.status());
-          downloads.verifyNoInteractions();
-          events.verify(() -> PortalUsageEvents.downloaded(any(), any()), never());
+          streamer.verifyNoInteractions();
+        } else {
+          streamer.verify(() -> AnonymousAttachmentStreamer.stream(eq(attachment),
+              eq(call.response), anyString()));
+        }
+        events.verify(() -> PortalUsageEvents.downloaded(any(), eq("INV-1")),
+            times((Boolean) c[2] ? 1 : 0));
+      }
+    }
+  }
+
+  // ── /me ─────────────────────────────────────────────────────────────────────
+
+  @Test
+  public void meNamesTheEntryDocumentOnlyWhenItIsStillInScope() throws Exception {
+    validLink();
+    BaseOBObject visible = mock(BaseOBObject.class);
+    // { the entry document in scope?, expected entryDocument id or null }
+    for (boolean inScope : new boolean[] { true, false }) {
+      try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class)) {
+        documents.when(() -> PortalDocumentQuery.findInScope(any(),
+            eq(PortalDocumentKind.INVOICE), eq("INV-1"))).thenReturn(inScope ? visible : null);
+        Call call = new Call();
+
+        servlet.service(request("GET", "/me"), call.response);
+
+        JSONObject body = new JSONObject(call.body.toString());
+        assertEquals("valid", body.getString("state"));
+        if (inScope) {
+          assertEquals("INV-1", body.getJSONObject("entryDocument").getString("id"));
+          assertEquals("INVOICE", body.getJSONObject("entryDocument").getString("kind"));
+          assertFalse(body.has("entryKind"));
+        } else {
+          // Hidden since it was sent (voided to a hidden status, or out of scope): the page
+          // opens the kind's list instead, and the record is not named.
+          assertTrue(body.isNull("entryDocument"));
+          assertEquals("INVOICE", body.getString("entryKind"));
         }
       }
     }
+  }
+
+  @Test
+  public void theLogoIsTheIssuingOrganizationsOnMeAndOnLogo() throws Exception {
+    validLink();
+    when(linkService.findSentLink(any())).thenReturn(Optional.of(link(new Date(0L),
+        new Date(System.currentTimeMillis() + 3_600_000L), true)));
+    try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class)) {
+      servlet.service(request("GET", "/me"), new Call().response);
+      servlet.service(request("GET", "/logo"), new Call().response);
+    }
+
+    logos.verify(() -> CompanyLogoResolver.resolve(CLIENT_ID, "ORG-1"), times(2));
+    logos.verify(() -> CompanyLogoResolver.resolve(any(), eq(null)), never());
+  }
+
+  @Test
+  public void openedIsRecordedOncePerValidMeAndNeverOtherwise() throws Exception {
+    Date future = new Date(System.currentTimeMillis() + 3_600_000L);
+    PortalLink valid = link(new Date(0L), future, true);
+    List<PortalLinkService.Validation> answers = Arrays.asList(
+        new PortalLinkService.Validation(PortalLinkService.State.VALID, valid),
+        new PortalLinkService.Validation(PortalLinkService.State.EXPIRED,
+            link(new Date(0L), new Date(1L), true)),
+        new PortalLinkService.Validation(PortalLinkService.State.UNAVAILABLE, valid),
+        new PortalLinkService.Validation(PortalLinkService.State.INVALID, null));
+    try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class)) {
+      for (PortalLinkService.Validation answer : answers) {
+        when(linkService.validate(any())).thenReturn(answer);
+
+        servlet.service(request("GET", "/me"), new Call().response);
+      }
+    }
+
+    events.verify(() -> PortalUsageEvents.opened(any()));
+    events.verify(() -> PortalUsageEvents.opened(valid));
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────

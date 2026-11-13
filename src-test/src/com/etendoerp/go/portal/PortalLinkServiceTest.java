@@ -31,6 +31,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -279,6 +280,40 @@ public class PortalLinkServiceTest {
   }
 
   @Test
+  public void aSecondSendMintsAnotherLinkAndLeavesTheFirstAsItWas() {
+    Invoice invoice = mock(Invoice.class);
+    Client client = mock(Client.class);
+    Organization organization = mock(Organization.class);
+    when(invoice.getClient()).thenReturn(client);
+    when(invoice.getOrganization()).thenReturn(organization);
+    when(invoice.getBusinessPartner()).thenReturn(businessPartner);
+    when(obDal.get(Invoice.class, RECORD_ID)).thenReturn(invoice);
+    List<String> to = Collections.singletonList("billing@customer.test");
+
+    try (MockedStatic<PortalLinkPolicy> policy = mockStatic(PortalLinkPolicy.class);
+        MockedStatic<SequenceIdData> ids = mockStatic(SequenceIdData.class)) {
+      policy.when(PortalLinkPolicy::isLinkEnabled).thenReturn(true);
+      policy.when(() -> PortalLinkPolicy.buildLink(anyString()))
+          .thenAnswer(inv -> Optional.of(URL_PREFIX + inv.getArgument(0)));
+      ids.when(SequenceIdData::getUUID).thenReturn("LINK-A", "LINK-B");
+
+      service().mintForSend(PortalDocumentKind.INVOICE, RECORD_ID, to,
+          Collections.<String>emptyList(), "es_ES", "sales-invoice-send");
+      service().mintForSend(PortalDocumentKind.INVOICE, RECORD_ID, to,
+          Collections.<String>emptyList(), "es_ES", "sales-invoice-send");
+
+      ArgumentCaptor<PortalLinkDal.NewLink> rows =
+          ArgumentCaptor.forClass(PortalLinkDal.NewLink.class);
+      dal.verify(() -> PortalLinkDal.insertPending(rows.capture()), times(2));
+      assertNotEquals(rows.getAllValues().get(0).id, rows.getAllValues().get(1).id);
+      assertNotEquals("each send gets its own token",
+          rows.getAllValues().get(0).tokenHash, rows.getAllValues().get(1).tokenHash);
+      // Minting only inserts: the first link's SENT_AT, EXPIRES_AT and ISACTIVE are not touched.
+      dal.verifyNoMoreInteractions();
+    }
+  }
+
+  @Test
   public void confirmStampsSentAndExpiryFromTheClockAndCommitsAtOnce() {
     BaseOBObject row = mock(BaseOBObject.class);
     dal.when(() -> PortalLinkDal.findById(LINK_ID)).thenReturn(row);
@@ -291,6 +326,8 @@ public class PortalLinkServiceTest {
         Date.from(NOW.plus(Duration.ofHours(48))), "LOG-1"));
     verify(sessionHandler).commitAndStart();
     verify(obDal, never()).rollbackAndClose();
+    // The KPI event carries the send it belongs to and how many addresses received it.
+    events.verify(() -> PortalUsageEvents.sent(confirmed, "LOG-1", 3));
   }
 
   @Test

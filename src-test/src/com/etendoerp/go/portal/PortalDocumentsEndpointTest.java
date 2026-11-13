@@ -25,12 +25,14 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -46,6 +48,7 @@ import java.util.Map;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.hibernate.query.Query;
 import org.junit.After;
 import org.junit.Before;
@@ -62,8 +65,6 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
-import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
-import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * Unit tests for {@link PortalDocumentsEndpoint}: the home aggregates, the list of one kind, one
@@ -87,8 +88,8 @@ public class PortalDocumentsEndpointTest {
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<PortalDocumentQuery> query;
   private MockedStatic<PortalDocumentLinks> links;
-  private MockedStatic<NeoAttachmentsHelper> attachments;
   private OBDal obDal;
+  private Session session;
   /** Rows the detail's line, tax and instalment queries answer, by a fragment of their HQL. */
   private final Map<String, Query> detailQueries = new HashMap<>();
   private final Query emptyQuery = mock(Query.class);
@@ -98,7 +99,7 @@ public class PortalDocumentsEndpointTest {
     obDal = mock(OBDal.class);
     obDalStatic = mockStatic(OBDal.class);
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
-    Session session = mock(Session.class);
+    session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
     doAnswer(invocation -> {
       String hql = invocation.getArgument(0);
@@ -115,12 +116,10 @@ public class PortalDocumentsEndpointTest {
     query.when(() -> PortalDocumentQuery.dateOf(any())).thenCallRealMethod();
     query.when(() -> PortalDocumentQuery.visibleStatuses(any())).thenCallRealMethod();
     links = mockStatic(PortalDocumentLinks.class);
-    attachments = mockStatic(NeoAttachmentsHelper.class);
   }
 
   @After
   public void tearDown() {
-    attachments.close();
     links.close();
     query.close();
     obDalStatic.close();
@@ -194,6 +193,21 @@ public class PortalDocumentsEndpointTest {
   }
 
   @Test
+  public void requestedStatusesAreTrimmedAndBlanksDropped() throws Exception {
+    // { ?status=, statuses handed to the query (null: no status filter) }
+    Object[][] cases = { { "CO, CL", Arrays.asList("CO", "CL") },
+        { " CO ,, CL ,", Arrays.asList("CO", "CL") }, { " , ,", null }, { "  ", null } };
+    for (Object[] c : cases) {
+      query.clearInvocations();
+
+      PortalDocumentsEndpoint.list(SESSION, "invoice", (String) c[0], null, null, null, null,
+          null);
+
+      assertEquals("status=" + c[0], c[1], capturedFilter().statuses);
+    }
+  }
+
+  @Test
   public void aRowNamesCreditNotesFallsBackToTheDescriptionAndShipmentsCarryNoAmounts()
       throws Exception {
     Invoice creditNote = invoice("INV-9", null, "Rectifica F-1", "ARC");
@@ -247,7 +261,8 @@ public class PortalDocumentsEndpointTest {
     query.verify(() -> PortalDocumentQuery.findInScope(any(), any(), any()),
         times(2));
     links.verifyNoInteractions();
-    attachments.verifyNoInteractions();
+    // No attachment lookup either: the printable is only looked for once the document is found.
+    verify(session, never()).createNativeQuery(anyString());
   }
 
   @Test
@@ -262,7 +277,7 @@ public class PortalDocumentsEndpointTest {
     Order order = order("ORD-1", "SO");
     links.when(() -> PortalDocumentLinks.related(SESSION, PortalDocumentKind.INVOICE, "INV-1"))
         .thenReturn(Collections.<BaseOBObject>singletonList(order));
-    printable("C_Invoice", "INV-1", CLIENT_ID);
+    printable(CLIENT_ID);
 
     JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "invoice", "INV-1");
 
@@ -281,7 +296,7 @@ public class PortalDocumentsEndpointTest {
     query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.ORDER,
         "ORD-1")).thenReturn(document);
     detailRows("from OrderLine", mock(BaseOBObject.class));
-    printable("C_Order", "ORD-1", "CLIENT-2");
+    printable("CLIENT-2");
 
     JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "order", "ORD-1");
 
@@ -389,10 +404,22 @@ public class PortalDocumentsEndpointTest {
     detailQueries.put(hqlFragment, rowsQuery);
   }
 
-  private void printable(String table, String recordId, String attachmentClientId)
-      throws Exception {
-    NeoResponse main = new NeoResponse(200, new JSONObject().put("id", "ATT-1"));
-    attachments.when(() -> NeoAttachmentsHelper.handleGetMain(table, recordId)).thenReturn(main);
+  /**
+   * The record's main attachment, found the session-less way (native {@code ad_table} and
+   * {@code C_File} lookups, as {@code NeoDocumentDownloadServiceTest} stubs them) and owned by
+   * {@code attachmentClientId}.
+   */
+  private void printable(String attachmentClientId) {
+    NativeQuery tableQuery = mock(NativeQuery.class);
+    when(tableQuery.setParameter(anyString(), any())).thenReturn(tableQuery);
+    when(tableQuery.list()).thenReturn(Collections.singletonList("TABLE1"));
+    NativeQuery mainQuery = mock(NativeQuery.class);
+    when(mainQuery.setParameter(anyString(), any())).thenReturn(mainQuery);
+    when(mainQuery.list()).thenReturn(Collections.singletonList("ATT-1"));
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("ad_table"))))
+        .thenReturn(tableQuery);
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("C_File"))))
+        .thenReturn(mainQuery);
     Client owner = mock(Client.class);
     when(owner.getId()).thenReturn(attachmentClientId);
     Attachment attachment = mock(Attachment.class);
