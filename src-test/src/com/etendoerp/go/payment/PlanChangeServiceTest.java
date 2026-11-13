@@ -286,7 +286,7 @@ class PlanChangeServiceTest {
     assertEquals(Instant.ofEpochSecond(PERIOD_END), result.effectiveAt());
     ArgumentCaptor<String> create = ArgumentCaptor.forClass(String.class);
     verify(stripe).postForm(eq("/v1/subscription_schedules"), create.capture(),
-        eq("plan-change-schedule:ROW"));
+        eq("plan-change-schedule:ROW:" + NOW.getEpochSecond()));
     assertEquals("from_subscription=" + SUB_ID, create.getValue());
     ArgumentCaptor<String> phases = ArgumentCaptor.forClass(String.class);
     verify(stripe).postForm(eq("/v1/subscription_schedules/sub_sched_9"), phases.capture());
@@ -426,12 +426,15 @@ class PlanChangeServiceTest {
     when(stripe.get(startsWith("/v1/subscriptions/")))
         .thenReturn(ok(liveSubscription("price_pro", "\"sub_sched_1\"")));
     when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString()))
-        .thenReturn(new StripeResponse(400, "{\"error\":{\"code\":\"resource_missing\"}}"));
+        .thenReturn(new StripeResponse(400, "{\"error\":{\"code\":\"resource_missing\","
+            + "\"message\":\"No such subscription schedule\"}}"));
 
     PlanChangeRefusedException refusal = assertThrows(PlanChangeRefusedException.class,
         () -> service.requestChange(CLIENT_ID, "pro"));
 
     assertEquals(PlanChangeRefusedException.PROVIDER_REJECTED, refusal.code());
+    // The provider's own message is kept: a bare status said nothing when this failed live.
+    assertTrue(refusal.getMessage().contains("No such subscription schedule"), refusal.getMessage());
     // Clearing here while the provider still downgrades would show "no change" falsely.
     verify(subscriptionService, never()).clearPendingChange(any());
   }

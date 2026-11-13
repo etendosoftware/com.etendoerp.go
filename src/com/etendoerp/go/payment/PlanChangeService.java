@@ -490,8 +490,13 @@ public class PlanChangeService {
     if (scheduleId == null) {
       StringBuilder create = new StringBuilder();
       add(create, "from_subscription", subscriptionId);
+      // Keyed per row and request second: a double submit cannot create two schedules, but a
+      // later request is a new operation. A key per row alone made Stripe replay, for 24 hours,
+      // the schedule an earlier downgrade created — released by a cancellation by then — and the
+      // phase update of that released schedule failed.
       JSONObject schedule = requireSuccess(stripe.postForm(SCHEDULES, create.toString(),
-          "plan-change-schedule:" + open.getId()), "create the subscription schedule");
+          "plan-change-schedule:" + open.getId() + ":" + clock.instant().getEpochSecond()),
+          "create the subscription schedule");
       scheduleId = StringUtils.trimToNull(schedule.optString("id", ""));
       if (scheduleId == null) {
         throw refused(PlanChangeRefusedException.PROVIDER_REJECTED,
@@ -542,7 +547,8 @@ public class PlanChangeService {
     if (!response.isSuccess()) {
       throw refused(PlanChangeRefusedException.PROVIDER_REJECTED, "The payment provider refused to "
           + what + ": " + response.status() + " (" + Objects.toString(response.errorCode(),
-              "no code") + ")");
+              "no code") + ")" + (StringUtils.isBlank(response.errorMessage()) ? ""
+                  : " " + response.errorMessage()));
     }
     return response.json();
   }
