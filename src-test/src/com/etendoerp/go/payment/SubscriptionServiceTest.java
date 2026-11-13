@@ -834,6 +834,30 @@ class SubscriptionServiceTest {
     }
 
     @Test
+    void aScheduledCancellationDropsThePendingPlanChange() {
+      Subscription cancelling = subscriptionOf(CLIENT_ID);
+      when(cancelling.isCancelAtPeriodEnd()).thenReturn(false);
+      when(cancelling.getPendingPlan()).thenReturn(mock(Plan.class));
+      when(cancelling.getPendingEffectiveDate()).thenReturn(new Date());
+      // Already flagged, the downgrade scheduled afterwards: still dropped.
+      Subscription alreadyFlagged = subscriptionOf(CLIENT_ID);
+      when(alreadyFlagged.isCancelAtPeriodEnd()).thenReturn(true);
+      when(alreadyFlagged.getPendingPlan()).thenReturn(mock(Plan.class));
+      Subscription renewing = subscriptionOf(CLIENT_ID);
+      when(renewing.isCancelAtPeriodEnd()).thenReturn(true);
+      when(renewing.getPendingPlan()).thenReturn(mock(Plan.class));
+
+      SubscriptionService.writeCancelAtPeriodEnd(cancelling, CancelAtPeriodEnd.SET);
+      SubscriptionService.writeCancelAtPeriodEnd(alreadyFlagged, CancelAtPeriodEnd.SET);
+      SubscriptionService.writeCancelAtPeriodEnd(renewing, CancelAtPeriodEnd.CLEARED);
+
+      verify(cancelling).setPendingPlan(null);
+      verify(cancelling).setPendingEffectiveDate(null);
+      verify(alreadyFlagged).setPendingPlan(null);
+      verify(renewing, never()).setPendingPlan(any());
+    }
+
+    @Test
     void setsTheWatermarkOnARowThatHasNone() {
       Subscription row = subscriptionOf(CLIENT_ID);
 

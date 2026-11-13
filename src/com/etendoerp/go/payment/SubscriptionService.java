@@ -822,6 +822,9 @@ public class SubscriptionService {
       writePeriod(subscription, outcome);
       writeCancelAtPeriodEnd(subscription, outcome.cancelAtPeriodEnd());
       writeEventWatermark(subscription, eventAt);
+      if (outcome.closesSubscription()) {
+        dropPendingChange(subscription, "it ended");
+      }
       if (outcome.closesSubscription() && subscription.getEndDate() == null) {
         // END_DATE is the provider's end instant, never before START_DATE, "now" when none.
         subscription.setEndDate(closingDateOf(subscription, outcome.endedAt()));
@@ -863,17 +866,37 @@ public class SubscriptionService {
    * environment list's {@code renewalAt} and nothing else — no access, grace or status decision
    * reads it. {@code null} (the event does not report it) leaves the stored flag alone.
    *
+   * <p>ETP-5053 — a scheduled cancellation also drops a pending plan change: a subscription that
+   * ends at the period end has no next plan (Stripe's portal releases the downgrade schedule when
+   * the customer cancels), so the row must not keep announcing one.
+   *
    * @param subscription the row to update
    * @param cancel the provider flag; {@link CancelAtPeriodEnd#NOT_REPORTED} (or null) writes nothing
    * @return true when the stored flag changed
    */
   public static boolean writeCancelAtPeriodEnd(Subscription subscription,
       CancelAtPeriodEnd cancel) {
+    if (cancel == CancelAtPeriodEnd.SET) {
+      dropPendingChange(subscription, "its cancellation is scheduled");
+    }
     if (cancel == null || cancel.leavesUnchanged(subscription.isCancelAtPeriodEnd())) {
       return false;
     }
     subscription.setCancelAtPeriodEnd(cancel.isSet());
     return true;
+  }
+
+  /**
+   * ETP-5053 — clears the pending plan change of a subscription that will not renew, without
+   * saving (the caller saves the row with the rest of its update).
+   */
+  static void dropPendingChange(Subscription subscription, String why) {
+    if (subscription.getPendingPlan() == null && subscription.getPendingEffectiveDate() == null) {
+      return;
+    }
+    subscription.setPendingPlan(null);
+    subscription.setPendingEffectiveDate(null);
+    log.info("Pending plan change of subscription {} dropped: {}", subscription.getId(), why);
   }
 
   /**
