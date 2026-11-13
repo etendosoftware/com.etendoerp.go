@@ -56,6 +56,24 @@ public class SubscriptionLifecycleApplierTest {
     assertEquals(Instant.ofEpochSecond(1793750400L), outcome.dueAt());
   }
 
+  /**
+   * ETP-5053 — the unpaid invoice of a plan change is no failed renewal: the change waits for it
+   * as a pending update and the subscription stays current on its plan.
+   */
+  @Test
+  public void aFailedPlanChangeInvoiceIsNotARenewalFailure() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_update\"}}}"));
+    assertTrue(outcome.isIgnored());
+    assertEquals(SubscriptionLifecycleApplier.PLAN_CHANGE_INVOICE, outcome.reason());
+
+    SubscriptionEventOutcome renewal = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_cycle\"}}}"));
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, renewal.status());
+  }
+
   @Test
   public void paymentFailedWithoutAPeriodEndIsIgnoredRatherThanBlocking() throws Exception {
     SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",

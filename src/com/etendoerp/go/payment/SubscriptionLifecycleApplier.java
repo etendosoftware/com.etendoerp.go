@@ -33,6 +33,8 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAID = "invoice.paid";
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
+  static final String BILLING_REASON_SUBSCRIPTION_UPDATE = "subscription_update";
+  static final String PLAN_CHANGE_INVOICE = "plan change invoice";
   /** The provider's scheduled-cancellation flag on a subscription object (display-only). */
   static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   /**
@@ -96,6 +98,13 @@ public class SubscriptionLifecycleApplier {
       case INVOICE_PAID:
         return invoicePaid(object);
       case INVOICE_PAYMENT_FAILED:
+        if (BILLING_REASON_SUBSCRIPTION_UPDATE.equals(object.optString("billing_reason", ""))) {
+          // ETP-5053 — the invoice of a plan change (an upgrade's prorated difference). The
+          // change waits for it as a pending update and the subscription stays current on its
+          // plan, so it is no failed renewal. Without a pending update Stripe itself moves the
+          // subscription to past_due and says so in customer.subscription.updated.
+          return SubscriptionEventOutcome.ignore(PLAN_CHANGE_INVOICE);
+        }
         return pastDue(epochSeconds(object, "period_end"));
       case SUBSCRIPTION_DELETED:
         return SubscriptionEventOutcome.apply(

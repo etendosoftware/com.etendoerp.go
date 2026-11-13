@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment;
 
 import java.io.UnsupportedEncodingException;
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -30,11 +31,17 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *
  * <p><b>Upgrade, same interval</b> ({@link PlanChangeTiming#IMMEDIATE}): the subscription item is
  * updated to the target price, with {@code proration_behavior=always_invoice} — the commercial
- * choice this module makes: the difference is billed now, so the next invoice stays at the
- * sticker price and the UI has nothing to explain about it. {@code billing_cycle_anchor} is never
- * passed (PRD §8.2): it would move the customer's billing date forever. A monthly-to-annual change
- * takes the same call; Stripe restarts the cycle itself because the interval changes, and the
- * quota year follows that new anchor through the rollover. The provider's answer is applied at
+ * choice this module makes: the difference is billed now on the saved payment method, so the next
+ * invoice stays at the sticker price. {@link #previewChange} quotes that amount and the card
+ * before the customer confirms, and the change is charged at the quoted proration instant.
+ * {@code payment_behavior=pending_if_incomplete}: the plan changes only once that invoice is paid;
+ * when the card is declined or the bank asks the customer to authenticate, the result is
+ * {@link PlanChangeResult#paymentRequired()} with the provider's hosted invoice page, and the
+ * provider drops the change after about 23 hours if it stays unpaid. {@code billing_cycle_anchor}
+ * is never passed (PRD §8.2): it would move the customer's billing date forever. A
+ * monthly-to-annual change takes the same call; in flexible billing mode (the provider's default
+ * since API 2025-09-30) the billing date is kept and the new yearly period runs from it, and the
+ * quota year follows the provider's period through the rollover. The provider's answer is applied at
  * once through the lifecycle path ({@link TenantEnvironmentLifecycleService#applySubscriptionEvent}
  * with a synthetic {@code customer.subscription.updated}), so the row is rolled over and the plan
  * is visible before the webhook arrives; the webhook then finds the price already matching and
@@ -56,9 +63,11 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * configured. A provider 4xx is {@code BILLING_PROVIDER_ERROR}; a transport failure propagates as
  * {@link StripeTransportException} for the caller to word.
  *
- * <p><b>A failed prorated charge is not a failure here.</b> The item update succeeds, Stripe
- * invoices the difference and, if the charge fails, moves the subscription to {@code past_due};
- * ETP-5047 handles that. Nothing is rolled back.
+ * <p><b>A failed prorated charge changes nothing.</b> The update waits at the provider for its
+ * invoice, the subscription stays current on its plan, and the invoice's
+ * {@code invoice.payment_failed} is not a renewal failure ({@link SubscriptionLifecycleApplier}
+ * ignores it). A downgrade that was pending is released before the upgrade is asked for, so it
+ * stays released even when the upgrade is never paid.
  */
 public class PlanChangeService {
 
@@ -66,7 +75,9 @@ public class PlanChangeService {
 
   static final String PRORATION_UPGRADE = "always_invoice";
   static final String PRORATION_NONE = "none";
+  static final String PAYMENT_PENDING_IF_INCOMPLETE = "pending_if_incomplete";
   private static final String SUBSCRIPTIONS = "/v1/subscriptions/";
+  private static final String INVOICE_PREVIEW = "/v1/invoices/create_preview";
   private static final String SCHEDULES = "/v1/subscription_schedules";
   private static final String FIELD_SCHEDULE = "schedule";
 
@@ -149,6 +160,122 @@ public class PlanChangeService {
    */
   public PlanChangeResult requestChange(Subscription open, String targetPlanKey)
       throws StripeTransportException {
+    return requestChange(open, targetPlanKey, null);
+  }
+
+  /**
+   * Requests a plan change, charging an upgrade at the proration instant a
+   * {@link #previewChange preview} quoted, so the customer pays exactly the amount shown.
+   *
+   * @param clientId {@code AD_CLIENT_ID} of the tenant
+   * @param targetPlanKey the {@code VALUE} of the plan asked for
+   * @param prorationDate epoch seconds of the preview; null, in the future or more than an hour
+   *     old means now
+   * @return what happened: applied now, waiting for its payment, or scheduled for the period end
+   * @throws PlanChangeRefusedException with one of its codes when the change is refused
+   * @throws StripeTransportException when the provider did not answer
+   */
+  public PlanChangeResult requestChange(String clientId, String targetPlanKey, Long prorationDate)
+      throws StripeTransportException {
+    Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
+        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
+            "The environment has no open subscription"));
+    return requestChange(open, targetPlanKey, prorationDate);
+  }
+
+  private PlanChangeResult requestChange(Subscription open, String targetPlanKey,
+      Long prorationDate) throws StripeTransportException {
+    Resolved change = resolve(open, targetPlanKey);
+    Plan target = change.target();
+    if (change.timing() == PlanChangeTiming.PERIOD_END && isAlreadyPending(open, target)) {
+      log.info("Subscription {} already moves to plan '{}' on {}; nothing to schedule",
+          open.getId(), target.getSearchKey(), open.getPendingEffectiveDate());
+      return new PlanChangeResult(change.timing(), target,
+          open.getPendingEffectiveDate().toInstant(), true);
+    }
+    JSONObject live = readSubscription(change.subscriptionId());
+    if (change.timing() == PlanChangeTiming.PERIOD_END) {
+      return scheduleDowngrade(open, target, change.subscriptionId(), live);
+    }
+    return applyUpgrade(open, target, change.subscriptionId(), live,
+        prorationInstant(prorationDate));
+  }
+
+  /**
+   * What a plan change would do, read before the customer confirms it: for an upgrade the amount
+   * the saved payment method is charged today and that payment method, for a downgrade the date it
+   * takes effect. Refuses exactly what {@link #requestChange(String, String)} refuses, and changes
+   * nothing, here or at the provider.
+   *
+   * @param clientId {@code AD_CLIENT_ID} of the tenant
+   * @param targetPlanKey the {@code VALUE} of the plan asked for
+   * @return the preview
+   * @throws PlanChangeRefusedException with one of its codes when the change would be refused
+   * @throws StripeTransportException when the provider did not answer
+   */
+  public PlanChangePreview previewChange(String clientId, String targetPlanKey)
+      throws StripeTransportException {
+    Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
+        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
+            "The environment has no open subscription"));
+    Resolved change = resolve(open, targetPlanKey);
+    JSONObject live = requireSuccess(stripe.get(SUBSCRIPTIONS + encode(change.subscriptionId())
+        + "?expand%5B%5D=default_payment_method"), "read the subscription");
+    if (change.timing() == PlanChangeTiming.PERIOD_END) {
+      Instant periodEnd = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
+          SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
+      return new PlanChangePreview(change.timing(), change.target(), periodEnd, null, null, null,
+          null, null);
+    }
+    String itemId = firstItemIdOf(live);
+    if (itemId == null) {
+      throw refused(PlanChangeRefusedException.PROVIDER_REJECTED,
+          "The provider subscription carries no item to update");
+    }
+    long prorationDate = clock.instant().getEpochSecond();
+    StringBuilder form = new StringBuilder();
+    add(form, "subscription", change.subscriptionId());
+    add(form, "subscription_details[items][0][id]", itemId);
+    add(form, "subscription_details[items][0][price]", change.target().getProviderPriceID());
+    add(form, "subscription_details[proration_behavior]", PRORATION_UPGRADE);
+    add(form, "subscription_details[proration_date]", String.valueOf(prorationDate));
+    JSONObject invoice = requireSuccess(stripe.postForm(INVOICE_PREVIEW, form.toString()),
+        "preview the plan change invoice");
+    String currency = StringUtils.upperCase(StringUtils.trimToNull(invoice.optString("currency",
+        "")));
+    BigDecimal amountDue = currency == null ? null
+        : BigDecimal.valueOf(invoice.optLong("amount_due", 0L))
+            .movePointLeft(StripeCurrencyScale.exponent(currency));
+    JSONObject card = cardOf(live.optJSONObject("default_payment_method"));
+    return new PlanChangePreview(change.timing(), change.target(), clock.instant(), amountDue,
+        currency, prorationDate, card == null ? null : StringUtils.trimToNull(card.optString(
+            "brand", "")), card == null ? null : StringUtils.trimToNull(card.optString("last4", "")));
+  }
+
+  /** The {@code card} of an expanded payment method; null when it is not expanded or no card. */
+  private static JSONObject cardOf(JSONObject paymentMethod) {
+    return paymentMethod == null ? null : paymentMethod.optJSONObject("card");
+  }
+
+  /**
+   * The proration instant of an upgrade: the previewed one when it is recent (at most an hour old
+   * and not ahead of the clock), so the charge equals the amount the customer saw; now otherwise.
+   */
+  Instant prorationInstant(Long prorationDate) {
+    Instant now = clock.instant();
+    if (prorationDate == null) {
+      return now;
+    }
+    Instant quoted = Instant.ofEpochSecond(prorationDate);
+    return quoted.isAfter(now) || quoted.isBefore(now.minusSeconds(3600)) ? now : quoted;
+  }
+
+  /** A validated change: the target plan, its timing and the provider subscription it acts on. */
+  private record Resolved(Plan target, PlanChangeTiming timing, String subscriptionId) {
+  }
+
+  /** Every refusal a change and its preview share, before anything is asked of the provider. */
+  private Resolved resolve(Subscription open, String targetPlanKey) {
     if (open == null) {
       throw refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
           "The environment has no open subscription");
@@ -179,18 +306,7 @@ public class PlanChangeService {
       throw refused(PlanChangeRefusedException.NOT_CONFIGURED,
           "The payment provider is not configured");
     }
-    PlanChangeTiming timing = PlanChangeCatalog.timingOf(rule);
-    if (timing == PlanChangeTiming.PERIOD_END && isAlreadyPending(open, target)) {
-      log.info("Subscription {} already moves to plan '{}' on {}; nothing to schedule",
-          open.getId(), target.getSearchKey(), open.getPendingEffectiveDate());
-      return new PlanChangeResult(timing, target, open.getPendingEffectiveDate().toInstant(),
-          true);
-    }
-    JSONObject live = readSubscription(subscriptionId);
-    if (timing == PlanChangeTiming.PERIOD_END) {
-      return scheduleDowngrade(open, target, subscriptionId, live);
-    }
-    return applyUpgrade(open, target, subscriptionId, live);
+    return new Resolved(target, PlanChangeCatalog.timingOf(rule), subscriptionId);
   }
 
   /**
@@ -212,7 +328,7 @@ public class PlanChangeService {
   // ---------------------------------------------------------------- upgrade (immediate)
 
   private PlanChangeResult applyUpgrade(Subscription open, Plan target, String subscriptionId,
-      JSONObject live) throws StripeTransportException {
+      JSONObject live, Instant prorationAt) throws StripeTransportException {
     String scheduleId = scheduleIdOf(live);
     if (scheduleId != null) {
       // A pending downgrade and now an upgrade: one intention per subscription (PRD §8.4).
@@ -228,12 +344,28 @@ public class PlanChangeService {
     add(form, "items[0][id]", itemId);
     add(form, "items[0][price]", target.getProviderPriceID());
     add(form, "proration_behavior", PRORATION_UPGRADE);
-    // Never billing_cycle_anchor (PRD §8.2). Idempotent per row and target: a retried request
-    // is the same provider operation, so there is never a second proration.
+    long prorationDate = prorationAt.getEpochSecond();
+    add(form, "proration_date", String.valueOf(prorationDate));
+    // The change applies only once its invoice is paid: a declined card or a bank asking the
+    // customer to authenticate leaves the plan as it is instead of upgrading on credit.
+    add(form, "payment_behavior", PAYMENT_PENDING_IF_INCOMPLETE);
+    add(form, "expand[]", "latest_invoice");
+    // Never billing_cycle_anchor (PRD §8.2). Idempotent per row, target and quoted proration
+    // instant: a retried confirmation is the same provider operation, so there is never a second
+    // proration, while a new preview is a new operation.
     StripeResponse response = stripe.postForm(SUBSCRIPTIONS + encode(subscriptionId),
-        form.toString(), "plan-change:" + open.getId() + ":" + target.getId());
+        form.toString(), "plan-change:" + open.getId() + ":" + target.getId() + ":"
+            + prorationDate);
     JSONObject updated = requireSuccess(response, "update the subscription item");
     Instant now = clock.instant();
+    if (hasPendingUpdate(updated)) {
+      String paymentUrl = hostedInvoiceUrlOf(updated);
+      log.info("Upgrade of subscription {} of tenant {} to plan '{}' waits for its payment"
+          + " (invoice page {})", open.getId(), clientIdOf(open), target.getSearchKey(),
+          paymentUrl == null ? "not available" : "available");
+      return new PlanChangeResult(PlanChangeTiming.IMMEDIATE, target, now, false, true,
+          paymentUrl);
+    }
     applyProviderAnswer(subscriptionId, updated, now);
     log.info("Subscription {} of tenant {} upgraded to plan '{}' (price {}), prorated {}",
         open.getId(), clientIdOf(open), target.getSearchKey(), target.getProviderPriceID(),
@@ -358,6 +490,18 @@ public class PlanChangeService {
     JSONObject expanded = subscription.optJSONObject(FIELD_SCHEDULE);
     return StringUtils.trimToNull(expanded != null ? expanded.optString("id", "")
         : subscription.optString(FIELD_SCHEDULE, ""));
+  }
+
+  /** True when the provider kept the update aside until its invoice is paid. */
+  static boolean hasPendingUpdate(JSONObject subscription) {
+    return subscription != null && subscription.optJSONObject("pending_update") != null;
+  }
+
+  /** The hosted page of the subscription's latest invoice, when {@code latest_invoice} is expanded. */
+  static String hostedInvoiceUrlOf(JSONObject subscription) {
+    JSONObject invoice = subscription == null ? null : subscription.optJSONObject("latest_invoice");
+    return invoice == null ? null : StringUtils.trimToNull(invoice.optString(
+        "hosted_invoice_url", ""));
   }
 
   static String firstItemIdOf(JSONObject subscription) {

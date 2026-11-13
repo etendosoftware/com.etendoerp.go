@@ -45,6 +45,7 @@ public class SubscriptionPlanChangeActionHandler extends BaseProcessActionHandle
   static final String PARAMS = "_params";
   static final String PARAM_TARGET_PLAN = "target_plan_id";
   static final String MSG_APPLIED = "ETGO_PlanChangeApplied";
+  static final String MSG_PAYMENT_REQUIRED = "ETGO_PlanChangePaymentRequired";
   static final String MSG_SCHEDULED = "ETGO_PlanChangeScheduled";
   static final String MSG_ALREADY_PENDING = "ETGO_PlanChangeAlreadyPending";
   static final String MSG_REFUSED = "ETGO_PlanChangeRefused";
@@ -53,6 +54,7 @@ public class SubscriptionPlanChangeActionHandler extends BaseProcessActionHandle
   static final String MSG_ROW_CLOSED = "ETGO_PlanChangeRowClosed";
   private static final String TITLE_ERROR = "Error";
   private static final String TITLE_SUCCESS = "Success";
+  private static final String TITLE_WARNING = "OBUIAPP_Warning";
 
   private final Supplier<PlanChangeService> serviceFactory;
 
@@ -122,6 +124,15 @@ public class SubscriptionPlanChangeActionHandler extends BaseProcessActionHandle
     String planName = StringUtils.defaultIfBlank(result.targetPlan().getName(),
         result.targetPlan().getSearchKey());
     String text;
+    if (result.paymentRequired()) {
+      // Nothing changed yet: the customer has to pay (or authenticate) the upgrade's invoice.
+      return getResponseBuilder()
+          .showMsgInProcessView(MessageType.WARNING, translate(TITLE_WARNING),
+              translate(MSG_PAYMENT_REQUIRED, planName,
+                  StringUtils.defaultString(result.paymentUrl(), "-")))
+          .refreshGrid()
+          .build();
+    }
     if (result.timing() == PlanChangeTiming.IMMEDIATE) {
       text = translate(MSG_APPLIED, planName);
     } else {

@@ -19,10 +19,12 @@ lifecycle of ETP-5047 (the webhook path, the row model).
 - **Upgrade, same interval** (e.g. Core monthly → Pro monthly): applies **now**. The billing date
   does not move, the quota year does not restart, usage already counted this year carries over
   against the new, higher limit.
-- **Monthly → annual**: applies **now**. Stripe restarts the billing cycle on the change date
-  (the interval changed) and invoices the year upfront, crediting unused monthly time; the quota
-  year restarts on that date too and usage starts from zero. The customer pays a full year
-  upfront, so this is not an abuse path.
+- **Monthly → annual**: applies **now**. In Stripe's flexible billing mode (the default for
+  subscriptions created on API 2025-09-30 or later) the billing date is **kept**: the new yearly
+  period runs from the existing billing anchor, and today the customer pays the yearly price minus
+  the unused part of the current period. The quota year follows the provider's period, so it keeps
+  its anchor and usage carries over. (On a classic-billing subscription Stripe would restart the
+  cycle on the change date instead, and the quota year would follow that.)
 - **Annual → monthly**: not offered by default. Offering it is a configuration row (§2), not code.
 - **Downgrade**: applies at the **end of the current billing period** (month or year). Nothing is
   deleted. The quota year and its usage carry over; if usage is already above the lower plan's
@@ -64,16 +66,33 @@ All provider calls are made by `PlanChangeService`, through `StripeApiClient`.
 
 **Upgrade (`immediate`).** `POST /v1/subscriptions/{sub}` with the item (`items[0][id]`) moved to
 the target price and **`proration_behavior=always_invoice`**. This is the commercial choice this
-module makes and documents: the difference is billed now, so the next invoice stays at the sticker
-price and the UI has nothing to explain about it. **`billing_cycle_anchor` is never passed** (PRD
-§8.2): it would move the customer's billing date forever. The call carries an idempotency key per
-row and target (`plan-change:<row>:<plan>`), so a retried request is the same operation and there
-is never a second proration. A monthly → annual change is the same call; Stripe resets the cycle
-itself because the interval changed, which is what moves the quota year.
+module makes and documents: the difference is billed now, on the payment method saved at checkout
+(no Stripe page in the normal case), so the next invoice stays at the sticker price.
+**`billing_cycle_anchor` is never passed** (PRD §8.2): it would move the customer's billing date
+forever. A monthly → annual change is the same call (see §1 for the billing date).
+
+- **Quoted before confirming.** `PlanChangeService.previewChange` asks
+  `POST /v1/invoices/create_preview` for the same update (`subscription_details[...]`, same
+  proration) at a `proration_date` of now, and reads the subscription's
+  `default_payment_method`: the page shows "You will be charged €X today on your Visa ending in
+  4242". The change is then sent with that **same `proration_date`** (accepted when at most an hour
+  old and not in the future, else now), so the amount charged is the amount shown.
+- **Applied only once paid.** The update carries **`payment_behavior=pending_if_incomplete`**:
+  Stripe charges the saved card at once and applies the change only if that payment succeeds. When
+  it does not (a decline, or the bank asks the customer to authenticate, 3-D Secure), the
+  subscription keeps its plan and carries a `pending_update`; the API answers
+  `paymentRequired: true` with the invoice's `hosted_invoice_url`, where the customer pays or
+  authenticates. Once paid, Stripe applies the change and `customer.subscription.updated` rolls the
+  row (§4). Unpaid, Stripe voids the invoice and drops the change after about 23 hours.
+- **Idempotent.** The key is per row, target and quoted proration instant
+  (`plan-change:<row>:<plan>:<prorationDate>`): a retried confirmation is the same operation and
+  never a second proration, while a new preview is a new operation.
 
 **Downgrade (`period_end`).** A Subscription Schedule from the subscription
 (`POST /v1/subscription_schedules`, `from_subscription`), then its phases rewritten: the current
-phase as it stands, then one iteration on the target price from `current_period_end`, with
+phase as it stands, then one billing cycle of the target plan from `current_period_end`
+(`duration[interval]` = the target's interval, `duration[interval_count]=1`; `iterations` was
+removed in API 2025-09-30.clover and is refused as `parameter_unknown`), with
 `proration_behavior=none` and `end_behavior=release`. The row records the intention in
 `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE`; the subscription keeps its plan until the boundary.
 A second downgrade to another plan **updates the same schedule** (no second schedule); the same
@@ -81,16 +100,19 @@ target again answers `alreadyPending` and asks the provider nothing.
 
 **A downgrade is pending and the customer upgrades.** The schedule is released
 (`POST /v1/subscription_schedules/{id}/release`) and the pending columns cleared, then the item is
-updated. One intention per subscription.
+updated. One intention per subscription. The release comes first, so it stands even when the
+upgrade then waits for a payment that never comes.
 
 **Change requested while past due or canceled.** Refused before any provider call
 (`409 SUBSCRIPTION_NOT_CURRENT`). A target plan with no provider price, or a provider that is not
 configured, is `503 CHECKOUT_NOT_CONFIGURED`; a provider 4xx is `502 BILLING_PROVIDER_ERROR` with
 the provider's error code in the message; a transport failure is `502` too.
 
-**The prorated upgrade charge fails.** Not a failure here. The change already happened at the
-provider; Stripe invoices the difference and, if the charge fails, moves the subscription to
-`past_due`, which ETP-5047 handles. There is no rollback and no compensating transaction.
+**The prorated upgrade charge fails.** Nothing changes: the update waits as a pending update (see
+*Upgrade* above) and the subscription stays current on its plan. That invoice's
+`invoice.payment_failed` (`billing_reason=subscription_update`) is therefore **not** a failed
+renewal: `SubscriptionLifecycleApplier` ignores it (`plan change invoice`), so the tenant is never
+marked past due for an upgrade it did not get.
 
 ## 4. How the row follows
 
@@ -114,8 +136,9 @@ price; pending columns cleared; and the **quota-year anchor**:
 
 - an upgrade or a downgrade: the predecessor's anchor (`TenantQuotas.quotaYearAnchorOf`:
   `QUOTA_YEAR_START`, else `START_DATE`), so usage carries over;
-- a billing-interval change: the new provider `current_period_start` the event reports (Stripe
-  restarted the cycle), so the year restarts with the billing;
+- a billing-interval change: the provider `current_period_start` the event reports, so the year
+  follows the billing period. In flexible billing mode that start is the kept billing anchor (the
+  year does not restart); on a classic-billing subscription it is the change date;
 - the same plan under a new price id (a rotated price): the row's snapshot is updated, nothing
   rolls.
 
@@ -141,20 +164,31 @@ closing instant more than five minutes ahead of the clock is refused
   `subscriptionStatus`, `pendingChange`, and `changes[]`, each a plan with `timing`,
   `intervalChange` and `quotas[]` — today's usage measured against the **target** plan's limits
   (the page's own `QuotaItem` shape).
-- `POST /sws/go/billing/subscription/plan-change` `{ planKey, clientId? }` — answers the target
-  plan with `timing`, `effectiveAt` and `alreadyPending`; refusals as in §3.
+- `POST /sws/go/billing/subscription/plan-change/preview` `{ planKey, clientId? }` — what
+  confirming would do, without doing it: the target plan with `timing`, `effectiveAt`, and for an
+  upgrade `amountDue` (major units, a plain string), `currency`, `prorationDate` and
+  `paymentMethod` (`{ brand, last4 }` or null); a downgrade charges nothing today, so those are
+  null. Refusals as for the change.
+- `POST /sws/go/billing/subscription/plan-change` `{ planKey, clientId?, prorationDate? }` —
+  answers the target plan with `timing`, `effectiveAt`, `alreadyPending`, `paymentRequired` and
+  `paymentUrl` (the hosted invoice page when the payment needs the customer, else null);
+  refusals as in §3.
 
 **Account page** (`/account`, `SubscriptionSection` + `PlanChangeDialog`): a **Change plan**
 action on a renewing subscription with a catalog plan; the dialog offers only the listed targets,
-states the direction, the timing and the quota consequence (every exceeded quota with its numbers)
-before confirming, and the page shows a persistent "Your plan changes to X on <date>" line while a
+states the direction, the timing, **for an upgrade the amount charged today and the card it goes
+on**, and the quota consequence (every exceeded quota with its numbers) before confirming; when
+the payment needs the customer it says so and links to the invoice page ("Complete the payment"),
+and the page shows a persistent "Your plan changes to X on <date>" line while a
 downgrade is pending. Strings in `en_US.json`, `es_ES.json`, `es_AR.json`; amounts through
 `formatCurrency`, dates through `formatCalendarDate`.
 
 **Classic** (operators): the **Allowed Plan Changes** tab (§2); on the **Subscription** window the
 **Quota Year Start**, **Pending Plan** and **Pending Effective Date** fields (read-only) and the
 **Change Plan** button (`ETGO_SubscriptionPlanChange`, a process definition on the open row), which
-runs exactly the customer's change through the same service, for assisted cases.
+runs exactly the customer's change through the same service, for assisted cases. When the upgrade
+waits for its payment it warns so (`ETGO_PlanChangePaymentRequired`) with the invoice page to send
+to the customer; nothing changed yet.
 
 ## 6. Out of scope (and where it would go)
 

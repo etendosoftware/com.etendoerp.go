@@ -10,8 +10,9 @@ import java.time.Instant;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
- * ETP-5053 — what a plan change request did: applied now ({@link PlanChangeTiming#IMMEDIATE}) or
- * scheduled for the end of the current billing period ({@link PlanChangeTiming#PERIOD_END}).
+ * ETP-5053 — what a plan change request did: applied now ({@link PlanChangeTiming#IMMEDIATE}),
+ * scheduled for the end of the current billing period ({@link PlanChangeTiming#PERIOD_END}), or
+ * an upgrade waiting for its payment ({@link #paymentRequired()}).
  */
 public final class PlanChangeResult {
 
@@ -19,16 +20,25 @@ public final class PlanChangeResult {
   private final Plan targetPlan;
   private final Instant effectiveAt;
   private final boolean alreadyPending;
+  private final boolean paymentRequired;
+  private final String paymentUrl;
 
   PlanChangeResult(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
       boolean alreadyPending) {
+    this(timing, targetPlan, effectiveAt, alreadyPending, false, null);
+  }
+
+  PlanChangeResult(PlanChangeTiming timing, Plan targetPlan, Instant effectiveAt,
+      boolean alreadyPending, boolean paymentRequired, String paymentUrl) {
     this.timing = timing;
     this.targetPlan = targetPlan;
     this.effectiveAt = effectiveAt;
     this.alreadyPending = alreadyPending;
+    this.paymentRequired = paymentRequired;
+    this.paymentUrl = paymentUrl;
   }
 
-  /** @return how the change applied */
+  /** @return how the change applies */
   public PlanChangeTiming timing() {
     return timing;
   }
@@ -46,5 +56,19 @@ public final class PlanChangeResult {
   /** @return true when the same downgrade was already pending and nothing was asked of the provider */
   public boolean alreadyPending() {
     return alreadyPending;
+  }
+
+  /**
+   * @return true when the upgrade is not applied yet: the saved payment method could not pay its
+   *     invoice (declined, or the bank asks the customer to authenticate). The plan changes as soon
+   *     as the invoice is paid; unpaid, the provider drops the change after about 23 hours.
+   */
+  public boolean paymentRequired() {
+    return paymentRequired;
+  }
+
+  /** @return the provider's hosted page where the customer pays or authenticates; may be null */
+  public String paymentUrl() {
+    return paymentUrl;
   }
 }

@@ -46,6 +46,7 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * @covers com.etendoerp.go.payment.PlanChangeService
  * @covers com.etendoerp.go.payment.PlanChangeRefusedException
  * @covers com.etendoerp.go.payment.PlanChangeResult
+ * @covers com.etendoerp.go.payment.PlanChangePreview
  */
 class PlanChangeServiceTest {
 
@@ -218,11 +219,16 @@ class PlanChangeServiceTest {
     assertFalse(result.alreadyPending());
     ArgumentCaptor<String> form = ArgumentCaptor.forClass(String.class);
     verify(stripe).postForm(eq("/v1/subscriptions/" + SUB_ID), form.capture(),
-        eq("plan-change:ROW:PRO"));
+        eq("plan-change:ROW:PRO:" + NOW.getEpochSecond()));
     String body = form.getValue();
     assertTrue(body.contains("items%5B0%5D%5Bid%5D=si_1"), body);
     assertTrue(body.contains("items%5B0%5D%5Bprice%5D=price_pro"), body);
     assertTrue(body.contains("proration_behavior=always_invoice"), body);
+    assertTrue(body.contains("proration_date=" + NOW.getEpochSecond()), body);
+    // Applied only once paid: an unpaid upgrade never changes the plan on credit.
+    assertTrue(body.contains("payment_behavior=pending_if_incomplete"), body);
+    assertTrue(body.contains("expand%5B%5D=latest_invoice"), body);
+    assertFalse(result.paymentRequired());
     assertFalse(body.contains("billing_cycle_anchor"), "PRD §8.2: " + body);
     // The provider's answer is applied through the lifecycle path, so the row rolls over now.
     ArgumentCaptor<SubscriptionEventOutcome> outcome =
@@ -374,6 +380,98 @@ class PlanChangeServiceTest {
     assertTrue(service.allowedChanges(null).isEmpty());
     when(open.getPlan()).thenReturn(null);
     assertTrue(service.allowedChanges(open).isEmpty());
+  }
+
+  @Test
+  void anUpgradeWhoseInvoiceIsUnpaidWaitsForThePaymentAndChangesNothingLocally() throws Exception {
+    PlanChange immediate = rule("immediate");
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(immediate));
+    // The provider kept the update aside: the item is still on the current price.
+    String pending = liveSubscription("price_core", null).replaceFirst("\\}$",
+        ",\"pending_update\":{\"expires_at\":1793000000},\"latest_invoice\":{\"id\":\"in_1\","
+            + "\"hosted_invoice_url\":\"https://invoice.stripe.com/i/abc\"}}");
+    when(stripe.postForm(startsWith("/v1/subscriptions/"), anyString(), anyString()))
+        .thenReturn(ok(pending));
+
+    PlanChangeResult result = service.requestChange(CLIENT_ID, "pro");
+
+    assertEquals(PlanChangeTiming.IMMEDIATE, result.timing());
+    assertTrue(result.paymentRequired());
+    assertEquals("https://invoice.stripe.com/i/abc", result.paymentUrl());
+    // No rollover, no pending columns: the webhook rolls the row once the invoice is paid.
+    verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
+    verify(subscriptionService, never()).writePendingChange(any(), any(), any());
+  }
+
+  @Test
+  void aPreviewQuotesTheChargeAndTheCardAndChangesNothing() throws Exception {
+    PlanChange immediate = rule("immediate");
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(immediate));
+    String live = liveSubscription("price_core", null).replaceFirst("\\}$",
+        ",\"default_payment_method\":{\"id\":\"pm_1\",\"card\":{\"brand\":\"visa\","
+            + "\"last4\":\"4242\"}}}");
+    when(stripe.get(startsWith("/v1/subscriptions/"))).thenReturn(ok(live));
+    when(stripe.postForm(eq("/v1/invoices/create_preview"), anyString()))
+        .thenReturn(ok("{\"amount_due\":45829,\"currency\":\"eur\"}"));
+
+    PlanChangePreview preview = service.previewChange(CLIENT_ID, "pro");
+
+    assertEquals(PlanChangeTiming.IMMEDIATE, preview.timing());
+    assertSame(pro, preview.targetPlan());
+    assertEquals(new java.math.BigDecimal("458.29"), preview.amountDue());
+    assertEquals("EUR", preview.currency());
+    assertEquals(NOW.getEpochSecond(), preview.prorationDate());
+    assertEquals("visa", preview.cardBrand());
+    assertEquals("4242", preview.cardLast4());
+    verify(stripe).get("/v1/subscriptions/" + SUB_ID + "?expand%5B%5D=default_payment_method");
+    ArgumentCaptor<String> form = ArgumentCaptor.forClass(String.class);
+    verify(stripe).postForm(eq("/v1/invoices/create_preview"), form.capture());
+    String body = form.getValue();
+    assertTrue(body.contains("subscription=" + SUB_ID), body);
+    assertTrue(body.contains("subscription_details%5Bitems%5D%5B0%5D%5Bid%5D=si_1"), body);
+    assertTrue(body.contains("subscription_details%5Bitems%5D%5B0%5D%5Bprice%5D=price_pro"), body);
+    assertTrue(body.contains("subscription_details%5Bproration_behavior%5D=always_invoice"), body);
+    assertTrue(body.contains("subscription_details%5Bproration_date%5D=" + NOW.getEpochSecond()),
+        body);
+    // A preview changes nothing at the provider or here.
+    verify(stripe, never()).postForm(startsWith("/v1/subscriptions/"), anyString(), anyString());
+    verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
+  }
+
+  @Test
+  void aDowngradePreviewChargesNothingAndSaysWhenItApplies() throws Exception {
+    PlanChange periodEnd = rule("period_end");
+    when(planChangeCatalog.findAllowed(pro, core)).thenReturn(Optional.of(periodEnd));
+    when(open.getPlan()).thenReturn(pro);
+    when(stripe.get(startsWith("/v1/subscriptions/")))
+        .thenReturn(ok(liveSubscription("price_pro", null)));
+
+    PlanChangePreview preview = service.previewChange(CLIENT_ID, "core");
+
+    assertEquals(PlanChangeTiming.PERIOD_END, preview.timing());
+    assertEquals(Instant.ofEpochSecond(PERIOD_END), preview.effectiveAt());
+    assertNull(preview.amountDue());
+    assertNull(preview.prorationDate());
+    verify(stripe, never()).postForm(anyString(), anyString());
+  }
+
+  @Test
+  void aPreviewRefusesWhatTheChangeWouldRefuse() {
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.empty());
+
+    PlanChangeRefusedException refusal = assertThrows(PlanChangeRefusedException.class,
+        () -> service.previewChange(CLIENT_ID, "pro"));
+
+    assertEquals(PlanChangeRefusedException.PLAN_CHANGE_NOT_ALLOWED, refusal.code());
+  }
+
+  @Test
+  void anUpgradeIsChargedAtTheQuotedProrationDateOnlyWhileItIsRecent() {
+    long quoted = NOW.minusSeconds(120).getEpochSecond();
+    assertEquals(Instant.ofEpochSecond(quoted), service.prorationInstant(quoted));
+    assertEquals(NOW, service.prorationInstant(null));
+    assertEquals(NOW, service.prorationInstant(NOW.plusSeconds(60).getEpochSecond()));
+    assertEquals(NOW, service.prorationInstant(NOW.minusSeconds(3601).getEpochSecond()));
   }
 
   @Test

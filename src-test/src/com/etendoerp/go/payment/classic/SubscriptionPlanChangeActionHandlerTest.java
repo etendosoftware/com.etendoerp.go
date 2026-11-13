@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment.classic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -111,6 +112,22 @@ class SubscriptionPlanChangeActionHandlerTest {
   }
 
   @Test
+  void anUpgradeWaitingForItsPaymentSaysSoWithTheInvoicePage() throws Exception {
+    when(service.requestChange(row, "pro")).thenReturn(new PlanChangeResultFixture()
+        .awaitingPayment(pro, Instant.parse("2026-10-31T10:00:00Z"),
+            "https://invoice.stripe.com/i/abc"));
+
+    JSONObject response = handler.doExecute(Map.of(), request(ROW_ID, PLAN_ID));
+
+    String text = response.toString().replace("\\/", "/");
+    assertTrue(text.contains("ETGO_PlanChangePaymentRequired:Pro,https://invoice.stripe.com/i/abc"),
+        text);
+    assertTrue(text.contains("\"msgType\":\"warning\""), text);
+    assertTrue(text.contains("OBUIAPP_Warning"), text);
+    assertFalse(response.toString().contains("ETGO_PlanChangeApplied"), response.toString());
+  }
+
+  @Test
   void schedulesADowngradeWithItsDate() throws Exception {
     when(service.requestChange(row, "pro")).thenReturn(new PlanChangeResultFixture()
         .scheduled(pro, Instant.parse("2026-12-01T00:00:00Z"), false));
@@ -186,6 +203,14 @@ class SubscriptionPlanChangeActionHandlerTest {
 
     PlanChangeResult scheduled(Plan plan, Instant at, boolean pending) throws Exception {
       return construct(PlanChangeTiming.PERIOD_END, plan, at, pending);
+    }
+
+    PlanChangeResult awaitingPayment(Plan plan, Instant at, String url) throws Exception {
+      java.lang.reflect.Constructor<PlanChangeResult> constructor =
+          PlanChangeResult.class.getDeclaredConstructor(PlanChangeTiming.class, Plan.class,
+              Instant.class, boolean.class, boolean.class, String.class);
+      constructor.setAccessible(true);
+      return constructor.newInstance(PlanChangeTiming.IMMEDIATE, plan, at, false, true, url);
     }
 
     private static PlanChangeResult construct(PlanChangeTiming timing, Plan plan, Instant at,

@@ -180,7 +180,8 @@ plan maps it onto code.
 - [x] Upgrade over a pending downgrade: release the schedule and clear the pending columns first.
 - [x] Coded refusals: `NO_SUBSCRIPTION`, `PLAN_NOT_FOUND`, `PLAN_CHANGE_NOT_ALLOWED` (409),
   `SUBSCRIPTION_NOT_CURRENT` (409, before any provider call), `CHECKOUT_NOT_CONFIGURED` (503),
-  `BILLING_PROVIDER_ERROR` (502). A failed prorated charge is Stripe's `past_due`, no rollback.
+  `BILLING_PROVIDER_ERROR` (502). A failed prorated charge is Stripe's `past_due`, no rollback
+  (superseded on 2026-11-13: see Task 11).
 - [x] `EtendoGoJwtServlet`: `GET /sws/go/billing/subscription/plan-changes[?clientId=]` (offered
   changes with today's usage against each target's quotas), `POST
   /sws/go/billing/subscription/plan-change`, and `quotaYearStart` + `pendingChange` on
@@ -286,6 +287,24 @@ Both checks were added or tightened on develop after the branch was written. Fix
 
 ---
 
+## Task 11: Quote the charge and apply an upgrade only once paid (option B, 2026-11-13)
+
+Found while testing locally: the upgrade charged the saved card with no amount shown, and a charge
+that failed or needed 3-D Secure would still have changed the plan. Two Stripe API changes also
+surfaced: `phases[].iterations` was removed (2025-09-30.clover, the downgrade answered
+`400 parameter_unknown`) and flexible billing keeps the billing date on monthly → annual.
+
+- [x] Downgrade phase uses `duration[interval]` / `duration[interval_count]` instead of `iterations`.
+- [x] `POST /billing/subscription/plan-change/preview` (`PlanChangeService.previewChange`,
+  `/v1/invoices/create_preview`): amount today, currency, saved card, proration date.
+- [x] The upgrade is sent with that `proration_date` and `payment_behavior=pending_if_incomplete`;
+  a pending update answers `paymentRequired` with the hosted invoice page; the idempotency key
+  includes the proration date.
+- [x] `invoice.payment_failed` of a `subscription_update` invoice is not a renewal failure.
+- [x] Dialog: charge line, confirm waits for the quote, "Complete the payment" link; Classic button
+  warns with `ETGO_PlanChangePaymentRequired`; copy for monthly → annual corrected in 3 locales.
+- [x] Docs: `plan-changes.md` §1, §3, §4, §5; functional flows §3.2a-sexies.
+
 ## Acceptance criteria → evidence
 
 | Acceptance criterion (ticket) | Where it is proven |
@@ -298,7 +317,7 @@ Both checks were added or tightened on develop after the branch was written. Fix
 | A downgrade changes nothing until the boundary, then does via `customer.subscription.updated` | `PlanChangeServiceTest.aDowngradeSchedulesTheTargetPriceFromThePeriodEndWithoutProrationAndRecordsItPending` + the rollover tests |
 | Downgrade into an exceeded quota shows the numbers; creates refused afterwards, data readable | `PlanChangeServiceTest.theOfferedChangesAreTheAllowedRowsWhoseTargetIsSellable` (usage vs target quotas), `PlanChangeDialog.vitest.jsx`; the refusal itself is ETP-5051's `block` mode on the NEO write path |
 | Pending downgrade visible in Classic and to the customer; cancelled by an upgrade | Read-only pending fields (Task 1), `SubscriptionSection.vitest.jsx`, `PlanChangeServiceTest.anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
-| Failed prorated charge leaves the upgraded plan in `past_due`, no rollback | By design: no compensating code path; `past_due` handled by ETP-5047. Covered in `plan-changes.md` §3, worth confirming in the Task 10 smoke test |
+| Failed prorated charge leaves the upgraded plan in `past_due`, no rollback | **Superseded on 2026-11-13 (option B):** the upgrade is sent with `payment_behavior=pending_if_incomplete`, so a failed charge changes nothing and the customer gets the invoice page (`PlanChangeServiceTest.anUpgradeWhoseInvoiceIsUnpaidWaitsForThePaymentAndChangesNothingLocally`); that invoice's `invoice.payment_failed` is not a renewal failure (`SubscriptionLifecycleApplierTest.aFailedPlanChangeInvoiceIsNotARenewalFailure`) |
 | `END_DATE` never future (guard tested) | `SubscriptionServiceTest.aFutureClosingInstantIsRefusedAndNothingIsWritten`, `aClosingInstantWithinTheClockSkewToleranceStillCloses` |
 | Repeated requests are idempotent | `PlanChangeServiceTest.theSameDowngradeTwiceIsIdempotentAndAsksTheProviderNothing`, `aSecondDowngradeToAnotherPlanUpdatesTheExistingScheduleInsteadOfCreatingOne`, the idempotency key on the upgrade, `SubscriptionPlanRolloverTest.theSamePriceIsNoChange` |
 | Past due / canceled refused with a clear message | `PlanChangeServiceTest.aPastDueOrCanceledSubscriptionIsRefusedBeforeAnyProviderCall` |

@@ -92,6 +92,7 @@ import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
+import com.etendoerp.go.payment.PlanChangePreview;
 import com.etendoerp.go.payment.PlanChangeRefusedException;
 import com.etendoerp.go.payment.PlanChangeResult;
 import com.etendoerp.go.payment.PlanChangeService;
@@ -206,6 +207,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
  *   GET  /sws/go/billing/subscription/plan-changes — ETP-5053: the plan changes the shown
  *        subscription may ask for, each with the tenant's usage against the target plan's quotas
+ *   POST /sws/go/billing/subscription/plan-change/preview — ETP-5053: what a plan change would
+ *        cost today (amount, card) before the customer confirms it
  *   POST /sws/go/billing/subscription/plan-change — ETP-5053: upgrade now or schedule a downgrade
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
@@ -288,8 +291,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_HAS_SUBSCRIPTION = "hasSubscription";
   /** ETP-5053 — the timing of a plan change ({@code immediate} / {@code period_end}). */
   private static final String FIELD_TIMING = "timing";
+  private static final String FIELD_PRORATION_DATE = "prorationDate";
   private static final String NO_SUBSCRIPTION_MESSAGE = "No subscription for this account";
   private static final String ACTION_BILLING_PLAN_CHANGE = "billing-plan-change";
+  private static final String ACTION_BILLING_PLAN_CHANGE_PREVIEW = "billing-plan-change-preview";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
       "The selected plan is no longer available. Reload the page to see the current plans.";
@@ -866,6 +871,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPortal(request, response);
     } else if (isPath(path, "/billing/subscription/plan-change")) {
       handleBillingPlanChange(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-change/preview")) {
+      handleBillingPlanChangePreview(request, response);
     } else if (isPath(path, "/billing/reactivation")) {
       handleSubscriptionReactivation(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
@@ -2075,11 +2082,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String clientId = purchase.getCreatedClient().getId();
       try {
         // The service runs its own client-0 writes as system; the request's DAL filter commits.
-        PlanChangeResult changed = planChangeService.requestChange(clientId, planKey);
+        Long prorationDate = body.optLong(FIELD_PRORATION_DATE, 0L) > 0L
+            ? body.optLong(FIELD_PRORATION_DATE) : null;
+        PlanChangeResult changed = planChangeService.requestChange(clientId, planKey,
+            prorationDate);
         JSONObject result = planJson(changed.targetPlan());
         result.put(FIELD_TIMING, changed.timing().value());
         result.put("effectiveAt", changed.effectiveAt().toString());
         result.put("alreadyPending", changed.alreadyPending());
+        result.put("paymentRequired", changed.paymentRequired());
+        result.put("paymentUrl", changed.paymentUrl() == null ? JSONObject.NULL
+            : changed.paymentUrl());
         result.put(FIELD_CLIENT_ID, clientId);
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (PlanChangeRefusedException e) {
@@ -2096,6 +2109,79 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             "Unable to change the plan", "Unable to change the plan");
       }
     });
+  }
+
+  /**
+   * POST /sws/go/billing/subscription/plan-change/preview — ETP-5053.
+   * Body: {@code { "planKey": "<VALUE of the target plan>", "clientId": "<optional>" }}.
+   *
+   * <p>What confirming the change would do, without doing it: the target plan with its
+   * {@code timing} and {@code effectiveAt}; for an upgrade also {@code amountDue} (major units, a
+   * plain string), {@code currency}, {@code prorationDate} (send it back with the change so the
+   * charge equals this amount) and {@code paymentMethod} ({@code { brand, last4 }} or null). A
+   * downgrade charges nothing today, so those are null. Refusals as for the change itself.
+   */
+  private void handleBillingPlanChangePreview(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithPlatformContext(request, response, ACTION_BILLING_PLAN_CHANGE_PREVIEW,
+        authenticated -> {
+          JSONObject body = readJsonBodyOrBadRequest(request, response);
+          if (body == null) {
+            return;
+          }
+          String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+          if (planKey == null) {
+            writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+                "planKey is required", "Choose the plan to change to");
+            return;
+          }
+          String requestedClientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
+          CheckoutRequest purchase = findRequestedSubscription(authenticated,
+              ZERO_ID.equals(requestedClientId) ? null : requestedClientId);
+          if (purchase == null || purchase.getCreatedClient() == null) {
+            writeError(response, HttpServletResponse.SC_NOT_FOUND,
+                PlanChangeRefusedException.NO_SUBSCRIPTION, NO_SUBSCRIPTION_MESSAGE,
+                NO_SUBSCRIPTION_MESSAGE);
+            return;
+          }
+          String clientId = purchase.getCreatedClient().getId();
+          try {
+            writeResponse(response, HttpServletResponse.SC_OK,
+                planChangePreviewJson(planChangeService.previewChange(clientId, planKey)));
+          } catch (PlanChangeRefusedException e) {
+            log.warn("Plan change preview refused for tenant {}: {} ({})", clientId,
+                e.getMessage(), e.code());
+            writeError(response, planChangeStatusOf(e.code()), e.code(), e.getMessage(),
+                e.getMessage());
+          } catch (StripeTransportException e) {
+            log.error("The payment provider did not answer the plan change preview of tenant {}",
+                clientId, e);
+            writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+                "Unable to preview the plan change", "Unable to preview the plan change");
+          }
+        });
+  }
+
+  /** ETP-5053 — the JSON of a plan change preview (see {@link #handleBillingPlanChangePreview}). */
+  static JSONObject planChangePreviewJson(PlanChangePreview preview) throws JSONException {
+    JSONObject result = planJson(preview.targetPlan());
+    result.put(FIELD_TIMING, preview.timing().value());
+    result.put("effectiveAt", preview.effectiveAt() == null ? JSONObject.NULL
+        : preview.effectiveAt().toString());
+    result.put("amountDue", preview.amountDue() == null ? JSONObject.NULL
+        : preview.amountDue().toPlainString());
+    result.put(FIELD_CURRENCY, preview.currency() == null ? JSONObject.NULL : preview.currency());
+    result.put(FIELD_PRORATION_DATE, preview.prorationDate() == null ? JSONObject.NULL
+        : preview.prorationDate());
+    if (preview.cardLast4() == null) {
+      result.put("paymentMethod", JSONObject.NULL);
+    } else {
+      JSONObject card = new JSONObject();
+      card.put("brand", preview.cardBrand() == null ? JSONObject.NULL : preview.cardBrand());
+      card.put("last4", preview.cardLast4());
+      result.put("paymentMethod", card);
+    }
+    return result;
   }
 
   /** ETP-5053 — the HTTP status of each plan change refusal code. */
