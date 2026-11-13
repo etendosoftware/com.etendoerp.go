@@ -98,10 +98,33 @@ class SubscriptionPlanRolloverTest {
   }
 
   @Test
-  void aRowWithNoStoredPriceComparesNothing() {
+  void aRowWithNoStoredPriceIsComparedByPlanSoAPaidUpgradeStillRollsOver() {
     when(row.getProviderPriceID()).thenReturn(null);
+    when(planCatalogService.findByProviderPrice("price_pro")).thenReturn(Optional.of(pro));
 
-    assertSame(row, rollover.rollIfPriceChanged(row, current("price_pro")));
+    assertSame(successor, rollover.rollIfPriceChanged(row, current("price_pro")));
+    verify(subscriptionService).rollToPlan(eq(row), eq(pro), eq("price_pro"), any());
+  }
+
+  @Test
+  void aRowWithNoStoredPriceOnItsOwnPlanOnlyFillsTheSnapshot() {
+    when(row.getProviderPriceID()).thenReturn(null);
+    when(planCatalogService.findByProviderPrice("price_core")).thenReturn(Optional.of(core));
+
+    assertSame(row, rollover.rollIfPriceChanged(row, current("price_core")));
+
+    verify(row).setProviderPriceID("price_core");
+    verify(subscriptionService, never()).rollToPlan(any(), any(), any(), any());
+  }
+
+  @Test
+  void aRowWithNoStoredPriceOnAPriceNoPlanCarriesIsLeftAlone() {
+    when(row.getProviderPriceID()).thenReturn(null);
+    when(planCatalogService.findByProviderPrice("price_mystery")).thenReturn(Optional.empty());
+
+    assertSame(row, rollover.rollIfPriceChanged(row, current("price_mystery")));
+
+    verify(row, never()).setProviderPriceID(any());
     verify(subscriptionService, never()).rollToPlan(any(), any(), any(), any());
   }
 

@@ -32,7 +32,10 @@ import com.etendoerp.go.usage.quota.TenantQuotas;
  * the row, and the event is otherwise applied as usual to the existing row (status, period,
  * watermark), so access is never wrong while an operator attaches the price to its plan in the
  * Plans window. A row with no stored price (a backfilled row the reconciliation has not filled
- * yet) compares nothing.
+ * yet) is compared by plan instead: an event price of another plan rolls it over (else a paid
+ * upgrade would never reach the row, and once the reconciliation stored the new price on the old
+ * row the prices would match for good); a price of its own plan only fills the snapshot; a price
+ * no plan carries is left alone without an alert.
  *
  * <p><b>The quota year.</b> The successor inherits the predecessor's anchor
  * ({@link TenantQuotas#quotaYearAnchorOf}), so an upgrade or a downgrade never resets usage;
@@ -70,11 +73,15 @@ public class SubscriptionPlanRollover {
   public Subscription rollIfPriceChanged(Subscription row, SubscriptionEventOutcome outcome) {
     String eventPrice = outcome == null ? null : StringUtils.trimToNull(outcome.providerPriceId());
     String rowPrice = StringUtils.trimToNull(row.getProviderPriceID());
-    if (eventPrice == null || rowPrice == null || eventPrice.equals(rowPrice)
-        || row.getEndDate() != null) {
+    if (eventPrice == null || eventPrice.equals(rowPrice) || row.getEndDate() != null) {
       return row;
     }
     Optional<Plan> target = planCatalogService.findByProviderPrice(eventPrice);
+    if (target.isEmpty() && rowPrice == null) {
+      // A row that never stored its price (backfilled) on a price no plan carries: nothing to
+      // compare with, so nothing to report either.
+      return row;
+    }
     if (target.isEmpty()) {
       log.error("[BILLING-ALERT] Subscription {} (Stripe {}) is now on price {}, which no active"
           + " plan carries; the row stays on plan '{}' with price {} until an operator maps the"
