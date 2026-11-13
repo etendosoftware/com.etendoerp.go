@@ -344,6 +344,7 @@ because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unles
 | 15 | Classic **Change Plan** on SPRING3 | Target Plan combo empty: a Table reference on a process parameter fails in `ComboTableDatasourceService` | Selector + HQL_JS validation listing the allowed targets (`366cc66f2`) |
 | 16 | Downgrade then upgrade back (question, 2026-11-12) | The upgrade releases the schedule and clears the pending columns | Covered by `anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
 | 17 | Classic **Change Plan**: downgrade from the back office | Works after #15: the Target Plan list shows the allowed targets and the downgrade fills **Pending Plan** / **Pending Effective Date** on the Subscription window | — |
+| 18 | Classic **Change Plan**: upgrade with the 3-D Secure card from the back office (SPRING3, Monthly → Yearly) | The button warned that the payment needs the customer and gave the invoice page; once paid, Stripe applied the change, the webhook rolled the row (Yearly from 11:55:34, Monthly closed) and the account page showed Productive Yearly | — |
 
 ### Findings that needed no code change
 
@@ -388,9 +389,10 @@ valuable first.
 
 - [ ] **Upgrade with a card that needs 3-D Secure** (`4000 0027 6000 3184` as default payment
   method via **Manage subscription**): "Complete the payment" with the link, the plan unchanged
-  until paid, then switched. *Partly done 2026-11-13 (SPRING3, legacy → monthly): the payment and
-  the switch worked; returning to the tab was fixed in **SF** `9ee49777a` — repeat to see the
-  dialog turn into "Plan changed".*
+  until paid, then switched. *Partly done 2026-11-13: from the account page (SPRING3, legacy →
+  monthly) and from the back office (scenario 18) the payment and the switch worked; returning to
+  the tab was fixed in **SF** `9ee49777a` — repeat from the account page to see the dialog turn
+  into "Plan changed".*
 - [ ] **Upgrade with a declined card** (`4000 0000 0000 0341`: saves fine, every charge fails): the
   plan does not change and the tenant is not marked past due.
 - [ ] **Quote equals charge**: the amount the dialog quotes equals the invoice Stripe creates
@@ -426,8 +428,8 @@ valuable first.
 - [ ] **A missed webhook**: stop `stripe listen`, make a change, restart it and replay (or let the
   reconciliation run); the database catches up. *Seen by accident with SPRING8 (replay worked).*
 - [ ] **Classic Change Plan button**: one upgrade, one downgrade and one keep from the Subscription
-  window. *Downgrade done (scenario 17: the filtered Target Plan list and the pending plan work);
-  upgrade and keep still to do.*
+  window. *Downgrade (scenario 17) and upgrade with 3-D Secure (scenario 18) done; keep still to
+  do.*
 - [ ] **Legacy → yearly** (the `legacy-productive → PROD_YEARLY` row exists locally).
 
 **Docs**
