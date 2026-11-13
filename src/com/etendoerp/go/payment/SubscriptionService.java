@@ -22,6 +22,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
@@ -604,6 +605,26 @@ public class SubscriptionService {
       open.setPendingEffectiveDate(null);
       saveOrEvict(open);
       log.info("Pending plan change of subscription {} cleared", open.getId());
+    });
+    return true;
+  }
+
+  /**
+   * ETP-5053 — clears a pending change and commits it at once, keeping the session open. For a
+   * release that is already final at the payment provider: whatever the caller does next may be
+   * refused and rolled back, and that rollback must not bring back a downgrade the provider no
+   * longer has.
+   *
+   * @param open the tenant's open row, never null
+   * @return true when something was cleared
+   */
+  public boolean clearPendingChangeCommitted(Subscription open) {
+    if (!clearPendingChange(open)) {
+      return false;
+    }
+    SystemContext.run("committing a cleared plan change", () -> {
+      OBDal.getInstance().flush();
+      SessionHandler.getInstance().commitAndStart();
     });
     return true;
   }

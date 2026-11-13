@@ -58,7 +58,8 @@ tier → `immediate`; nothing from annual to monthly. The catalog has no tier co
 ranks active, priced plans by display price within their interval and currency — acceptable
 once, at seed time, because the operator reviews the result in the tab. The seed runs **only into
 an empty table**: one row present, active or not, and it does nothing, so operator decisions are
-never overwritten or re-added.
+never overwritten or re-added. To withdraw every change, **deactivate** the rows rather than delete
+them: a table emptied by hand is seeded again on the next `update.database`.
 
 **The grandfathered `legacy-productive` plan** has no price of its own, so no provider price ever
 derives its interval, but transitions compare intervals: `EnsureLegacyPlanScript` gives it
@@ -120,15 +121,26 @@ plan** (`PlanChangeService.fromPlanOf`), and the same rule validates the request
   fails (`502 BILLING_PROVIDER_ERROR`) and the pending columns stay, so the app never says "no
   change" while Stripe still downgrades at the period end. Without a pending downgrade, asking for
   the current plan stays `409 PLAN_CHANGE_NOT_ALLOWED`.
-- **A `period_end` row of the pending plan** replaces the scheduled target (the same schedule is
-  updated).
-- **An `immediate` row of the pending plan** applies now, from the current plan: the schedule is
-  released and the upgrade charged as above.
+- **The timing is decided by the current plan.** The list is read from the pending plan, but the
+  change acts on the plan the subscription is on, so each offered target carries the timing of
+  the row *current plan → target* (`PlanChangeService.timingOf`); with no such row it is
+  `period_end`. A target that is cheaper than the current plan therefore never applies mid-period
+  just because it is an upgrade from the pending one (Year Pro with Year Mini pending, target
+  Yearly: scheduled, not credited now).
+- **A `period_end` change** replaces the scheduled target (the same schedule is updated).
+- **An `immediate` change** applies now, from the current plan: the schedule is released and the
+  upgrade charged as above. The release must succeed (a refusal is accepted only when the
+  subscription no longer carries the schedule), and the cleared pending columns are committed
+  before the upgrade is asked for, so a refused upgrade cannot bring back a downgrade Stripe no
+  longer has.
 - **The pending target itself** is not offered again; asking for it anyway answers
   `alreadyPending` and asks the provider nothing.
 
-**Change requested while past due or canceled.** Refused before any provider call
-(`409 SUBSCRIPTION_NOT_CURRENT`). A target plan with no provider price, or a provider that is not
+**Change requested while past due, canceled or cancelling.** Refused before any provider call
+(`409 SUBSCRIPTION_NOT_CURRENT`), and so is a subscription set to cancel at the period end (the
+row's `CANCEL_AT_PERIOD_END`, or the live subscription when its webhook has not arrived yet):
+scheduling a downgrade would rewrite the schedule with `end_behavior=release` and undo the
+cancellation. A target plan with no provider price, or a provider that is not
 configured, is `503 CHECKOUT_NOT_CONFIGURED`; a provider 4xx is `502 BILLING_PROVIDER_ERROR` with
 the provider's error code in the message; a transport failure is `502` too.
 

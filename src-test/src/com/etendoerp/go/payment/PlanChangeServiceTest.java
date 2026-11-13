@@ -55,6 +55,7 @@ class PlanChangeServiceTest {
   private static final Instant NOW = Instant.parse("2026-10-31T10:00:00Z");
   private static final long PERIOD_START = 1_761_955_200L; // 2026-11-01T00:00:00Z
   private static final long PERIOD_END = 1_764_547_200L; // 2026-12-01T00:00:00Z
+  private static final Instant PAID_AT = NOW.minusSeconds(90);
 
   private final SubscriptionService subscriptionService = mock(SubscriptionService.class);
   private final PlanCatalogService planCatalogService = mock(PlanCatalogService.class);
@@ -197,12 +198,15 @@ class PlanChangeServiceTest {
   void anUpgradeUpdatesTheItemWithProrationAndNeverMovesTheBillingAnchor() throws Exception {
     PlanChange rule4 = rule("immediate");
     when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(rule4));
+    // The proration invoice was paid at the provider a little before this server's clock.
     when(stripe.postForm(startsWith("/v1/subscriptions/"), anyString(), anyString()))
-        .thenReturn(ok(liveSubscription("price_pro", null)));
+        .thenReturn(ok(liveSubscription("price_pro", null).replaceFirst("\\}$",
+            ",\"latest_invoice\":{\"id\":\"in_1\",\"status_transitions\":{\"paid_at\":"
+                + PAID_AT.getEpochSecond() + "}}}")));
     TenantEnvironmentLifecycleService.LifecycleTarget target = LifecycleTargetFixtures.row(
         CLIENT_ID, open, SubscriptionLifecycleApplier.StoredState.NONE);
     when(lifecycle.targetForSubscription(SUB_ID)).thenReturn(target);
-    when(lifecycle.applySubscriptionEvent(eq(target), any(), eq(NOW))).thenReturn(true);
+    when(lifecycle.applySubscriptionEvent(eq(target), any(), eq(PAID_AT))).thenReturn(true);
 
     PlanChangeResult result;
     try (MockedStatic<SystemContext> system = Mockito.mockStatic(SystemContext.class)) {
@@ -233,7 +237,8 @@ class PlanChangeServiceTest {
     // The provider's answer is applied through the lifecycle path, so the row rolls over now.
     ArgumentCaptor<SubscriptionEventOutcome> outcome =
         ArgumentCaptor.forClass(SubscriptionEventOutcome.class);
-    verify(lifecycle).applySubscriptionEvent(eq(target), outcome.capture(), eq(NOW));
+    // Stamped with the provider's instant, never this server's clock: it becomes the watermark.
+    verify(lifecycle).applySubscriptionEvent(eq(target), outcome.capture(), eq(PAID_AT));
     assertEquals("price_pro", outcome.getValue().providerPriceId());
     assertEquals(Instant.ofEpochSecond(PERIOD_END), outcome.getValue().periodEnd());
     verify(stripe, never()).postForm(startsWith("/v1/subscription_schedules"), anyString());
@@ -261,7 +266,70 @@ class PlanChangeServiceTest {
     }
 
     verify(stripe).postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString());
-    verify(subscriptionService).clearPendingChange(open);
+    // Committed at once: a refusal of the upgrade must not bring the released downgrade back.
+    verify(subscriptionService).clearPendingChangeCommitted(open);
+  }
+
+  @Test
+  void aReleaseRefusedWhileTheScheduleIsStillAttachedRefusesTheUpgrade() throws Exception {
+    PlanChange immediate = rule("immediate");
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(immediate));
+    when(stripe.get(startsWith("/v1/subscriptions/")))
+        .thenReturn(ok(liveSubscription("price_core", "\"sub_sched_1\"")));
+    when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString()))
+        .thenReturn(new StripeResponse(500, "{\"error\":{\"code\":\"api_error\"}}"));
+
+    PlanChangeRefusedException refusal = assertThrows(PlanChangeRefusedException.class,
+        () -> service.requestChange(CLIENT_ID, "pro"));
+
+    assertEquals(PlanChangeRefusedException.PROVIDER_REJECTED, refusal.code());
+    // Never charged while the provider still downgrades at the period end.
+    verify(stripe, never()).postForm(startsWith("/v1/subscriptions/"), anyString(), anyString());
+    verify(subscriptionService, never()).clearPendingChangeCommitted(any());
+  }
+
+  @Test
+  void aReleaseRefusedBecauseTheScheduleIsAlreadyGoneLetsTheUpgradeGoOn() throws Exception {
+    PlanChange immediate = rule("immediate");
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(immediate));
+    // First read: the schedule; re-read after the refused release: no schedule any more.
+    when(stripe.get(startsWith("/v1/subscriptions/")))
+        .thenReturn(ok(liveSubscription("price_core", "\"sub_sched_1\"")))
+        .thenReturn(ok(liveSubscription("price_core", null)));
+    when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_1/release"), anyString()))
+        .thenReturn(new StripeResponse(400, "{\"error\":{\"code\":\"resource_missing\"}}"));
+    when(stripe.postForm(startsWith("/v1/subscriptions/"), anyString(), anyString()))
+        .thenReturn(ok(liveSubscription("price_pro", null)));
+    when(lifecycle.targetForSubscription(SUB_ID)).thenReturn(null);
+
+    try (MockedStatic<SystemContext> system = Mockito.mockStatic(SystemContext.class)) {
+      system.when(() -> SystemContext.run(anyString(), any())).thenAnswer(invocation -> {
+        ((Runnable) invocation.getArgument(1)).run();
+        return null;
+      });
+      assertEquals(PlanChangeTiming.IMMEDIATE, service.requestChange(CLIENT_ID, "pro").timing());
+    }
+    verify(subscriptionService).clearPendingChangeCommitted(open);
+  }
+
+  @Test
+  void aSubscriptionSetToCancelCannotChangePlanWhetherTheRowOrTheProviderSaysSo()
+      throws Exception {
+    PlanChange immediate = rule("immediate");
+    when(planChangeCatalog.findAllowed(core, pro)).thenReturn(Optional.of(immediate));
+    when(open.isCancelAtPeriodEnd()).thenReturn(true);
+    assertEquals(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT, refusal("pro").code());
+    verify(stripe, never()).get(anyString());
+
+    // The row does not know yet (its webhook is on the way); the live subscription does.
+    when(open.isCancelAtPeriodEnd()).thenReturn(false);
+    when(stripe.get(startsWith("/v1/subscriptions/"))).thenReturn(ok(liveSubscription(
+        "price_core", null).replaceFirst("\\}$", ",\"cancel_at_period_end\":true}")));
+    assertEquals(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT, refusal("pro").code());
+    assertEquals(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT, assertThrows(
+        PlanChangeRefusedException.class, () -> service.previewChange(CLIENT_ID, "pro")).code());
+    verify(stripe, never()).postForm(anyString(), anyString(), any());
+    verify(stripe, never()).postForm(anyString(), anyString());
   }
 
   // ---------------------------------------------------------------- downgrade
@@ -394,6 +462,33 @@ class PlanChangeServiceTest {
     assertEquals(List.of(toPro), service.allowedChanges(open));
     assertSame(core, PlanChangeService.fromPlanOf(open));
     verify(planChangeCatalog, never()).listAllowed(pro);
+  }
+
+  @Test
+  void whileADowngradeIsPendingTheTimingIsTheCurrentPlansRowElseThePeriodEnd() {
+    Plan basic = plan("BASIC", "basic", "price_basic");
+    // On pro with a downgrade to basic pending: basic -> core is an upgrade from basic...
+    when(open.getPlan()).thenReturn(pro);
+    when(open.getPendingPlan()).thenReturn(basic);
+    PlanChange basicToCore = rule("immediate");
+    when(basicToCore.getTargetPlan()).thenReturn(core);
+    // ...but a downgrade from pro, the plan the change acts on: never applied mid-period.
+    PlanChange proToCore = rule("period_end");
+    when(planChangeCatalog.findAllowed(pro, core)).thenReturn(Optional.of(proToCore));
+    assertEquals(PlanChangeTiming.PERIOD_END, service.timingOf(open, basicToCore));
+
+    // A real upgrade from the current plan stays immediate.
+    PlanChange proToCoreNow = rule("immediate");
+    when(planChangeCatalog.findAllowed(pro, core)).thenReturn(Optional.of(proToCoreNow));
+    assertEquals(PlanChangeTiming.IMMEDIATE, service.timingOf(open, basicToCore));
+
+    // No row from the current plan: it replaces the scheduled downgrade at the period end.
+    when(planChangeCatalog.findAllowed(pro, core)).thenReturn(Optional.empty());
+    assertEquals(PlanChangeTiming.PERIOD_END, service.timingOf(open, basicToCore));
+
+    // Nothing pending: the row's own timing.
+    when(open.getPendingPlan()).thenReturn(null);
+    assertEquals(PlanChangeTiming.IMMEDIATE, service.timingOf(open, basicToCore));
   }
 
   @Test

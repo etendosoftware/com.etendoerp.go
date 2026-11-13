@@ -142,9 +142,7 @@ public class PlanChangeService {
    */
   public PlanChangeResult requestChange(String clientId, String targetPlanKey)
       throws StripeTransportException {
-    Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
-        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
-            "The environment has no open subscription"));
+    Subscription open = findOpenOrRefuse(clientId);
     return requestChange(open, targetPlanKey);
   }
 
@@ -178,9 +176,7 @@ public class PlanChangeService {
    */
   public PlanChangeResult requestChange(String clientId, String targetPlanKey, Long prorationDate)
       throws StripeTransportException {
-    Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
-        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
-            "The environment has no open subscription"));
+    Subscription open = findOpenOrRefuse(clientId);
     return requestChange(open, targetPlanKey, prorationDate);
   }
 
@@ -200,6 +196,7 @@ public class PlanChangeService {
     Resolved change = resolve(open, targetPlanKey);
     Plan target = change.target();
     JSONObject live = readSubscription(change.subscriptionId());
+    refuseWhenCancelling(live);
     if (change.timing() == PlanChangeTiming.PERIOD_END) {
       return scheduleDowngrade(open, target, change.subscriptionId(), live);
     }
@@ -221,9 +218,7 @@ public class PlanChangeService {
    */
   public PlanChangePreview previewChange(String clientId, String targetPlanKey)
       throws StripeTransportException {
-    Subscription open = subscriptionService.findOpen(clientId).orElseThrow(
-        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
-            "The environment has no open subscription"));
+    Subscription open = findOpenOrRefuse(clientId);
     if (keepsCurrentPlan(open, targetPlanKey)) {
       // Cancelling the scheduled downgrade charges nothing.
       return new PlanChangePreview(PlanChangeTiming.IMMEDIATE, open.getPlan(), clock.instant(),
@@ -232,6 +227,7 @@ public class PlanChangeService {
     Resolved change = resolve(open, targetPlanKey);
     JSONObject live = requireSuccess(stripe.get(SUBSCRIPTIONS + encode(change.subscriptionId())
         + "?expand%5B%5D=default_payment_method"), "read the subscription");
+    refuseWhenCancelling(live);
     if (change.timing() == PlanChangeTiming.PERIOD_END) {
       Instant periodEnd = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
           SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
@@ -278,6 +274,28 @@ public class PlanChangeService {
       return null;
     }
     return open.getPendingPlan() != null ? open.getPendingPlan() : open.getPlan();
+  }
+
+  /**
+   * The timing a change applies with. Without a pending downgrade it is the row's own. While one is
+   * pending the offered rows are read from the pending plan, but the change acts on the plan the
+   * subscription is on now, so the row from <em>that</em> plan to the target decides: a target
+   * that is a downgrade from the current plan never applies mid-period just because it is an
+   * upgrade from the pending one. With no such row the change replaces the scheduled target at the
+   * period end, the timing of the downgrade it supersedes.
+   *
+   * @param open the tenant's open row, may be null
+   * @param rule an Allowed plan changes row offered for {@code open}
+   * @return the timing the change would apply with
+   */
+  public PlanChangeTiming timingOf(Subscription open, PlanChange rule) {
+    PlanChangeTiming offered = PlanChangeCatalog.timingOf(rule);
+    if (open == null || open.getPendingPlan() == null || open.getPlan() == null) {
+      return offered;
+    }
+    return planChangeCatalog.findAllowed(open.getPlan(), rule.getTargetPlan())
+        .map(PlanChangeCatalog::timingOf)
+        .orElse(PlanChangeTiming.PERIOD_END);
   }
 
   /**
@@ -351,6 +369,13 @@ public class PlanChangeService {
           "Only a current subscription can change plan; this one is "
               + SubscriptionService.effectiveStatusOf(open));
     }
+    if (Boolean.TRUE.equals(open.isCancelAtPeriodEnd())) {
+      // Scheduling a downgrade would rewrite the phases with end_behavior=release and so undo the
+      // cancellation; an upgrade would charge for a subscription that is about to end.
+      throw refused(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT,
+          "A subscription that is set to cancel at the period end cannot change plan; renew it"
+              + " first");
+    }
     Plan target = planCatalogService.findPurchasablePlan(targetPlanKey).orElseThrow(
         () -> refused(PlanChangeRefusedException.PLAN_NOT_FOUND,
             "No plan is sold under '" + StringUtils.trimToEmpty(targetPlanKey) + "'"));
@@ -372,7 +397,7 @@ public class PlanChangeService {
       throw refused(PlanChangeRefusedException.NOT_CONFIGURED,
           "The payment provider is not configured");
     }
-    return new Resolved(target, PlanChangeCatalog.timingOf(rule), subscriptionId);
+    return new Resolved(target, timingOf(open, rule), subscriptionId);
   }
 
   /**
@@ -397,9 +422,12 @@ public class PlanChangeService {
       JSONObject live, Instant prorationAt) throws StripeTransportException {
     String scheduleId = scheduleIdOf(live);
     if (scheduleId != null) {
-      // A pending downgrade and now an upgrade: one intention per subscription (PRD §8.4).
-      releaseSchedule(scheduleId);
-      subscriptionService.clearPendingChange(open);
+      // A pending downgrade and now an upgrade: one intention per subscription (PRD §8.4). The
+      // release is final at the provider, so the cleared columns are committed at once: a later
+      // refusal of the upgrade rolls back the request, and must not bring back a downgrade that
+      // the provider no longer has.
+      releaseSchedule(subscriptionId, scheduleId);
+      subscriptionService.clearPendingChangeCommitted(open);
     }
     String itemId = firstItemIdOf(live);
     if (itemId == null) {
@@ -432,7 +460,7 @@ public class PlanChangeService {
       return new PlanChangeResult(PlanChangeTiming.IMMEDIATE, target, now, false, true,
           paymentUrl);
     }
-    applyProviderAnswer(subscriptionId, updated, now);
+    applyProviderAnswer(subscriptionId, updated);
     log.info("Subscription {} of tenant {} upgraded to plan '{}' (price {}), prorated {}",
         open.getId(), clientIdOf(open), target.getSearchKey(), target.getProviderPriceID(),
         PRORATION_UPGRADE);
@@ -443,8 +471,14 @@ public class PlanChangeService {
    * Applies the subscription object the provider answered with, through the same path the
    * webhook takes: the price moved, so the row is rolled over now rather than when the
    * {@code customer.subscription.updated} arrives. Written as system (client-{@code 0} rows).
+   *
+   * <p>Stamped with the provider's own instant ({@link SubscriptionLifecycleApplier#providerStateAt},
+   * the payment of the proration invoice), as the reconciler does, never with this server's clock:
+   * that instant becomes the event watermark, and a clock running ahead of the provider would make
+   * real events created just after the change look stale and be dropped.
    */
-  private void applyProviderAnswer(String subscriptionId, JSONObject updated, Instant now) {
+  private void applyProviderAnswer(String subscriptionId, JSONObject updated) {
+    Instant providerAt = SubscriptionLifecycleApplier.providerStateAt(updated);
     SystemContext.run("applying a plan change", () -> {
       TenantEnvironmentLifecycleService.LifecycleTarget target =
           lifecycleService.targetForSubscription(subscriptionId);
@@ -455,14 +489,14 @@ public class PlanChangeService {
       }
       SubscriptionEventOutcome outcome = applier.evaluate(
           SubscriptionLifecycleApplier.SUBSCRIPTION_UPDATED,
-          SubscriptionLifecycleApplier.syntheticSubscriptionUpdated(updated, now),
+          SubscriptionLifecycleApplier.syntheticSubscriptionUpdated(updated, providerAt),
           target.storedState());
       if (outcome.isIgnored()) {
         log.warn("The provider's answer to the plan change of {} was not applied ({}); the webhook"
             + " will roll the row", subscriptionId, outcome.reason());
         return;
       }
-      if (!lifecycleService.applySubscriptionEvent(target, outcome, now)) {
+      if (!lifecycleService.applySubscriptionEvent(target, outcome, providerAt)) {
         throw new IllegalStateException("Could not store the plan change of " + subscriptionId);
       }
     });
@@ -472,15 +506,11 @@ public class PlanChangeService {
 
   private PlanChangeResult scheduleDowngrade(Subscription open, Plan target,
       String subscriptionId, JSONObject live) throws StripeTransportException {
-    Instant periodEnd = epochSeconds(live, "current_period_end");
-    Instant periodStart = epochSeconds(live, "current_period_start");
-    if (periodEnd == null || periodStart == null) {
-      // API 2025-03-31 moved the boundaries onto the item.
-      periodStart = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
-          SubscriptionLifecycleApplier.CURRENT_PERIOD_START);
-      periodEnd = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
-          SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
-    }
+    // Top level, or on the item since API 2025-03-31.
+    Instant periodStart = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
+        SubscriptionLifecycleApplier.CURRENT_PERIOD_START);
+    Instant periodEnd = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(live,
+        SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
     String currentPrice = SubscriptionLifecycleApplier.itemPriceIdOf(live);
     if (periodEnd == null || periodStart == null || currentPrice == null) {
       throw refused(PlanChangeRefusedException.PROVIDER_REJECTED,
@@ -526,14 +556,44 @@ public class PlanChangeService {
     return new PlanChangeResult(PlanChangeTiming.PERIOD_END, target, periodEnd, false);
   }
 
-  private void releaseSchedule(String scheduleId) throws StripeTransportException {
+  /**
+   * Releases the schedule of a pending downgrade before an upgrade. A refused release is accepted
+   * only when the subscription no longer carries the schedule (it was released or completed
+   * meanwhile); otherwise the upgrade is refused: going on would charge the upgrade while the
+   * provider still moves the subscription to the downgrade at the period end.
+   */
+  private void releaseSchedule(String subscriptionId, String scheduleId)
+      throws StripeTransportException {
     StripeResponse response = stripe.postForm(SCHEDULES + "/" + encode(scheduleId) + "/release",
         "");
-    if (!response.isSuccess()) {
-      // A schedule already released or completed is not a refusal of the upgrade.
-      log.warn("Could not release subscription schedule {} before the upgrade: {} ({})",
-          scheduleId, response.status(), Objects.toString(response.errorCode(), "no code"));
+    if (response.isSuccess()) {
+      return;
     }
+    if (scheduleIdOf(readSubscription(subscriptionId)) != null) {
+      throw refused(PlanChangeRefusedException.PROVIDER_REJECTED,
+          "The payment provider refused to cancel the scheduled plan change: " + response.status()
+              + " (" + Objects.toString(response.errorCode(), "no code") + ")");
+    }
+    log.info("Subscription schedule {} was already released before the upgrade ({})", scheduleId,
+        response.status());
+  }
+
+  /**
+   * Refuses a change on a subscription the provider has set to cancel, also when the row does not
+   * show it yet (its webhook is still on the way).
+   */
+  private static void refuseWhenCancelling(JSONObject live) {
+    if (SubscriptionLifecycleApplier.cancelAtPeriodEndOf(live).isSet()) {
+      throw refused(PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT,
+          "A subscription that is set to cancel at the period end cannot change plan; renew it"
+              + " first");
+    }
+  }
+
+  private Subscription findOpenOrRefuse(String clientId) {
+    return subscriptionService.findOpen(clientId).orElseThrow(
+        () -> refused(PlanChangeRefusedException.NO_SUBSCRIPTION,
+            "The environment has no open subscription"));
   }
 
   // ---------------------------------------------------------------- provider helpers
@@ -581,11 +641,6 @@ public class PlanChangeService {
     JSONArray data = items == null ? null : items.optJSONArray("data");
     JSONObject first = data == null ? null : data.optJSONObject(0);
     return first == null ? null : StringUtils.trimToNull(first.optString("id", ""));
-  }
-
-  private static Instant epochSeconds(JSONObject object, String field) {
-    long seconds = object == null ? 0L : object.optLong(field, 0L);
-    return seconds > 0L ? Instant.ofEpochSecond(seconds) : null;
   }
 
   private static void add(StringBuilder form, String key, String value) {

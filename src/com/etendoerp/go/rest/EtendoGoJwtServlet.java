@@ -1994,7 +1994,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code GET /billing/subscription} describes, or the environment named by {@code ?clientId=}
    * for a "Mis empresas" row — ownership is the query's, as for the portal). Each offered target
    * carries its timing ({@code immediate} / {@code period_end}), whether it changes the billing
-   * interval (then the quota year restarts), and the tenant's <em>current</em> usage measured
+   * interval (the quota year then follows the provider's new period start, which flexible billing
+   * keeps on the same anchor), and the tenant's <em>current</em> usage measured
    * against the target plan's quotas, so a downgrade into an exceeded quota shows its numbers
    * before the customer confirms. No active Allowed plan changes row for a target means it is
    * simply not listed.
@@ -2043,7 +2044,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             continue;
           }
           JSONObject item = planJson(target);
-          item.put(FIELD_TIMING, change.getTiming());
+          // The timing the change would apply with, which while a downgrade is pending is the
+          // row from the current plan, not the pending one the offer is read from.
+          item.put(FIELD_TIMING, planChangeService.timingOf(subscription, change).value());
           item.put("intervalChange", current != null && !StringUtils.equalsIgnoreCase(
               StringUtils.trimToEmpty(current.getBillingInterval()),
               StringUtils.trimToEmpty(target.getBillingInterval())));
