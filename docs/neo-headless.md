@@ -2359,7 +2359,8 @@ document is untrusted data):
 is pure (no DB); `InvoiceInboxStatusPolicy.apply(row, result)` only moves `PENDING_REVIEW` <->
 `ERROR(MISSING_FIELDS|REFERENCE_TOO_LONG|FOREIGN_RECEIVER)` and leaves every other state alone;
 `InvoiceInboxSummary.syncFrom(document, row)` copies the header into the summary columns
-(`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). Edits
+(`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). The
+read side (`review`, below) recomputes the verdict on every read. Edits
 must be bound with `@NeoExtension(spec = "invoice-inbox", ...)`, never `Java_Qualifier`.
 
 **Discard (ETP-6049).** `POST /sws/neo/invoice-inbox/header/{id}/action/discard` (no body needed)
@@ -2390,6 +2391,76 @@ only `WHERE status = 'PROCESSING'`, so it can not race a discard. The texts are 
 of `InvoiceInboxMessages` (no `AD_MESSAGE` rows: the SPA translates by `error.code`). **Hidden from
 MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 405 `actionHidden`
 ("its customization keeps it for people only"); declared in §4.12.9.
+
+**Review (ETP-6050).** `GET /sws/neo/invoice-inbox/header/{id}/action/review` answers everything the
+review panel needs to open one document in a single call. Served by `InvoiceInboxHeaderHandler`
+(ACTION surface, delegating to `InvoiceInboxReview`), read-only: nothing is written. Same order as
+discard: window access -> `NeoActionRecordGuard` (another tenant's id: 404) -> the handler pre-hook,
+which answers `403 feature_disabled` first when the flag is off -> the action. The spec stays
+read-only (`currentData` / `extractedData` are still `discarded`), so this action is the only way
+the document reaches the browser.
+
+| Case | HTTP | Body |
+|---|---|---|
+| any state but `PROCESSING` | 200 | the review answer below |
+| `PROCESSING` | 409 | `error.code=processing` (it cannot be opened yet) |
+| unknown id, or another client's | 404 | `error.code=not_found` (the guard's text when it judged first) |
+| flag off | 403 | `error.code=feature_disabled` |
+| `POST .../action/review` | 405 | (the review only reads) |
+
+```json
+{ "id": "...", "status": "PENDING_REVIEW|ERROR|READY|CONFIRMED|DISCARDED",
+  "errorCode": null, "reviewed": false, "adjusted": false,
+  "updated": "<as NEO serializes it>", "editable": true,
+  "fileName": "", "sender": "", "source": "UPLOAD", "created": "<as NEO serializes it>",
+  "invoice": null,
+  "attachment": { "id": "", "name": "", "mimeType": "application/pdf" },
+  "currency": { "id": "", "isoCode": "EUR", "symbol": "€" },
+  "document": { "version": 1, "header": {}, "lines": [], "notices": [], "validation": {} } }
+```
+
+- `updated` and `created` are rendered with `NeoDateFormat.toAuditToken` (the audit token NEO's own
+  GET emits: `yyyy-MM-dd'T'HH:mm:ss.SSS` plus the colon offset, milliseconds included), so `updated`
+  is the optimistic-lock token of the later write actions. `DataToJsonConverter` is not used: it
+  drops the milliseconds.
+- `editable` = status in `PENDING_REVIEW`, `ERROR`, `READY` **and** `errorCode != FOREIGN_RECEIVER`
+  (a foreign receiver is discard-only). `CONFIRMED` and `DISCARDED` are never editable.
+- `invoice` = `{id, documentNo, identifier}` of `C_INVOICE_ID` when it is set (`CONFIRMED`), else
+  `null`. `documentNo` is the plain document number the UI shows; `identifier` is the DAL one
+  (number - date - total).
+- `attachment` = the row's main attachment (`NeoAttachmentsHelper.findMainAttachment` on
+  `ETGO_Incoming_Document`, tenant-checked), `null` when none. `mimeType` is the stored data type
+  when it is a MIME type, else derived from the file extension. The file itself is downloaded with
+  the existing `GET /sws/neo/attachments/file/{attachmentId}`.
+- `currency` = the row's organization currency (the client's when the organization has none): shown
+  read-only, the OCR extracts no currency. There is no due date anywhere (ETP-6050 decision 1).
+- `document` = the stored `CURRENT_DATA`, with `validation` **recomputed** by
+  `InvoiceInboxValidator.validate` on every read (never persisted, so a row stored before a rule
+  changed does not show a stale verdict), plus read-time enrichment (never persisted: it would go
+  stale, and the worker's contract keeps ids and names only):
+  - `header.vendor.details = {name, taxId, city}` when `state = linked`; every
+    `header.vendor.candidates[i]` gets `city` (city of the vendor's first active address; empty when
+    none).
+  - `lines[i].product.details = {name, searchKey, category, uom}` when `state = linked`; every
+    `lines[i].product.candidates[i]` gets `searchKey`, `category`, `uom` (names; empty when none).
+  - Names follow the session language, as the selectors do: product `name` (also each candidate's
+    `name`, replaced when a translation exists), `category` and `uom` are read through
+    `NeoTrl.translatedNames` (the `*_Trl` rows `ProductTrl`, `ProductCategoryTrl`, `UOMTrl`,
+    language `NeoLanguage.currentCode()`), falling back to the base name. Business partners have no
+    translation table, so vendor names stay as stored.
+  - Computed by `OcrLookups.vendorDetails(ids)` / `productDetails(ids)` (default methods,
+    implemented by `PurchaseInvoiceOcrLookups`): one query per kind for the whole document, plus one
+    for the cities. An id that does not resolve for the session (other tenant, not readable) simply
+    gets no enrichment. `OcrLookups.productById(id)` (same visibility rule as `vendorById`) is
+    added for the write actions. All are total: a failed lookup leaves the document unenriched.
+  - A row with **no** `CURRENT_DATA` (`UNREADABLE`, `SERVICE_FAILURE`: the worker only fails them),
+    or one that does not parse, is answered with an empty skeleton `{version:1, header:{vendor:
+    {state:"none", candidates:[], extracted:{}}, documentNo:"", invoiceDate:null, totalAmount:0,
+    totalSource:"lines", duplicate:{state:"unknown", invoices:[], inbox:[]},
+    receiver:{check:"absent"}}, lines:[], notices:[]}` plus its validation. It is not persisted.
+- Texts of the document come from an external extraction and are untrusted data: they are copied,
+  never interpreted. The lookups are bound by the row's `TARGET_TYPE` the way the worker binds them.
+- **Hidden from MCP**: `agentExcludedActions()` returns `discard` and `review` (§4.12.9).
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
@@ -6501,12 +6572,16 @@ handlers do, so `buildingNumber` no longer blocks the request here either — `s
 `country` are unaffected. With both layers fixed, the "no longer a UI-vs-API divergence" claim two
 paragraphs above now holds for the onboarding endpoint too, not only for the 3 entity handlers.
 
-**Declared divergence: `discard` of the invoice inbox is REST-only (ETP-6049).** The action
+**Declared divergence: `discard` and `review` of the invoice inbox are REST-only (ETP-6049,
+ETP-6050).** The action
 `POST /sws/neo/invoice-inbox/header/{id}/action/discard` works from the SPA and plain REST, and is
 hidden from MCP (`InvoiceInboxHeaderHandler.agentExcludedActions()` = `discard`: `etendo_action`
 answers 405 `actionHidden`). It is irreversible and ships for people first; it will be declared with
 an `actionContract` next to the confirm action (ETP-6051) so agents get both at once. Exposing it
-earlier is removing that one override.
+earlier is removing that one override. `GET .../action/review` (ETP-6050) is hidden the same way
+(`agentExcludedActions()` = `discard`, `review`): it is the review panel's own read, up to 1 MB of
+document plus enrichment, which would only cost an agent context; agents read the row with
+`etendo_get` (no `currentData`).
 
 > **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
 > (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
