@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.ad.utility.Image;
 
@@ -506,9 +507,16 @@ public class PortalServlet extends HttpBaseServlet {
       return;
     }
     PortalDocumentKind kind = PortalDocumentsEndpoint.kindOf(parts[0]);
-    Attachment attachment = kind == null
-        || PortalDocumentQuery.findInScope(validated, kind, parts[1]) == null ? null
+    BaseOBObject document = kind == null ? null
+        : PortalDocumentQuery.findInScope(validated, kind, parts[1]);
+    Attachment attachment = document == null ? null
         : PortalDocumentsEndpoint.mainAttachment(validated, kind, parts[1]);
+    if (document != null && attachment == null) {
+      // No stored printable yet (never emailed nor printed): render it with the server-side render
+      // the MCP uses and store it as the main attachment (ETP-6209). Any failure answers the same
+      // 404, and the page shows the data sheet.
+      attachment = PortalPrintable.renderAndFind(validated, kind, document);
+    }
     if (attachment == null) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       return;

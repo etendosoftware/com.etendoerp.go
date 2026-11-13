@@ -91,4 +91,12 @@ public final class PortalSession {
   public String getEntryDocumentId() {
     return link.getRecordId();
   }
+
+  /**
+   * @return the language the link's email was sent in (an Etendo language code), the language a
+   *     printable rendered for this session is printed in, so it matches the email
+   */
+  public String getLanguage() {
+    return link.getLanguage();
+  }
 }

@@ -141,7 +141,34 @@ email's download link serves. Both callers share `schemaforge/AnonymousAttachmen
 caller's client — the link's here, the signed token's there) and `stream`, which bypasses
 `AttachImplementationManager.download()` (ETP-5304). A session-less request cannot use
 `NeoAttachmentsHelper.handleGetMain` or `NeoAttachmentsDownloader`: both resolve through the
-session's tenant. A document never emailed or printed has no main attachment: `hasPdf:false`.
+session's tenant.
+
+**A document with no stored PDF yet** (never emailed nor printed; user decision 2026-11-13) is
+rendered on its first `/pdf` request by `PortalPrintable`, with the MCP's server-side render
+(`NeoPrintableRenderer` on `NeoPrintAfterComplete`'s worker, ETP-6013) — not a seventh producer:
+same template the frontend publishes, same data builder, same jsreport, stored the same way as the
+record's main attachment (`<spec>-<documentNo>.pdf`, `markAsMain`), so the next open, the email
+link and the app's preview reuse it and the app's freshness rule applies.
+
+- **Only for an in-scope document:** the servlet calls it after `PortalDocumentQuery#findInScope`
+  returned the document, and only through the data rate limiter.
+- **Identity** (`NeoPrintAfterComplete#renderAndWaitAs`): a portal request has no session, and the
+  worker never falls back to an administrator. It runs as the user who **sent** the document — the
+  `CREATEDBY` of the link's root row (a renewal is minted by the system and names no one) — with
+  that user's default role, else their first active role, in the link's client; the link's client;
+  the document's own organization; the link's email language. The worker's D23 check still
+  applies (the role must be able to write the document's attachments), and a file a person marked
+  main is never replaced. No sender, no role, or a system creator: no render.
+- **One render per document:** concurrent opens join the render in flight in this JVM; across
+  nodes the worker's `pg_advisory_xact_lock` and re-check store one file. The request waits at most
+  the worker's bound (40 s).
+- **Never a 500 for this:** not configured (no jsreport / printables location), not printable, not
+  allowed, timed out or failed → the same 404 as before, and the page shows its data sheet with
+  "PDF no disponible".
+- **`hasPdf`** is true for a stored PDF or a kind whose window declares a printable in an
+  environment that can render; the page then requests `/pdf` and falls back on its 404. Chosen over
+  rendering inside the detail request so the detail answers fast and only a document actually
+  looked at is rendered.
 A stream failure answers a `text/plain` 500 (the email link's format), unlike the portal's other
 JSON errors — a known optional cleanup. Details: `neo-headless.md`, *Shared with the customer
 portal (ETP-6209)*.

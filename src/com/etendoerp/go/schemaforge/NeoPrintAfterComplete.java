@@ -91,7 +91,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *       or committed and closed, and its context cleared.</li>
  *   <li><b>As the caller.</b> The worker runs under the caller's user, role, client and
  *       organization. The renderer refuses to store for a role without write access to the
- *       document's attachments (D23).</li>
+ *       document's attachments (D23). The customer portal, which has no session, passes the identity
+ *       explicitly ({@link #renderAndWaitAs}): the user who sent the document (ETP-6209).</li>
  *   <li><b>In the MCP's language.</b> The PDF is printed in the language the MCP caller passes: its
  *       default ({@code es_ES}, the email tool's default) for the eager and the
  *       {@code etendo_get_document_pdf} renders, the email's own language for
@@ -287,6 +288,31 @@ public final class NeoPrintAfterComplete {
     return job == null ? null : await(submit(job), recordId);
   }
 
+  /**
+   * As {@link #renderAndWait}, for a caller with no Etendo session to borrow the identity from: the
+   * render runs as the user, role, client and organization given, which the caller has resolved
+   * and is accountable for (the customer portal renders as the user who sent the document, in the
+   * document's own client and organization, ETP-6209). Everything else is the same path — the
+   * worker, the in-JVM join, the advisory lock and re-check, the write-access check (D23) and the
+   * store as the main attachment.
+   *
+   * @return the outcome, or {@code null} when nothing could be queued or the render did not finish
+   *         in time
+   */
+  public static NeoPrintableRenderer.Outcome renderAndWaitAs(SFEntity entity, String recordId,
+      String language, String userId, String roleId, String clientId, String orgId) {
+    Job job;
+    try {
+      job = jobFor(entity, recordId,
+          StringUtils.isAnyBlank(userId, roleId, clientId, orgId, language) ? null
+              : new Caller(userId, roleId, clientId, orgId, language));
+    } catch (RuntimeException e) {
+      log.warn(MSG_NOT_QUEUED, e.getClass().getSimpleName());
+      return null;
+    }
+    return job == null ? null : await(submit(job), recordId);
+  }
+
   /** The outcome of a render, waited for at most {@link #REQUEST_WAIT}; {@code null} past it. */
   private static NeoPrintableRenderer.Outcome await(
       CompletableFuture<NeoPrintableRenderer.Outcome> render, String recordId) {
@@ -352,6 +378,24 @@ public final class NeoPrintAfterComplete {
     Caller caller = new Caller(context.getUser().getId(), context.getRole().getId(),
         context.getCurrentClient().getId(), context.getCurrentOrganization().getId(),
         languageOf(language, context));
+    return new Job(spec.getName(), entity.getId(), table.getDBTableName(), recordId, caller);
+  }
+
+  /**
+   * The job for a document of a printable entity, as the given caller, or {@code null} when there
+   * is nothing to render or no caller.
+   */
+  static Job jobFor(SFEntity entity, String recordId, Caller caller) {
+    if (caller == null || entity == null || StringUtils.isBlank(recordId)
+        || NeoPdfSourceConfig.printDocumentOf(entity) == null
+        || !NeoPrintableRenderer.isConfigured()) {
+      return null;
+    }
+    SFSpec spec = entity.getETGOSFSpec();
+    Table table = entity.getADTab() == null ? null : entity.getADTab().getTable();
+    if (spec == null || table == null) {
+      return null;
+    }
     return new Job(spec.getName(), entity.getId(), table.getDBTableName(), recordId, caller);
   }
 

@@ -401,7 +401,10 @@ final class PortalDocumentsEndpoint {
       related.put(row(link, linkSchedules));
     }
     body.put("related", related);
-    body.put("hasPdf", mainAttachment(session, kind, id) != null);
+    // A stored printable, or one the server can render on the first /pdf request (ETP-6209):
+    // the page asks for the PDF and falls back to the data sheet if that request answers 404.
+    body.put("hasPdf", mainAttachment(session, kind, id) != null
+        || PortalPrintable.isRenderable(kind));
     return body;
   }
 
