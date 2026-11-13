@@ -37,7 +37,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="CONTENT" primaryKey="false" required="true" type="CLOB" size="4000" autoIncrement="false">
+      <column name="CONTENT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>

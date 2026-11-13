@@ -14,7 +14,7 @@ Code: `com.etendoerp.go.terms.TermsAndConditionsService`.
 |---|---|
 | `AD_LANGUAGE` | the language of the text, e.g. `es_ES`, `en_US` |
 | `VERSION` | the version label, e.g. `2026-11`. The same label in every language of one release |
-| `CONTENT` | the text, plain text; line breaks are kept, nothing is rendered as HTML |
+| `CONTENT` | optional: the text, when the row has no Word document attached (see [Content format](#content-format)) |
 | `PUBLISHED` | from when the version is in force |
 | `AD_MODULE_ID` | set only on the rows the module ships (the placeholder); empty on the ones loaded in the ERP |
 
@@ -28,6 +28,41 @@ Deactivating a row hides it from the endpoint; accounts keep the label they stor
 
 The module ships one placeholder version per language as module data (`AD_DATASET` `0`, filtered
 by `AD_MODULE_ID`), to be replaced by the real text as a new version.
+
+## Loading the document from Classic
+
+The real text is a Word document loaded in Classic, never shipped with the module:
+
+1. *Terms and Conditions* window (System Administrator): one new row per language, with the same
+   `VERSION` and a later `PUBLISHED`. `CONTENT` can stay empty.
+2. On each row, attach the `.docx` with the paperclip (Classic attachments).
+
+While there is no English text, attach the Spanish document to the `en_US` row too, so an English
+screen shows it rather than the placeholder.
+
+A row with a `.docx` attached shows the document; without one, its `CONTENT`. When several `.docx`
+are attached to one row, the most recently updated wins. Other attached files are ignored. Never
+replace the document of a version already in force: accounts that accepted it point at its label.
+Publish a new version instead.
+
+## Content format
+
+**Document.** `GET /sws/go/terms` says `hasDocument: true`; the register dialog then downloads the
+`.docx` from `GET /sws/go/terms/document?language=<language>&version=<version>` (the `language`
+and `version` of that body) the first time it opens, and converts it to HTML in the browser with
+mammoth (`fetchTermsDocumentHtml` in `@etendosoftware/etendo-go-core`, loaded only then). Bold,
+italics, lists and tables are kept; colours, fonts and page layout are not. A table whose rows
+Word marks all as header rows ("Repeat as header row") keeps only the first one as the header.
+
+**`CONTENT`.** Plain text, line breaks kept; HTML when it holds a block tag (`<p>`, `<ul>`,
+`<table>`, …).
+
+Either way the HTML is never injected as markup: `TermsContent.jsx` parses it and rebuilds it from
+an allowlist of tags — paragraphs and wrappers (`p`, `div`, `span`, `blockquote`, `hr`, `br`),
+`h1`–`h6`, inline formatting (`strong`/`b`, `em`/`i`, `u`, `s`, `sub`, `sup`), lists, tables, and
+`a` with an `http(s):` or `mailto:` `href`. Every other attribute is dropped, other tags keep only
+their text, and `script`/`style`/`iframe` are dropped whole. Tables scroll horizontally inside the
+dialog.
 
 ## Which version is in force
 
@@ -46,10 +81,21 @@ Public, no session: the register screen shows the terms before any account exist
 the text and its identity:
 
 ```json
-{ "version": "2026-11", "language": "es_ES", "content": "…", "publishedAt": 1793750400000 }
+{ "version": "2026-11", "language": "es_ES", "content": "…", "publishedAt": 1793750400000,
+  "hasDocument": false }
 ```
 
+`hasDocument` is true when a `.docx` is attached to the row (ETP-6244); `content` is then
+whatever the row holds, possibly empty.
+
 `404 TERMS_NOT_FOUND` when no version is published at all.
+
+## `GET /sws/go/terms/document?language=es_ES&version=2026-11`
+
+Public as well (ETP-6244): the `.docx` attached to the active, published row with exactly that
+language and version, as `application/vnd.openxmlformats-officedocument.wordprocessingml.document`.
+It serves only attachments of `ETGO_TERMS` rows; a missing row, a row without document or a
+malformed parameter is `404 TERMS_DOCUMENT_NOT_FOUND`.
 
 ## What an account records
 

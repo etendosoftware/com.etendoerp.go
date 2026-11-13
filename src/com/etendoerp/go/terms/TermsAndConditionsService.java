@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.terms;
 
+import java.io.ByteArrayOutputStream;
 import java.sql.Timestamp;
 import java.util.Date;
 import java.util.List;
@@ -29,6 +30,8 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -44,6 +47,11 @@ import org.openbravo.dal.service.OBDal;
  * {@code TERMS_ACCEPTED_AT}). The version is the one the register screen showed: a version
  * published while someone was registering does not replace what that person actually saw. A
  * version the screen could not load, or one that does not exist, is replaced by the one in force.
+ *
+ * <p>The text can also be a Word document (ETP-6244): a {@code .docx} attached in Classic to the
+ * version's row. The public body then says {@code hasDocument}, and the register screen downloads
+ * it from {@code /sws/go/terms/document} and shows it converted to HTML. A row with a document
+ * needs no {@code CONTENT}.
  *
  * <p>The terms dialog also asks for consent to promotional mail ({@code
  * ETGO_ACCOUNT.MARKETING_CONSENT}). It is a choice of its own, not part of accepting the terms: it
@@ -65,8 +73,37 @@ public class TermsAndConditionsService {
 
   private static final Pattern LANGUAGE_PATTERN = Pattern.compile("[A-Za-z]{2,3}(_[A-Za-z]{2})?");
 
-  /** One version of the terms in one language. */
-  public record Terms(String version, String language, String content, Date publishedAt) {
+  /** The file extension of the only document the register screen can show. */
+  static final String DOCUMENT_EXTENSION = ".docx";
+
+  /** The media type of a Word document. */
+  public static final String DOCUMENT_CONTENT_TYPE =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+  /**
+   * One version of the terms in one language.
+   *
+   * @param version     the version label, the same in every language of one release
+   * @param language    the language of the row, e.g. {@code es_ES}
+   * @param content     the text of the row; empty when it has none
+   * @param publishedAt from when the version is in force
+   * @param hasDocument whether a Word document is attached to the row; when it is, the screen
+   *     shows the document instead of {@code content}
+   */
+  public record Terms(String version, String language, String content, Date publishedAt,
+      boolean hasDocument) {
+
+    /**
+     * A version whose text is its {@code CONTENT} alone, with no Word document.
+     *
+     * @param version     the version label
+     * @param language    the language of the row
+     * @param content     the text of the row
+     * @param publishedAt from when the version is in force
+     */
+    public Terms(String version, String language, String content, Date publishedAt) {
+      this(version, language, content, publishedAt, false);
+    }
 
     /**
      * What the public endpoint returns: the text and its identity, nothing else of the row.
@@ -79,7 +116,8 @@ public class TermsAndConditionsService {
           .put("version", version)
           .put("language", language)
           .put("content", content)
-          .put("publishedAt", publishedAt == null ? JSONObject.NULL : publishedAt.getTime());
+          .put("publishedAt", publishedAt == null ? JSONObject.NULL : publishedAt.getTime())
+          .put("hasDocument", hasDocument);
     }
   }
 
@@ -102,6 +140,28 @@ public class TermsAndConditionsService {
      * @return whether an active row holds this version, in any language
      */
     boolean exists(String version);
+
+    /**
+     * Finds the Word document attached to one version in one language.
+     *
+     * @param language the exact language of the row, as {@link Terms#language()} returned it
+     * @param version  the version label
+     * @return the attachment ({@code C_File}) id, or empty when the row is missing, inactive,
+     *     not yet published, or has no {@code .docx} attached
+     */
+    default Optional<String> findDocumentId(String language, String version) {
+      return Optional.empty();
+    }
+
+    /**
+     * Reads the bytes of an attachment.
+     *
+     * @param attachmentId the {@code C_File} id {@link #findDocumentId} returned
+     * @return the file content
+     */
+    default byte[] download(String attachmentId) {
+      throw new UnsupportedOperationException("This store holds no documents");
+    }
   }
 
   private final Store store;
@@ -124,6 +184,24 @@ public class TermsAndConditionsService {
   public Optional<Terms> findCurrent(String requestedLanguage) {
     String language = normalizeLanguage(requestedLanguage);
     return store.findCurrent(language, language.substring(0, 2).toLowerCase());
+  }
+
+  /**
+   * The Word document of one version, as attached in Classic.
+   *
+   * @param language the language the public body returned for the version
+   * @param version  the version the public body returned
+   * @return the {@code .docx} content, or empty when the parameters are malformed, the version is
+   *     not in force in that language, or it has no document
+   */
+  public Optional<byte[]> findDocument(String language, String version) {
+    String cleanVersion = StringUtils.trimToNull(version);
+    String cleanLanguage = StringUtils.trimToEmpty(language);
+    if (cleanVersion == null || cleanVersion.length() > VERSION_MAX_LENGTH
+        || !LANGUAGE_PATTERN.matcher(cleanLanguage).matches()) {
+      return Optional.empty();
+    }
+    return store.findDocumentId(cleanLanguage, cleanVersion).map(store::download);
   }
 
   /**
@@ -180,14 +258,27 @@ public class TermsAndConditionsService {
   /** Reads {@code ETGO_TERMS} with plain SQL: the rows are System data, read without a role. */
   static final class DalStore implements Store {
 
-    private static final String CURRENT_SQL = "select version, ad_language, content, published"
-        + " from etgo_terms"
-        + " where isactive = 'Y' and published <= now()"
-        + " and (ad_language = :language or lower(substr(ad_language, 1, 2)) = :base"
-        + " or ad_language = :fallback)"
-        + " order by case when ad_language = :language then 0"
-        + " when lower(substr(ad_language, 1, 2)) = :base then 1 else 2 end,"
-        + " published desc, ad_language";
+    /** The {@code .docx} attachments of a terms row, newest first. */
+    private static final String DOCUMENT_OF_ROW = "select f.c_file_id from c_file f"
+        + " join ad_table tb on tb.ad_table_id = f.ad_table_id"
+        + " where lower(tb.tablename) = 'etgo_terms' and f.ad_record_id = t.etgo_terms_id"
+        + " and f.isactive = 'Y' and lower(f.name) like '%" + DOCUMENT_EXTENSION + "'"
+        + " order by f.updated desc";
+
+    private static final String CURRENT_SQL = "select t.version, t.ad_language, t.content,"
+        + " t.published, exists(" + DOCUMENT_OF_ROW + ")"
+        + " from etgo_terms t"
+        + " where t.isactive = 'Y' and t.published <= now()"
+        + " and (t.ad_language = :language or lower(substr(t.ad_language, 1, 2)) = :base"
+        + " or t.ad_language = :fallback)"
+        + " order by case when t.ad_language = :language then 0"
+        + " when lower(substr(t.ad_language, 1, 2)) = :base then 1 else 2 end,"
+        + " t.published desc, t.ad_language";
+
+    private static final String DOCUMENT_SQL = "select (" + DOCUMENT_OF_ROW + " limit 1)"
+        + " from etgo_terms t"
+        + " where t.isactive = 'Y' and t.published <= now()"
+        + " and t.ad_language = :language and t.version = :version";
 
     private static final String EXISTS_SQL = "select 1 from etgo_terms"
         + " where isactive = 'Y' and version = :version";
@@ -204,8 +295,29 @@ public class TermsAndConditionsService {
         return Optional.empty();
       }
       Object[] row = (Object[]) rows.get(0);
-      return Optional.of(new Terms((String) row[0], (String) row[1], String.valueOf(row[2]),
-          row[3] instanceof Timestamp ? new Date(((Timestamp) row[3]).getTime()) : null));
+      return Optional.of(new Terms((String) row[0], (String) row[1],
+          row[2] == null ? "" : String.valueOf(row[2]),
+          row[3] instanceof Timestamp ? new Date(((Timestamp) row[3]).getTime()) : null,
+          Boolean.TRUE.equals(row[4])));
+    }
+
+    @Override
+    public Optional<String> findDocumentId(String language, String version) {
+      List<?> rows = OBDal.getInstance().getSession().createNativeQuery(DOCUMENT_SQL)
+          .setParameter("language", language)
+          .setParameter("version", version)
+          .setMaxResults(1)
+          .getResultList();
+      return rows.isEmpty() || rows.get(0) == null ? Optional.empty()
+          : Optional.of(String.valueOf(rows.get(0)));
+    }
+
+    @Override
+    public byte[] download(String attachmentId) {
+      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+      WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class)
+          .download(attachmentId, buffer);
+      return buffer.toByteArray();
     }
 
     @Override

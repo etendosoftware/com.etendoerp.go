@@ -377,6 +377,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_VERIFY_EMAIL = "/verify-email";
   /** ETP-6081: the terms and conditions in force, public. */
   private static final String PATH_TERMS = "/terms";
+  /** ETP-6244: the Word document of a terms version, public like the terms themselves. */
+  private static final String PATH_TERMS_DOCUMENT = "/terms/document";
   private static final String FIELD_TERMS_VERSION = "termsVersion";
   /** ETP-6081: consent to promotional mail, asked in the terms dialog of the register screen. */
   private static final String FIELD_MARKETING_CONSENT = "marketingConsent";
@@ -635,6 +637,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, PATH_TERMS)) {
       handleTermsAndConditions(request, response);
+    } else if (isPath(path, PATH_TERMS_DOCUMENT)) {
+      handleTermsDocument(request, response);
     } else {
       return false;
     }
@@ -2818,6 +2822,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * GET /sws/go/terms/document?language=es_ES&amp;version=1.0 (ETP-6244).
+   *
+   * <p>Unauthenticated like {@code /terms}: the Word document attached in Classic to that version,
+   * for the register screen to show when {@code /terms} said {@code hasDocument}. Only the
+   * {@code .docx} of an active, published {@code ETGO_TERMS} row is ever served; anything else,
+   * a malformed parameter included, is a 404.
+   */
+  private void handleTermsDocument(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Optional<byte[]> document = termsService.findDocument(
+          request.getParameter(FIELD_LANGUAGE), request.getParameter("version"));
+      if (document.isPresent()) {
+        writeTermsDocument(response, document.get());
+      } else {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "TERMS_DOCUMENT_NOT_FOUND",
+            "No terms document for this version", "No terms document for this version");
+      }
+    } catch (RuntimeException e) {
+      log.error("Could not read the terms and conditions document", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Writes a terms Word document as the whole body of a 200. */
+  static void writeTermsDocument(HttpServletResponse response, byte[] bytes) throws IOException {
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType(TermsAndConditionsService.DOCUMENT_CONTENT_TYPE);
+    response.setHeader(HEADER_CACHE_CONTROL, "no-cache");
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
   }
 
   /** The terms version an SSO body carries besides the credential, or {@code null}. */
