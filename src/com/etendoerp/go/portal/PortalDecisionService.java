@@ -318,7 +318,9 @@ public class PortalDecisionService {
       return new RequestResult(RequestOutcome.ACCEPT_UNAVAILABLE, null, null);
     }
     String reason = StringUtils.upperCase(StringUtils.trimToNull(reasonCode));
-    String text = StringUtils.trimToNull(reasonText);
+    // Free text belongs to "Otros" only (PO spec): with any other reason it is discarded, so a text
+    // typed before switching reason is never stored, emailed or noted.
+    String text = REASON_OTHER.equals(reason) ? StringUtils.trimToNull(reasonText) : null;
     if (!DECISION_ACCEPT.equals(normalizedDecision) && !DECISION_REJECT.equals(normalizedDecision)
         || DECISION_REJECT.equals(normalizedDecision) && (!REASON_CODES.contains(reason)
             || REASON_OTHER.equals(reason) && text == null)
