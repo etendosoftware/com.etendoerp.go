@@ -24,7 +24,9 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>Only into an empty table.</b> Operators maintain the rows afterwards (the ticket's rule:
  * the direction is declared by the row, never inferred), so the seed must never overwrite,
  * re-add or remove what an operator decided. One row in the table, active or not, and this
- * script does nothing.
+ * script does nothing. The guard is the table's content, not a record of having seeded: a table
+ * an operator empties by hand is seeded again on the next update, so withdrawing every change is
+ * done by deactivating the rows (documented in {@code docs/plan-changes.md}).
  *
  * <p><b>The seeded rule</b> (ETP-5053): within one billing interval, a higher tier applies
  * immediately (an upgrade) and a lower tier at the end of the period (a downgrade); monthly to
