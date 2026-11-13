@@ -176,7 +176,7 @@ class Fiscal390FileValidationSupport {
 
   /**
    * Keeps the validator's draft PDF of an ACCEPTED file as proof that it was validated:
-   * {@code VALIDACION-justificante-390-<year>-0A.pdf}, replacing the one of the previous
+   * {@code VALIDACION-390-<year>-0A.pdf}, replacing the one of the previous
    * accepted validation. A rejected answer, or an accepted one without PDF, attaches nothing and
    * leaves the existing one. Never throws (the attach helpers are best-effort).
    */
@@ -192,7 +192,9 @@ class Fiscal390FileValidationSupport {
       Organization org = OBDal.getInstance().get(Organization.class, declaration.orgId());
       FiscalAeatSubmissionSupport.replaceAttachedPdf(decl, org,
           Fiscal390SubmissionSupport.validationFileName(declaration.year(), declaration.period()),
-          pdf, "aeat390goval", Fiscal390BoxesHandler.MODEL);
+          pdf, "aeat390goval", Fiscal390BoxesHandler.MODEL,
+          Fiscal390SubmissionSupport.legacyValidationFileName(declaration.year(),
+              declaration.period()));
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not attach the AEAT validation PDF to declaration "
           + declaration.declId(), e);

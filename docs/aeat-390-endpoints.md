@@ -288,10 +288,10 @@ the one `submit` uses in test mode; no certificate) and returned **whatever the 
 | `not_validated` | any other failure (e.g. an answer that is not the validator's JSON) | untouched |
 
 **Validation PDF.** An `accepted` answer carries the validator's draft PDF. It is attached to
-the declaration as `VALIDACION-justificante-390-<year>-0A.pdf` (the `TEST-` scheme of the
-test-mode submit under its own prefix), as proof that the file was validated — it is not a filing
+the declaration as `VALIDACION-390-<year>-0A.pdf`, as proof that the file was validated — it is not a filing
 receipt. Each accepted validation replaces the previous `VALIDACION-` attachment
-(`FiscalAeatSubmissionSupport.replaceAttachedPdf`, exact name match: the `TEST-` attachment and
+(`FiscalAeatSubmissionSupport.replaceAttachedPdf`, exact name match — plus the earlier name
+`VALIDACION-justificante-390-<year>-0A.pdf`, so both never coexist; the `TEST-` attachment and
 the real justificante are never touched). Any other outcome, or an accepted answer without PDF,
 attaches nothing and leaves the existing one. Best-effort: a failure is logged and changes
 neither the outcome nor the download.
@@ -312,6 +312,21 @@ Every call that reaches the AEAT — an answer or a connection failure (`502 SUB
 leaves a row in the append-only attempt log (`ETGO_Fiscal_AEAT_Attempt`): path
 `direct_submission`, or `manual_validation` in test mode. The guards below write none. See
 `aeat-attempt-log.md`.
+
+**Validation before a real presentation (ETP-5716).** With `testMode = false`, once every guard
+has passed and the file is generated, the server first sends that same file to the validation
+service (`FiscalAeatSubmissionSupport.validateBeforeSubmission`, 10 s connect + 30 s read; the
+service's default timeouts are restored for the presentation):
+
+| Validator | What happens |
+|---|---|
+| no errors (warnings allowed) | the presentation goes ahead, as before |
+| errors | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
+| no answer | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
+
+It writes its own attempt row (path `pre_submission_validation`); the presentation that follows
+writes its `direct_submission` row. No PDF is attached for this validation. `testMode = true` is
+unchanged.
 
 Request body (JSON): `{ testMode, idi, presenterNif, presenterName }` — the same shape as
 `/fiscal303/submit` (see `aeat-303-submit-endpoint.md`), without `nrc`: a 390 is informative (the

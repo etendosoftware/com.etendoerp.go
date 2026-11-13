@@ -35,6 +35,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.module.aeat303.es.presentation.AEAT303DeclarationData;
 import org.openbravo.module.aeat303.es.presentation.AEAT303DeclarationDataExtractor;
+import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionRequestBuilder;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 import org.openbravo.module.taxreportlauncher.TaxReport;
@@ -369,6 +370,28 @@ class Fiscal303SubmissionSupport {
     FiscalAeatAttemptLog.Declaration attempted = new FiscalAeatAttemptLog.Declaration(
         MODEL_303, year, period, declId, orgId);
     FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
+    // A real presentation is validated first, with the very file it is about to send: the
+    // validator's errors stop it (nothing presented, the declaration stays a draft).
+    if (!testMode) {
+      FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+          FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog(),
+              attempted, new FiscalAeatSubmissionSupport.FileToPresent(
+                  AEAT303SubmissionRequestBuilder.MODELO_303, fileContent, data.getFiscalYear(),
+                  data.getPeriod(), idi));
+      if (!validation.proceed()) {
+        if (validation.rejected == null) {
+          writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
+              FiscalAeatSubmissionSupport.validationUnavailableJson());
+          return;
+        }
+        persistIncidentsBestEffort(decl, declId, validation.rejected);
+        commitSubmissionBestEffort(declId);
+        writeJson(response, HttpServletResponse.SC_OK,
+            FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
+                owner.declarationDataJson(data)));
+        return;
+      }
+    }
     String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
     AEAT303SubmissionResult result;
     try {

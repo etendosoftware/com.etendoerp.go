@@ -15,6 +15,7 @@ A row is written only when a call to the AEAT was actually tried — answered or
 |---|---|---|
 | `direct_submission` | `Fiscal303SubmissionSupport.handleSubmit`, `Fiscal390SubmissionSupport.handleSubmit` with `testMode = false` | the AEAT answer (accepted / rejected) and the `OBException` branch (502 `SUBMISSION_FAILED`) |
 | `manual_validation` | the same two handlers with `testMode = true` ("Validar sin presentar") | same two branches |
+| `pre_submission_validation` | the validation the server runs right before a real presentation (`FiscalAeatSubmissionSupport.validateBeforeSubmission`, 303 and 390) | every outcome; a presentation it stops leaves only this row, one that goes ahead also leaves its `direct_submission` row |
 | `download` | `Fiscal390FileValidationSupport#recordOutcome` (`POST /fiscal390/generate-validated`) | every outcome |
 
 The guards that stop before any call write nothing: no certificate, already submitted, blocking
@@ -34,7 +35,7 @@ the AEAT.
 | `Fiscal_Year` | `NUMERIC` | no | exercise |
 | `Period` | `VARCHAR(200)` | yes | `1T`…`4T`, `01`…`12`, `0A` |
 | `Fiscal_Decl_UUID` | `VARCHAR(32)` | yes | `ETGO_Fiscal_Decl_ID` of the declaration — **no foreign key** |
-| `Attempt_Path` | `VARCHAR(200)` | no | `direct_submission`, `manual_validation`, `download` |
+| `Attempt_Path` | `VARCHAR(200)` | no | `direct_submission`, `manual_validation`, `pre_submission_validation`, `download` |
 | `IsTestMode` | `CHAR(1)` | no | `Y` when the validation service was asked (nothing is filed), `N` for a presentation |
 | `Environment` | `VARCHAR(200)` | yes | `production` (the AEAT production endpoint: a real filing), `preproduction` (a presentation routed to another AEAT host: `ETSG_ForceTestMode` or an endpoint preference), `validation` (the AEAT validation service, ServValiDos), `override` (a host that is not the AEAT's: an endpoint preference pointing at a stub or proxy), `unknown` |
 | `Aeat_Host` | `VARCHAR(200)` | yes | host of the endpoint the attempt went to |

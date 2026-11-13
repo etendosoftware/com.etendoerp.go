@@ -51,7 +51,9 @@ final class FiscalAeatValidationOutcome {
     /** The direct presentation ("Presentación directa") — a filing. */
     DIRECT_SUBMISSION,
     /** "Validar sin presentar": the test mode of the direct presentation; nothing is filed. */
-    MANUAL_VALIDATION;
+    MANUAL_VALIDATION,
+    /** The validation the server runs by itself right before a real presentation. */
+    PRE_SUBMISSION_VALIDATION;
 
     /** The path of a submit request: a validation in test mode, a presentation otherwise. */
     static Path ofSubmission(boolean testMode) {

@@ -172,6 +172,19 @@ class Fiscal390SubmissionSupport {
     FiscalAeatAttemptLog.Declaration attempted = new FiscalAeatAttemptLog.Declaration(
         Fiscal390BoxesHandler.MODEL, year, period, declId, orgId);
     FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
+    // A real presentation is validated first, with the very file it is about to send: the
+    // validator's errors stop it (nothing presented, the declaration stays a draft).
+    if (!testMode) {
+      FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+          FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog(),
+              attempted, new FiscalAeatSubmissionSupport.FileToPresent(
+                  AEAT303SubmissionRequestBuilder.MODELO_390, fileContent, fiscalYear, period,
+                  idi));
+      if (!validation.proceed()) {
+        answerStoppedByValidation(validation, decl, declId, year, period, response);
+        return;
+      }
+    }
     String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
     AEAT303SubmissionResult result;
     try {
@@ -213,6 +226,26 @@ class Fiscal390SubmissionSupport {
     FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
         FiscalAeatSubmissionSupport.resultJson(result,
             declarationDataJson(decl, year, period, snapshot)));
+  }
+
+  /**
+   * The presentation did not go ahead: the validator rejected the file (its errors go to the
+   * declaration's incidents, like any AEAT answer) or — only when the policy says so — it could
+   * not be reached. Nothing else of the declaration changes.
+   */
+  private void answerStoppedByValidation(
+      FiscalAeatSubmissionSupport.PreSubmissionValidation validation, FiscalDecl decl,
+      String declId, int year, String period, HttpServletResponse response) throws Exception {
+    if (validation.rejected == null) {
+      FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
+          FiscalAeatSubmissionSupport.validationUnavailableJson());
+      return;
+    }
+    persistAeatIncidentsBestEffort(decl, validation.rejected);
+    commitBestEffort(declId);
+    FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
+        FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
+            declarationDataJson(decl, year, period, null)));
   }
 
   /**
@@ -404,11 +437,16 @@ class Fiscal390SubmissionSupport {
   }
 
   /**
-   * Name of the draft PDF the validator returns for a file validated before its download: the
-   * {@code TEST-} scheme under its own prefix, so it is never taken for a filing receipt nor for
-   * the test-mode attachment.
+   * Name of the draft PDF the validator returns for a file validated before its download
+   * ({@code VALIDACION-390-<year>-0A.pdf}): its own prefix and no "justificante", so it is never
+   * taken for a filing receipt nor for the test-mode attachment.
    */
   static String validationFileName(int year, String period) {
+    return "VALIDACION-390-" + year + "-" + Fiscal303BoxesHandler.safeFileToken(period) + ".pdf";
+  }
+
+  /** The name {@link #validationFileName} had at first; an attachment left with it is replaced too. */
+  static String legacyValidationFileName(int year, String period) {
     return "VALIDACION-" + justificanteFileName(year, period);
   }
 
