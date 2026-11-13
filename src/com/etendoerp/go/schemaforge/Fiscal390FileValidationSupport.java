@@ -89,15 +89,23 @@ class Fiscal390FileValidationSupport {
       return;
     }
 
+    long startedAt = System.currentTimeMillis();
     Fiscal390GenerateSupport.Generated generated =
         owner.generateSupport().generateContent(orgId, year, inputs);
+    long generatedAt = System.currentTimeMillis();
     AEAT303SubmissionService service = newValidationService();
     String endpoint = FiscalAeatAttemptLog.endpointOf(service, true);
     FiscalAeatValidationOutcome outcome = validate(service, generated.content, year, period);
+    long validatedAt = System.currentTimeMillis();
     recordOutcome(decl,
         new FiscalAeatAttemptLog.Declaration(Fiscal390BoxesHandler.MODEL, year, period, declId,
             orgId),
         outcome, endpoint);
+    // Where the time of a "Generar fichero 390" goes (the guards are timed by the handler).
+    AbstractFiscalHandler.log.info("Modelo 390 generate-validated (decl=" + declId + "): file "
+        + (generatedAt - startedAt) + " ms, AEAT validation (" + outcome.outcome().key() + ") "
+        + (validatedAt - generatedAt) + " ms, recording "
+        + (System.currentTimeMillis() - validatedAt) + " ms");
 
     JSONObject out = new JSONObject();
     out.put("fileName", Fiscal390GenerateSupport.fileName(year) + ".txt");
