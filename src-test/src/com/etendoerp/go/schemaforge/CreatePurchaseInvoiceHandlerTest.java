@@ -3502,4 +3502,95 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertEquals("2", captor.getValue().getJSONObject(0).getString("orderedQuantity"));
     }
   }
+
+  // ─── findAPInvoiceDocType never picks a corrective type (ETP-6179) ─────────
+
+  /** A ranked AP candidate list the client lookup answers, in the given order. */
+  @SuppressWarnings("unchecked")
+  private static void stubApCandidates(OBDal dal, List<DocumentType> candidates) {
+    when(dal.get(Client.class, "client-1")).thenReturn(mock(Client.class));
+    OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(candidates);
+  }
+
+  /**
+   * An ordinary purchase invoice was generated with a return or rectificative document type
+   * whenever one ranked first (the client's default "Factura rectificativa de proveedor", say),
+   * and was then booked as a correction of nothing. The first ordinary candidate wins.
+   */
+  @Test
+  public void findAPInvoiceDocTypeNeverPicksAReturnOrRectificativeType() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificative = mock(DocumentType.class);
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mock(DocumentType.class);
+      when(returnType.isReturn()).thenReturn(true);
+      DocumentType ordinary = mock(DocumentType.class);
+      stubApCandidates(dal, Arrays.asList(rectificative, returnType, ordinary));
+
+      assertSame(ordinary, new CreatePurchaseInvoiceHandler().findAPInvoiceDocType("client-1"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /** When every AP candidate is corrective there is none to use, not a corrective fallback. */
+  @Test
+  public void findAPInvoiceDocTypeAnswersNoneWhenEveryCandidateIsCorrective() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificative = mock(DocumentType.class);
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mock(DocumentType.class);
+      when(returnType.isReturn()).thenReturn(true);
+      stubApCandidates(dal, Arrays.asList(rectificative, returnType));
+
+      assertNull(new CreatePurchaseInvoiceHandler().findAPInvoiceDocType("client-1"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * ETP-6179 review W2 repro: several receipts are invoiced through a receipt-built header that
+   * carries NO order (only the single-receipt route builds the header from the order), so the
+   * sifDefaults preview must not read the common order either.
+   */
+  @Test
+  public void sifPreviewTargetCarriesTheOrderOnlyForASingleReceipt() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<MultiDocumentInvoiceSupport> multiMock =
+             Mockito.mockStatic(MultiDocumentInvoiceSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mock(Order.class);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getSalesOrder()).thenReturn(order);
+      when(first.getOrganization()).thenReturn(mock(Organization.class));
+      when(dal.get(ShipmentInOut.class, "rc-1")).thenReturn(first);
+      multiMock.when(() -> MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
+          any(), any(), any(), any())).thenReturn(List.of(first, first));
+      DocumentType docType = mock(DocumentType.class);
+      CreatePurchaseInvoiceHandler handler = Mockito.spy(new CreatePurchaseInvoiceHandler());
+      Mockito.doReturn(order).when(handler).resolveCommonOrder(any());
+      Mockito.doReturn(docType).when(handler).resolveAPInvoiceDocType(order);
+
+      InvoiceSifPreset.Target several = PurchaseInvoiceSifTarget.resolve(handler, "goods-receipt",
+          "rc-1", new JSONObject().put("receiptIds", new JSONArray().put("rc-1").put("rc-2")));
+      InvoiceSifPreset.Target single = PurchaseInvoiceSifTarget.resolve(handler, "goods-receipt",
+          "rc-1", new JSONObject());
+
+      assertNull("several receipts: the header carries no order", several.order());
+      assertSame(docType, several.docType());
+      assertSame("one receipt: the header carries the order", order, single.order());
+    }
+  }
 }

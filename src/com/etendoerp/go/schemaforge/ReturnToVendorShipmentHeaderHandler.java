@@ -28,7 +28,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
@@ -57,8 +56,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
  * injection point and the {@code handle()} wiring shared with {@link ReturnMaterialReceiptHeaderHandler}.
+ *
+ * <p><b>Binding (ETP-6179).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code returnToVendorShipmentHeaderHandler}) and the class's
+ * {@code @Named} were removed in the same change (neo-extension-migration).
  */
-@Named("returnToVendorShipmentHeaderHandler")
+@NeoExtension(spec = "return-to-vendor-shipment", entity = "returnToVendorShipment")
 public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnToVendorShipmentHeaderHandler.class);
@@ -219,9 +222,13 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             NeoActionContract.TYPE_BOOLEAN,
             "Only the JSON boolean true creates a second factura rectificativa for a return "
                 + "that already has one; anything else (absent, false, a string, a number) keeps "
-                + "the one-per-return refusal. Use it only when a second one is really intended."))
+                + "the one-per-return refusal. Use it only when a second one is really intended."),
+        InvoiceSifPreset.sifFieldsParam(false))
         .withIdDescription("The id of the completed return shipment.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
+    // ETP-6179: the SIF fields the factura rectificativa would get (SII only on a purchase).
+    contracts.put(InvoiceSifPreset.ACTION_SIF_DEFAULTS, InvoiceSifPreset.defaultsContract(
+        ACTION_CREATE_RETURN_INVOICE, "The id of the return shipment."));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);
     contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -462,8 +469,8 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
 
         // ETP-4737: resolves the unified "Factura Rectificativa" (API + isRectificative) doc
         // type, replacing the legacy plain-APC ("AP CreditMemo") lookup.
-        DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            returnDoc.getClient(), returnDoc.getOrganization().getId(), "API", false, false, true);
+        // ETP-6179: the same lookup the sifDefaults preview uses, so the two cannot drift.
+        DocumentType docType = ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No rectificative invoice document type found for this organization");

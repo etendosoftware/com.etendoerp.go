@@ -98,6 +98,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.ReturnShipmentUtils
  * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class ReturnToVendorShipmentHeaderHandlerTest {
 
@@ -491,8 +492,8 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       when(org.getId()).thenReturn("org-1");
       when(returnDoc.getOrganization()).thenReturn(org);
       DocumentType docType = mock(DocumentType.class);
-      utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
-          eq("API"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
+      // ETP-6179: the handler resolves it through the lookup the sifDefaults preview shares.
+      utils.when(() -> ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc)).thenReturn(docType);
       support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
           any(), anyBoolean(), any(), any())).thenThrow(QuotaRefusalTestSupport.refusal());
 
@@ -1129,13 +1130,17 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts = handler.actionContracts();
 
     assertEquals(java.util.List.of("availableReceipts", "availableReceiptLines",
-        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "post", "unpost",
-        "documentAction"),
+        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "sifDefaults", "post",
+        "unpost", "documentAction"),
         java.util.List.copyOf(contracts.keySet()));
     assertFalse(contracts.get("availableReceipts").isMutating());
     assertFalse(contracts.get("availableReceiptLines").isMutating());
     assertTrue(contracts.get("importReceiptLines").isMutating());
     assertTrue(contracts.get("documentAction").getDescription().contains("DRAFT"));
+    // ETP-6179: the rectificativa's SIF fields, previewed and accepted like the customer return
+    assertFalse(contracts.get("sifDefaults").isMutating());
+    assertTrue(contracts.get("createReturnInvoice").getParams().stream()
+        .anyMatch(p -> "sifFields".equals(p.getName())));
   }
 
   /** Every declared action is one handle() dispatches (a 400 with no record and no body), except
@@ -2014,6 +2019,144 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of its factura rectificativa (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, NeoActionContract> contracts = handler.actionContracts();
+
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createReturnInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a return to a vendor previews its purchase factura rectificativa: SII only —
+   * never VERI*FACTU or TicketBAI, even with both configured.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsThePurchaseRectificativaWithSiiOnly() throws Exception {
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+        new InvoiceSifPreviewTestSupport.PreviewMocks(true)) {
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      Organization sourceOrg = InvoiceSifPreviewTestSupport.org();
+      when(returnDoc.getOrganization()).thenReturn(sourceOrg);
+      when(returnDoc.isSalesTransaction()).thenReturn(false);
+      when(mocks.dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
+      stubDocTypeLookup(mocks.dal, InvoiceSifPreviewTestSupport.ORG_ID);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults(
+              "return-to-vendor-shipment", "ret-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      assertEquals(List.of("SII"), InvoiceSifPreviewTestSupport.systems(data));
+      assertFalse(data.getBoolean("sales"));
+      assertTrue(data.getBoolean("rectificative"));
+      InvoiceSifPreviewTestSupport.assertNoVerifactuOrTicketBaiField(data);
+      assertEquals("F1", data.getJSONObject("fields")
+          .getString(Invoice.PROPERTY_AEATSIICLAVETIPOFC));
+      Mockito.verify(mocks.dal, Mockito.never()).save(any());
+    }
+  }
+
+  // ── createReturnInvoice: the sifFields are applied after the first save (ETP-6179) ──
+
+  /** The body every createReturnInvoice test below sends: one SIF field. */
+  private static JSONObject sifBody() throws Exception {
+    return new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS,
+        new JSONObject().put(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1"));
+  }
+
+  /**
+   * The caller's sifFields reach InvoiceSifPreset.applyBeforeCompletion with the invoice once it
+   * is saved and flushed — so its header row exists — and before it is completed.
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void handleCreateReturnInvoice_appliesTheSifFieldsAfterTheFirstSave() throws Exception {
+    JSONObject body = sifBody();
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+      Invoice invoice = mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-sif");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess());
+           MockedStatic<InvoiceSifPreset> sifMock = Mockito.mockStatic(InvoiceSifPreset.class,
+               invocation -> {
+                 if (!"applyBeforeCompletion".equals(invocation.getMethod().getName())) {
+                   return invocation.callRealMethod();
+                 }
+                 // the header row is saved and flushed, and not yet completed
+                 Mockito.verify(dal).save(invoice);
+                 Mockito.verify(dal, Mockito.atLeastOnce()).flush();
+                 Mockito.verifyNoInteractions(completion.processInvoiceUtil);
+                 return null;
+               })) {
+        mockCompletedInvoice(dal, "ret-inv-sif", "REC-SIF", "CO");
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("ret-1").requestBody(body).build());
+
+        assertEquals(200, result.getHttpStatus());
+        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+        Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
+            .process(eq("ret-inv-sif"), eq("CO"), anyString(), anyString(), anyString(), any(),
+                any());
+      }
+    }
+  }
+
+  /**
+   * A refused SIF value answers its 422 and rolls back the invoice already saved: nothing is
+   * completed and nothing is left behind.
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void handleCreateReturnInvoice_aRefusedSifFieldRollsTheInvoiceBack() throws Exception {
+    JSONObject body = sifBody();
+    NeoResponse refusal = NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE,
+        new JSONObject().put("success", false)
+            .put("messageKeys", new JSONArray().put(InvoiceSifPreset.MSG_FIELD_INVALID)));
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+      Invoice invoice = mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-refused");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess());
+           MockedStatic<InvoiceSifPreset> sifMock = Mockito.mockStatic(InvoiceSifPreset.class,
+               invocation -> {
+                 if (!"applyBeforeCompletion".equals(invocation.getMethod().getName())) {
+                   return invocation.callRealMethod();
+                 }
+                 throw new InvoiceSifPreset.Refused(refusal);
+               })) {
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("ret-1").requestBody(body).build());
+
+        assertSame(refusal, result);
+        Mockito.verify(dal).save(invoice);
+        Mockito.verify(dal).rollbackAndClose();
+        Mockito.verifyNoInteractions(completion.processInvoiceUtil);
+      }
     }
   }
 }
