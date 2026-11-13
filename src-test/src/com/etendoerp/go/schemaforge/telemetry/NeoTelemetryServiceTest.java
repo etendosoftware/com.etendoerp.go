@@ -43,6 +43,7 @@ import com.etendoerp.go.usageevents.LogCapture;
 /**
  * @covers com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService
  * @covers com.etendoerp.go.schemaforge.telemetry.LogNeoTelemetrySink
+ * @covers com.etendoerp.go.schemaforge.telemetry.MixpanelNeoTelemetryConfig
  */
 class NeoTelemetryServiceTest {
 
@@ -350,6 +351,41 @@ class NeoTelemetryServiceTest {
     assertDoesNotThrow(() ->
         service.emit(NeoTelemetryEvents.BACKEND_ACCOUNTING_ENTRY_GENERATED,
             mapOf("status", "success")));
+  }
+
+  /**
+   * With the Mixpanel backend disabled ({@code ETGO_MIXPANEL_ENABLED=false}, here its system
+   * property twin) the runtime service never builds a Mixpanel sink, even when a token is present,
+   * and emitting an event neither throws nor submits anything.
+   */
+  @Test
+  void runtimeServiceWithMixpanelDisabledNeverBuildsTheMixpanelSinkAndEmitDoesNotThrow() {
+    String enabledKey = MixpanelNeoTelemetryConfig.PROP_ENABLED;
+    String tokenKey = MixpanelNeoTelemetryConfig.PROP_TOKEN;
+    String previousEnabled = System.getProperty(enabledKey);
+    String previousToken = System.getProperty(tokenKey);
+    System.setProperty(enabledKey, "false");
+    System.setProperty(tokenKey, "a-token-that-must-stay-unused");
+    try (org.mockito.MockedConstruction<MixpanelNeoTelemetrySink> mixpanel =
+             org.mockito.Mockito.mockConstruction(MixpanelNeoTelemetrySink.class)) {
+      NeoTelemetryService service = NeoTelemetryService.runtime();
+
+      assertDoesNotThrow(() -> service.emit(NeoTelemetryEvents.BACKEND_GOODS_SHIPMENT_COMPLETED,
+          mapOf("account_id", "CLIENT-A", "flag_enabled", true), "CLIENT-A"));
+
+      assertTrue(mixpanel.constructed().isEmpty(), "the Mixpanel sink must not be created");
+    } finally {
+      restore(enabledKey, previousEnabled);
+      restore(tokenKey, previousToken);
+    }
+  }
+
+  private static void restore(String key, String previous) {
+    if (previous == null) {
+      System.clearProperty(key);
+    } else {
+      System.setProperty(key, previous);
+    }
   }
 
   @Test
