@@ -8404,7 +8404,12 @@ Only the action SPLITS. "Create invoice from order" and the single CRUD create e
 
 **Known limitation (pre-existing, shared with purchase — not changed by ETP-6002).** The pending the rule reads is `computePendingQtyPerLineOrThrow(…, true)`, whose `draft_all` arm counts the quantity of every DRAFT invoice line on the same ORDER line against each movement line of that order line in the same document. While another invoice of that order line is still a draft, a sibling movement line that is really pending can read 0: draft A linked to shipment line S1 makes S2 (same order line, same shipment) look taken for invoice B, so B's quantity is not bound to S2 and its line stays linked to the order line only. It only happens while the other invoice is a draft; once A is completed only its real links (`M_InOutLine_ID`, `M_MatchSI`) count. Fixing it means scoping `draft_all` to unlinked draft lines, which changes the purchase receipt cap too — left for the purchase pass.
 
-**IMP-3 (quotation ↔ shipment).** `GoodsShipmentHeaderHandler#enrichLinkedOrder` now flags each `linkedOrders` entry with `isQuotation` (`DocSubTypeSO = 'OB'` of `C_DocTypeTarget_ID`), so a shipment made from an invoice that came straight from a quotation shows a quotation chip instead of "Pedido". `SalesQuotationHeaderHandler` (detail GET) injects `linkedShipments` (`QuotationShipmentLinks`): shipments whose header `C_Order_ID` or whose lines' `C_OrderLine_ID` point at the quotation — direct links only, nothing deduced through invoices; declared in `responseEnrichedFields`. Touching both header handlers migrated them (touch rule, §5.3.a): `GoodsShipmentHeaderHandler` is `@NeoExtension(spec = "goods-shipment", entity = "goodsShipment")` and `SalesQuotationHeaderHandler` `@NeoExtension(spec = "sales-quotation", entity = "quotation")`; their `@Named`, the rows' `Java_Qualifier` (sourcedata `ETGO_SF_ENTITY.xml`) and the `javaQualifier` in both `decisions.json` were removed, `EXTENSION_CEILING` went 92 → 90 and both left `legacyHandlers` in the guardrail allowlist. A database that has not run `update.database` still carries the old qualifier on both rows: harmless, the annotation is resolved first and no bean carries that name any more.
+**IMP-3 (quotation ↔ shipment) — superseded by QA CP-14.** A quotation and a shipment are never related: quotation → invoice → shipment does not make the quotation and the shipment direct, and the quotation must not end up delivered (QA criterion, ETP-6002 CP-14). So:
+- `GoodsShipmentHeaderHandler#enrichLinkedOrder` leaves out every order whose `C_DocTypeTarget_ID` has `DocSubTypeSO = 'OB'`, and its entries carry no `isQuotation` (the first IMP-3 version listed the quotation with that flag);
+- `SalesQuotationHeaderHandler` injects no `linkedShipments` any more (`QuotationShipmentLinks` was removed);
+- a shipment line no longer carries a quotation line: `GoodsShipmentLineHandler#handle` drops a quotation `salesOrderLine` from any CRUD write (REST single, `/batch`, MCP — the window's «Añadir desde Factura» popup still sends it), and the sales invoice's `createShipment` follow-up maps with `InvoiceInOutMapping.mapDeliverableOrders` (no quotation order line, never the quotation as the shipment's `C_Order_ID`). So completing the shipment does not raise the quotation's `QtyDelivered`. The quotation test is `SalesQuotations.isQuotation` (`DocSubTypeSO`), called by those customizations only; the purchase receipt keeps `InvoiceInOutMapping.map`, unchanged.
+Existing data is not corrected: a shipment whose lines already carry a quotation line stops listing it (the filter is on the read), but the quotation's `QtyDelivered` already raised by such a shipment stays as it is. The invoice ↔ quotation relation (`isQuotation` on the invoice's `linkedOrders`) is direct and unchanged.
+Touching both header handlers migrated them (touch rule, §5.3.a): `GoodsShipmentHeaderHandler` is `@NeoExtension(spec = "goods-shipment", entity = "goodsShipment")` and `SalesQuotationHeaderHandler` `@NeoExtension(spec = "sales-quotation", entity = "quotation")`; their `@Named`, the rows' `Java_Qualifier` (sourcedata `ETGO_SF_ENTITY.xml`) and the `javaQualifier` in both `decisions.json` were removed, `EXTENSION_CEILING` went 92 → 90 and both left `legacyHandlers` in the guardrail allowlist. A database that has not run `update.database` still carries the old qualifier on both rows: harmless, the annotation is resolved first and no bean carries that name any more.
 
 **Consequence, by design:** a sales invoice line created from an order before this change with no `M_InOutLine_ID` and no `M_MatchSI` row stops showing its shipment (local DB: 1 line, 1 invoice — `I/32`, QA Testing; no data-fix).
 
@@ -13696,15 +13701,80 @@ not the total-discount line, line order; `{id, lineNo, product, product$_identif
 invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
-- **goods shipment**: `max(0, invoiced − delivered(order line) − drafts)` for a line with an order line (drafts: every
-  DRAFT shipment on that order line, the target included); for one without, its quantity, or 0 when `linked` (already
-  pointing at a movement line);
+- **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
+  invoice's own «Crear albarán» follow-up** (`createShipment`, `InvoicePendingResolver.loadSources`, read through
+  `ImportInvoiceLinesIntoInOutHandler#loadFollowUpSources`; `availableInvoices` reads the whole scanned page in ONE
+  statement and skips the draft-holdings query, which only feeds the `inDraftDocuments` note of the lines), so the popup, `availableInvoiceLines` on MCP and
+  `createShipment` never disagree on the same invoice. Per invoice line: `QtyInvoiced − moved`, where `moved` is the
+  quantity of the movement lines linked to THAT invoice line (`C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`; active,
+  not voided, not a return; a DRAFT one counts, the target's own included) — never another invoice's shipments of the
+  same order line; then, for a line with its own `C_OrderLine_ID`, capped by `QtyOrdered − QtyDelivered − DRAFT
+  movement lines on it`, shared out over the invoice's lines in line order. A line the follow-up does not carry (no
+  product, nothing pending) is at 0. A shipment line created with `invoiceLineId` counts whether or not it carries the
+  order line, so the window's popup (which copies `salesOrderLine`; a quotation line is dropped by
+  `GoodsShipmentLineHandler`, CP-14) and an MCP create with only `invoiceLineId` give the same pending. `linked` still
+  reports the column only (display); `orderLine` (own, or the header order's line of the same product) and
+  `inDraftDocuments` are display only. Known, shared with the follow-up since ETP-5576: one movement line linked to
+  two invoice lines counts in full for each (can only under-state, never offer twice), and the order cap reads
+  `QtyOrdered`, so a shipment made by hand on the order line (no invoice link) of a partly invoiced order does not
+  lower the pending of the invoiced part. (A first CP-22 version capped by the invoices put on the order line and split
+  a shared movement line; review M2 replaced it with this one rule, which also removed its need to tell
+  rectificatives apart — review M1.)
 - **goods receipt** (product decision: the popup's rule is kept, delivered is NOT deducted): 0 when `linked`, otherwise
   `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
 
 Only lines with something pending unless `includeCovered`. The line keys are always present (new actions, nothing to
-keep compatible); `availableInvoices` takes `detail` only for `creationDate`. The popup shows no row total for them (no
-price), so there is no `amount`.
+keep compatible). On the goods receipt `availableInvoices` takes `detail` only for `creationDate`; on the goods
+shipment (ETP-6002 CP-27) `detail` also adds `amount` — unit price (`C_InvoiceLine.PriceActual`) × `pendingQuantity`
+summed over the lines with a positive pending, at the invoice currency's standard precision — the same figure
+`availableOrders` gives an order, and what the shipment's «Añadir desde Factura» row shows (it used to show 0,00);
+its `availableInvoiceLines` rows add `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
+once they are loaded. The goods receipt's rows carry neither.
+
+**Invoice-line link of a goods-shipment line (ETP-6002 CP-22).** `invoiceLineId` on a `goods-shipment/goodsShipmentLine`
+create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDirectives`): MCP no longer reports it in
+`unknownFields`, and `etendo_schema(view:"create")` publishes it. After the create the line is linked with
+`InvoiceLineLinker.linkInvoiceLineToInOutLine(…, SALES)`: the first shipment of the invoice line in its column (the
+match row is written by `M_INOUT_POST` on completion), a later partial one in `M_MatchSI` at once (before, a second
+partial shipment was not linked at all). Same on REST single, `/batch` and MCP. **QA BUG-1 (MCP parity):** a create
+that carries `invoiceLineId` and no `salesOrderLine` takes the invoice line's `C_OrderLine_ID` in the pre-hook
+(`GoodsShipmentLineHandler#deriveOrderLineFromInvoiceLine`), never a quotation's (`SalesQuotations`, CP-14), only for
+an invoice line of the caller's client (`TenantOwnership.loadOwned`); a `salesOrderLine` the caller sent is kept. The
+window always sent it; MCP agents are never offered it (system field, not in `view:"create"`), so their lines carried no
+order line: the order stayed undelivered and `availableOrderLines` offered the units again. The `invoiceLineId`
+directive and the `availableInvoiceLines` flow text say so. It does not double-count the invoice's pending: the
+follow-up rule takes `min(invoiced − moved by the link, QtyOrdered − QtyDelivered − drafts)`, never their sum. The goods-receipt line keeps the
+column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Binding: `GoodsShipmentLineHandler` moved from
+`@Named("goodsShipmentLineHandler")` + the row's `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-shipment", entity =
+"goodsShipmentLine")` (touch-means-migrate, §5.3.a): qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING`
+75 → 74 on the branch (71 once merged with develop, where ETP-6179 and later migrations lowered it further), the class removed from `legacyHandlers`.
+
+**Draft-time match rows (ETP-6002 review M4).** The `M_MatchSI` row a later partial shipment gets at draft time
+froze the line quantity of that moment. `GoodsShipmentHeaderHandler#handle` (the `documentAction` POST, before the
+native completion) calls `InvoiceLineLinker.refreshDraftMatchQuantities(shipment, SALES)`, which sets `qty =
+MovementQty` on the unposted rows of that DRAFT shipment's lines, so `M_INOUT_POST` (`QtyInvoiced`,
+`IsCompletelyInvoiced`) and `ETGO_GET_DELIVERY_STATUS` read the final quantity. A failure propagates and the
+completion is refused: on PostgreSQL a failed statement aborts the transaction, so carrying on would only fail later
+with a misleading "current transaction is aborted". Life cycle, verified on the schema: deleting the
+draft line or the draft shipment cascade-deletes the row (`m_matchsi_m_inoutline` `ON DELETE CASCADE`; the column is
+`ON DELETE SET NULL`); `M_MATCHSI_TRG` only refuses deleting a POSTED row, which a draft one never is; voiding a
+draft or a completed shipment leaves the rows on a `VO` movement, which every reader skips (`io.docstatus <> 'VO'` in
+the pending readers, `CO`/`CL` only in the delivery status), and the Classic reversal writes the opposite rows on the
+`VO` reversal; `M_INOUT_POST` has no reactivation for shipments. A later shipment of an invoice line whose column
+points at a voided line is linked through `M_MatchSI` (the column is set only when empty), so it is counted. The
+purchase side (`M_MatchInv`, follow-up linker) is unchanged.
+
+**Price list of the create-invoice modal (ETP-6002, CP-14 follow-up).** `GoodsShipmentHeaderHandler#enrichResolvedPriceList`
+gained a tier between the linked order and the business partner: the price list of the first directly linked invoice
+(`linkedInvoices[0]`, whose entries now carry `priceListId` / `priceList$_identifier`). A shipment made from an invoice
+that came straight from a quotation has no linked order since CP-14, and preselects that invoice's price list instead
+of falling to the partner's.
+
+**`listInvoices` on sales orders and quotations (ETP-6002).** Each row adds `isRectificative`
+(`SalesInvoiceHeaderHandler.isRectificativeDocType`, passed by `CreateDraftInvoiceHandler#handleList` to
+`OrderInvoiceListSupport.listInvoices`); rows and order are unchanged. The SPA's related documents of a sales order and
+a quotation leave those rows out (QA criterion: a Pedido / Presupuesto never shows a factura rectificativa). The
+purchase order's `listInvoices` passes no rule and its rows carry no such key.
 
 **`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
 above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about

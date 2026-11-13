@@ -45,6 +45,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
@@ -321,6 +322,59 @@ class InvoiceInOutMappingTest {
 
     assertNull(InvoiceInOutMapping.resolveOrder(invoice, twoOrders));
     assertNull(InvoiceInOutMapping.resolveOrder(invoice, oneWithoutOrder));
+  }
+
+  /**
+   * ETP-6002 CP-14: the SALES mapper never carries a quotation. An invoice made straight from a
+   * quotation points at it (header and lines); the shipment made from that invoice keeps no
+   * quotation order line and does not take the quotation as its order, so completing it does not
+   * mark the quotation delivered. A sales-order line next to it is still carried, and the purchase
+   * mapper ({@code map}) carries every order as before.
+   */
+  @Test
+  void mapDeliverableOrdersCarriesNoQuotationButKeepsTheOrders() throws Exception {
+    Order quotation = order("quo-1");
+    DocumentType quotationType = mock(DocumentType.class);
+    when(quotationType.getSOSubType()).thenReturn("OB");
+    when(quotation.getTransactionDocument()).thenReturn(quotationType);
+    Order salesOrder = order("ord-1");
+    invoice("inv-1", quotation);
+    InvoiceLine fromQuotation = lineFrom(quotation);
+    InvoiceLine fromOrder = lineFrom(salesOrder);
+    when(dal.get(InvoiceLine.class, "il-q")).thenReturn(fromQuotation);
+    when(dal.get(InvoiceLine.class, "il-o")).thenReturn(fromOrder);
+    OrderLine orderLine = fromOrder.getSalesOrderLine();
+    OrderLine quotationLine = fromQuotation.getSalesOrderLine();
+    List<PendingResolver.SourceLine> pending = Arrays.asList(
+        new PendingResolver.SourceLine("il-q", BigDecimal.ONE),
+        new PendingResolver.SourceLine("il-o", BigDecimal.ONE));
+
+    try (MockedStatic<InOutWarehouseResolver> warehouses = mockStatic(InOutWarehouseResolver.class)) {
+      InOutFollowUpCreator.Mapping sales = InvoiceInOutMapping.mapDeliverableOrders("inv-1",
+          pending, FollowUpInputs.none());
+      InOutFollowUpCreator.Mapping purchase = InvoiceInOutMapping.map("inv-1", pending,
+          FollowUpInputs.none());
+
+      assertNull(field(sales.getLines().get(0), "orderLine"), "no quotation line");
+      assertSame(orderLine, field(sales.getLines().get(1), "orderLine"));
+      assertNull(field(sales.getHeader(), "order"),
+          "the quotation is not the shipment's order, and the lines come from two sources");
+      assertSame(quotationLine, field(purchase.getLines().get(0), "orderLine"),
+          "map (the purchase receipt's) is unchanged");
+      assertSame(quotation, field(purchase.getHeader(), "order"));
+    }
+  }
+
+  @Test
+  void resolveOrderSkipsARefusedInvoiceOrderAndTreatsARefusedLineOrderAsNone() {
+    Order quotation = order("quo-1");
+    Order salesOrder = order("ord-1");
+    Invoice invoice = invoice("inv-1", quotation);
+
+    assertSame(salesOrder, InvoiceInOutMapping.resolveOrder(invoice,
+        Collections.singletonList(lineFrom(salesOrder)), o -> o != quotation));
+    assertNull(InvoiceInOutMapping.resolveOrder(invoice,
+        Collections.singletonList(lineFrom(quotation)), o -> o != quotation));
   }
 
   // ── linker ────────────────────────────────────────────────────────────────

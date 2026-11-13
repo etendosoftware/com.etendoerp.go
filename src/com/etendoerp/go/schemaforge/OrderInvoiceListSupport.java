@@ -21,6 +21,7 @@ import java.text.SimpleDateFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -58,6 +59,20 @@ final class OrderInvoiceListSupport {
    * @return the {@code {response:{data:[...]}}} payload, or an error response
    */
   static NeoResponse listInvoices(NeoContext context, boolean salesTransaction) {
+    return listInvoices(context, salesTransaction, null);
+  }
+
+  /**
+   * {@link #listInvoices(NeoContext, boolean)}, each row also telling whether the invoice is a
+   * rectificative ({@code isRectificative}) by the caller's own rule (ETP-6002): a sales order's
+   * or quotation's related documents leave rectificatives out (QA criterion: they are the
+   * original invoice's relation, not the order's), while the rows and their order are unchanged
+   * for every other reader of the action.
+   *
+   * @param rectificative the caller's rectificative rule; {@code null} adds no key (purchase)
+   */
+  static NeoResponse listInvoices(NeoContext context, boolean salesTransaction,
+      Predicate<Invoice> rectificative) {
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
@@ -101,6 +116,9 @@ final class OrderInvoiceListSupport {
           // the amount in the invoice's own currency (form and preview read this field).
           Currency currency = inv.getCurrency();
           item.put("currency$_identifier", currency != null ? currency.getISOCode() : JSONObject.NULL);
+          if (rectificative != null) {
+            item.put("isRectificative", rectificative.test(inv));
+          }
           if (inv.getInvoiceDate() != null) {
             item.put("invoiceDate", new SimpleDateFormat("yyyy-MM-dd").format(inv.getInvoiceDate()));
           }
