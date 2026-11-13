@@ -213,6 +213,7 @@ com.etendoerp.go.payment.StripeListPagerTest
 com.etendoerp.go.payment.StripePriceServiceTest
 com.etendoerp.go.payment.StripeResponseTest
 com.etendoerp.go.payment.StripeSubscriptionPeriodReaderTest
+com.etendoerp.go.payment.SubscriptionBillingCalendarTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierPeriodTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierTest
 com.etendoerp.go.payment.SubscriptionLifecycleCorrelationTest
