@@ -370,6 +370,7 @@ portal") and the download button goes â€” the portal shows the same printable â€
 `document.portal.intro` sentence states the link's validity. With no link (flag off, purchase and
 return contracts) the email is byte-identical to before. The base class only asks whether a kind
 was declared and whether a link was minted; it names no window or table.
+The portal side (endpoints, renewal checks, rate limits, PDF) is in `customer-portal.md`.
 
 - **One link per send.** `PortalLinkService#mintForSend` inserts an `ETGO_Portal_Link` row in
   `resolve()` with `SENT_AT` null (pending) and the email's To and CC. The link id travels as

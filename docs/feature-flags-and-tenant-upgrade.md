@@ -203,7 +203,7 @@ browser reads it, and none must be added. It gates the link only: the portal rou
 link lives 48 hours from its send and there is no manual revoke action any more; an expired link is
 renewed by email to the original recipients (`POST /sws/portal/renew`), and that renewal is **not**
 gated — it only replaces a link the flag already let out. Turning the flag off stops new links; a
-link already out stops working at the end of its own 48 hours.
+link already out stops working at the end of its own 48 hours. The portal itself: `customer-portal.md`.
 
 `structured-address-for-sepa` (ETP-5806, TTL 2026-11-15) decides whether the structured SEPA
 address fields (Street/Number/Building Name) are exposed and enforced, backend-only — the frontend
