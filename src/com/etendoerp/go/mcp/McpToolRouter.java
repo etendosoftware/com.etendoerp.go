@@ -76,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -494,6 +495,8 @@ public class McpToolRouter {
     // ETP-5611: same default as the REST list — a child tab without orderBy follows the AD tab's
     // order-by instead of the random id order.
     NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
+    // ETP-6148: property-path fields, read and sorted exactly as on the REST list.
+    NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);
 
     // One read context for the customization's filter aliases and read predicates below.
     NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
@@ -507,7 +510,7 @@ public class McpToolRouter {
     if (filters != null && filters.length() > 0) {
       String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
           NeoReadPredicates.resolveFilterAliases(readCtx, NeoExtensionChannel.MCP),
-          appliedAliases, log);
+          appliedAliases, NeoPropertyPaths.of(fieldFilter), log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -543,6 +546,9 @@ public class McpToolRouter {
     if (error != null) {
       return wrapAsErrorContent(error);
     }
+    // ETP-5837 (QA CP-16): an offset at or past the end is an empty page, not the first page
+    // again — core restarts an empty page from row 0. MCP only; the REST list keeps core's answer.
+    McpListPaging.emptyPageWhenPastEnd(responseJson, offset);
 
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
@@ -627,6 +633,8 @@ public class McpToolRouter {
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
+    // ETP-6148: property-path fields, read exactly as on the REST GET by id.
+    NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);
 
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
@@ -1630,6 +1638,9 @@ public class McpToolRouter {
     // whether an address has a country. Empty for every entity without a wrapper policy.
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
         McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
+    // ETP-6148: the property-path fields, read-only, at the same point and for the same reason.
+    McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
+        McpPathFieldSchema.build(sfEntity, dalEntity));
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // ETP-5473: what the entity's customization refuses a create without, although AD and
     // etendo_defaults do not say so. Flagged on the full array so every view agrees.

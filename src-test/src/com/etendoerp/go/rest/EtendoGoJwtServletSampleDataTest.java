@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.rest;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,11 +42,16 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 
+import com.etendoerp.go.onboarding.OnboardingRemittanceSetupService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 
 /**
  * ETP-5426 — the servlet wiring of the optional sample data: the post-commit best-effort step and
- * the onboarding draft keeping the checkbox value.
+ * the onboarding draft keeping the checkbox value. ETP-6148 — the remittance setup that follows it
+ * (the sample data is a new tenant's only source of a bank account): its own commit when it
+ * provisioned something, nothing when it did not, and a rollback that never escapes on a failure.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 class EtendoGoJwtServletSampleDataTest {
 
@@ -131,6 +137,77 @@ class EtendoGoJwtServletSampleDataTest {
     assertEquals(Boolean.TRUE, clean.get("includeSampleData"));
     assertEquals("Acme", clean.get("clientName"));
     assertFalse(clean.has("sector"), "only the sample-data opt-in may be a boolean");
+  }
+
+  // ── remittance setup (ETP-6148) ───────────────────────────────────────────
+
+  private static final String ACCOUNT_EMAIL = "owner@example.com";
+  private static final String REMITTANCE_STEP = "remittance setup";
+
+  @Test
+  void aRemittanceSetupThatProvisionedCommitsItsOwnTransaction() {
+    OnboardingRemittanceSetupService remittance = remittanceSetup();
+    when(remittance.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL)).thenReturn(true);
+
+    try (MockedStatic<EtendoGoDalHelper> dal = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.applyRemittanceSetupBestEffort(CLIENT_ID, ACCOUNT_EMAIL);
+
+      verify(remittance).applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL);
+      dal.verify(() -> EtendoGoDalHelper.commitDalChanges(eq(REMITTANCE_STEP), any()));
+      dal.verify(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()), never());
+    }
+  }
+
+  @Test
+  void aRemittanceSetupWithNothingToDoTouchesNoTransaction() {
+    OnboardingRemittanceSetupService remittance = remittanceSetup();
+    when(remittance.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL)).thenReturn(false);
+
+    try (MockedStatic<EtendoGoDalHelper> dal = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.applyRemittanceSetupBestEffort(CLIENT_ID, ACCOUNT_EMAIL);
+
+      dal.verifyNoInteractions();
+    }
+  }
+
+  /** A failure rolls back only this step and never escapes: the committed tenant survives it. */
+  @Test
+  void aFailedRemittanceSetupRollsBackWithoutFailingTheSignup() {
+    OnboardingRemittanceSetupService remittance = remittanceSetup();
+    IllegalStateException boom = new IllegalStateException("provisioning failed");
+    when(remittance.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL)).thenThrow(boom);
+
+    try (MockedStatic<EtendoGoDalHelper> dal = mockStatic(EtendoGoDalHelper.class)) {
+      assertDoesNotThrow(() -> servlet.applyRemittanceSetupBestEffort(CLIENT_ID, ACCOUNT_EMAIL));
+
+      dal.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(REMITTANCE_STEP), eq(boom),
+          any()));
+      dal.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()), never());
+    }
+  }
+
+  /** A failing commit is rolled back too, and never escapes. */
+  @Test
+  void aFailedRemittanceCommitRollsBackWithoutFailingTheSignup() {
+    OnboardingRemittanceSetupService remittance = remittanceSetup();
+    when(remittance.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL)).thenReturn(true);
+    IllegalStateException commitFailure = new IllegalStateException("commit failed");
+
+    try (MockedStatic<EtendoGoDalHelper> dal = mockStatic(EtendoGoDalHelper.class)) {
+      dal.when(() -> EtendoGoDalHelper.commitDalChanges(eq(REMITTANCE_STEP), any()))
+          .thenThrow(commitFailure);
+
+      assertDoesNotThrow(() -> servlet.applyRemittanceSetupBestEffort(CLIENT_ID, ACCOUNT_EMAIL));
+
+      dal.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(REMITTANCE_STEP),
+          eq(commitFailure), any()));
+    }
+  }
+
+  private OnboardingRemittanceSetupService remittanceSetup() {
+    OnboardingRemittanceSetupService remittance = mock(OnboardingRemittanceSetupService.class);
+    servlet.onboardingRemittanceSetupService = remittance;
+    return remittance;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
