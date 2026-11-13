@@ -2422,6 +2422,16 @@ delete-old-then-mark-new semantics), so there is nothing left to serve.
 The send event remains audited by the transactional email service, but download authorization does
 not rely on in-memory audit state.
 
+**Shared with the customer portal (ETP-6209).** The lookup and the streaming now live in
+`AnonymousAttachmentStreamer`, and the customer portal's `GET /sws/portal/documents/{kind}/{id}/pdf`
+(and the detail's `hasPdf`) uses the same code: `findMainAttachmentOfClient` (native SQL plus the
+explicit client check against the caller's credential: the signed token here, the portal link
+there), then `stream`, which bypasses `AttachImplementationManager.download()` exactly as described
+in ETP-5304 (filesystem attachments read their recorded `path`; others go through their own
+handler). Neither caller can use `NeoAttachmentsHelper.handleGetMain` or `NeoAttachmentsDownloader`:
+both resolve through the session's tenant, and these requests have none. The email link's answers
+(403, 404, 500 messages) are unchanged.
+
 **Attachment links (ETP-5715).** The MCP's download links are the same token with one more claim, `att` (the attachment id), valid 10 minutes
 (`DocumentDownloadTokenService#createAttachmentToken`). With the claim present the endpoint serves exactly that attachment — never the main one —
 after checking it belongs to the signed record and client; without it, nothing changes. See §4.12.37.

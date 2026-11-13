@@ -31,10 +31,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.ad.utility.Image;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
-import com.etendoerp.go.schemaforge.NeoAttachmentsDownloader;
+import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
 /**
@@ -65,8 +66,9 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
  * is the threat model: this is the module's only endpoint family whose caller is an outside party
  * holding nothing but a link. Routing it through an engine designed to expose arbitrary entities to
  * an authenticated employee would make every future NEO feature a potential portal exposure. The one
- * thing it reuses is the document attachment pipeline (the main attachment, streamed by
- * {@link NeoAttachmentsDownloader}), which is a read of an already scope-checked record.
+ * thing it reuses is the email download link's session-less attachment path (the main attachment,
+ * found and streamed by {@link AnonymousAttachmentStreamer}), which is a read of an already
+ * scope-checked record.
  *
  * <p><b>Reachable with no Etendo session, by design.</b> {@code /sws/portal/*} is a longer
  * path-prefix mapping than {@code /sws/*}, so the container serves it here and the request never
@@ -242,7 +244,8 @@ public class PortalServlet extends HttpBaseServlet {
    *
    * <pre>
    * 401 {"error": "This link is no longer valid"}          unknown, pending, deactivated (as MVP)
-   * 200 {"state": "valid", businessPartnerName, tenantName, hasLogo, entryDocument: {kind, id}}
+   * 200 {"state": "valid", businessPartnerName, tenantName, hasLogo,
+   *      entryDocument: {kind, id} | null, entryKind?}  entryKind only when entryDocument is null
    * 200 {"state": "expired", tenantName, hasLogo}          the page then calls POST /renew
    * 200 {"state": "unavailable", tenantName, hasLogo}      blocked, inactive or plan expired
    * </pre>
@@ -269,7 +272,7 @@ public class PortalServlet extends HttpBaseServlet {
     // Whether there is a logo to fetch, so the page never requests one that does not exist and
     // never has to hide a broken image. The bytes come from GET /logo, not inlined here: a base64
     // logo would bloat every /me response.
-    body.put(FIELD_HAS_LOGO, resolveTenantLogo(link.getClientId()) != null);
+    body.put(FIELD_HAS_LOGO, resolveTenantLogo(link) != null);
     if (validation.getState() == PortalLinkService.State.EXPIRED) {
       body.put(FIELD_STATE, STATE_EXPIRED);
     } else if (validation.getState() == PortalLinkService.State.UNAVAILABLE) {
@@ -277,10 +280,12 @@ public class PortalServlet extends HttpBaseServlet {
     } else {
       body.put(FIELD_STATE, STATE_VALID);
       body.put("businessPartnerName", StringUtils.defaultString(link.getBusinessPartnerName()));
-      JSONObject entryDocument = new JSONObject();
-      entryDocument.put("kind", link.getDocumentKind().name());
-      entryDocument.put("id", link.getRecordId());
-      body.put("entryDocument", entryDocument);
+      Object entry = entryDocument(validation, link);
+      body.put("entryDocument", entry);
+      if (entry == JSONObject.NULL && link.getDocumentKind() != null) {
+        // Which list to open instead: the kind is the link's, never the hidden record's state.
+        body.put("entryKind", link.getDocumentKind().name());
+      }
       PortalUsageEvents.opened(link);
     }
     sendJson(response, HttpServletResponse.SC_OK, body);
@@ -355,7 +360,7 @@ public class PortalServlet extends HttpBaseServlet {
       rejectInvalidLink(response);
       return;
     }
-    Image logo = resolveTenantLogo(link.get().getClientId());
+    Image logo = resolveTenantLogo(link.get());
     byte[] bytes = logo == null ? null : logo.getBindaryData();
     if (bytes == null || bytes.length == 0) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
@@ -372,15 +377,40 @@ public class PortalServlet extends HttpBaseServlet {
   }
 
   /**
-   * Resolves the tenant's document logo, or {@code null} when it has none.
+   * Resolves the issuing company's document logo, or {@code null} when the tenant has none.
    *
    * <p>Delegates to {@link CompanyLogoResolver} so the portal and the printed documents can never
-   * disagree on the logo. A portal session carries no organization, so resolution starts at the
-   * client's first organization logo. The resolver runs its own admin-mode reads: a portal request
-   * has no Etendo session, so DAL's own client filtering would match nothing.
+   * disagree on the logo. Resolution starts at the organization of the document the link was sent
+   * for (ETP-6209 QA BUG-4), the same organization whose logo that document printed with, and falls
+   * back as the resolver does. The resolver runs its own admin-mode reads: a portal request has no
+   * Etendo session, so DAL's own client filtering would match nothing.
+   *
+   * <p>Only the branding is per organization. The documents the portal lists stay client-wide
+   * (every tenant has one organization today); see the plan's Part B notes.
    */
-  private static Image resolveTenantLogo(String clientId) {
-    return CompanyLogoResolver.resolve(clientId, null);
+  private static Image resolveTenantLogo(PortalLink link) {
+    return CompanyLogoResolver.resolve(link.getClientId(),
+        StringUtils.trimToNull(link.getOrganizationId()));
+  }
+
+  /**
+   * The document the link was sent for, as {@code {kind, id}}, or {@link JSONObject#NULL} when it
+   * is no longer in the link's scope (voided into a hidden status, another customer's since a
+   * change, deleted): the page then opens the kind's list ({@code entryKind}) with a notice instead
+   * of a "not available" detail (plan §A.8.8, ETP-6209 QA BUG-7).
+   */
+  private static Object entryDocument(PortalLinkService.Validation validation, PortalLink link)
+      throws JSONException {
+    Optional<PortalSession> session = validation.getSession();
+    PortalDocumentKind kind = link.getDocumentKind();
+    if (!session.isPresent() || kind == null
+        || PortalDocumentQuery.findInScope(session.get(), kind, link.getRecordId()) == null) {
+      return JSONObject.NULL;
+    }
+    JSONObject entry = new JSONObject();
+    entry.put("kind", kind.name());
+    entry.put("id", link.getRecordId());
+    return entry;
   }
 
   /** The home's balances, per-kind tiles and recent documents ({@link PortalDocumentsEndpoint}). */
@@ -454,15 +484,19 @@ public class PortalServlet extends HttpBaseServlet {
       return;
     }
     PortalDocumentKind kind = PortalDocumentsEndpoint.kindOf(parts[0]);
-    String attachmentId = kind == null
+    Attachment attachment = kind == null
         || PortalDocumentQuery.findInScope(validated, kind, parts[1]) == null ? null
-        : PortalDocumentsEndpoint.mainAttachmentId(validated, kind, parts[1]);
-    if (attachmentId == null) {
+        : PortalDocumentsEndpoint.mainAttachment(validated, kind, parts[1]);
+    if (attachment == null) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       return;
     }
-    NeoAttachmentsDownloader.handleDownload(attachmentId, response);
-    PortalUsageEvents.downloaded(validated, parts[1]);
+    // The email link's session-less path (ETP-6209 QA BUG-1); the event only counts a file that
+    // was actually served (BUG-5).
+    if (AnonymousAttachmentStreamer.stream(attachment, response,
+        "portal kind=" + kind.name() + " record=" + parts[1])) {
+      PortalUsageEvents.downloaded(validated, parts[1]);
+    }
   }
 
   /**

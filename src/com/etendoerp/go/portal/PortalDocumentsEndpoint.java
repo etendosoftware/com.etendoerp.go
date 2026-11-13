@@ -29,6 +29,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -49,8 +51,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
-import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
-import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
 
 /**
  * The customer portal's document reads (ETP-6209, plan §B.3–§B.7): the home aggregates, the list
@@ -188,8 +189,15 @@ final class PortalDocumentsEndpoint {
     Date toInclusive = parseDate(dateTo);
     Date toExclusive = toInclusive == null ? null
         : toDate(toLocalDate(toInclusive).plusDays(1));
+    // Each value trimmed (`?status=CO, CL`); blanks dropped, and nothing left means no filter.
     List<String> statuses = StringUtils.isBlank(status) ? null
-        : Arrays.asList(StringUtils.split(status, ','));
+        : Arrays.stream(StringUtils.split(status, ','))
+            .map(StringUtils::trimToNull)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+    if (statuses != null && statuses.isEmpty()) {
+      statuses = null;
+    }
     PortalDocumentQuery.Filter filter = new PortalDocumentQuery.Filter(statuses, from, toExclusive,
         search);
     int limit = Math.min(Math.max(parseInt(limitParam, DEFAULT_LIMIT), 1), MAX_LIMIT);
@@ -269,27 +277,23 @@ final class PortalDocumentsEndpoint {
       related.put(row(link, linkSchedules));
     }
     body.put("related", related);
-    body.put("hasPdf", mainAttachmentId(session, kind, id) != null);
+    body.put("hasPdf", mainAttachment(session, kind, id) != null);
     return body;
   }
 
   /**
-   * The id of a document's main attachment — the very file the email's download link serves
-   * ({@code NeoDocumentDownloadService}) — when it belongs to the session's tenant; otherwise
-   * {@code null}.
+   * A document's main attachment — the very file the email's download link serves — when it
+   * belongs to the session's tenant; otherwise {@code null}.
+   *
+   * <p>Resolved through {@link AnonymousAttachmentStreamer}, the email link's session-less path
+   * (ETP-6209 QA BUG-1): native SQL plus an explicit check against the link's client. The
+   * session-based {@code NeoAttachmentsHelper#handleGetMain} cannot be used here: it hides an
+   * attachment that is not visible to the current tenant, and a portal request has no tenant.
+   * The caller must already have checked that the document itself is in the session's scope.
    */
-  static String mainAttachmentId(PortalSession session, PortalDocumentKind kind, String id) {
-    NeoResponse main = NeoAttachmentsHelper.handleGetMain(kind.getTableName(), id);
-    if (main == null || main.getHttpStatus() != 200 || main.getBody() == null) {
-      return null;
-    }
-    String attachmentId = StringUtils.trimToNull(main.getBody().optString(ID));
-    if (attachmentId == null) {
-      return null;
-    }
-    Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
-    return attachment != null && attachment.getClient() != null
-        && attachment.getClient().getId().equals(session.getClientId()) ? attachmentId : null;
+  static Attachment mainAttachment(PortalSession session, PortalDocumentKind kind, String id) {
+    return AnonymousAttachmentStreamer.findMainAttachmentOfClient(kind.getTableName(), id,
+        session.getClientId());
   }
 
   /**
