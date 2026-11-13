@@ -336,13 +336,16 @@ because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unles
   `year`, and a price with `interval_count` ≠ 1 (a quarter) is refused.
 - Cards: `4242…` (pays at once) and the 3-D Secure test card (`…3184`, asks to authenticate).
 
-### Scenarios tested
+### Tests done by hand
+
+Tests 1–19 were found while using the feature and most needed a fix; tests 20–31 were the edge
+cases tested on purpose on 2026-11-13, all passing with no further code change.
 
 | # | Scenario | Result | Fix |
 |---|---|---|---|
 | 1 | Onboard a new tenant (sample data) | Failed first: the `CHANGE_PLAN` button column existed in the AD but not physically | Column added to `ETGO_SUBSCRIPTION.xml` (folded into `d51ad7407`) |
-| 2 | Downgrade yearly → monthly (period end) | Stripe `400 parameter_unknown` on `phases[].iterations` (removed in `2025-09-30.clover`) | `duration[interval]`/`duration[interval_count]` (folded into `f7ddd9e10`) |
-| 3 | Upgrade monthly mini → yearly | Charged the saved card silently, no amount shown; a failed or 3-D Secure charge would still change the plan | Option B: quote + `pending_if_incomplete` + invoice page (`eb1c1497d`, **SF** `1d4aef299`) — Task 11 |
+| 2 | Downgrade yearly → monthly (period end) | Stripe `400 parameter_unknown` on `phases[].iterations` (removed in `2025-09-30.clover`); after the fix the downgrade schedules and shows as pending (retested 2026-11-13) | `duration[interval]`/`duration[interval_count]` (folded into `f7ddd9e10`) |
+| 3 | Upgrade monthly mini → yearly | Charged the saved card silently, no amount shown; a failed or 3-D Secure charge would still change the plan; after the fix the quote is shown and the upgrade applies once paid (retested 2026-11-13) | Option B: quote + `pending_if_incomplete` + invoice page (`eb1c1497d`, **SF** `1d4aef299`) — Task 11 |
 | 4 | Monthly → yearly keeps the billing date | Confirmed: flexible billing does not reset the anchor; the quota year follows it | Copy corrected in 3 locales (**SF** `1d4aef299`), `plan-changes.md` |
 | 5 | Confirmation after a change | The dialog vanished for ~0.5 s and came back on the option list | Silent refresh that does not unmount the section (**SF** `e89318f44`) |
 | 6 | Change back to yearly while a downgrade is pending | Not possible: the offer listed the scheduled target, never the current plan | Offer starts from the pending plan; "keep current plan" releases the schedule (`1f2245a96`, **SF** `15a5c024c`) |
@@ -358,6 +361,19 @@ because of it. Commit hashes are on `feature/ETP-5053` (`com.etendoerp.go` unles
 | 16 | Downgrade then upgrade back (question, 2026-11-12) | The upgrade releases the schedule and clears the pending columns | Covered by `anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
 | 17 | Classic **Change Plan**: downgrade from the back office | Works after #15: the Target Plan list shows the allowed targets and the downgrade fills **Pending Plan** / **Pending Effective Date** on the Subscription window | — |
 | 18 | Classic **Change Plan**: upgrade with the 3-D Secure card from the back office (SPRING3, Monthly → Yearly) | The button warned that the payment needs the customer and gave the invoice page; once paid, Stripe applied the change, the webhook rolled the row (Yearly from 11:55:34, Monthly closed) and the account page showed Productive Yearly | — |
+| 19 | Allowed Plan Changes tab in Classic | Organization was shown although the rows are always `*` (System) | Field hidden like Client (`c1ba3258c`) |
+| 20 | **3-D Secure upgrade from the account page** (`4000 0027 6000 3184` as default card via **Manage subscription**) | "Complete the payment" with the invoice link, plan unchanged until paid; after paying in the Stripe tab and returning to the Etendo tab the dialog turned into "Plan changed" by itself (the fix of scenario 14). Back-office variant: scenario 18 | — |
+| 21 | **Upgrade with a declined card** (`4000 0000 0000 0341`: saves fine, every charge fails) | The plan did not change and the tenant was not marked past due | — |
+| 22 | **Quote equals charge** | The amount the dialog quoted equalled the invoice Stripe created (`stripe invoices list --subscription <sub>`) | — |
+| 23 | **Downgrade, then a different downgrade** | The pending target was replaced on the same schedule; no second schedule | — |
+| 24 | **Downgrade, then an upgrade to a third plan** (e.g. SPRING6: Yearly with Monthly pending → Year Pro) | The schedule was released, the pending line cleared and the upgrade charged | — |
+| 25 | **Cancel in the portal with a downgrade pending, then reactivate** | The pending line was gone after the cancellation and stayed gone after reactivating; **Change plan** came back | — |
+| 26 | **Double-click Confirm** on an upgrade and on a downgrade | One charge, one schedule | — |
+| 27 | **A downgrade reaching its date** (SPRING7, Yearly → Year Mini) | The row rolled over on `customer.subscription.updated` (Yearly closed, Year Mini open from 14:04), the quota-year start stayed 2026-10-23 and the pending line cleared. How: see "Making a downgrade apply early" below | — |
+| 28 | **Downgrade into an exceeded quota** (SPRING7: 9 sales invoices in the quota year, Year Mini allows 3 with `block`) | The dialog showed the numbers before confirming; after the downgrade applied, creating a sales invoice was refused and the existing invoices stayed readable | — |
+| 29 | **A missed webhook**: stop `stripe listen`, change, restart and replay | The database caught up (also seen by accident with SPRING8, scenario 11) | — |
+| 30 | **Keep from the back office**: schedule a downgrade with **Change Plan**, then choose the current plan as Target Plan | **Pending Plan** cleared. With scenarios 17 and 18 the Classic button is covered for downgrade, upgrade and keep | — |
+| 31 | Legacy plan → yearly (`legacy-productive → PROD_YEARLY`, immediate) | Works (reported 2026-11-13) | — |
 
 ### Findings that needed no code change
 
@@ -393,26 +409,9 @@ Last runs: `PlanChangeServiceTest` 24, `SubscriptionPlanChangeActionHandlerTest`
 `SubscriptionServiceTest` 103, `SubscriptionLifecycleApplierTest` 43, `EnsureLegacyPlanScriptTest` 8,
 all green; SPA account and locale tests 114 green.
 
-### Edge cases tested by hand (2026-11-13)
+### Making a downgrade apply early
 
-Plain upgrade and downgrade are covered by the scenarios above; these are the edges. All passed,
-with the code as it stands after the fixes above: no further code change came out of them.
-
-| # | Edge case | Expected and seen |
-|---|---|---|
-| E1 | **3-D Secure upgrade from the account page** (`4000 0027 6000 3184` as default card via **Manage subscription**) | "Complete the payment" with the invoice link, plan unchanged until paid; after paying in the Stripe tab and returning to the Etendo tab the dialog turned into "Plan changed" by itself (the fix of scenario 14). Back-office variant: scenario 18 |
-| E2 | **Upgrade with a declined card** (`4000 0000 0000 0341`: saves fine, every charge fails) | The plan did not change and the tenant was not marked past due |
-| E3 | **Quote equals charge** | The amount the dialog quoted equalled the invoice Stripe created (`stripe invoices list --subscription <sub>`) |
-| E4 | **Downgrade, then a different downgrade** | The pending target was replaced on the same schedule; no second schedule |
-| E5 | **Downgrade, then an upgrade to a third plan** (e.g. SPRING6: Yearly with Monthly pending → Year Pro) | The schedule was released, the pending line cleared and the upgrade charged |
-| E6 | **Cancel in the portal with a downgrade pending, then reactivate** | The pending line was gone after the cancellation and stayed gone after reactivating; **Change plan** came back |
-| E7 | **Double-click Confirm** on an upgrade and on a downgrade | One charge, one schedule |
-| E8 | **A downgrade reaching its date** (SPRING7, Yearly → Year Mini) | The row rolled over on `customer.subscription.updated` (Yearly closed, Year Mini open from 14:04), the quota-year start stayed 2026-10-23 and the pending line cleared. How: see below |
-| E9 | **Downgrade into an exceeded quota** (SPRING7: 9 sales invoices in the quota year, Year Mini allows 3 with `block`) | The dialog showed the numbers before confirming; after the downgrade applied, creating a sales invoice was refused and the existing invoices stayed readable |
-| E10 | **A missed webhook**: stop `stripe listen`, change, restart and replay | The database caught up (also seen by accident with SPRING8, scenario 11) |
-| E11 | **Keep from the back office**: schedule a downgrade with **Change Plan**, then choose the current plan as Target Plan | **Pending Plan** cleared. With scenarios 17 and 18 the Classic button is covered for downgrade, upgrade and keep |
-
-**Making a downgrade apply without waiting for the period end** (E8). Every test period ends in
+Used for test 27. Every test period ends in
 2027. A daily test price is not possible (`day` is refused by `ETGO_PLAN_INTERVAL_CHK`) and Stripe
 test clocks need a customer created on the clock, which Checkout does not do. Instead, once the
 downgrade is scheduled, move the end of the schedule's current phase a few minutes ahead,
@@ -433,10 +432,8 @@ sends `customer.subscription.updated`; the rollover reacts to the price change, 
 `PENDING_EFFECTIVE_DATE`, so this runs the real code path. It does not move the billing anchor, so
 it is the rollover that is proven, not a real period boundary.
 
-**Still open**
+### Still open
 
-- [ ] **Legacy → yearly** (the `legacy-productive → PROD_YEARLY` row exists locally). Legacy →
-  monthly is done (scenarios 13 and 14).
 - [ ] `~/mytmp/ETP-5053-e2e-stripe-testing.md` (the QA guide, outside the repo) still describes
   monthly → annual as restarting the billing date and lacks the quote, payment required, keep and
   cancellation; update it before handing it to QA.
@@ -450,8 +447,8 @@ it is the rollover that is proven, not a real period boundary.
 | Upgrade then downgrade does not reset usage | Same inheritance path for both directions (`SubscriptionPlanRolloverTest.aRowWithoutAnAnchorHandsItsStartDateDown`) |
 | Monthly → annual applies now; billing and quota year start on the change date | `SubscriptionPlanRolloverTest.aBillingIntervalChangeStartsTheQuotaYearOnTheNewProviderPeriod`, `anIntervalChangeWithoutAReportedPeriodAnchorsOnNow` |
 | No active row → refused; annual → monthly refused by the seed; a new row enables it without code | `PlanChangeServiceTest.aChangeWithNoActiveAllowedRowIsRefusedAndTheSamePlanTooBecauseItHasNone`, `PlanChangeCatalogTest.aChangeWithNoActiveRowIsNotAllowed`, `SeedAllowedPlanChangesScriptTest.theSeedFollowsTheTicketsRuleAndIsGuardedAgainstExistingRows` |
-| A downgrade changes nothing until the boundary, then does via `customer.subscription.updated` | `PlanChangeServiceTest.aDowngradeSchedulesTheTargetPriceFromThePeriodEndWithoutProrationAndRecordsItPending` + the rollover tests; by hand: edge case E8 |
-| Downgrade into an exceeded quota shows the numbers; creates refused afterwards, data readable | `PlanChangeServiceTest.theOfferedChangesAreTheAllowedRowsWhoseTargetIsSellable` (usage vs target quotas), `PlanChangeDialog.vitest.jsx`; the refusal itself is ETP-5051's `block` mode on the NEO write path; by hand: edge case E9 |
+| A downgrade changes nothing until the boundary, then does via `customer.subscription.updated` | `PlanChangeServiceTest.aDowngradeSchedulesTheTargetPriceFromThePeriodEndWithoutProrationAndRecordsItPending` + the rollover tests; by hand: test 27 |
+| Downgrade into an exceeded quota shows the numbers; creates refused afterwards, data readable | `PlanChangeServiceTest.theOfferedChangesAreTheAllowedRowsWhoseTargetIsSellable` (usage vs target quotas), `PlanChangeDialog.vitest.jsx`; the refusal itself is ETP-5051's `block` mode on the NEO write path; by hand: test 28 |
 | Pending downgrade visible in Classic and to the customer; cancelled by an upgrade | Read-only pending fields (Task 1), `SubscriptionSection.vitest.jsx`, `PlanChangeServiceTest.anUpgradeOverAPendingDowngradeReleasesTheScheduleAndClearsThePendingColumns` |
 | Failed prorated charge leaves the upgraded plan in `past_due`, no rollback | **Superseded on 2026-11-13 (option B):** the upgrade is sent with `payment_behavior=pending_if_incomplete`, so a failed charge changes nothing and the customer gets the invoice page (`PlanChangeServiceTest.anUpgradeWhoseInvoiceIsUnpaidWaitsForThePaymentAndChangesNothingLocally`); that invoice's `invoice.payment_failed` is not a renewal failure (`SubscriptionLifecycleApplierTest.aFailedPlanChangeInvoiceIsNotARenewalFailure`) |
 | `END_DATE` never future (guard tested) | `SubscriptionServiceTest.aFutureClosingInstantIsRefusedAndNothingIsWritten`, `aClosingInstantWithinTheClockSkewToleranceStillCloses` |
