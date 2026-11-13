@@ -182,8 +182,11 @@ class AccountGroupKeyHandlerTest {
   }
 
   private EntityUpdateEvent updateEvent(String previousKey, String currentKey) {
+    // Built before stubbing the event: group() stubs its own mock, which cannot happen inside
+    // another stubbing (UnfinishedStubbingException).
+    Group group = group(currentKey, null);
     EntityUpdateEvent event = mock(EntityUpdateEvent.class);
-    when(event.getTargetInstance()).thenReturn(group(currentKey, null));
+    when(event.getTargetInstance()).thenReturn(group);
     when(event.getPreviousState(keyProperty)).thenReturn(previousKey);
     when(event.getCurrentState(keyProperty)).thenReturn(currentKey);
     return event;
