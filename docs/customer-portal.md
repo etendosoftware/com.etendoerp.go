@@ -14,7 +14,15 @@ events) plus two shared pieces outside it — the document-send email contracts
 ## 1. The link model — `ETGO_PORTAL_LINK`
 
 One row per email that carried a link (`PortalLink` / `PortalLinkDal`). It replaces the MVP's
-`ETGO_PORTAL_ACCESS` (one stable row per Business Partner), which is dropped.
+`ETGO_PORTAL_ACCESS` (one stable row per Business Partner).
+
+**`ETGO_PORTAL_ACCESS` is kept, unused.** The table, its model XML and its dictionary rows
+(`AD_TABLE`, `AD_COLUMN`, `AD_ELEMENT`) stay exactly as they are on `develop`, so
+`update.database` leaves the table and any rows in it untouched: it shipped to `main` with the MVP
+and nobody has checked yet whether production holds rows. Nothing reads or writes it any more —
+`PortalAccessService`, `PortalAccessDal`, `SFPortalAccess` and the `portalaccess` pseudo-spec are
+removed; only the DAL class `generate.entities` builds from the dictionary remains. It will be
+dropped in a follow-up once production is confirmed empty.
 
 | What | How |
 |---|---|
