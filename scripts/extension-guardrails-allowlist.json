@@ -70,7 +70,6 @@
     "RegisterPaymentOutHandler",
     "RejectQuotationHandler",
     "ReturnMaterialReceiptLineHandler",
-    "ReturnToVendorShipmentHeaderHandler",
     "ReturnToVendorShipmentLineHandler",
     "SiiSendHandler",
     "TaxAccountingHandler",
