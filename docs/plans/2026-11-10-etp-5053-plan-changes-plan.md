@@ -378,14 +378,62 @@ Last runs: `PlanChangeServiceTest` 24, `SubscriptionPlanChangeActionHandlerTest`
 `SubscriptionServiceTest` 103, `SubscriptionLifecycleApplierTest` 43, `EnsureLegacyPlanScriptTest` 8,
 all green; SPA account and locale tests 114 green.
 
-### Still to verify by hand
+### Edge cases still to test by hand
 
-- [ ] Classic **Change Plan** dialog shows the filtered Target Plan list (the selector answered
-  correctly when called directly: SPRING3 → Month Mini, Yearly; SPRING7 → Monthly).
-- [ ] A new 3-D Secure upgrade: pay in the Stripe tab, return, dialog turns into "Plan changed".
-- [ ] Legacy → yearly (the `legacy-productive → PROD_YEARLY` row exists locally).
+Plain upgrade and downgrade are covered (scenarios above); what went wrong was at the edges. Most
+valuable first.
+
+**Payment**
+
+- [ ] **Upgrade with a card that needs 3-D Secure** (`4000 0027 6000 3184` as default payment
+  method via **Manage subscription**): "Complete the payment" with the link, the plan unchanged
+  until paid, then switched. *Partly done 2026-11-13 (SPRING3, legacy → monthly): the payment and
+  the switch worked; returning to the tab was fixed in **SF** `9ee49777a` — repeat to see the
+  dialog turn into "Plan changed".*
+- [ ] **Upgrade with a declined card** (`4000 0000 0000 0341`: saves fine, every charge fails): the
+  plan does not change and the tenant is not marked past due.
+- [ ] **Quote equals charge**: the amount the dialog quotes equals the invoice Stripe creates
+  (`stripe invoices list --subscription <sub>`).
+
+**Combinations of changes**
+
+- [ ] **Downgrade, then a different downgrade** (Yearly → Monthly, then Monthly → Month Mini): the
+  target is replaced, no second schedule. Needs Month Mini active and a `PROD_MONTH →
+  PROD_MONTH_MINI` row (both exist locally now).
+- [ ] **Downgrade, then an upgrade to a third plan**: the schedule is released and the upgrade
+  charged.
+- [ ] **Cancel in the portal with a downgrade pending, then reactivate**: the pending line stays
+  gone after reactivation and **Change plan** comes back. *Cancel half done (SPRING8, scenario 12).*
+- [ ] **Double-click Confirm** on an upgrade and on a downgrade: one charge, one schedule.
+
+**The downgrade actually applying**
+
+- [ ] Every test period ends in 2027, so the boundary is never reached. Create a Stripe test price
+  with a daily interval (`stripe prices create --product <prod> --unit-amount 100 --currency eur
+  -d "recurring[interval]=day"`), put it on a test plan in Classic and buy it; the period ends the
+  next day. Watch `customer.subscription.updated` roll the row over, keep the quota-year anchor and
+  clear the pending line. Keep `stripe listen` running overnight.
+
+**Quotas**
+
+- [ ] Downgrade into a plan whose quota the tenant already exceeds: the dialog lists the numbers
+  before confirming; once the downgrade applies, creating that kind of record is refused while
+  existing data stays readable.
+
+**Operational**
+
+- [ ] **A missed webhook**: stop `stripe listen`, make a change, restart it and replay (or let the
+  reconciliation run); the database catches up. *Seen by accident with SPRING8 (replay worked).*
+- [ ] **Classic Change Plan button**: one upgrade, one downgrade and one keep from the Subscription
+  window. The Target Plan list was empty until `366cc66f2`; the selector answered correctly when
+  called directly (SPRING3 → Month Mini, Yearly; SPRING7 → Monthly), not yet seen in the dialog.
+- [ ] **Legacy → yearly** (the `legacy-productive → PROD_YEARLY` row exists locally).
+
+**Docs**
+
 - [ ] `~/mytmp/ETP-5053-e2e-stripe-testing.md` still describes monthly → annual as restarting the
-  billing date; update it before handing it to QA.
+  billing date and lacks the quote, payment required, keep and cancellation; update it before
+  handing it to QA.
 
 ## Acceptance criteria → evidence
 
