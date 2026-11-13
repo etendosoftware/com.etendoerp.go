@@ -53,6 +53,7 @@ import org.openbravo.model.ad.system.Language;
 import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usageevents.PublicApiCall;
 import com.etendoerp.go.usageevents.PublicApiCaller;
@@ -65,6 +66,7 @@ import com.etendoerp.go.usageevents.PublicApiUsageCounter;
  * writes has its Classic fiscal messages reworded in the language captured after authentication.
  *
  * @covers com.etendoerp.go.schemaforge.NeoServlet
+ * @covers com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry
  * @covers com.etendoerp.go.schemaforge.NeoPublicApiUsage
  * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
@@ -182,6 +184,68 @@ class NeoServletProcessRequestTest {
         + "F3 (issued to replace simplified invoices): add the invoices it corrects in the "
         + "Rectifications tab.", error.getString("message"));
     assertEquals("ETVFAC_reversed_invoice", error.getJSONArray("messageKeys").getString(0));
+  }
+
+  // ── ETP-6230: the request context the accounting KPI keeps on the servlet thread ───────────
+
+  private static Object restRequestOnThisThread() throws Exception {
+    java.lang.reflect.Field field = AccountingKpiTelemetry.class.getDeclaredField("REST_REQUEST");
+    field.setAccessible(true);
+    return ((ThreadLocal<?>) field.get(null)).get();
+  }
+
+  @Test
+  void theKpiRequestContextIsSeenByTheRoutedCallAndClearedAfterwards() throws Exception {
+    java.util.concurrent.atomic.AtomicReference<Object> during =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    doAnswer(inv -> {
+      during.set(restRequestOnThisThread());
+      return null;
+    }).when(routers.constructed().get(0)).handleSpecRequest(any(), anyString(), any(), any());
+
+    servlet.doPost(mock(HttpServletRequest.class), response);
+
+    org.junit.jupiter.api.Assertions.assertNotNull(during.get());
+    org.junit.jupiter.api.Assertions.assertNull(restRequestOnThisThread());
+  }
+
+  @Test
+  void theKpiRequestContextIsClearedWhenTheRoutedCallThrows() throws Exception {
+    routedCallThrows(new IllegalStateException("boom"));
+
+    servlet.doPost(mock(HttpServletRequest.class), response);
+
+    org.junit.jupiter.api.Assertions.assertNull(restRequestOnThisThread());
+  }
+
+  @Test
+  void aRoutedWriteIsReportedToTheKpiWithTheResponseStatusAndTheContextIsEnded()
+      throws Exception {
+    doAnswer(inv -> null).when(routers.constructed().get(0))
+        .handleSpecRequest(any(), anyString(), any(), any());
+    when(response.getStatus()).thenReturn(201);
+
+    try (MockedStatic<AccountingKpiTelemetry> kpi = mockStatic(AccountingKpiTelemetry.class)) {
+      servlet.doPost(mock(HttpServletRequest.class), response);
+
+      kpi.verify(() -> AccountingKpiTelemetry.beginRestRequest("spec", "entity", "POST", null));
+      kpi.verify(() -> AccountingKpiTelemetry.restWriteSucceeded(201));
+      kpi.verify(AccountingKpiTelemetry::endRestRequest);
+    }
+  }
+
+  @Test
+  void aFailedRoutedCallIsObservedForRefusalsAndNeverCountsAsASuccessfulWrite() throws Exception {
+    routedCallThrows(new IllegalStateException("boom"));
+
+    try (MockedStatic<AccountingKpiTelemetry> kpi = mockStatic(AccountingKpiTelemetry.class)) {
+      servlet.doPost(mock(HttpServletRequest.class), response);
+
+      kpi.verify(() -> AccountingKpiTelemetry.restWriteSucceeded(org.mockito.ArgumentMatchers.anyInt()),
+          never());
+      kpi.verify(() -> AccountingKpiTelemetry.observeRestResponse(eq(500), any()));
+      kpi.verify(AccountingKpiTelemetry::endRestRequest);
+    }
   }
 
   @Test

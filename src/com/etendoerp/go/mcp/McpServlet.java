@@ -503,6 +503,10 @@ public class McpServlet extends HttpServlet {
    */
   private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
       JSONObject params, JSONObject result, String forcedErrorCode) {
+    // ETP-6230: before the usage-log switch below — the KPI must not depend on it.
+    McpUsageTelemetry.Tenant kpiTenant = McpUsageTelemetry.currentTenant();
+    McpAccountingKpiObserver.observe(kpiTenant != null ? kpiTenant.getClientId()
+        : identity != null ? identity.clientId : null, toolName, params, result);
     try {
       if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
         return;

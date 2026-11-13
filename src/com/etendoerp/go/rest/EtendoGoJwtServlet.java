@@ -108,6 +108,7 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.CheckoutPromotionTerms;
@@ -4154,6 +4155,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         calendarReviewService.confirm(session.clientId, userId);
       }
       EtendoGoDalHelper.commitDalChanges("calendar review", log);
+      // ETP-6230: after the commit; enqueue only.
+      AccountingKpiTelemetry.calendarReviewCompleted(session.clientId,
+          AccountingKpiTelemetry.REVIEW_FIRST_STEPS,
+          regenerate ? AccountingKpiTelemetry.TYPE_MODIFY : AccountingKpiTelemetry.TYPE_CONFIRM,
+          AccountingKpiTelemetry.SOURCE_FIRST_STEPS);
       // Same shape as the GET: the caller is the owner, or it would have been refused above.
       JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
       result.put("isOwner", true);
@@ -5513,6 +5519,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
     alertAttempt.committed = true;
     alertAttempt.stage = "committed";
+    if (paidUpgrade) {
+      // ETP-6230: productive signup, after the onboarding commit; enqueue only.
+      AccountingKpiTelemetry.productiveEnvironmentCreated(clientId);
+    }
     notifyProvisioningAlert(alertAttempt,
         com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK, null);
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "

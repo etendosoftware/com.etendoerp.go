@@ -73,6 +73,7 @@ Allowed low-cardinality keys:
 - `confidence` (ETP-5581)
 - `decision` (ETP-5581)
 - `detection_signal` (ETP-5581)
+- `internal` (ETP-6230) — boolean: the tenant owner's e-mail domain is internal (see *Accounting Calendar KPIs*)
 - `entity`
 - `entityType`
 - `flow`
@@ -221,6 +222,103 @@ included, not distinguishable from each other), `mcp_batch` (`etendo_batch`, syn
 UI from document vs OCR apart would need a client-sent marker; none exists today.
 
 Contacts created outside NEO CRUD (demo-data transfer, onboarding sample data) emit nothing.
+
+## Accounting Calendar KPIs (ETP-6230)
+
+`AccountingKpiTelemetry` (`schemaforge/telemetry`) emits four events for the accounting-calendar
+KPIs (ETP-5577). All carry `account_id` (tenant `AD_Client_ID`) and `internal`; nothing else
+identifies anybody.
+
+| Event | Emitted | Once? | Properties |
+|---|---|---|---|
+| `backend_productive_environment_created` | right after the onboarding commit (`EtendoGoJwtServlet`), only when `preparation.paidUpgrade` | by construction (a paid upgrade is a new tenant) | - |
+| `backend_calendar_review_completed` | Primeros pasos confirm / regenerate (after its commit) and a successful manual **open** in `PeriodOpenCloseHandler` | once per tenant **per kind** | `type` (`confirm`, `modify` for regenerate), `source` (`first_steps`, `calendar_window` REST, `mcp`, `batch`) |
+| `backend_first_document_processed` | outcome probe after a successful write | once per tenant | `operation` (`post` when the request's action was `post`, else `complete`), `source`, `entity`, `specName` |
+| `backend_period_refused` | every refusal keyed `PeriodNotAvailable` / `PeriodNotValid` | no | `operation`, `source`, `errorCode`, `entity`, `specName` |
+
+`source` for the last two: `spa` (any REST call that is not a batch), `mcp`, `batch` (REST batch,
+MCP `etendo_batch`, MCP `etendo_action_batch`, async batch rows). One rule for every batch. The
+manual-open review derives its `source` from the write channel instead; see Limitations.
+
+**Population.** Review, first-document and signup events only for tenants carrying
+`ETGO_CalendarReviewRequired` (productive tenants onboarded after ETP-5577; permanent marker; the
+signup event is emitted for every paid onboarding). `backend_period_refused` goes out for every
+tenant. TODO: `tenant_type` when ETP-6072 lands; `ad_client_id` when ETP-6228 lands.
+
+**Threading.** The hooks only *enqueue* `{clientId, source, entity, operation hint}` (REST:
+`NeoServlet` / `NeoPseudoSpecDispatcher`; MCP: `McpAccountingKpiObserver`, called from
+`McpServlet.recordToolCall` *before* the `McpUsageLogger.isEnabled()` early return, so the KPI does
+not depend on the usage-log switch; async batch: the `BatchJobService` worker). One daemon sender
+(`accounting-kpi-telemetry`, queue 1000, drop when full) then does gate, probe, emit and marker on
+its **own** connection from `ExternalConnectionPool` (like `McpUsageLogger`): zero SQL on the
+business connection, nothing a failure can propagate to the request. Errors are logged at debug
+and forgotten.
+
+**Probe cost control.** The probe scans seven tables, six of which have no `ad_client_id`-leading index, so it is
+bounded: at most **one probe per tenant per 60 s** (writes inside the window are coalesced and
+the next probe after it sees them), and a tenant found *not* review-required is skipped for 10
+minutes (a TTL, not permanent, because the marker can be set later). The probe also runs about
+**5 s after** the write is queued, not at once: the request's transaction is committed by
+`DalRequestFilter` after the hook returns, and the probe runs on its own connection, so it can only
+see committed rows. If the commit takes longer than the delay, that document is found by the
+tenant's next probe (see Limitations). Refusal and review emits are immediate.
+*Open check:* run `EXPLAIN (ANALYZE)` of the probe query on the production read replica for the
+largest tenants before relying on the 60 s interval.
+
+**Markers** are client preferences, written by the sender after the event is emitted:
+`ETGO_KpiReviewFirstStepsSent`, `ETGO_KpiReviewManualOpenSent`, `ETGO_KpiFirstDocSent` (no AD
+change). A lost marker can only cost a duplicate event; reports count distinct `account_id`.
+Tenants whose first document was reported are also kept in a positive-only in-memory set.
+
+**First-document probe.** Is any document of the tenant `Processed='Y' OR Posted='Y'` in
+`C_Invoice`, `M_InOut`, `FIN_Payment`, `GL_Journal`, `M_Movement`, `M_Inventory`,
+`FIN_BankStatement` (all have both columns)? The list is the KPI's definition of "document" and
+lives in the telemetry class; no hook branches on the entity a request touched. Orders are
+excluded: `C_Order_Post` has no period check.
+
+**`internal`.** `true` when the owner's e-mail domain is in the comma-separated list from system
+property `etendo.go.kpi.internal.email.domains` / env `ETGO_KPI_INTERNAL_EMAIL_DOMAINS` (default
+`etendo.software,etendo.ai,smfconsulting.es`). The owner is the earliest-created active `AD_User`
+of the tenant with an e-mail. The sender reads it, reduces it to a boolean and caches it per tenant (`true` for good, `false` for 1 hour, since a tenant with no e-mail user may get one);
+the address is never sent. Reports filter `internal != true`. Interim until the platform's
+test-account mark exists.
+
+**Refusal detection.** REST: `NeoServlet.writeResponse`, status >= 400, `messageKeys` flat, under
+`error`, or under `error.detail.error` (batch envelope). MCP: the tool answer's JSON text (or, on a
+prose error, `recognizeMessageKeys`), one event per failed item for `etendo_action_batch`;
+`etendo_job_status` / `etendo_job_cancel` are skipped (they re-render old rows on every poll).
+Async batch rows are observed in the worker as each row finishes.
+
+**Limitations.**
+- *Late detection:* a document completed or posted outside a request (async batch worker, Etendo
+  Classic, background posting) is only seen on the tenant's next NEO write, and carries that
+  write's `source`/`operation`. The probe is also asynchronous, so it can lag the commit by one
+  write.
+- `operation` is derived from the request's *action* name (`post`, else `complete`; a plain CRUD
+  write with no action is `complete`), not from which flag the data shows. For
+  `backend_period_refused` it is the action name, else the HTTP method or MCP verb.
+- *Probe lag:* the probe is delayed ~5 s and throttled to one per tenant per 60 s, so the first
+  document can be reported up to a minute (or, if the tenant stops writing, one write) late, and a
+  commit slower than the delay is seen on the next probe.
+- `manual_open` reviews are queued with `NeoBatchScope.runAfterCommit`: inside a batch scope (REST
+  `/sws/neo/batch`, MCP `etendo_batch`, sync or async) they are sent after the batch commits and
+  dropped on rollback, so a rolled-back open leaves neither an event nor the permanent marker.
+  Outside a batch scope `runAfterCommit` runs at once, i.e. before `DalRequestFilter` commits the
+  request, so a commit that then fails costs one stray event. The review markers are shared across
+  channels (REST and MCP).
+- *`source` of a manual open* is taken from the write channel, not from the tool: a channel ending
+  in `_batch` (`rest_batch`, `mcp_batch`) gives `batch`, a channel starting with `mcp` gives `mcp`,
+  anything else gives `calendar_window`. `etendo_action_batch` opens **no** `NeoBatchScope`, so a
+  manual open made through it runs on the plain `mcp` channel and reports `mcp`, not `batch`. This
+  differs from `backend_first_document_processed` / `backend_period_refused`, which the MCP observer
+  labels `batch` for `etendo_action_batch` and `etendo_batch` alike (by tool name).
+- Not counted: opens by document category (process 168), anything done in Etendo Classic, a
+  refusal that only exists as prose in an HTTP >= 500 answer (not recognised, as in the REST
+  refusal identification).
+- Tenants that were productive before this deploy and already have documents emit one stray
+  first-document event on their next write but have no signup event, so they fall outside every KPI.
+- A completion marked by `documentStatus` written raw on create (ETP-6240) is not `Processed`, so
+  it is not detected, which is the right answer.
 
 ## Bank Bounce-Pair KPIs (ETP-5581)
 

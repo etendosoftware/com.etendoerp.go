@@ -31,6 +31,7 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.PeriodControlLog;
 import org.openbravo.service.db.CallProcess;
 
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -120,7 +121,20 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
     ProcessInstance pInstance = CallProcess.getInstance().call(process167, logEntry.getId(), null);
     OBDal.getInstance().getSession().refresh(pInstance);
 
-    return PeriodOpenCloseSupport.translateResult(pInstance, process167);
+    NeoResponse result = PeriodOpenCloseSupport.translateResult(pInstance, process167);
+    if (result.getHttpStatus() < 400 && "O".equals(openCloseValue)) {
+      // ETP-6230: a manual open counts as a calendar review (confirm). Queued for after the commit
+      // (dropped when a batch rolls back, so no false event and no permanent marker). shortcut: a
+      // single request commits after this returns, so a failing commit there costs one stray event.
+      String channel = NeoWriteChannel.current();
+      String source = channel.endsWith("_batch") ? AccountingKpiTelemetry.SOURCE_BATCH
+          : channel.startsWith(NeoWriteChannel.MCP) ? AccountingKpiTelemetry.SOURCE_MCP
+          : AccountingKpiTelemetry.SOURCE_CALENDAR_WINDOW;
+      String clientId = period.getClient().getId();
+      NeoBatchScope.runAfterCommit(() -> AccountingKpiTelemetry.calendarReviewCompleted(clientId,
+          AccountingKpiTelemetry.REVIEW_MANUAL_OPEN, AccountingKpiTelemetry.TYPE_CONFIRM, source));
+    }
+    return result;
   }
 
   @Override

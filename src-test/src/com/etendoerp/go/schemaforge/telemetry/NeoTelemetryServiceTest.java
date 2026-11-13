@@ -287,6 +287,33 @@ class NeoTelemetryServiceTest {
     }
   }
 
+  /** ETP-6230: {@code internal} is an allowlisted boolean; the owner's address never is. */
+  @Test
+  void emitKeepsTheAccountingKpiPropsAndDropsAnEmail() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_FIRST_DOCUMENT_PROCESSED, mapOf(
+        "account_id", "CLIENT-1", "internal", true, "source", "spa", "operation", "post",
+        "email", "owner@etendo.ai", "ownerEmail", "owner@etendo.ai"));
+
+    Map<String, Object> emitted = sink.last().getProperties();
+    assertEquals(Map.of("account_id", "CLIENT-1", "internal", true, "source", "spa",
+        "operation", "post"), emitted);
+  }
+
+  @Test
+  void emitDropsANonBooleanInternalFlag() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_PERIOD_REFUSED,
+        mapOf("account_id", "CLIENT-1", "internal", "true"));
+
+    assertFalse(sink.last().getProperties().containsKey("internal"));
+    assertEquals("CLIENT-1", sink.last().getProperties().get("account_id"));
+  }
+
   @Test
   void measureBackendOperationEmitsWriteTimingWithoutRecordId() throws Exception {
     RecordingSink sink = new RecordingSink();
