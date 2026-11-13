@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,6 +44,7 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.plm.Product;
@@ -58,8 +60,9 @@ import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
  * of one document kind, one document's read-only detail, and its printable.
  *
  * <pre>
- * GET /sws/portal/home                                  balances, per-kind tiles, recent documents
- * GET /sws/portal/documents?type=&amp;status=&amp;dateFrom=&amp;dateTo=&amp;q=&amp;limit=&amp;offset=
+ * GET /sws/portal/home?months=                          balances, tiles, recent, paid, chart
+ * GET /sws/portal/search?q=                             documents of every kind matching q
+ * GET /sws/portal/documents?type=&amp;group=&amp;status=&amp;dateFrom=&amp;dateTo=&amp;q=&amp;limit=&amp;offset=
  * GET /sws/portal/documents/{kind}/{id}                 header, lines, taxes, payments, links
  * GET /sws/portal/documents/{kind}/{id}/pdf             the main attachment, streamed
  * </pre>
@@ -81,11 +84,14 @@ final class PortalDocumentsEndpoint {
   private static final int DEFAULT_LIMIT = 50;
   private static final int MAX_LIMIT = 200;
   private static final int RECENT_LIMIT = 5;
+  private static final int SEARCH_LIMIT = 8;
+  /** Chart periods the home offers ("Últimos 3 / 6 / 12 meses"); anything else is 12. */
+  private static final List<Integer> CHART_MONTHS = List.of(3, 6, 12);
+  private static final int DEFAULT_CHART_MONTHS = 12;
   private static final String KIND = "kind";
   private static final String ID = "id";
   private static final String CURRENCY = "currency";
   private static final String COUNT = "count";
-  private static final String DOCUMENT_STATUS_UNDER_EVALUATION = "UE";
 
   private PortalDocumentsEndpoint() {
   }
@@ -98,11 +104,19 @@ final class PortalDocumentsEndpoint {
    * newest documents.
    */
   static JSONObject home(PortalSession session) throws JSONException {
+    return home(session, null);
+  }
+
+  /**
+   * As {@link #home(PortalSession)}, plus the design's "Tu saldo · Pagado este año" and the
+   * "Facturado por mes" chart over the chosen period ({@code months}: 3, 6 or 12; default 12).
+   */
+  static JSONObject home(PortalSession session, String monthsParam) throws JSONException {
     Date today = today();
     JSONObject body = new JSONObject();
 
     JSONArray balances = new JSONArray();
-    Map<String, Object[]> overdue = new java.util.HashMap<>();
+    Map<String, Object[]> overdue = new HashMap<>();
     for (Object[] row : PortalDocumentQuery.overdueByCurrency(session, today)) {
       overdue.put((String) row[0], row);
     }
@@ -141,26 +155,113 @@ final class PortalDocumentsEndpoint {
       recent.put(row(document, schedules));
     }
     body.put("recent", recent);
+
+    // "Pagado este año": paid on the invoices issued this calendar year, per currency.
+    LocalDate firstOfYear = LocalDate.now().withDayOfYear(1);
+    JSONArray paid = new JSONArray();
+    for (Object[] row : PortalDocumentQuery.paidSince(session, toDate(firstOfYear))) {
+      JSONObject entry = new JSONObject();
+      entry.put(CURRENCY, StringUtils.defaultString((String) row[0]));
+      entry.put("paid", PortalDocumentQuery.amount(row[1]));
+      entry.put(COUNT, ((Number) row[2]).longValue());
+      paid.put(entry);
+    }
+    body.put("paidThisYear", paid);
+
+    long[] year = PortalDocumentQuery.invoicesSince(session, toDate(firstOfYear), today);
+    JSONObject yearInvoices = new JSONObject();
+    yearInvoices.put("total", year[0]);
+    yearInvoices.put("upToDate", Math.max(year[0] - year[1], 0));
+    body.put("invoicesThisYear", yearInvoices);
+
+    body.put("chart", chart(session, monthsParam));
+    return body;
+  }
+
+  /**
+   * The invoiced amount per month over the last {@code months} months, current month included,
+   * in one currency: the one the customer was invoiced in most (an amount chart cannot add two
+   * currencies). Months with nothing invoiced are present with 0, so the bars line up.
+   */
+  private static JSONObject chart(PortalSession session, String monthsParam) throws JSONException {
+    int months = parseInt(monthsParam, DEFAULT_CHART_MONTHS);
+    if (!CHART_MONTHS.contains(months)) {
+      months = DEFAULT_CHART_MONTHS;
+    }
+    LocalDate firstMonth = LocalDate.now().withDayOfMonth(1).minusMonths(months - 1L);
+    Map<String, Map<String, BigDecimal>> byCurrency = new HashMap<>();
+    for (Object[] row : PortalDocumentQuery.invoicedByMonth(session, toDate(firstMonth))) {
+      String key = String.format("%04d-%02d", ((Number) row[0]).intValue(),
+          ((Number) row[1]).intValue());
+      byCurrency.computeIfAbsent(StringUtils.defaultString((String) row[2]),
+          c -> new HashMap<>()).merge(key, PortalDocumentQuery.amount(row[3]),
+              BigDecimal::add);
+    }
+    String currency = null;
+    for (Map.Entry<String, Map<String, BigDecimal>> entry : byCurrency.entrySet()) {
+      if (currency == null || entry.getValue().size() > byCurrency.get(currency).size()) {
+        currency = entry.getKey();
+      }
+    }
+    Map<String, BigDecimal> amounts = currency == null ? Collections.emptyMap()
+        : byCurrency.get(currency);
+    JSONArray bars = new JSONArray();
+    for (int i = 0; i < months; i++) {
+      LocalDate month = firstMonth.plusMonths(i);
+      String key = String.format("%04d-%02d", month.getYear(), month.getMonthValue());
+      JSONObject bar = new JSONObject();
+      bar.put("month", key);
+      bar.put("amount", amounts.getOrDefault(key, BigDecimal.ZERO));
+      bars.put(bar);
+    }
+    JSONObject chart = new JSONObject();
+    chart.put("months", months);
+    chart.put(CURRENCY, currency == null ? JSONObject.NULL : currency);
+    chart.put("bars", bars);
+    return chart;
+  }
+
+  /**
+   * The header search across every kind: newest matches first, at most {@value #SEARCH_LIMIT}.
+   * A blank query answers an empty list.
+   */
+  static JSONObject search(PortalSession session, String search) throws JSONException {
+    List<BaseOBObject> documents = PortalDocumentQuery.search(session, search, SEARCH_LIMIT);
+    Map<String, Object[]> schedules = PortalDocumentQuery.invoiceSchedules(invoiceIds(documents),
+        today());
+    JSONArray rows = new JSONArray();
+    for (BaseOBObject document : documents) {
+      rows.put(row(document, schedules));
+    }
+    JSONObject body = new JSONObject();
+    body.put("documents", rows);
     return body;
   }
 
   /**
    * The one figure a tile calls out: quotations awaiting the customer's answer, overdue invoices,
-   * shipments of the current month. Orders have no single honest "needs you" figure, so none.
+   * orders in progress (completed, not yet fully delivered or invoiced), shipments of the current
+   * month.
    */
   private static Object highlight(PortalSession session, PortalDocumentKind kind,
       long overdueInvoices, Date today) throws JSONException {
     JSONObject highlight = new JSONObject();
     switch (kind) {
       case QUOTATION:
+        // The same set as the list's "Por responder" tab, so the tile and the tab agree.
         highlight.put("code", "awaitingAnswer");
-        highlight.put(COUNT, PortalDocumentQuery.count(session, kind,
-            new PortalDocumentQuery.Filter(Collections.singletonList(
-                DOCUMENT_STATUS_UNDER_EVALUATION), null, null, null)));
+        highlight.put(COUNT, PortalDocumentQuery.count(session, kind, PortalDocumentQuery.Filter
+            .group(PortalDocumentQuery.group(kind, "awaiting"), today)));
         return highlight;
       case INVOICE:
         highlight.put("code", "overdue");
         highlight.put(COUNT, overdueInvoices);
+        return highlight;
+      case ORDER:
+        // "En curso": completed and not yet fully delivered or fully invoiced (plan §B.4).
+        highlight.put("code", "inProgress");
+        highlight.put(COUNT, PortalDocumentQuery.count(session, kind, PortalDocumentQuery.Filter
+            .group(PortalDocumentQuery.group(kind, "inProgress"), today)));
         return highlight;
       case SHIPMENT:
         LocalDate firstOfMonth = LocalDate.now().withDayOfMonth(1);
@@ -181,6 +282,17 @@ final class PortalDocumentsEndpoint {
    */
   static JSONObject list(PortalSession session, String type, String status, String dateFrom,
       String dateTo, String search, String limitParam, String offsetParam) throws JSONException {
+    return list(session, type, null, status, dateFrom, dateTo, search, limitParam, offsetParam);
+  }
+
+  /**
+   * As above, narrowed to one of the kind's status groups ({@code group}; blank or unknown means
+   * all). A group replaces {@code status}.
+   */
+  @SuppressWarnings("java:S107")
+  static JSONObject list(PortalSession session, String type, String groupCode, String status,
+      String dateFrom, String dateTo, String search, String limitParam, String offsetParam)
+      throws JSONException {
     PortalDocumentKind kind = kindOf(type);
     if (kind == null) {
       return null;
@@ -198,8 +310,9 @@ final class PortalDocumentsEndpoint {
     if (statuses != null && statuses.isEmpty()) {
       statuses = null;
     }
-    PortalDocumentQuery.Filter filter = new PortalDocumentQuery.Filter(statuses, from, toExclusive,
-        search);
+    PortalDocumentQuery.Group group = PortalDocumentQuery.group(kind, groupCode);
+    PortalDocumentQuery.Filter filter = new PortalDocumentQuery.Filter(
+        group == null ? statuses : null, from, toExclusive, search, group, today());
     int limit = Math.min(Math.max(parseInt(limitParam, DEFAULT_LIMIT), 1), MAX_LIMIT);
     int offset = Math.max(parseInt(offsetParam, 0), 0);
 
@@ -207,9 +320,18 @@ final class PortalDocumentsEndpoint {
     Map<String, Object[]> schedules = kind == PortalDocumentKind.INVOICE
         ? PortalDocumentQuery.invoiceSchedules(invoiceIds(documents), today())
         : Collections.emptyMap();
+    Map<String, String[]> orders = kind == PortalDocumentKind.QUOTATION
+        ? PortalDocumentQuery.ordersOfQuotations(session, ids(documents))
+        : Collections.emptyMap();
     JSONArray rows = new JSONArray();
     for (BaseOBObject document : documents) {
-      rows.put(row(document, schedules));
+      JSONObject row = row(document, schedules);
+      String[] order = orders.get(document.getId());
+      if (order != null) {
+        row.put("orderId", order[0]);
+        row.put("orderNo", order[1]);
+      }
+      rows.put(row);
     }
     long totalCount = 0;
     JSONArray totals = new JSONArray();
@@ -230,6 +352,8 @@ final class PortalDocumentsEndpoint {
     body.put("offset", offset);
     body.put("limit", limit);
     body.put("statuses", new JSONArray(PortalDocumentQuery.visibleStatuses(kind)));
+    body.put("groups", new JSONArray(PortalDocumentQuery.groupCodes(kind)));
+    body.put("group", group == null ? JSONObject.NULL : StringUtils.trimToNull(groupCode));
     body.put("totals", totals);
     return body;
   }
@@ -263,7 +387,7 @@ final class PortalDocumentsEndpoint {
     Location address = (Location) document.get("partnerAddress");
     customer.put("address", address == null ? "" : StringUtils.defaultString(address.getName()));
     body.put("customer", customer);
-    body.put("issuer", StringUtils.defaultString(session.getTenantName()));
+    body.put("issuer", issuerOf(document, session));
     body.put("lines", lines(kind, id));
     body.put("taxes", taxes(kind, id));
     if (kind == PortalDocumentKind.INVOICE) {
@@ -434,6 +558,29 @@ final class PortalDocumentsEndpoint {
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  /**
+   * "Emitido por": the document's own organization, the company that issued it (QA BUG-4), or the
+   * tenant's name when the document hangs off the "*" organization or has no name.
+   */
+  private static String issuerOf(BaseOBObject document, PortalSession session) {
+    Object organization = document.get("organization");
+    if (organization instanceof Organization) {
+      Organization org = (Organization) organization;
+      if (!"0".equals(org.getId()) && StringUtils.isNotBlank(org.getName())) {
+        return org.getName();
+      }
+    }
+    return StringUtils.defaultString(session.getTenantName());
+  }
+
+  private static List<String> ids(List<BaseOBObject> documents) {
+    List<String> ids = new ArrayList<>();
+    for (BaseOBObject document : documents) {
+      ids.add((String) document.getId());
+    }
+    return ids;
+  }
 
   private static List<String> invoiceIds(List<BaseOBObject> documents) {
     List<String> ids = new ArrayList<>();

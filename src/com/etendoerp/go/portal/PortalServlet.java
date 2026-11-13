@@ -45,8 +45,9 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
  * GET  /sws/portal/me[/{token}]                 the link's state, and who it speaks for when valid
  * POST /sws/portal/renew                        email a new link for an expired one
  * GET  /sws/portal/logo                         the issuing company's logo
- * GET  /sws/portal/home                         balances, per-kind tiles, recent documents
- * GET  /sws/portal/documents?type=…             one document kind, filtered and paged
+ * GET  /sws/portal/home?months=                balances, tiles, recent, paid this year, chart
+ * GET  /sws/portal/search?q=                    documents of every kind matching q
+ * GET  /sws/portal/documents?type=&amp;group=…      one document kind, filtered and paged
  * GET  /sws/portal/documents/{kind}/{id}[/pdf]  one document's detail, or its printable
  * </pre>
  *
@@ -117,6 +118,8 @@ public class PortalServlet extends HttpBaseServlet {
   /** ETP-6209 Part B: the home aggregates and the per-kind documents. */
   private static final String PATH_HOME = "/home";
   private static final String PATH_DOCUMENTS = "/documents";
+  /** The home's header search, across every kind. */
+  private static final String PATH_SEARCH = "/search";
   private static final String PDF_SUFFIX = "/pdf";
 
   /** Tenant logo, so the page can show whose portal this is. Takes no parameters. */
@@ -159,7 +162,7 @@ public class PortalServlet extends HttpBaseServlet {
   private final transient PortalRateLimiter meRateLimiter = new PortalRateLimiter();
   private final transient PortalRateLimiter renewRateLimiter = new PortalRateLimiter();
   /**
-   * The data reads ({@code /home}, {@code /documents*}). Its own counter, so a customer paging and
+   * The data reads ({@code /home}, {@code /search}, {@code /documents*}). Its own counter, so a customer paging and
    * filtering a long history never starves {@code /me} or {@code /renew}, and a higher ceiling
    * ({@link PortalRateLimiter#MAX_DATA_REQUESTS_PER_WINDOW} per minute), because a single page
    * visit makes several of these calls.
@@ -215,6 +218,8 @@ public class PortalServlet extends HttpBaseServlet {
         handleMe(request, response);
       } else if (path.equals(PATH_HOME)) {
         handleHome(request, response);
+      } else if (path.equals(PATH_SEARCH)) {
+        handleSearch(request, response);
       } else if (path.equals(PATH_DOCUMENTS)) {
         handleDocuments(request, response);
       } else if (path.startsWith(PATH_DOCUMENTS + "/")) {
@@ -425,7 +430,24 @@ public class PortalServlet extends HttpBaseServlet {
       rejectInvalidLink(response);
       return;
     }
-    sendJson(response, HttpServletResponse.SC_OK, PortalDocumentsEndpoint.home(session.get()));
+    sendJson(response, HttpServletResponse.SC_OK,
+        PortalDocumentsEndpoint.home(session.get(), request.getParameter("months")));
+  }
+
+  /** Documents of every kind matching {@code ?q=}, for the home's header search. */
+  private void handleSearch(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    sendJson(response, HttpServletResponse.SC_OK,
+        PortalDocumentsEndpoint.search(session.get(), request.getParameter("q")));
   }
 
   /** One page of one document kind; an unknown {@code type} answers 404. */
@@ -441,7 +463,7 @@ public class PortalServlet extends HttpBaseServlet {
       return;
     }
     JSONObject body = PortalDocumentsEndpoint.list(session.get(), request.getParameter("type"),
-        request.getParameter("status"), request.getParameter("dateFrom"),
+        request.getParameter("group"), request.getParameter("status"), request.getParameter("dateFrom"),
         request.getParameter("dateTo"), request.getParameter("q"),
         request.getParameter(PARAM_LIMIT), request.getParameter(PARAM_OFFSET));
     if (body == null) {

@@ -46,14 +46,15 @@ CRUD engine), reachable with no Etendo session. Every response is `no-store`.
 | `GET /me[/{token}]` | The link's state: `valid` (Business Partner name, tenant name, `hasLogo`, `entryDocument` or `null` + `entryKind` when the link's own document left its scope), `expired`, `unavailable`; or the 401 below |
 | `POST /renew` | For an expired link: `{state:"renewed", renewal:"sent"}`, `{state:"renewed", renewal:"recentlySent"}` (cool-down, nothing sent), `{state:"unavailable"}`, `{state:"valid"}` (not expired), `503` when the email could not be sent |
 | `GET /logo` | The issuing company's logo, resolved from the link's organization; served for any sent link, so the expired page keeps the branding |
-| `GET /home` | Pending-payment balances, one tile per kind (count + highlight), recent documents — server-side aggregates |
-| `GET /documents?type=&status=&dateFrom=&dateTo=&limit=&offset=` | One kind's list, filtered and paged (default 50, max 200), with invoice payment fields |
+| `GET /home?months=` | Pending-payment balances, one tile per kind (count + highlight: quotations awaiting an answer, overdue invoices, orders in progress, shipments this month), recent documents, `paidThisYear` (per currency, `Invoice.totalPaid` of this year's completed/closed invoices), `invoicesThisYear` (`total`, `upToDate`) and `chart` (invoiced per month over `months` = 3, 6 or 12, default 12, in the currency invoiced in most months) — server-side aggregates |
+| `GET /search?q=` | Documents of every kind matching `q` (number, reference, description), newest first, 8 at most; blank `q` answers an empty list |
+| `GET /documents?type=&group=&status=&dateFrom=&dateTo=&q=&limit=&offset=` | One kind's list, filtered and paged (default 50, max 200), with invoice payment fields, a quotation's generated order (`orderId`, `orderNo`) and the kind's `groups`; `group` (one of the kind's status groups, below) replaces `status` |
 | `GET /documents/{kind}/{id}` | Read-only detail, related documents (each re-checked against the scope), `hasPdf` |
 | `GET /documents/{kind}/{id}/pdf` | The document's printable (§5) |
 
 **Invalid** — unknown, pending, deactivated or malformed token — is one byte-identical answer:
 `401 {"error":"This link is no longer valid"}`. Only a link that was really emailed can answer
-`expired` or `unavailable`. On an expired or unavailable link the data reads (`/home`,
+`expired` or `unavailable`. On an expired or unavailable link the data reads (`/home`, `/search`,
 `/documents*`) answer that same 401; the page then re-checks `/me` once. A document outside the
 scope, of the wrong kind or in a hidden status is **404, never 403**.
 
@@ -71,6 +72,27 @@ Sales side, active, the link's tenant and Business Partner, and a per-kind statu
 
 Drafts and pre-completion states are never shown. The scope is client-wide (every tenant has a
 single organization today).
+
+**Status groups** (`?group=`, the page's list tabs, `PortalDocumentQuery.GROUPS`). Each is a
+subset of the kind's allow-list (intersected again at query time, so a group can never widen what
+is visible) plus, where the status alone cannot say it, a condition on the document:
+
+| Kind | Group | Statuses | Condition |
+|---|---|---|---|
+| Quotation | `awaiting` | `UE`, `CO` | — |
+| | `accepted` | `CA`, `ETGO_CI` | — |
+| | `rejected` | `CJ` | — |
+| Order | `inProgress` | `CO` | a line with `orderedQuantity ≠ deliveredQuantity` or `≠ invoicedQuantity` |
+| | `completed` | `CO`, `CL` | `CL`, or no such line |
+| | `voided` | `VO` | — |
+| Shipment | `delivered` | `CO`, `CL` | — |
+| | `voided` | `VO` | — |
+| Invoice | `pending` | `CO`, `CL` | `outstandingAmount ≠ 0` |
+| | `overdue` | `CO`, `CL` | an instalment past due (server day) with money owed |
+| | `paid` | `CO`, `CL` | `outstandingAmount = 0` |
+
+No group (or an unknown one) is every visible status. The home's tiles count the same sets
+(`awaiting`, `overdue`, `inProgress`), so a tile and its tab always agree.
 
 ## 3. The token header — `X-Portal-Token`
 
@@ -133,7 +155,7 @@ portal (ETP-6209)*.
 |---|---|
 | `GET /me` | 30 |
 | `POST /renew` | 30 |
-| `GET /home`, `GET /documents*` (shared) | 120 |
+| `GET /home`, `GET /search`, `GET /documents*` (shared) | 120 |
 
 **Production (review W6, resolved by infra with no code change).** Traffic goes browser →
 CloudFront → ALB → Tomcat. Infra added `RemoteIpValve` to the Tomcat image, live from the next

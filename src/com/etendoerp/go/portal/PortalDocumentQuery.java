@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -64,6 +65,68 @@ final class PortalDocumentQuery {
     VISIBLE_STATUSES.put(PortalDocumentKind.INVOICE, List.of("CO", "CL", "VO"));
   }
 
+  /**
+   * The customer-facing status groups of each kind's list tabs (ETP-6209 design rework, plan
+   * §B.4): a small set of answers to "what do I still have to do", each one a subset of the kind's
+   * allow-list plus, where the status alone cannot say it, a condition on the document's own data.
+   * "all" is implicit (no group). The badges inside a group keep the app's own status labels.
+   */
+  private static final Map<PortalDocumentKind, Map<String, Group>> GROUPS =
+      new EnumMap<>(PortalDocumentKind.class);
+  /** An instalment still owing money is past due. */
+  private static final String HAS_OVERDUE_INSTALMENT = "exists (select 1 from FIN_Payment_Schedule"
+      + " ps where ps.invoice.id = e.id and ps.active = true and ps.outstandingAmount > 0"
+      + " and ps.dueDate < :today)";
+  /** A line not yet fully delivered or not yet fully invoiced. */
+  private static final String HAS_PENDING_LINE = "exists (select 1 from OrderLine l"
+      + " where l.salesOrder.id = e.id and l.active = true"
+      + " and (l.orderedQuantity <> l.deliveredQuantity or l.orderedQuantity <> l.invoicedQuantity))";
+
+  static {
+    Map<String, Group> quotation = new LinkedHashMap<>();
+    // CO is a quotation completed but not yet answered, the same "awaiting" the app's convert and
+    // reject actions accept (QuotationTopbarActions: CO or UE). CL and VO show under "all" only.
+    quotation.put("awaiting", new Group(List.of("UE", "CO"), null));
+    quotation.put("accepted", new Group(List.of("CA", "ETGO_CI"), null));
+    quotation.put("rejected", new Group(List.of("CJ"), null));
+    GROUPS.put(PortalDocumentKind.QUOTATION, quotation);
+
+    Map<String, Group> order = new LinkedHashMap<>();
+    order.put("inProgress", new Group(List.of("CO"), HAS_PENDING_LINE));
+    order.put("completed", new Group(List.of("CO", "CL"),
+        "(e.documentStatus = 'CL' or not " + HAS_PENDING_LINE + ")"));
+    order.put("voided", new Group(List.of("VO"), null));
+    GROUPS.put(PortalDocumentKind.ORDER, order);
+
+    Map<String, Group> shipment = new LinkedHashMap<>();
+    shipment.put("delivered", new Group(List.of("CO", "CL"), null));
+    shipment.put("voided", new Group(List.of("VO"), null));
+    GROUPS.put(PortalDocumentKind.SHIPMENT, shipment);
+
+    Map<String, Group> invoice = new LinkedHashMap<>();
+    // "Pendientes" is everything still owed, overdue included ("Ver facturas pendientes" of the
+    // home opens it); "Vencidas" is the overdue part of it.
+    invoice.put("pending", new Group(List.of("CO", "CL"), "e.outstandingAmount <> 0"));
+    invoice.put("overdue", new Group(List.of("CO", "CL"), HAS_OVERDUE_INSTALMENT));
+    invoice.put("paid", new Group(List.of("CO", "CL"), "e.outstandingAmount = 0"));
+    GROUPS.put(PortalDocumentKind.INVOICE, invoice);
+  }
+
+  /** One status group: the statuses it covers and an optional extra HQL condition on {@code e}. */
+  static final class Group {
+    final List<String> statuses;
+    final String condition;
+
+    Group(List<String> statuses, String condition) {
+      this.statuses = statuses;
+      this.condition = condition;
+    }
+
+    boolean usesToday() {
+      return condition != null && condition.contains(":" + P_TODAY);
+    }
+  }
+
   /** Quotation and proposal sub-types of {@code C_DocType.DocSubTypeSO}. */
   private static final String QUOTATION_SUBTYPES = "('OB', 'ON')";
   /**
@@ -92,12 +155,26 @@ final class PortalDocumentQuery {
     final Date dateFrom;
     final Date dateToExclusive;
     final String search;
+    final Group group;
+    final Date today;
 
     Filter(List<String> statuses, Date dateFrom, Date dateToExclusive, String search) {
+      this(statuses, dateFrom, dateToExclusive, search, null, null);
+    }
+
+    Filter(List<String> statuses, Date dateFrom, Date dateToExclusive, String search, Group group,
+        Date today) {
       this.statuses = statuses;
       this.dateFrom = dateFrom;
       this.dateToExclusive = dateToExclusive;
       this.search = StringUtils.trimToNull(search);
+      this.group = group;
+      this.today = today;
+    }
+
+    /** Only the given group, for the home's tiles. */
+    static Filter group(Group group, Date today) {
+      return new Filter(null, null, null, null, group, today);
     }
 
     static Filter none() {
@@ -111,6 +188,22 @@ final class PortalDocumentQuery {
    */
   static List<String> visibleStatuses(PortalDocumentKind kind) {
     return VISIBLE_STATUSES.get(kind);
+  }
+
+  /**
+   * @param kind a document kind
+   * @return its status groups' codes, in tab order
+   */
+  static List<String> groupCodes(PortalDocumentKind kind) {
+    return new ArrayList<>(GROUPS.get(kind).keySet());
+  }
+
+  /**
+   * @return the kind's group of that code, or {@code null} for "all", blank or an unknown code
+   */
+  static Group group(PortalDocumentKind kind, String code) {
+    String normalized = StringUtils.trimToNull(code);
+    return normalized == null ? null : GROUPS.get(kind).get(normalized);
   }
 
   /**
@@ -237,13 +330,106 @@ final class PortalDocumentQuery {
     return query.list();
   }
 
+  /**
+   * What the customer paid on the invoices issued since {@code from} (the home's "Pagado este
+   * año"), per currency: {@code Invoice.totalPaid}, over completed and closed invoices that have a
+   * payment at all.
+   *
+   * @return rows of {@code [currencyIso, paidSum, invoiceCount]}
+   */
+  static List<Object[]> paidSince(PortalSession session, Date from) {
+    PortalDocumentKind kind = PortalDocumentKind.INVOICE;
+    Filter filter = new Filter(List.of("CO", "CL"), from, null, null);
+    Query<Object[]> query = session().createQuery("select e.currency.iSOCode, sum(e.totalPaid),"
+        + " count(e) from Invoice e where " + where(kind, filter) + " and e.totalPaid > 0"
+        + " group by e.currency.iSOCode", Object[].class);
+    bind(query, session, kind, filter);
+    return query.list();
+  }
+
+  /**
+   * Invoiced amount per calendar month since {@code from}, per currency (the home's "Facturado por
+   * mes"), over completed and closed invoices.
+   *
+   * @return rows of {@code [year, month, currencyIso, grandTotalSum]}
+   */
+  static List<Object[]> invoicedByMonth(PortalSession session, Date from) {
+    PortalDocumentKind kind = PortalDocumentKind.INVOICE;
+    Filter filter = new Filter(List.of("CO", "CL"), from, null, null);
+    Query<Object[]> query = session().createQuery("select year(e.invoiceDate),"
+        + " month(e.invoiceDate), e.currency.iSOCode, sum(e.grandTotalAmount) from Invoice e"
+        + " where " + where(kind, filter) + " group by year(e.invoiceDate), month(e.invoiceDate),"
+        + " e.currency.iSOCode", Object[].class);
+    bind(query, session, kind, filter);
+    return query.list();
+  }
+
+  /**
+   * Completed and closed invoices issued since {@code from}: how many there are, and how many of
+   * them have an instalment past due with money owed (the home's "Al día con X de Y facturas").
+   *
+   * @return {@code [total, overdue]}
+   */
+  static long[] invoicesSince(PortalSession session, Date from, Date today) {
+    PortalDocumentKind kind = PortalDocumentKind.INVOICE;
+    Filter all = new Filter(List.of("CO", "CL"), from, null, null);
+    Filter overdue = new Filter(null, from, null, null, GROUPS.get(kind).get("overdue"), today);
+    return new long[] { count(session, kind, all), count(session, kind, overdue) };
+  }
+
+  /**
+   * The order generated from each of the given quotations, when it is in the session's scope:
+   * the "Pedido PV…" line an accepted quotation's card shows. One query for a whole page.
+   *
+   * @return {@code quotationId -> [orderId, orderDocumentNo]}
+   */
+  static Map<String, String[]> ordersOfQuotations(PortalSession session,
+      Collection<String> quotationIds) {
+    if (quotationIds == null || quotationIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    PortalDocumentKind kind = PortalDocumentKind.ORDER;
+    Query<Object[]> query = session().createQuery("select e.quotation.id, e.id, e.documentNo"
+        + " from Order e where e.quotation.id in (:" + P_IDS + ") and "
+        + where(kind, Filter.none()) + " order by e.orderDate", Object[].class);
+    bind(query, session, kind, Filter.none());
+    query.setParameterList(P_IDS, new LinkedHashSet<>(quotationIds));
+    Map<String, String[]> result = new HashMap<>();
+    for (Object[] row : query.list()) {
+      result.putIfAbsent((String) row[0], new String[] { (String) row[1], (String) row[2] });
+    }
+    return result;
+  }
+
+  /**
+   * Documents of every kind matching a search, newest first (the header search of the home).
+   * Each kind contributes at most {@code limit}; the merged list is cut to {@code limit}.
+   */
+  static List<BaseOBObject> search(PortalSession session, String search, int limit) {
+    if (StringUtils.isBlank(search)) {
+      return Collections.emptyList();
+    }
+    Filter filter = new Filter(null, null, null, search);
+    List<BaseOBObject> all = new ArrayList<>();
+    for (PortalDocumentKind kind : PortalDocumentKind.values()) {
+      all.addAll(list(session, kind, filter, 0, limit));
+    }
+    sortNewestFirst(all);
+    return all.size() > limit ? new ArrayList<>(all.subList(0, limit)) : all;
+  }
+
   /** The {@code limit} newest visible documents of every kind, newest first. */
   static List<BaseOBObject> recent(PortalSession session, int limit) {
     List<BaseOBObject> all = new ArrayList<>();
     for (PortalDocumentKind kind : PortalDocumentKind.values()) {
       all.addAll(list(session, kind, Filter.none(), 0, limit));
     }
-    all.sort((a, b) -> {
+    sortNewestFirst(all);
+    return all.size() > limit ? new ArrayList<>(all.subList(0, limit)) : all;
+  }
+
+  private static void sortNewestFirst(List<BaseOBObject> documents) {
+    documents.sort((a, b) -> {
       Date da = dateOf(a);
       Date db = dateOf(b);
       if (da == null || db == null) {
@@ -251,7 +437,6 @@ final class PortalDocumentQuery {
       }
       return db.compareTo(da);
     });
-    return all.size() > limit ? new ArrayList<>(all.subList(0, limit)) : all;
   }
 
   /** The document date of any portal document (order, shipment or invoice date). */
@@ -278,6 +463,9 @@ final class PortalDocumentQuery {
     }
     if (filter.dateToExclusive != null) {
       where.append(" and e.").append(kind.getDateProperty()).append(" < :").append(P_TO);
+    }
+    if (filter.group != null && filter.group.condition != null) {
+      where.append(" and ").append(filter.group.condition);
     }
     if (filter.search != null) {
       where.append(" and (lower(e.documentNo) like :").append(P_SEARCH)
@@ -315,6 +503,9 @@ final class PortalDocumentQuery {
     if (filter.search != null) {
       query.setParameter(P_SEARCH, "%" + escapeLike(filter.search.toLowerCase(Locale.ROOT)) + "%");
     }
+    if (filter.group != null && filter.group.usesToday()) {
+      query.setParameter(P_TODAY, filter.today);
+    }
   }
 
   /**
@@ -323,6 +514,13 @@ final class PortalDocumentQuery {
    */
   private static Set<String> statusesFor(PortalDocumentKind kind, Filter filter) {
     List<String> allowed = VISIBLE_STATUSES.get(kind);
+    if (filter.group != null) {
+      // A group's statuses are a subset of the allow-list by construction; intersected anyway so
+      // a mistake in GROUPS can never widen what a customer sees.
+      Set<String> grouped = new LinkedHashSet<>(filter.group.statuses);
+      grouped.retainAll(allowed);
+      return grouped;
+    }
     if (filter.statuses == null || filter.statuses.isEmpty()) {
       return new LinkedHashSet<>(allowed);
     }
