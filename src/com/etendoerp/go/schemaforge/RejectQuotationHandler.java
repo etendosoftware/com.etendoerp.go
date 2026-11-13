@@ -71,8 +71,6 @@ public class RejectQuotationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(RejectQuotationHandler.class);
   private static final String ACTION_NAME = "rejectQuotation";
-  private static final String STATUS_REJECTED = "CJ";
-  private static final String STATUS_UNDER_EVALUATION = "UE";
   private static final String FIELD_REJECT_REASON = "rejectReason";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
   /**
@@ -147,7 +145,7 @@ public class RejectQuotationHandler implements NeoHandler {
         if (quotation == null) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_QUOTATION_NOT_FOUND + recordId);
         }
-        if (!STATUS_UNDER_EVALUATION.equals(quotation.getDocumentStatus())) {
+        if (!QuotationDecisions.isDecidable(quotation)) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_QUOTATION_NOT_UE);
         }
 
@@ -156,11 +154,8 @@ public class RejectQuotationHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_REASON_NOT_FOUND + reasonId);
         }
 
-        quotation.setRejectReason(reason);
-        quotation.setDocumentStatus(STATUS_REJECTED);
-        quotation.setProcessed(true);
-        OBDal.getInstance().save(quotation);
-        OBDal.getInstance().flush();
+        // The writes are shared with the customer portal's confirmed rejections (ETP-6209).
+        QuotationDecisions.reject(quotation, reason);
 
         return buildSuccessResponse(quotation);
       } finally {
