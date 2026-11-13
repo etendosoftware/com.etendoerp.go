@@ -93,9 +93,11 @@ final class FiscalAeatValidationOutcome {
   private final Outcome outcome;
   private final List<String> errors;
   private final List<String> warnings;
+  private final byte[] pdf;
 
   private FiscalAeatValidationOutcome(String model, Path path, boolean testMode, Outcome outcome,
-      List<String> errors, List<String> warnings) {
+      List<String> errors, List<String> warnings, byte[] pdf) {
+    this.pdf = pdf != null && pdf.length > 0 ? pdf.clone() : null;
     this.model = model;
     this.path = path;
     this.testMode = testMode;
@@ -109,7 +111,7 @@ final class FiscalAeatValidationOutcome {
       AEAT303SubmissionResult result) {
     return new FiscalAeatValidationOutcome(model, path, result.isTestMode(),
         result.isSuccessful() ? Outcome.ACCEPTED : Outcome.REJECTED, result.getErrors(),
-        result.getWarnings());
+        result.getWarnings(), result.isSuccessful() ? result.getPdfContent() : null);
   }
 
   /**
@@ -121,7 +123,7 @@ final class FiscalAeatValidationOutcome {
       Throwable failure) {
     return new FiscalAeatValidationOutcome(model, path, testMode,
         hasIoCause(failure) ? Outcome.CONNECTION_FAILURE : Outcome.NOT_VALIDATED, List.of(),
-        List.of());
+        List.of(), null);
   }
 
   private static boolean hasIoCause(Throwable failure) {
@@ -153,6 +155,11 @@ final class FiscalAeatValidationOutcome {
   /** True when the AEAT answered (accepted or rejected) — only then is there anything to store. */
   boolean answered() {
     return outcome == Outcome.ACCEPTED || outcome == Outcome.REJECTED;
+  }
+
+  /** The PDF of an accepted answer (the validator's draft, a justificante), or null. */
+  byte[] pdf() {
+    return pdf != null ? pdf.clone() : null;
   }
 
   /** The AEAT errors as they came ({@code "CODE - message"}). */

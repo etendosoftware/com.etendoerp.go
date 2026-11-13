@@ -33,6 +33,10 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 
@@ -170,6 +174,32 @@ final class FiscalAeatSubmissionSupport {
     } finally {
       cleanupTempDir(tempDir);
     }
+  }
+
+  /**
+   * Same as {@link #attachPdf}, but the declaration keeps ONE attachment of that name: every
+   * attachment of the declaration called exactly {@code fileName} is removed first. For a
+   * document each new AEAT answer supersedes (the validation draft of a generated file). Only
+   * that name is touched — never another attachment of the declaration. Best-effort and without
+   * commit, like {@link #attachPdf}.
+   */
+  static void replaceAttachedPdf(FiscalDecl decl, Organization org, String fileName,
+      byte[] pdfContent, String tempPrefix, String modelLabel) {
+    try {
+      String tableId = NeoAttachmentsHelper.resolveTableId(FiscalDecl.TABLE_NAME);
+      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, decl.getId()));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_NAME, fileName));
+      criteria.setFilterOnReadableOrganization(false);
+      for (Attachment previous : criteria.list()) {
+        NeoAttachmentsHelper.getAttachManager().delete(previous);
+      }
+    } catch (Exception e) {
+      AbstractFiscalHandler.log.error("Could not remove the previous " + fileName
+          + " attachment of declaration " + decl.getId(), e);
+    }
+    attachPdf(decl, org, fileName, pdfContent, tempPrefix, modelLabel);
   }
 
   private static void cleanupTempDir(Path tempDir) {

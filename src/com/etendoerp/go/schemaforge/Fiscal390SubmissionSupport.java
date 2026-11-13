@@ -403,6 +403,15 @@ class Fiscal390SubmissionSupport {
     return f.format(date);
   }
 
+  /**
+   * Name of the draft PDF the validator returns for a file validated before its download: the
+   * {@code TEST-} scheme under its own prefix, so it is never taken for a filing receipt nor for
+   * the test-mode attachment.
+   */
+  static String validationFileName(int year, String period) {
+    return "VALIDACION-" + justificanteFileName(year, period);
+  }
+
   static String justificanteFileName(int year, String period) {
     return "justificante-390-" + year + "-" + Fiscal303BoxesHandler.safeFileToken(period) + ".pdf";
   }

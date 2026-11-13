@@ -282,10 +282,19 @@ the one `submit` uses in test mode; no certificate) and returned **whatever the 
 
 | `outcome` | Meaning | Incidents |
 |---|---|---|
-| `accepted` | the AEAT answered, no error | the AEAT incidents (`AEAT-<code>`) are cleared |
+| `accepted` | the AEAT answered, no error | the AEAT incidents (`AEAT-<code>`) are cleared; its warnings (`avisos`) are stored as warning incidents |
 | `rejected` | the AEAT answered with errors | replaced by this answer's errors (block) and warnings (warn) |
 | `connection_failure` | an `IOException` reaching the validator (timeout, refused, unknown host) | untouched |
 | `not_validated` | any other failure (e.g. an answer that is not the validator's JSON) | untouched |
+
+**Validation PDF.** An `accepted` answer carries the validator's draft PDF. It is attached to
+the declaration as `VALIDACION-justificante-390-<year>-0A.pdf` (the `TEST-` scheme of the
+test-mode submit under its own prefix), as proof that the file was validated — it is not a filing
+receipt. Each accepted validation replaces the previous `VALIDACION-` attachment
+(`FiscalAeatSubmissionSupport.replaceAttachedPdf`, exact name match: the `TEST-` attachment and
+the real justificante are never touched). Any other outcome, or an accepted answer without PDF,
+attaches nothing and leaves the existing one. Best-effort: a failure is logged and changes
+neither the outcome nor the download.
 
 The validation never fails the request and never delays it indefinitely: the classic service is
 used with `withTimeouts(10 s connect, 30 s read)` (its interactive defaults are 30 s / 120 s) and

@@ -26,6 +26,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionRequestBuilder;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 
@@ -150,7 +151,7 @@ class Fiscal390FileValidationSupport {
    * attempt — answered or not — leaves its row in the attempt log
    * ({@link FiscalAeatAttemptLog}, own connection). An AEAT answer is also stored in the
    * declaration's incidents: it replaces the previous AEAT incidents (a clean one leaves none);
-   * no answer keeps them.
+   * no answer keeps them. An accepted answer's PDF is attached ({@link #attachValidationPdf}).
    *
    * <p>Best-effort: a persistence failure is logged and never reaches the caller, which still
    * has a file to hand over.
@@ -164,11 +165,37 @@ class Fiscal390FileValidationSupport {
     try {
       owner.declHandler().replaceAeatIncidentsNoCommit(decl, outcome.errors(),
           outcome.warnings());
+      attachValidationPdf(decl, declaration, outcome);
       OBDal.getInstance().commitAndClose();
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not persist the AEAT validation incidents of"
           + " declaration " + decl.getId(), e);
       rollbackQuietly();
+    }
+  }
+
+  /**
+   * Keeps the validator's draft PDF of an ACCEPTED file as proof that it was validated:
+   * {@code VALIDACION-justificante-390-<year>-0A.pdf}, replacing the one of the previous
+   * accepted validation. A rejected answer, or an accepted one without PDF, attaches nothing and
+   * leaves the existing one. Never throws (the attach helpers are best-effort).
+   */
+  void attachValidationPdf(FiscalDecl decl, FiscalAeatAttemptLog.Declaration declaration,
+      FiscalAeatValidationOutcome outcome) {
+    byte[] pdf = outcome.outcome() == FiscalAeatValidationOutcome.Outcome.ACCEPTED
+        ? outcome.pdf() : null;
+    if (pdf == null) {
+      return;
+    }
+    try {
+      // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
+      Organization org = OBDal.getInstance().get(Organization.class, declaration.orgId());
+      FiscalAeatSubmissionSupport.replaceAttachedPdf(decl, org,
+          Fiscal390SubmissionSupport.validationFileName(declaration.year(), declaration.period()),
+          pdf, "aeat390goval", Fiscal390BoxesHandler.MODEL);
+    } catch (Exception e) {
+      AbstractFiscalHandler.log.error("Could not attach the AEAT validation PDF to declaration "
+          + declaration.declId(), e);
     }
   }
 
