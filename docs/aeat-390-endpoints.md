@@ -16,6 +16,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 |---|---|---|
 | `GET` | `/fiscal390/boxes?year=&period=0A[&<input>=…]` | box preview (`Fiscal390BoxesHandler`) |
 | `GET` | `/fiscal390/generate?year=&period=0A[&<input>=…]` | TXT file (`Fiscal390GenerateSupport`) |
+| `POST` | `/fiscal390/generate-validated?year=&period=0A&id=[&<input>=…]` | TXT file + the AEAT validator's answer about it (`Fiscal390FileValidationSupport`) |
 | `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
 | `GET` | `/fiscal390/preload?year=&period=0A[&monthlyReturn=Y\|N]` | 303 preload + cuadre (`Fiscal390PreloadSupport`, `Fiscal390PreloadAggregator`) |
 | `POST` | `/fiscal390/submit?year=&period=0A&id=` | AEAT telematic filing (`Fiscal390SubmissionSupport`) |
@@ -31,9 +32,9 @@ Declarations use `model: "390"`, `period: "0A"`.
 | Status | When |
 |---|---|
 | `400` | `period` is not `0A`; an input is not a number (message names it); `sources` with a non-numeric `box`/`page`/`pageSize` or `pageSize` outside 0–500 |
-| `404` / `405` | unknown entity / wrong method (`generate` is GET-only, `submit` POST-only) |
-| `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
-| `409 BLOCKING_INCIDENTS` | `generate` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
+| `404` / `405` | unknown entity / wrong method (`generate` is GET-only; `generate-validated`, `submit` and `validate` POST-only) |
+| `409` | `generate` / `generate-validated` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
+| `409 BLOCKING_INCIDENTS` | `generate` / `generate-validated` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
 | `422 INCOMPLETE_FISCAL_YEAR` | the exercise has no period for some month 1–12 in the fiscal calendar (`boxes`, `sources`, `generate`; see "Annual period") — body `{ error: { status: 422, code, message, year, missingPeriods: [1..12] } }` |
 | `500` | no 390 tax report up to the year, classic validation errors (translated AD message, e.g. missing main IAE activity) |
@@ -261,6 +262,38 @@ returned temp file is deleted, and the content is served through the shared
 `writeGeneratedFile` in ISO-8859-1. Download name `390_0A_<exercise>.txt` — never derived from the
 report name, which carries the layout year. Response headers `X-Fiscal-Tax-Report` and
 `X-Fiscal-Layout-Year` report the resolved report.
+
+## `POST /fiscal390/generate-validated` — the file, validated by the AEAT before download
+
+What "Generar fichero 390" calls (ETP-5716). Same guards and same file as `GET generate`
+(`409` submitted, `409 BLOCKING_INCIDENTS`, `422 INCOMPLETE_FISCAL_YEAR`), plus `id` — the
+declaration (`400` missing, `404` not a 390 of this client/org/exercise). The generated file is
+sent to the AEAT validation service (`AEAT303SubmissionService.submitValidation`, MODELO 390 —
+the one `submit` uses in test mode; no certificate) and returned **whatever the validator says**:
+
+```json
+{ "fileName": "390_0A_2025.txt", "fileBase64": "<ISO-8859-1 bytes>", "taxReport": "AEAT390_2025_Y",
+  "layoutYear": 2025,
+  "validation": { "path": "download", "testMode": true,
+                  "outcome": "accepted | rejected | connection_failure | not_validated",
+                  "errorCodes": ["PAR016"],
+                  "errors": [{ "code": "PAR016", "message": "…" }], "warnings": [] } }
+```
+
+| `outcome` | Meaning | Incidents |
+|---|---|---|
+| `accepted` | the AEAT answered, no error | the AEAT incidents (`AEAT-<code>`) are cleared |
+| `rejected` | the AEAT answered with errors | replaced by this answer's errors (block) and warnings (warn) |
+| `connection_failure` | an `IOException` reaching the validator (timeout, refused, unknown host) | untouched |
+| `not_validated` | any other failure (e.g. an answer that is not the validator's JSON) | untouched |
+
+The validation never fails the request and never delays it indefinitely: the classic service is
+used with `withTimeouts(10 s connect, 30 s read)` (its interactive defaults are 30 s / 120 s) and
+every exception becomes an unanswered outcome. `FiscalAeatValidationOutcome` is the single value
+of an attempt (path, test mode, outcome, AEAT error codes without free text) and
+`Fiscal390FileValidationSupport#recordOutcome` the single place it is handed to — where a future
+attempt log hooks in. Like every AEAT attempt, an answer REPLACES the previous AEAT incidents.
+`GET generate` is unchanged: the file only, no validation, no write.
 
 ## `POST /fiscal390/submit` — AEAT telematic filing
 
