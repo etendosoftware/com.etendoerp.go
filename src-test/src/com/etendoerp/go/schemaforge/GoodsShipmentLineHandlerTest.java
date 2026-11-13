@@ -27,19 +27,26 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.junit.After;
 import org.junit.Before;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 
 /**
  * Unit tests for {@link GoodsShipmentLineHandler}.
@@ -49,12 +56,19 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  *   <li>{@code handle()} — must always return null to fall through to default CRUD.</li>
  *   <li>{@code afterHandle()} — guard conditions that short-circuit before DB access:
  *       non-GET method, missing previous result, null body, and empty data array.</li>
+ *   <li>ETP-6002 CP-22 — {@code invoiceLineId} declared as a create directive (the MCP no longer
+ *       reports it in {@code unknownFields}) and the sales link: the first shipment of an invoice
+ *       line in its column, a later partial one in {@code M_MatchSI}.</li>
+ *   <li>ETP-6002 CP-14 — a quotation line is never a shipment line's order line.</li>
+ *   <li>ETP-6002 QA BUG-1 — a create with {@code invoiceLineId} and no {@code salesOrderLine}
+ *       takes the invoice line's order line (MCP parity with the window).</li>
  * </ul>
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
  * are not included here — those are covered by integration tests.
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentLineHandler
+ * @covers com.etendoerp.go.schemaforge.SalesQuotations
  */
 public class GoodsShipmentLineHandlerTest {
 
@@ -513,5 +527,212 @@ public class GoodsShipmentLineHandlerTest {
       assertEquals("loc-explicit", body.getString("storageBin"));
       Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
     }
+  }
+
+  // ── ETP-6002 CP-22 — invoiceLineId: directive and sales link ──────────────
+
+  /**
+   * {@code invoiceLineId} is a create directive of the shipment line: the MCP write verbs read the
+   * directives to decide what is unknown, so declaring it is what keeps it out of
+   * {@code unknownFields} while the link it asks for is written.
+   */
+  @Test
+  public void createDirectivesDeclareInvoiceLineId() {
+    java.util.Map<String, String> directives = new GoodsShipmentLineHandler().createDirectives();
+
+    assertEquals(java.util.Set.of("invoiceLineId"), directives.keySet());
+    assertTrue(directives.get("invoiceLineId").contains("sales invoice line"));
+  }
+
+  /** Arms the handler with {@code invoiceLineId}, then runs the POST post-hook for the new line. */
+  private static void createWithInvoiceLine(GoodsShipmentLineHandler handler, String invoiceLineId,
+      String newLineId) throws Exception {
+    handler.handle(NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(new JSONObject().put("invoiceLineId", invoiceLineId)).build());
+    JSONObject created = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", newLineId))));
+    assertNull(handler.afterHandle(NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).previousResult(new NeoResponse(201, created)).build()));
+  }
+
+  /**
+   * The first shipment of an invoice line is recorded in its column and no match row is written
+   * (M_INOUT_POST writes it on completion); a later partial shipment, whose invoice line already
+   * points at another shipment line, gets its {@code M_MatchSI} row now. Before ETP-6002 the
+   * second one was not linked at all, so an MCP partial shipment without an order line left the
+   * rest of the invoice line looking unshipped forever.
+   */
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  @Test
+  public void createLinksTheInvoiceLineInItsColumnThenInTheSalesMatchTable() throws Exception {
+    for (int updated : new int[] { 1, 0 }) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class)) {
+        context.when(OBContext::getOBContext).thenReturn(null);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+        org.hibernate.query.NativeQuery query = mock(org.hibernate.query.NativeQuery.class);
+        List<String> statements = new ArrayList<>();
+        when(session.createNativeQuery(Mockito.anyString())).thenAnswer(call -> {
+          statements.add(call.getArgument(0));
+          return query;
+        });
+        when(query.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(query);
+        when(query.executeUpdate()).thenReturn(updated);
+
+        createWithInvoiceLine(new GoodsShipmentLineHandler(), "inv-line-1", "ship-line-2");
+
+        String label = updated == 1 ? "first shipment" : "later partial shipment";
+        assertTrue(label, statements.get(0).contains("UPDATE C_InvoiceLine")
+            && statements.get(0).contains("M_InOutLine_ID IS NULL"));
+        assertEquals(label, updated == 1 ? 1 : 2, statements.size());
+        if (updated == 0) {
+          assertTrue(label, statements.get(1).contains("INSERT INTO m_matchsi"));
+        }
+        Mockito.verify(query, Mockito.atLeastOnce()).setParameter("inoutLineId", "ship-line-2");
+        Mockito.verify(query, Mockito.atLeastOnce()).setParameter("invoiceLineId", "inv-line-1");
+      }
+    }
+  }
+
+  // ── ETP-6002 CP-14 — a quotation line is never a shipment line's order line ──
+
+  /** An order line of an order whose target doc type has {@code DocSubTypeSO = subType}. */
+  private static OrderLine orderLineOfSubType(String subType) {
+    DocumentType docType = mock(DocumentType.class);
+    when(docType.getSOSubType()).thenReturn(subType);
+    Order order = mock(Order.class);
+    when(order.getTransactionDocument()).thenReturn(docType);
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.getSalesOrder()).thenReturn(order);
+    return orderLine;
+  }
+
+  /**
+   * The window's «Añadir desde Factura» popup copies the invoice line's order line; an invoice
+   * made straight from a quotation carries quotation lines, and completing the shipment then
+   * marked the quotation delivered and related it to the shipment (QA CP-14). The pre-hook drops
+   * a quotation line from any CRUD write and keeps a sales-order line (order ↔ shipment is
+   * direct). Reads, actions and an order line that is not the caller's own are left alone.
+   */
+  @Test
+  public void dropsAQuotationOrderLineFromAWriteAndKeepsAnOrderLine() throws Exception {
+    OrderLine quotationLine = orderLineOfSubType("OB");
+    OrderLine salesOrderLine = orderLineOfSubType("SO");
+    ownership.when(() -> TenantOwnership.loadOwned(OrderLine.class, "ol-quotation"))
+        .thenReturn(quotationLine);
+    ownership.when(() -> TenantOwnership.loadOwned(OrderLine.class, "ol-order"))
+        .thenReturn(salesOrderLine);
+    Object[][] cases = {
+        // label, method, endpoint, order line id, kept
+        { "POST of a quotation line", "POST", NeoEndpointType.CRUD, "ol-quotation", false },
+        { "PATCH to a quotation line", "PATCH", NeoEndpointType.CRUD, "ol-quotation", false },
+        { "POST of a sales-order line", "POST", NeoEndpointType.CRUD, "ol-order", true },
+        { "an order line that is not the caller's", "POST", NeoEndpointType.CRUD, "ol-foreign",
+            true },
+        { "not a write", "GET", NeoEndpointType.CRUD, "ol-quotation", true },
+        { "not a CRUD call", "POST", NeoEndpointType.ACTION, "ol-quotation", true },
+    };
+    for (Object[] c : cases) {
+      JSONObject body = new JSONObject().put("salesOrderLine", c[3]).put("invoiceLineId", "il-1");
+      NeoContext ctx = NeoContext.builder().httpMethod((String) c[1])
+          .endpointType((NeoEndpointType) c[2]).requestBody(body).build();
+
+      GoodsShipmentLineHandler.dropQuotationOrderLine(ctx);
+
+      assertEquals((String) c[0], c[4], body.has("salesOrderLine"));
+      assertTrue((String) c[0] + ": the invoice line link stays", body.has("invoiceLineId"));
+    }
+  }
+
+  // ── ETP-6002 QA BUG-1 — salesOrderLine derived from invoiceLineId ─────────
+
+  /** An invoice line whose own order line is {@code orderLine} (or none). */
+  private static InvoiceLine invoiceLineFrom(OrderLine orderLine) {
+    InvoiceLine invoiceLine = mock(InvoiceLine.class);
+    when(invoiceLine.getSalesOrderLine()).thenReturn(orderLine);
+    return invoiceLine;
+  }
+
+  /**
+   * QA BUG-1: over MCP {@code salesOrderLine} is a system field the agent never sees, so a line
+   * created with only {@code invoiceLineId} from an invoice of a regular sales order carried no
+   * order line (the order stayed undelivered and {@code availableOrderLines} offered it again).
+   * The pre-hook now takes the invoice line's order line, as the window sends it. A quotation
+   * line is never taken (CP-14), an explicit {@code salesOrderLine} is kept, another tenant's
+   * invoice line is ignored, and only a CRUD create does it.
+   */
+  @Test
+  public void deriveOrderLineFromInvoiceLineOnlyForARegularOrderOnACreate() throws Exception {
+    OrderLine orderLine = orderLineOfSubType("SO");
+    when(orderLine.getId()).thenReturn("ol-order");
+    OrderLine quotationLine = orderLineOfSubType("OB");
+    when(quotationLine.getId()).thenReturn("ol-quotation");
+    InvoiceLine fromOrder = invoiceLineFrom(orderLine);
+    InvoiceLine fromQuotation = invoiceLineFrom(quotationLine);
+    InvoiceLine withoutOrder = invoiceLineFrom(null);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-order"))
+        .thenReturn(fromOrder);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-quotation"))
+        .thenReturn(fromQuotation);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-none"))
+        .thenReturn(withoutOrder);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-foreign"))
+        .thenReturn(null);
+    Object[][] cases = {
+        // label, method, endpoint, invoiceLineId, salesOrderLine sent, expected salesOrderLine
+        { "regular order line copied", "POST", NeoEndpointType.CRUD, "il-order", null,
+            "ol-order" },
+        { "quotation line not copied", "POST", NeoEndpointType.CRUD, "il-quotation", null, null },
+        { "invoice line without an order line", "POST", NeoEndpointType.CRUD, "il-none", null,
+            null },
+        { "another tenant's invoice line ignored", "POST", NeoEndpointType.CRUD, "il-foreign",
+            null, null },
+        { "explicit salesOrderLine kept", "POST", NeoEndpointType.CRUD, "il-order", "ol-sent",
+            "ol-sent" },
+        { "an update never derives", "PATCH", NeoEndpointType.CRUD, "il-order", null, null },
+        { "not a CRUD call", "POST", NeoEndpointType.ACTION, "il-order", null, null },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      JSONObject body = new JSONObject().put("invoiceLineId", c[3]);
+      if (c[4] != null) {
+        body.put("salesOrderLine", c[4]);
+      }
+      NeoContext ctx = NeoContext.builder().httpMethod((String) c[1])
+          .endpointType((NeoEndpointType) c[2]).requestBody(body).build();
+
+      GoodsShipmentLineHandler.deriveOrderLineFromInvoiceLine(ctx);
+
+      assertEquals(label, c[5], body.has("salesOrderLine") ? body.getString("salesOrderLine")
+          : null);
+    }
+  }
+
+  /**
+   * The window's path and the quotation drop still compose in {@code handle}: a quotation line
+   * the window sent is dropped and NOT re-derived from the same invoice line; a regular order
+   * line the window sent stays.
+   */
+  @Test
+  public void handleDropsAQuotationLineAndDoesNotDeriveItBack() throws Exception {
+    OrderLine quotationLine = orderLineOfSubType("OB");
+    when(quotationLine.getId()).thenReturn("ol-quotation");
+    InvoiceLine fromQuotation = invoiceLineFrom(quotationLine);
+    ownership.when(() -> TenantOwnership.loadOwned(OrderLine.class, "ol-quotation"))
+        .thenReturn(quotationLine);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-quotation"))
+        .thenReturn(fromQuotation);
+    JSONObject body = new JSONObject().put("invoiceLineId", "il-quotation")
+        .put("salesOrderLine", "ol-quotation");
+
+    GoodsShipmentLineHandler.dropQuotationOrderLine(NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).requestBody(body).build());
+    GoodsShipmentLineHandler.deriveOrderLineFromInvoiceLine(NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build());
+
+    assertFalse(body.has("salesOrderLine"));
   }
 }

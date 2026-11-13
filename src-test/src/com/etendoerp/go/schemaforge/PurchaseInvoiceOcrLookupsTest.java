@@ -29,6 +29,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -63,6 +65,9 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.plm.ProductCategory;
+import org.openbravo.model.common.uom.UOM;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
@@ -76,6 +81,8 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 import com.etendoerp.go.schemaforge.ocr.OcrReviewAssembler;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * The purchase-invoice lookups of the OCR review: each one must reach the SAME server code the
@@ -797,6 +804,313 @@ class PurchaseInvoiceOcrLookupsTest {
         assertEquals(1, lookups.searchVendors("Acme", 20).size());
         assertTrue(capture.warnings.isEmpty(), capture.warnings.toString());
       }
+    }
+  }
+
+  // ── review details (the review action's read-time enrichment) ─────────────
+
+  @Nested
+  @DisplayName("review details: product by id, vendor and product details")
+  class ReviewDetails {
+
+    private MockedStatic<NeoTrl> trlMock;
+    private MockedStatic<NeoLanguage> languageMock;
+
+    @BeforeEach
+    void openTranslation() {
+      trlMock = mockStatic(NeoTrl.class);
+      trlMock.when(() -> NeoTrl.translatedNames(anyString(), any(), anyString()))
+          .thenReturn(Map.of());
+      languageMock = mockStatic(NeoLanguage.class);
+      languageMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+    }
+
+    @AfterEach
+    void closeTranslation() {
+      languageMock.close();
+      trlMock.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T extends org.openbravo.base.structure.BaseOBObject> OBQuery<T> query(Class<T> type,
+        List<T> found) {
+      OBQuery<T> query = mock(OBQuery.class);
+      when(query.list()).thenReturn(found);
+      when(dal.createQuery(eq(type), anyString())).thenReturn(query);
+      return query;
+    }
+
+    private Product product(String id, String name, boolean active, boolean visible) {
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn(id);
+      when(product.getName()).thenReturn(name);
+      when(product.isActive()).thenReturn(active);
+      when(product.getSearchKey()).thenReturn("KEY-" + id);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(product)).thenReturn(visible);
+      return product;
+    }
+
+    private void withCategoryAndUom(Product product, String categoryName, String uomName) {
+      String productId = product.getId();
+      ProductCategory category = mock(ProductCategory.class);
+      when(category.getId()).thenReturn("CAT-" + productId);
+      when(category.getName()).thenReturn(categoryName);
+      UOM uom = mock(UOM.class);
+      when(uom.getId()).thenReturn("UOM-" + productId);
+      when(uom.getName()).thenReturn(uomName);
+      when(product.getProductCategory()).thenReturn(category);
+      when(product.getUOM()).thenReturn(uom);
+    }
+
+    private BusinessPartner partner(String id, String name, String taxId, boolean visible) {
+      BusinessPartner partner = mock(BusinessPartner.class);
+      when(partner.getId()).thenReturn(id);
+      when(partner.getName()).thenReturn(name);
+      when(partner.getTaxID()).thenReturn(taxId);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(partner)).thenReturn(visible);
+      return partner;
+    }
+
+    private org.openbravo.model.common.businesspartner.Location location(String partnerId,
+        String city) {
+      org.openbravo.model.common.businesspartner.Location location = mock(
+          org.openbravo.model.common.businesspartner.Location.class);
+      BusinessPartner owner = mock(BusinessPartner.class);
+      when(owner.getId()).thenReturn(partnerId);
+      when(location.getBusinessPartner()).thenReturn(owner);
+      if (city != null) {
+        org.openbravo.model.common.geography.Location address = mock(
+            org.openbravo.model.common.geography.Location.class);
+        when(address.getCityName()).thenReturn(city);
+        when(location.getLocationAddress()).thenReturn(address);
+      }
+      return location;
+    }
+
+    // ---- productById
+
+    @Test
+    @DisplayName("a product by id is returned only when active and visible to the tenant")
+    void productById() {
+      Product ok = product("P1", "Pen", true, true);
+      when(dal.get(Product.class, "P1")).thenReturn(ok);
+      assertEquals("Pen", lookups.productById("P1").orElseThrow().name());
+      assertEquals("P1", lookups.productById("P1").orElseThrow().id());
+
+      Product foreign = product("P2", "Other tenant", true, false);
+      when(dal.get(Product.class, "P2")).thenReturn(foreign);
+      assertTrue(lookups.productById("P2").isEmpty());
+
+      Product inactive = product("P3", "Gone", false, true);
+      when(dal.get(Product.class, "P3")).thenReturn(inactive);
+      assertTrue(lookups.productById("P3").isEmpty());
+
+      assertTrue(lookups.productById("nope").isEmpty());
+      assertTrue(lookups.productById(" ").isEmpty());
+      assertTrue(lookups.productById(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a DAL failure on the product by id is an empty answer")
+    void productByIdFailure() {
+      when(dal.get(Product.class, "P1")).thenThrow(new IllegalStateException("db"));
+
+      assertTrue(lookups.productById("P1").isEmpty());
+    }
+
+    // ---- vendorDetails
+
+    @Test
+    @DisplayName("no usable ids: empty answer and no query")
+    void vendorDetailsWithoutIds() {
+      assertTrue(lookups.vendorDetails(null).isEmpty());
+      assertTrue(lookups.vendorDetails(List.of()).isEmpty());
+      assertTrue(lookups.vendorDetails(java.util.Arrays.asList("", " ", null)).isEmpty());
+
+      verify(dal, never()).createQuery(any(Class.class), anyString());
+    }
+
+    @Test
+    @DisplayName("one query for the partners and one for the addresses, whatever the ids")
+    void vendorDetailsBatches() {
+      OBQuery<BusinessPartner> partners = query(BusinessPartner.class,
+          List.of(partner("V1", "Acme", " B123 ", true), partner("V2", "Beta", null, true),
+              partner("V3", "Foreign", "X", false)));
+      query(org.openbravo.model.common.businesspartner.Location.class,
+          List.of(location("V1", " Madrid "), location("V1", "Second city"),
+              location("V3", "Hidden")));
+
+      Map<String, OcrLookups.VendorDetails> out = lookups.vendorDetails(
+          java.util.Arrays.asList("V1", "V2", "V1", "V3", "", null));
+
+      verify(dal, times(2)).createQuery(any(Class.class), anyString());
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<java.util.Collection<String>> ids = ArgumentCaptor.forClass(
+          java.util.Collection.class);
+      verify(partners).setNamedParameter(eq("ids"), ids.capture());
+      assertEquals(List.of("V1", "V2", "V3"), List.copyOf(ids.getValue()));
+      assertEquals("Acme", out.get("V1").name());
+      assertEquals("B123", out.get("V1").taxId());
+      assertEquals("Madrid", out.get("V1").city(), "the first address wins, trimmed");
+      assertEquals("", out.get("V2").taxId());
+      assertEquals("", out.get("V2").city(), "no address: empty city");
+      assertFalse(out.containsKey("V3"), "not visible to the tenant");
+    }
+
+    @Test
+    @DisplayName("an address without a location record has an empty city")
+    void vendorDetailsAddressWithoutLocation() {
+      query(BusinessPartner.class, List.of(partner("V1", "Acme", "B1", true)));
+      query(org.openbravo.model.common.businesspartner.Location.class,
+          List.of(location("V1", null)));
+
+      assertEquals("", lookups.vendorDetails(List.of("V1")).get("V1").city());
+    }
+
+    @Test
+    @DisplayName("a failing city query keeps name and tax id with an empty city")
+    void vendorDetailsCityFailureKeepsTheRest() {
+      query(BusinessPartner.class,
+          List.of(partner("V1", "Acme", "B1", true), partner("V2", "Beta", " B2 ", true)));
+      OBQuery<org.openbravo.model.common.businesspartner.Location> cityQuery = query(
+          org.openbravo.model.common.businesspartner.Location.class, List.of());
+      when(cityQuery.list()).thenThrow(new IllegalStateException("SECRET V1"));
+
+      Map<String, OcrLookups.VendorDetails> out = lookups.vendorDetails(List.of("V1", "V2"));
+
+      assertEquals(2, out.size());
+      assertEquals("Acme", out.get("V1").name());
+      assertEquals("B1", out.get("V1").taxId());
+      assertEquals("", out.get("V1").city());
+      assertEquals("B2", out.get("V2").taxId());
+      assertEquals("", out.get("V2").city());
+    }
+
+    @Test
+    @DisplayName("the city query receives only the visible partners' ids")
+    void vendorDetailsCityQueryOnlyForVisiblePartners() {
+      query(BusinessPartner.class, List.of(partner("V1", "Acme", "B1", true),
+          partner("V3", "Foreign", "X", false)));
+      OBQuery<org.openbravo.model.common.businesspartner.Location> cityQuery = query(
+          org.openbravo.model.common.businesspartner.Location.class,
+          List.of(location("V1", "Madrid")));
+
+      Map<String, OcrLookups.VendorDetails> out = lookups.vendorDetails(List.of("V1", "V3"));
+
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<java.util.Collection<String>> ids = ArgumentCaptor.forClass(
+          java.util.Collection.class);
+      verify(cityQuery).setNamedParameter(eq("ids"), ids.capture());
+      assertEquals(List.of("V1"), List.copyOf(ids.getValue()));
+      assertEquals("Madrid", out.get("V1").city());
+      assertFalse(out.containsKey("V3"));
+    }
+
+    @Test
+    @DisplayName("when no partner is visible the city query is not run at all")
+    void vendorDetailsNoVisiblePartnerNoCityQuery() {
+      query(BusinessPartner.class, List.of(partner("V3", "Foreign", "X", false)));
+
+      assertTrue(lookups.vendorDetails(List.of("V3")).isEmpty());
+
+      verify(dal, times(1)).createQuery(any(Class.class), anyString());
+    }
+
+    @Test
+    @DisplayName("a failing vendor details lookup is an empty answer, logged without ids")
+    void vendorDetailsFailure() {
+      when(dal.createQuery(any(Class.class), anyString()))
+          .thenThrow(new IllegalStateException("SECRET V1"));
+
+      assertTrue(lookups.vendorDetails(List.of("V1")).isEmpty());
+    }
+
+    // ---- productDetails
+
+    @Test
+    @DisplayName("no usable ids: empty answer and no query")
+    void productDetailsWithoutIds() {
+      assertTrue(lookups.productDetails(null).isEmpty());
+      assertTrue(lookups.productDetails(List.of()).isEmpty());
+      assertTrue(lookups.productDetails(java.util.Arrays.asList(" ", null)).isEmpty());
+
+      verify(dal, never()).createQuery(any(Class.class), anyString());
+    }
+
+    @Test
+    @DisplayName("one product query; names follow the session language and fall back to the base")
+    void productDetailsTranslateAndFallBack() {
+      Product p1 = product("P1", "Pen", true, true);
+      withCategoryAndUom(p1, "Office", "Unit");
+      Product p2 = product("P2", "Pencil", true, true);
+      withCategoryAndUom(p2, "Office", "Box");
+      Product foreign = product("P3", "Foreign", true, false);
+      query(Product.class, List.of(p1, p2, foreign));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Product"), any(), eq("es_ES")))
+          .thenReturn(Map.of("P1", "Boligrafo"));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("ProductCategory"), any(), eq("es_ES")))
+          .thenReturn(Map.of("CAT-P1", "Oficina"));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("UOM"), any(), eq("es_ES")))
+          .thenReturn(Map.of("UOM-P1", "Unidad"));
+
+      Map<String, OcrLookups.ProductDetails> out = lookups.productDetails(
+          List.of("P1", "P2", "P3", "P1"));
+
+      verify(dal, times(1)).createQuery(any(Class.class), anyString());
+      OcrLookups.ProductDetails first = out.get("P1");
+      assertEquals("Boligrafo", first.name());
+      assertEquals("KEY-P1", first.searchKey());
+      assertEquals("Oficina", first.category());
+      assertEquals("Unidad", first.uom());
+      OcrLookups.ProductDetails second = out.get("P2");
+      assertEquals("Pencil", second.name());
+      assertEquals("Office", second.category());
+      assertEquals("Box", second.uom());
+      assertFalse(out.containsKey("P3"), "not visible to the tenant");
+    }
+
+    @Test
+    @DisplayName("a product without category or unit answers empty texts")
+    void productDetailsWithoutCategoryOrUom() {
+      Product p1 = product("P1", "Pen", true, true);
+      query(Product.class, List.of(p1));
+
+      OcrLookups.ProductDetails details = lookups.productDetails(List.of("P1")).get("P1");
+
+      assertEquals("", details.category());
+      assertEquals("", details.uom());
+    }
+
+    @Test
+    @DisplayName("a failing product details lookup is an empty answer")
+    void productDetailsFailure() {
+      when(dal.createQuery(any(Class.class), anyString()))
+          .thenThrow(new IllegalStateException("db"));
+
+      assertTrue(lookups.productDetails(List.of("P1")).isEmpty());
+    }
+
+    // ---- the interface defaults
+
+    @Test
+    @DisplayName("an implementation that does not support the details answers nothing, never throws")
+    void interfaceDefaultsAreTotal() {
+      OcrLookups bare = mock(OcrLookups.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+
+      assertTrue(bare.productById("P1").isEmpty());
+      assertTrue(bare.vendorDetails(List.of("V1")).isEmpty());
+      assertTrue(bare.productDetails(List.of("P1")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the data classes hand back what they were given")
+    void dataClassesCarryTheirValues() {
+      OcrLookups.VendorDetails vendor = new OcrLookups.VendorDetails("N", "T", "C");
+      OcrLookups.ProductDetails product = new OcrLookups.ProductDetails("N", "K", "G", "U");
+
+      assertEquals("N|T|C", vendor.name() + "|" + vendor.taxId() + "|" + vendor.city());
+      assertEquals("N|K|G|U", product.name() + "|" + product.searchKey() + "|"
+          + product.category() + "|" + product.uom());
     }
   }
 }

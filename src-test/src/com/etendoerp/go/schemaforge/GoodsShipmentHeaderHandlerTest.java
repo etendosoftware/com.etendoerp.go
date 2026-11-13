@@ -66,6 +66,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class GoodsShipmentHeaderHandlerTest {
 
@@ -312,18 +313,15 @@ public class GoodsShipmentHeaderHandlerTest {
   }
 
   /**
-   * Each linked order carries {@code isQuotation}, read from its target doc type's
-   * {@code DocSubTypeSO}: {@code 'OB'} is a quotation, any other subtype (or none) is an order.
-   * Only the linked-orders statement answers rows; every other statement reads an empty result.
+   * ETP-6002 CP-14: a QUOTATION is never one of the shipment's {@code linkedOrders}. A shipment
+   * made from an invoice that came straight from a quotation relates to the invoice only, and an
+   * older shipment whose lines still carry quotation lines must not list it either, so the
+   * statement leaves out every order whose target doc type is {@code DocSubTypeSO = 'OB'} (an
+   * order with no subtype stays). The entries no longer carry {@code isQuotation}. Only the
+   * linked-orders statement answers rows; every other statement reads an empty result.
    */
   @Test
-  public void testEnrichLinkedOrderMarksQuotationsByDocSubType() throws Exception {
-    String[][] orders = {
-        // id, documentNo, docSubTypeSO, expected isQuotation
-        { "o-quot", "QUO-1", "OB", "true" },
-        { "o-order", "SO-1", "SO", "false" },
-        { "o-nosub", "SO-2", null, "false" },
-    };
+  public void testEnrichLinkedOrderNeverListsAQuotation() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -337,19 +335,25 @@ public class GoodsShipmentHeaderHandlerTest {
       when(otherPs.executeQuery()).thenReturn(emptyRs);
 
       ResultSet ordersRs = mock(ResultSet.class);
-      when(ordersRs.next()).thenReturn(true, true, true, false);
-      when(ordersRs.getString(1)).thenReturn(orders[0][0], orders[1][0], orders[2][0]);
-      when(ordersRs.getString(2)).thenReturn(orders[0][1], orders[1][1], orders[2][1]);
+      when(ordersRs.next()).thenReturn(true, true, false);
+      when(ordersRs.getString(1)).thenReturn("o-order", "o-nosub");
+      when(ordersRs.getString(2)).thenReturn("SO-1", "SO-2");
       when(ordersRs.getString(4)).thenReturn("CO");
       when(ordersRs.getString(5)).thenReturn("EUR");
       when(ordersRs.getString(6)).thenReturn("pl-1");
       when(ordersRs.getString(7)).thenReturn("Tarifa");
-      when(ordersRs.getString(8)).thenReturn(orders[0][2], orders[1][2], orders[2][2]);
       PreparedStatement ordersPs = mock(PreparedStatement.class);
       when(ordersPs.executeQuery()).thenReturn(ordersRs);
 
-      when(conn.prepareStatement(anyString())).thenAnswer(inv ->
-          ((String) inv.getArgument(0)).contains("dt.docsubtypeso") ? ordersPs : otherPs);
+      java.util.List<String> ordersSql = new java.util.ArrayList<>();
+      when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+        String sql = inv.getArgument(0);
+        if (sql.contains("dt.docsubtypeso")) {
+          ordersSql.add(sql);
+          return ordersPs;
+        }
+        return otherPs;
+      });
 
       NeoContext ctx = getDetailCtx("sh-1");
       ctx.setPreviousResult(NeoResponse.ok(shipmentBody("sh-1")));
@@ -357,14 +361,15 @@ public class GoodsShipmentHeaderHandlerTest {
       NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
+      assertEquals(1, ordersSql.size());
+      assertTrue(ordersSql.get(0),
+          ordersSql.get(0).contains("(dt.docsubtypeso IS NULL OR dt.docsubtypeso <> 'OB')"));
       JSONArray linkedOrders = result.getBody().getJSONObject("response").getJSONArray("data")
           .getJSONObject(0).getJSONArray("linkedOrders");
-      assertEquals(orders.length, linkedOrders.length());
-      for (int i = 0; i < orders.length; i++) {
-        JSONObject order = linkedOrders.getJSONObject(i);
-        assertEquals(orders[i][0], order.getString("id"));
-        assertEquals(orders[i][0], Boolean.parseBoolean(orders[i][3]),
-            order.getBoolean("isQuotation"));
+      assertEquals(2, linkedOrders.length());
+      for (int i = 0; i < linkedOrders.length(); i++) {
+        assertFalse("no quotation flag on a shipment's orders",
+            linkedOrders.getJSONObject(i).has("isQuotation"));
       }
     }
   }
@@ -827,6 +832,33 @@ public class GoodsShipmentHeaderHandlerTest {
   // ReturnMaterialReceiptHeaderHandler / ReturnToVendorShipmentHeaderHandler, which already call
   // NeoHandlerUtils.reanchorLinesToHeaderWarehouse on this exact hook.
 
+  /**
+   * ETP-6002 review M4: completing a shipment first brings the draft-time M_MatchSI rows of its
+   * lines (later partial shipments of an invoice line) to the lines' current quantity, then lets
+   * the native completion run.
+   */
+  @Test
+  public void handleDocumentActionRefreshesTheDraftInvoiceMatchesBeforeCompletion() {
+    try (MockedStatic<NeoHandlerUtils> utils = Mockito.mockStatic(NeoHandlerUtils.class);
+         MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+
+      assertNull(new GoodsShipmentHeaderHandler().handle(ctx));
+
+      linker.verify(() -> InvoiceLineLinker.refreshDraftMatchQuantities("ship-1",
+          InOutInvoiceLinks.MatchTable.SALES));
+
+      // A failed refresh is not swallowed (review M2): on PostgreSQL the transaction is already
+      // aborted, so completing would only fail later with a misleading error.
+      linker.when(() -> InvoiceLineLinker.refreshDraftMatchQuantities("ship-1",
+          InOutInvoiceLinks.MatchTable.SALES)).thenThrow(new IllegalStateException("update failed"));
+      org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+          () -> new GoodsShipmentHeaderHandler().handle(ctx));
+    }
+  }
+
   @Test
   public void handleDocumentActionWithNullRecordIdSkipsReanchor() {
     NeoContext ctx = NeoContext.builder()
@@ -842,8 +874,11 @@ public class GoodsShipmentHeaderHandlerTest {
    */
   @Test
   public void handleDocumentActionReanchorsLineToHeaderWarehouseDefaultLocator() {
+    // The draft match refresh runs on this hook too and is covered by its own test,
+    // so it is stubbed out here
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
@@ -972,6 +1007,33 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertEquals("PL-ORDER", shipmentRec.getString("resolvedPriceListId"));
     assertEquals("Order Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
+  }
+
+  /**
+   * ETP-6002 (CP-14 follow-up): a shipment made from an invoice that came straight from a
+   * quotation has no linked order (a quotation never is one), so the price list comes from its
+   * first directly linked invoice, before the Business Partner's (not stubbed: it must not be
+   * read). A linked order still wins over the invoice.
+   */
+  @Test
+  public void enrichResolvedPriceListUsesTheLinkedInvoiceWhenThereIsNoOrder() throws Exception {
+    JSONObject invoice = new JSONObject().put("id", "inv-1").put("documentNo", "FV1")
+        .put("priceListId", "PL-INVOICE").put("priceList$_identifier", "Invoice Price List");
+    JSONObject noOrder = new JSONObject().put("id", "sh-1").put("linkedOrders", new JSONArray())
+        .put("linkedInvoices", new JSONArray().put(invoice));
+
+    invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), noOrder, "sh-1");
+
+    assertEquals("PL-INVOICE", noOrder.getString("resolvedPriceListId"));
+    assertEquals("Invoice Price List", noOrder.getString("resolvedPriceList$_identifier"));
+
+    JSONObject withOrder = new JSONObject().put("id", "sh-1")
+        .put("linkedOrders", linkedOrdersWithPriceList("PL-ORDER", "Order Price List"))
+        .put("linkedInvoices", new JSONArray().put(invoice));
+
+    invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), withOrder, "sh-1");
+
+    assertEquals("PL-ORDER", withOrder.getString("resolvedPriceListId"));
   }
 
   /**
@@ -1136,7 +1198,7 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
             "importOrderLines", "availableInvoices", "availableInvoiceLines", "createDraftInvoice",
-            "createReturn", "cloneRecord", "post", "unpost"),
+            "sifDefaults", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1194,7 +1256,7 @@ public class GoodsShipmentHeaderHandlerTest {
       names.add(p.getName());
       assertFalse(p.getName() + " must be optional: the SPA posts only priceListId", p.isRequired());
     }
-    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines"), names);
+    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines", "sifFields"), names);
     String d = c.getDescription();
     org.junit.Assert.assertTrue(d, d.contains("COMPLETES") && d.contains("completed")
         && d.contains("cannot have its quantities edited"));
@@ -1326,10 +1388,11 @@ public class GoodsShipmentHeaderHandlerTest {
 
   /**
    * The shipment's popup rules: a rectificative invoice delivers nothing, so it is not offered,
-   * and pending deducts what the order line delivered and every draft shipment, this one included.
+   * and a line pends by its own shipment links, capped by what its order line delivered and every
+   * draft shipment holds, this one included (ETP-6002 CP-22).
    */
   @Test
-  public void invoiceImportPolicy_offersNoRectificative_andDeductsDeliveredAndEveryDraft() {
+  public void invoiceImportPolicy_offersNoRectificative_andPendsByDirectLinks() {
     ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
         GoodsShipmentHeaderHandler.INVOICE_IMPORT_POLICY;
     org.openbravo.model.common.enterprise.DocumentType rectificative =
@@ -1356,6 +1419,8 @@ public class GoodsShipmentHeaderHandlerTest {
     assertTrue("the shipment's own draft lines count too", policy.deductsTargetDraft);
     assertFalse("the shipment offers no classic pending basis (ETP-6099 follow-up)",
         policy.offersClassicPending);
+    assertTrue("pending by the invoice line's own links (ETP-6002 CP-22)",
+        policy.pendsByDirectLinks);
   }
 
   /**
@@ -1390,6 +1455,58 @@ public class GoodsShipmentHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.SHIPMENT_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a goods shipment previews the invoice createDraftInvoice would create from it:
+   * a single shipment with an order takes the invoice type its order links (F2), the order's SII
+   * description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheShipment() throws Exception {
+    GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsShipmentHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      ShipmentInOut shipment = org.mockito.Mockito.mock(ShipmentInOut.class);
+      org.openbravo.model.common.enterprise.Organization sourceOrg =
+          InvoiceSifPreviewTestSupport.org();
+      org.mockito.Mockito.when(shipment.getOrganization()).thenReturn(sourceOrg);
+      org.mockito.Mockito.when(shipment.getSalesOrder()).thenReturn(order);
+      org.mockito.Mockito.when(mocks.dal.get(ShipmentInOut.class, "gs-1")).thenReturn(shipment);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("goods-shipment", "gs-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
     }
   }
 }

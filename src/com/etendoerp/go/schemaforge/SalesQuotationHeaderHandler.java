@@ -184,39 +184,6 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
-  /**
-   * The order-header post-hook, plus, on the detail GET, the quotation's goods movements
-   * ({@code linkedShipments}, ETP-6002 IMP-3: shipments whose lines point at this quotation's lines)
-   * so its related documents list them — see {@link QuotationShipmentLinks}.
-   */
-  @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    NeoResponse result = super.afterHandle(context);
-    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
-      return result;
-    }
-    NeoResponse effective = result != null ? result : context.getPreviousResult();
-    if (effective == null || effective.getBody() == null || effective.getHttpStatus() >= 400) {
-      return result;
-    }
-    JSONObject wrapper = effective.getBody().optJSONObject("response");
-    org.codehaus.jettison.json.JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
-    JSONObject rec = data == null || data.length() == 0 ? null : data.optJSONObject(0);
-    if (rec == null) {
-      return result;
-    }
-    QuotationShipmentLinks.enrich(rec, context.getRecordId());
-    return NeoResponse.ok(effective.getBody());
-  }
-
-  /** {@code linkedShipments} is injected on every detail record (ETP-6002). */
-  @Override
-  public java.util.Set<String> responseEnrichedFields() {
-    java.util.Set<String> fields = new java.util.LinkedHashSet<>(super.responseEnrichedFields());
-    fields.add(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
-    return fields;
-  }
-
   @Inject
   private ConvertQuotationIntoOrder convertQuotationProcess;
 
@@ -390,6 +357,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
         CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);

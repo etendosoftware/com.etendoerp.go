@@ -181,5 +181,22 @@ class McpBusinessFiltersTest {
       assertTrue(McpBusinessFilters.operatorKeys()
           .containsAll(java.util.List.of("gt", "gte", "lt", "lte", "between", "contains", "in")));
     }
+
+    /**
+     * ETP-6148 (neo-headless.md §4.3a): an MCP filter on a property-path field is compared through
+     * an implicit (inner) join, which drops a row whose path is null. That matches the REST grid's
+     * left-joined criteria only because no MCP operator can match a null: equality and these
+     * operators are all false on null. An operator that can match null ({@code isNull},
+     * {@code ne}/{@code notEquals}, {@code notIn}…) would make the two channels disagree, so it must
+     * not be added without switching path filters to a left join first.
+     */
+    @Test
+    @DisplayName("the operator set stays within the null-excluding operators (§4.3a)")
+    void operatorSetHasNoNullMatchingOperator() {
+      assertEquals(java.util.Set.of("gt", "gte", "lt", "lte", "between", "contains", "in"),
+          new java.util.HashSet<>(McpBusinessFilters.operatorKeys()),
+          "a new MCP filter operator: if it can match a null value, property-path filters "
+              + "(implicit inner join) stop agreeing with REST - see neo-headless.md §4.3a");
+    }
   }
 }

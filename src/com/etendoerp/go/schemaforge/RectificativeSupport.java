@@ -99,4 +99,32 @@ final class RectificativeSupport {
     return Boolean.TRUE.equals(dt.isEtsgIsRectificative());
   }
 
+  /**
+   * Whether the document type is a corrective one — flagged rectificative or {@code IsReturn}
+   * (ETP-6179). An ordinary invoice must never be generated with such a type: it would be sent
+   * to the fiscal systems as a correction of nothing.
+   *
+   * @param dt the document type to inspect, may be {@code null}
+   * @return {@code true} when {@code dt} is a return or rectificative type
+   */
+  static boolean isCorrective(DocumentType dt) {
+    return dt != null && (Boolean.TRUE.equals(dt.isReturn()) || isRectificative(dt));
+  }
+
+  /**
+   * The candidates that are ordinary (not {@link #isCorrective}) document types, in their order.
+   *
+   * @param candidates the ranked candidates
+   * @return a new list without the corrective ones
+   */
+  static java.util.List<DocumentType> ordinaryOnly(java.util.List<DocumentType> candidates) {
+    java.util.List<DocumentType> ordinary = new java.util.ArrayList<>();
+    for (DocumentType dt : candidates) {
+      if (!isCorrective(dt)) {
+        ordinary.add(dt);
+      }
+    }
+    return ordinary;
+  }
+
 }

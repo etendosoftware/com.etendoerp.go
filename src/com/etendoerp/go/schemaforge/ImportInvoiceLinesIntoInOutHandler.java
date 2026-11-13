@@ -20,6 +20,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -59,14 +60,16 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       {@code includeCovered} also lists the others, at {@code pendingLines} 0, so the popup can
  *       say "all already imported".</li>
  *   <li><b>Which lines.</b> Active, other than the total-discount line, in line order.</li>
- *   <li><b>How much</b>, by the header's {@link SourcePolicy}. Goods shipment: a line with an order
- *       line (its own, or the header order's line of the same product, the last one winning, as the
- *       popup) has {@code invoiced - delivered - drafts} pending, never below 0, where drafts are the
- *       lines of every DRAFT shipment of the direction pointing at that order line, the target's own
- *       included; a line without one has its quantity unless it is already linked to a movement line
- *       ({@code linked}), then 0. Goods receipt (the popup's rule, delivered NOT deducted): a linked
- *       line has 0, any other {@code invoiced - drafts}, drafts being the OTHER draft receipts holding
- *       its order line.</li>
+ *   <li><b>How much</b>, by the header's {@link SourcePolicy}. Goods shipment
+ *       ({@link SourcePolicy#byDirectLinks}, ETP-6002 CP-22 and review M2): exactly the pending of
+ *       the invoice's own «Create shipment» follow-up ({@link #loadFollowUpSources},
+ *       {@link InvoicePendingResolver}) — {@code invoiced - moved} by the invoice line's OWN links
+ *       ({@code C_InvoiceLine.M_InOutLine_ID} or the match table, drafts included), capped by its
+ *       order line's {@code QtyOrdered - QtyDelivered - draft lines}, shared out in line order.
+ *       The popup, the MCP listing and {@code createShipment} therefore agree. Goods receipt
+ *       (the popup's rule, delivered NOT deducted): a linked line has 0, any other
+ *       {@code invoiced - drafts}, drafts being the OTHER draft receipts holding its order
+ *       line.</li>
  * </ul>
  * The direction comes from the target document, never from the entity; the per-direction rule is
  * the header customization's own ({@link #ATTRIBUTE}). A plain CDI bean injected by the goods
@@ -104,6 +107,12 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
      * at {@code linked ? 0 : invoiced} with NO draft deduction ({@link #classicLineStates}).
      */
     final boolean offersClassicPending;
+    /**
+     * Whether a line pends by its own movement links ({@link #byDirectLinks}, ETP-6002 CP-22)
+     * instead of by what its order line delivered. Such a policy also gives
+     * {@code availableInvoices} rows (with {@code detail}) their pending {@code amount}.
+     */
+    final boolean pendsByDirectLinks;
 
     SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
         boolean deductsTargetDraft) {
@@ -112,10 +121,28 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
 
     SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
         boolean deductsTargetDraft, boolean offersClassicPending) {
+      this(offered, deductsDelivered, deductsTargetDraft, offersClassicPending, false);
+    }
+
+    private SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
+        boolean deductsTargetDraft, boolean offersClassicPending, boolean pendsByDirectLinks) {
       this.offered = offered;
       this.deductsDelivered = deductsDelivered;
       this.deductsTargetDraft = deductsTargetDraft;
       this.offersClassicPending = offersClassicPending;
+      this.pendsByDirectLinks = pendsByDirectLinks;
+    }
+
+    /**
+     * A line pends as the invoice's follow-up computes it
+     * ({@link ImportInvoiceLinesIntoInOutHandler#loadFollowUpSources}): by its own links (draft and
+     * completed movement lines, the target's included), capped by its order
+     * line's {@code QtyOrdered - QtyDelivered - drafts}. A movement line linked to the invoice
+     * line counts whatever order line it carries, or none, so a line created by the window's popup
+     * and one created through the MCP with only {@code invoiceLineId} give the same pending.
+     */
+    static SourcePolicy byDirectLinks(Predicate<Invoice> offered) {
+      return new SourcePolicy(offered, true, true, false, true);
     }
   }
 
@@ -137,15 +164,20 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         : " Invoices with a negative grand total are never listed.";
     String flow = " Flow: on a DRAFT " + doc + ", " + ACTION_AVAILABLE_INVOICES + ", then "
         + ACTION_AVAILABLE_LINES + "; the lines are then created on the " + doc + " lines (each "
-        + "with the invoice line in invoiceLineId), as the window's import popup does. Read-only: "
-        + "nothing is written by these two actions.";
+        + "with the invoice line in invoiceLineId"
+        + (sales ? "; the line's salesOrderLine is then taken from that invoice line, never a "
+            + "quotation's" : "")
+        + "), as the window's import popup does. Read-only: nothing is written by these two "
+        + "actions.";
     String on = DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.";
     String pendingRule = sales
-        ? "pendingQuantity is, for a line with an order line (its own, or the invoice's order line "
-            + "of the same product), the invoiced quantity minus what the order line already "
-            + "delivered minus what any DRAFT " + doc + " (this one included) holds of it, never "
-            + "below 0; for a line without one, its quantity, or 0 when it is already linked to a "
-            + doc + " line"
+        ? "pendingQuantity is the invoiced quantity minus what the " + doc + " lines linked to "
+            + "THIS invoice line already ship or hold (completed or DRAFT, this one included; a "
+            + doc + " line is linked when it was created with invoiceLineId), never below 0. A "
+            + "line with its own order line is also capped by that order line's ordered minus "
+            + "delivered minus what any DRAFT " + doc + " holds of it. Only the invoice line's "
+            + "own links count, never another invoice's shipments of the same order line. It is "
+            + "the same pending the invoice's createShipment action uses"
         : "pendingQuantity is 0 for a line already linked to a " + doc + " line, and otherwise the "
             + "invoiced quantity minus what OTHER draft " + doc + "s hold of its order line (its "
             + "own, or the invoice's order line of the same product), never below 0; what the "
@@ -159,14 +191,19 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
             + "the invoice's order id or null." + which + " hasMore true means the list may be "
             + "incomplete. limit (1 to " + ImportListing.MAX_LIMIT + "), offset and "
             + "includeCovered are optional; with limit or offset the answer adds offset and "
-            + "nextOffset (page on while hasMore); detail adds creationDate. includeCovered also lists the invoices with nothing left, at pendingLines 0. "
+            + "nextOffset (page on while hasMore); detail adds creationDate"
+            + (sales ? " and amount (unit price x pendingQuantity summed over the lines with a "
+                + "positive pending, at the invoice currency's precision: the import popup's row "
+                + "total)" : "")
+            + ". includeCovered also lists the invoices with nothing left, at pendingLines 0. "
             + "Step 1." + flow,
         ImportListing.listParams(MAX_INVOICES, "creationDate (ISO instant, UTC)"))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + invoice + " to " + (sales ? "ship" : "receive") + " here: "
             + "{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity, "
-            + "invoicedQuantity, orderLine, linked, inDraftDocuments}], hasMore:false}, where "
+            + "invoicedQuantity, orderLine, linked, inDraftDocuments"
+            + (sales ? ", unitPrice" : "") + "}], hasMore:false}, where "
             + pendingRule + "; orderLine is that order line id or null, linked whether the invoice "
             + "line already points at a " + doc + " line, and inDraftDocuments the document "
             + "numbers of the OTHER draft " + doc + "s holding its order line. Only the lines with "
@@ -229,17 +266,42 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     String currencyId = currencyOf(target);
     List<Invoice> candidates = findCandidateInvoices(partnerId, sales, currencyId, request.offset,
         request.scan);
+    Map<String, PendingResolver.Source> followUp = preloadFollowUp(candidates, policy, sales,
+        classic);
     return discover(candidates, invoice -> {
       if (!policy.offered.test(invoice)) {
         return null;
       }
-      List<LineState> lines = statesOfSourceInvoice(target, invoice, policy, classic);
+      List<LineState> lines = classic ? classicLineStates(invoice)
+          : lineStates(target, invoice, policy, followUp, false);
       int pendingLines = countPendingLines(lines);
       if (pendingLines == 0 && !(request.includeCovered && !lines.isEmpty())) {
         return null;
       }
-      return availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
+      JSONObject row = availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
+      if (request.detail && policy.pendsByDirectLinks && !classic) {
+        row.put("amount", DirectLinkPending.pendingAmount(invoice, lines));
+      }
+      return row;
     }, request);
+  }
+
+  /**
+   * The follow-up verdicts of every offered candidate in ONE statement (review M1, performance),
+   * when the policy pends by direct links; empty otherwise (nothing reads it).
+   */
+  private Map<String, PendingResolver.Source> preloadFollowUp(List<Invoice> candidates,
+      SourcePolicy policy, boolean sales, boolean classic) {
+    if (classic || !policy.pendsByDirectLinks) {
+      return Collections.emptyMap();
+    }
+    List<String> ids = new ArrayList<>();
+    for (Invoice invoice : candidates) {
+      if (policy.offered.test(invoice)) {
+        ids.add(invoice.getId());
+      }
+    }
+    return loadFollowUpSources(ids, sales);
   }
 
   /** The listed lines of {@code invoice} under the requested pending basis. */
@@ -287,6 +349,10 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       ImportListing.putNullable(row, "orderLine", state.orderLineId);
       row.put("linked", line.getGoodsShipmentLine() != null);
       row.put("inDraftDocuments", new JSONArray(state.draftDocuments));
+      if (policy.pendsByDirectLinks && !classic) {
+        // ETP-6002 CP-27: the popup's row total follows the loaded lines, priced like an order's.
+        ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
+      }
       rows.put(row);
     }
     return completePage(rows);
@@ -325,11 +391,31 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
 
   /** The listed lines of {@code invoice} with their pending, as the class comment states. */
   List<LineState> lineStates(ShipmentInOut target, Invoice invoice, SourcePolicy policy) {
+    return lineStates(target, invoice, policy, null, true);
+  }
+
+  /**
+   * @param followUp the follow-up verdicts already read for the page ({@code availableInvoices}),
+   *     or {@code null} to read this invoice's
+   * @param withDraftNotes whether {@code inDraftDocuments} is needed: under the direct-link rule
+   *     the drafts only feed that note, which {@code availableInvoices} does not show, so it skips
+   *     their query
+   */
+  private List<LineState> lineStates(ShipmentInOut target, Invoice invoice, SourcePolicy policy,
+      Map<String, PendingResolver.Source> followUp, boolean withDraftNotes) {
     List<InvoiceLine> lines = listedLines(invoice);
     Map<String, OrderLine> orderLineOf = orderLinesOfInvoiceLines(lines,
         headerOrderLinesByProduct(invoice));
     Set<String> orderLineIds = new LinkedHashSet<>();
     orderLineOf.values().forEach(ol -> orderLineIds.add(ol.getId()));
+    if (policy.pendsByDirectLinks) {
+      Map<String, Set<String>> others = withDraftNotes
+          ? draftTotals(target, orderLineIds, policy).others : Collections.emptyMap();
+      PendingResolver.Source source = followUp != null ? followUp.get(invoice.getId())
+          : loadFollowUpSources(List.of(invoice.getId()), isSales(target)).get(invoice.getId());
+      return DirectLinkPending.lineStates(lines, orderLineOf,
+          DirectLinkPending.pendingByLine(source), others);
+    }
     DraftTotals drafts = draftTotals(target, orderLineIds, policy);
     List<LineState> states = new ArrayList<>();
     for (InvoiceLine line : lines) {
@@ -569,5 +655,29 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           (BigDecimal) row[3]));
     }
     return holdings;
+  }
+
+  /**
+   * What each line of the invoices still has to move, as the invoice's «Create shipment» /
+   * «Create receipt» follow-up computes it ({@link InvoicePendingResolver#loadSources}): per
+   * invoice line, {@code QtyInvoiced} minus what the movement lines linked to it (column or match
+   * table, drafts included, voided and returns excluded) moved, capped by its order line's
+   * {@code QtyOrdered - QtyDelivered - draft movement lines on it}, shared out in line order. Only
+   * the lines with something pending are returned. Its document-type check is switched off (the
+   * listing decides which invoices it offers by its own policy); an invoice of the other
+   * direction or not completed carries no line.
+   *
+   * <p>One statement for every id ({@code availableInvoices} passes the whole scanned page).
+   *
+   * @return invoice id to the follow-up's verdict on it; an invoice it does not know is absent
+   */
+  protected Map<String, PendingResolver.Source> loadFollowUpSources(Collection<String> invoiceIds,
+      boolean sales) {
+    if (invoiceIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return new InvoicePendingResolver(
+        sales ? InOutTargetBuilder.Direction.SALES : InOutTargetBuilder.Direction.PURCHASE,
+        docTypeId -> true).loadSources(invoiceIds);
   }
 }

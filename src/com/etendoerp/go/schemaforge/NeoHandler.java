@@ -151,6 +151,35 @@ public interface NeoHandler {
   }
 
   /**
+   * Serves one page of a REST list in an order the DAL {@code _sortBy} cannot express.
+   *
+   * <p><b>Why this exists.</b> {@code _sortBy} accepts property paths only. A customization whose
+   * visible order is not any column's order (for example the alphabetical order of a translated
+   * label the client computed) cannot ask for it through that parameter, and sorting the loaded
+   * page afterwards would reorder 50 rows of an infinite scroll instead of the whole set.</p>
+   *
+   * <p><b>Contract.</b> Called for a REST list {@code GET} that reaches the default list step, with
+   * the filtered set the list itself would read ({@link NeoListAggregateQuery}: same tab, parent,
+   * read predicate and grid criteria, no sort, no paging). Return the ids of the requested page in
+   * the order to serve, plus the size of the whole set, or {@code null} to keep the default order.
+   * The default list step then fetches exactly those rows with its own field filtering and
+   * enrichment and puts them back in the returned order; a response carries the same shape as any
+   * other page. The order-by text handed to {@link NeoListAggregateQuery#orderedIds} must be a
+   * server-side constant: never text derived from the request. A customization that throws fails
+   * the read; one that cannot honour the request must return {@code null}.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @param filteredSet the filtered set of this list
+   * @param startRow zero-based first row of the requested page
+   * @param pageSize number of rows requested
+   * @return the ordered page, or {@code null} for the default order; {@code null} by default
+   */
+  default NeoOrderedPage orderedPage(NeoContext context, NeoListAggregateQuery filteredSet,
+      int startRow, int pageSize) {
+    return null;
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
