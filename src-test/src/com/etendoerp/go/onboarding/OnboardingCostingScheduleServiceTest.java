@@ -16,12 +16,12 @@
  */
 package com.etendoerp.go.onboarding;
 
+import static com.etendoerp.go.testsupport.ProcessRequestTestFixture.propertyBackedRequest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -146,17 +146,12 @@ public class OnboardingCostingScheduleServiceTest {
     doReturn(OB_CONTEXT).when(service)
         .buildObContext(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
 
-    // OBProvider.get() normally assigns the id; simulate that since OBDal.save is mocked here.
-    // Spy so the FK setters are no-ops: setting a mock Client/Organization/User on a real DAL
-    // object triggers BaseOBObject.checkIsValidValue, which NPEs on the mock's null Entity once
-    // any prior test in the shared JVM has initialized the model. The scheduling-field setters
-    // asserted below are left untouched.
-    ProcessRequest request = spy(new ProcessRequest());
-    request.setId(NEW_REQUEST_ID);
-    doNothing().when(request).setClient(any());
-    doNothing().when(request).setOrganization(any());
-    doNothing().when(request).setUserContact(any());
-    doNothing().when(request).setProcess(any());
+    // The generated constructor resolves real DAL metadata before any scheduling code runs.
+    // Keep the generated field accessors, but back their generic get/set storage with a map:
+    // this still observes the complete final schedule without initializing a database model.
+    ProcessRequest request = propertyBackedRequest();
+    // OBProvider normally assigns this identifier; the DAL save is isolated below.
+    when(request.getId()).thenReturn(NEW_REQUEST_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);

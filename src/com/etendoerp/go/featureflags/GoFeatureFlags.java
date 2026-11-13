@@ -465,6 +465,33 @@ public final class GoFeatureFlags {
   public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
+   * ETP-6151 — the <b>PSD2 statement import settings</b> of bank-connected financial accounts.
+   * Positive polarity: {@code true} = the new behaviour; the default and every failure read
+   * {@code false}, which is the behaviour before ETP-6151.
+   *
+   * <p><b>What it gates.</b> {@code link} / {@code createAndLink} requiring, validating and storing
+   * {@code importFromDate} and {@code statementGrouping} (and clearing a stale import-to date);
+   * {@code import-settings} requiring an import-from date and a valid grouping and answering a
+   * malformed date with 400; the {@code PUT}/{@code PATCH} of a financial account validating the
+   * PSD2 import keys; {@code accounts} answering {@code maxFetchInterval}; and deleting a statement
+   * of a bank-connected account (processed ones are reactivated and deleted instead of answering
+   * the 409 {@code Statements from a bank-connected account cannot be deleted.}). With the flag
+   * off every one of them answers as before ETP-6151.
+   *
+   * <p><b>One reader.</b> Only {@code Psd2ImportSettingsFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the request
+   * user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed lookup
+   * reads off. Locally {@code etendo.go.flags.psd2-statement-import-settings} /
+   * {@code ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS}.
+   *
+   * <p><b>Also evaluated by the SPA</b> (same key, same account email as targeting key), which
+   * shows the import-settings fields and the delete affordance only when it reads on. TTL
+   * 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_PSD2_STATEMENT_IMPORT_SETTINGS =
+      "psd2-statement-import-settings";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

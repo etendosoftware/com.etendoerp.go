@@ -137,6 +137,9 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     contracts.putAll(ImportInvoiceLinesIntoInOutHandler.contracts(false));
     contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(),
         CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT.getName(),
+        CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT);
     contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
         CreatePurchaseReturnHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);

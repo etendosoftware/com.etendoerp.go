@@ -66,6 +66,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class GoodsShipmentHeaderHandlerTest {
 
@@ -1136,7 +1137,7 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
             "importOrderLines", "availableInvoices", "availableInvoiceLines", "createDraftInvoice",
-            "createReturn", "cloneRecord", "post", "unpost"),
+            "sifDefaults", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1194,7 +1195,7 @@ public class GoodsShipmentHeaderHandlerTest {
       names.add(p.getName());
       assertFalse(p.getName() + " must be optional: the SPA posts only priceListId", p.isRequired());
     }
-    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines"), names);
+    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines", "sifFields"), names);
     String d = c.getDescription();
     org.junit.Assert.assertTrue(d, d.contains("COMPLETES") && d.contains("completed")
         && d.contains("cannot have its quantities edited"));
@@ -1390,6 +1391,58 @@ public class GoodsShipmentHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.SHIPMENT_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a goods shipment previews the invoice createDraftInvoice would create from it:
+   * a single shipment with an order takes the invoice type its order links (F2), the order's SII
+   * description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheShipment() throws Exception {
+    GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsShipmentHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      ShipmentInOut shipment = org.mockito.Mockito.mock(ShipmentInOut.class);
+      org.openbravo.model.common.enterprise.Organization sourceOrg =
+          InvoiceSifPreviewTestSupport.org();
+      org.mockito.Mockito.when(shipment.getOrganization()).thenReturn(sourceOrg);
+      org.mockito.Mockito.when(shipment.getSalesOrder()).thenReturn(order);
+      org.mockito.Mockito.when(mocks.dal.get(ShipmentInOut.class, "gs-1")).thenReturn(shipment);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("goods-shipment", "gs-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
     }
   }
 }

@@ -57,9 +57,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -101,6 +103,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementLineSet
  * @covers com.etendoerp.go.schemaforge.StatementLineFilter
+ * @covers com.etendoerp.go.schemaforge.BankStatementDeletion
  */
 // Silent runner: clearMocks() (below) wipes the inline mock maker registry after
 // each test to keep the shared test-worker heap flat; the strict runner would
@@ -123,16 +126,16 @@ public class BankStatementsHandlerTest {
   private static final String BANK_STATEMENTS_SPEC = "bank-statements";
 
   /**
-   * The bank-connected delete rejection (ETP-5111), byte-for-byte in sync with the handler's own
-   * constant and with the frontend's {@code backendError.statementBankConnectedNotDeletable}
-   * entry, which matches it by EXACT text after {@code trim()}.
+   * The delete rejection of a posted statement of a bank-connected account (ETP-6151),
+   * byte-for-byte in sync with the handler's own constant and with the frontend's
+   * {@code BACKEND_ERROR_MAP}, which matches it by EXACT text after {@code trim()}.
    */
-  private static final String MSG_STATEMENT_BANK_CONNECTED =
-      "Statements from a bank-connected account cannot be deleted.";
+  private static final String MSG_STATEMENT_POSTED_NOT_DELETABLE =
+      "The statement is posted. Unpost it before deleting it.";
 
   /**
    * The bank-connected create / import / preview rejection (ETP-5471). Kept as a literal copy for
-   * the same reason as {@link #MSG_STATEMENT_BANK_CONNECTED}: the frontend's
+   * the same reason as {@link #MSG_STATEMENT_POSTED_NOT_DELETABLE}: the frontend's
    * {@code backendError.statementBankConnectedNotCreatable} matches it by EXACT text.
    */
   private static final String MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE =
@@ -150,9 +153,14 @@ public class BankStatementsHandlerTest {
   private NeoContext spaCreateCtx;
   private MockedStatic<BankStatementAggregates> aggMock;
   private MockedStatic<BankStatementLinePruner> prunerMock;
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
 
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new BankStatementsHandler());
     // The write flows call BankStatementAggregates.recompute(), which hits OBDal /
     // ModelProvider. Stub it globally (no-op) so happy-path tests don't have to
@@ -172,6 +180,9 @@ public class BankStatementsHandlerTest {
    */
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     if (aggMock != null) {
       aggMock.close();
     }
@@ -180,6 +191,13 @@ public class BankStatementsHandlerTest {
       prunerMock.close();
     }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Switches the ETP-6151 gate OFF for the rest of the test: the pre-ETP-6151 behaviour.
+   */
+  private void flagOff() {
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(false);
   }
 
   /**
@@ -2267,21 +2285,34 @@ public class BankStatementsHandlerTest {
     assertEquals(400, handler.handle(postCtx(ctx, "delete")).getHttpStatus());
   }
 
+  /**
+   * On an account that is NOT bank-connected only a draft can be deleted: a processed statement
+   * answers 400 with the draft-only text and is never reactivated, whether the account has no
+   * connection status at all or the "disconnected" default.
+   */
   @Test
   public void handleDeleteRejectsAlreadyProcessed() throws Exception {
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
-    FIN_BankStatement processed = mock(FIN_BankStatement.class);
-    when(processed.isProcessed()).thenReturn(true);
-    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
-      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
-      assertEquals(400, r.getHttpStatus());
-      verify(dal, never()).remove(any());
+    FIN_FinancialAccount disconnected = accountWithConnectionStatus(PSD2_DISCONNECTED);
+    for (FIN_FinancialAccount account : new FIN_FinancialAccount[] {null, disconnected}) {
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+      FIN_BankStatement processed = mock(FIN_BankStatement.class);
+      when(processed.isProcessed()).thenReturn(true);
+      when(processed.getPosted()).thenReturn("N");
+      when(processed.getAccount()).thenReturn(account);
+      try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+        NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+        assertEquals(400, r.getHttpStatus());
+        assertEquals(BankStatementsHandler.MSG_NOT_DRAFT,
+            r.getBody().getJSONObject("error").getString("message"));
+        verify(dal, never()).remove(any());
+      }
     }
+    verify(handler, never()).reactivateStatement(any());
   }
 
   @Test
@@ -2338,19 +2369,12 @@ public class BankStatementsHandlerTest {
   }
 
   /**
-   * ETP-5111 — a statement whose financial account is bank-connected through PSD2 / Salt Edge is
-   * refused with a 409, even when it is a perfectly ordinary DRAFT with no matched lines (the
-   * `hasMatchedLines` probe is deliberately stubbed false, so the ONLY thing that can reject this
-   * delete is the connection status). Those statements are re-fetched from the bank, so removing
-   * one locally desynchronises the account.
-   *
-   * <p>This is the server-side half of the unified delete rule: the Statements tab no longer
-   * disables its bulk trash for a connected account, so this guard is what actually enforces the
-   * refusal — for the UI, the REST API and MCP alike. It also covers the accepted consequence that
-   * an OLD manual statement on an account since connected is no longer deletable either.
+   * ETP-6151 — a DRAFT statement of a bank-connected account (PSD2 / Salt Edge) is deleted like
+   * any other draft. Until ETP-6151 it was refused with a 409 (ETP-5111); now only creating and
+   * importing stay refused on such an account.
    */
   @Test
-  public void handleDeleteRejectsStatementOfBankConnectedAccount() throws Exception {
+  public void handleDeleteRemovesDraftOfBankConnectedAccount() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
     FIN_BankStatement draft = draftStatement("st-1");
@@ -2358,6 +2382,38 @@ public class BankStatementsHandlerTest {
     FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
     when(draft.getAccount()).thenReturn(connectedAccount);
     doReturn(false).when(handler).hasMatchedLines(draft);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal).remove(draft);
+    }
+  }
+
+  /**
+   * Flag {@code psd2-statement-import-settings} OFF — a draft of a bank-connected account answers
+   * the pre-ETP-6151 409, and nothing is reactivated or removed.
+   */
+  @Test
+  public void handleDeleteFlagOffRejectsDraftOfBankConnectedAccountWith409() throws Exception {
+    flagOff();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(draft.getAccount()).thenReturn(connectedAccount);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -2368,18 +2424,240 @@ public class BankStatementsHandlerTest {
       NeoResponse r = handler.handle(postCtx(ctx, "delete"));
 
       assertEquals(409, r.getHttpStatus());
-      assertEquals(MSG_STATEMENT_BANK_CONNECTED,
+      assertEquals("Statements from a bank-connected account cannot be deleted.", r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * Flag OFF — a PROCESSED statement answers the pre-ETP-6151 "only drafts" 400 even on a
+   * bank-connected account: it is never reactivated.
+   */
+  @Test
+  public void handleDeleteFlagOffRejectsProcessedStatementAsNotDraft() throws Exception {
+    flagOff();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement statement = draftStatement("st-1");
+    when(statement.isProcessed()).thenReturn(true);
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(statement.getAccount()).thenReturn(connectedAccount);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(statement);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(400, r.getHttpStatus());
+      assertEquals("Only draft (unprocessed) statements can be modified", r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /** Flag OFF — a draft of an account NOT connected to the bank is deleted as it always was. */
+  @Test
+  public void handleDeleteFlagOffStillDeletesDraftOfUnconnectedAccount() throws Exception {
+    flagOff();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    doReturn(false).when(handler).hasMatchedLines(draft);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(draft);
+    }
+  }
+
+  /**
+   * ETP-6151 — a PROCESSED statement of a bank-connected account that is posted is refused with a
+   * 400 carrying the exact text the frontend maps, before anything is reactivated or removed.
+   */
+  @Test
+  public void handleDeleteRejectsPostedProcessedStatementOfBankConnectedAccount()
+      throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement statement = draftStatement("st-1");
+    when(statement.isProcessed()).thenReturn(true);
+    when(statement.getPosted()).thenReturn("Y");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(statement.getAccount()).thenReturn(connectedAccount);
+    doReturn(false).when(handler).hasMatchedLines(statement);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(statement);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(400, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_POSTED_NOT_DELETABLE,
           r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * ETP-6151 — a processed statement of a bank-connected account that is posted AND has matched
+   * lines answers the posted message: the posted check comes first.
+   */
+  @Test
+  public void handleDeletePostedAndMatchedStatementReportsPostedFirst() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement statement = draftStatement("st-1");
+    when(statement.isProcessed()).thenReturn(true);
+    when(statement.getPosted()).thenReturn("Y");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(statement.getAccount()).thenReturn(connectedAccount);
+    doReturn(true).when(handler).hasMatchedLines(statement);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(statement);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(400, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_POSTED_NOT_DELETABLE,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * ETP-6151 — a PROCESSED, unposted statement of a bank-connected account with no matched lines
+   * is reactivated (the same logic as {@code ?action=reactivate}) and then removed with its lines.
+   */
+  @Test
+  public void handleDeleteReactivatesAndRemovesProcessedStatementOfBankConnectedAccount()
+      throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement statement = draftStatement("st-1");
+    when(statement.isProcessed()).thenReturn(true);
+    when(statement.getPosted()).thenReturn("N");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(statement.getAccount()).thenReturn(connectedAccount);
+    doReturn(false).when(handler).hasMatchedLines(statement);
+    doNothing().when(handler).reactivateStatement(statement);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(statement);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(handler).reactivateStatement(statement);
+      verify(dal).remove(statement);
+      // Reactivated and flushed BEFORE anything is removed: the lines of a processed statement
+      // cannot be deleted while it is still processed.
+      InOrder order = inOrder(handler, dal);
+      order.verify(handler).reactivateStatement(statement);
+      order.verify(dal).flush();
+      order.verify(dal).remove(statement);
+    }
+  }
+
+  /**
+   * ETP-6151 — a PROCESSED, unposted statement of a bank-connected account that still has lines
+   * matched to transactions is refused with the matched-lines 400, and it is NEVER reactivated: the
+   * refusal happens before anything is written, so it needs no rollback.
+   */
+  @Test
+  public void handleDeleteRejectsProcessedStatementWithMatchedLinesOfBankConnectedAccount()
+      throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement statement = draftStatement("st-1");
+    when(statement.isProcessed()).thenReturn(true);
+    when(statement.getPosted()).thenReturn("N");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(statement.getAccount()).thenReturn(connectedAccount);
+    doReturn(true).when(handler).hasMatchedLines(statement);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(statement);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(400, r.getHttpStatus());
+      assertEquals(BankStatementsHandler.MSG_HAS_MATCHED_LINES,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
       verify(dal, never()).remove(any());
       verify(dal, never()).flush();
     }
   }
 
   /**
-   * The other side of that guard, and the reason it compares against one exact code rather than
-   * "has any connection status": a disconnected account carries a non-null status too
-   * ({@link #PSD2_DISCONNECTED} is the column's default), and its statements must stay deletable.
-   * A null-check instead of a value-check would pass the test above and fail this one.
+   * ETP-6151 — a DRAFT of a bank-connected account keeps the matched-lines guard of any draft:
+   * deleting it would delete the matched lines too, which the core trigger never allows.
+   */
+  @Test
+  public void handleDeleteRejectsDraftWithMatchedLinesOfBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(draft.getAccount()).thenReturn(connectedAccount);
+    doReturn(true).when(handler).hasMatchedLines(draft);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(400, r.getHttpStatus());
+      assertEquals(BankStatementsHandler.MSG_HAS_MATCHED_LINES,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).reactivateStatement(any());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * A disconnected account carries a non-null connection status too ({@link #PSD2_DISCONNECTED}
+   * is the column's default), and its draft statements stay deletable through the ordinary
+   * (not bank-connected) rule.
    */
   @Test
   public void handleDeleteAllowsStatementOfDisconnectedAccount() throws Exception {
@@ -2586,8 +2864,6 @@ public class BankStatementsHandlerTest {
     FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
     when(matched.getLineNo()).thenReturn(20L);
     FIN_BankStatementLine created = mock(FIN_BankStatementLine.class);
-    @SuppressWarnings("unchecked")
-    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
@@ -2595,11 +2871,7 @@ public class BankStatementsHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
-      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
-      // Every line query sees the one matched line: countMatchedLines → 1, maxExistingLineNo →
-      // 20, and deleteUnmatchedLines' own query (which in production would NOT return it).
-      when(crit.list()).thenReturn(Collections.singletonList(matched));
+      givenOnlyMatchedStatementLine(dal, matched);
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(FIN_BankStatementLine.class)).thenReturn(created);
@@ -2613,6 +2885,7 @@ public class BankStatementsHandlerTest {
       // Numbering continues after the highest existing LineNo so it cannot collide with the
       // matched line that was kept.
       verify(created).setLineNo(30L);
+      verify(dal, never()).remove(matched);
     }
   }
 
@@ -2633,24 +2906,46 @@ public class BankStatementsHandlerTest {
     FIN_BankStatement draft = draftStatement("st-1");
     when(draft.getName()).thenReturn("Solo cabecera");
     FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
-    @SuppressWarnings("unchecked")
-    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
-      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
-      when(crit.list()).thenReturn(Collections.singletonList(matched));
+      givenOnlyMatchedStatementLine(dal, matched);
 
       NeoResponse r = handler.handle(postCtx(ctx, "update"));
       assertEquals(200, r.getHttpStatus());
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
           .getJSONObject("statement");
       assertEquals(1, data.getInt("lineCount"));
+      verify(dal, never()).remove(matched);
     }
+  }
+
+  /**
+   * One matched row remains visible to count/numbering queries, never to unmatched-line queries.
+   * Each criteria has independent restrictions, as in DAL: returning the matched row for every
+   * query would make identity capture read metadata for a row that cannot be rebuilt or deleted.
+   */
+  @SuppressWarnings("unchecked")
+  private static void givenOnlyMatchedStatementLine(OBDal dal, FIN_BankStatementLine matched) {
+    String unmatchedRestriction = Restrictions.isNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION).toString();
+    when(dal.createCriteria(FIN_BankStatementLine.class)).thenAnswer(create -> {
+      OBCriteria<FIN_BankStatementLine> criteria = mock(OBCriteria.class);
+      AtomicBoolean unmatched = new AtomicBoolean();
+      when(criteria.add(any())).thenAnswer(add -> {
+        Object restriction = add.getArgument(0);
+        if (unmatchedRestriction.equals(String.valueOf(restriction))) {
+          unmatched.set(true);
+        }
+        return criteria;
+      });
+      when(criteria.list()).thenAnswer(list -> unmatched.get()
+          ? Collections.emptyList() : Collections.singletonList(matched));
+      return criteria;
+    });
   }
 
   /** With no lines in the body AND no matched lines to keep, the statement would be left empty. */

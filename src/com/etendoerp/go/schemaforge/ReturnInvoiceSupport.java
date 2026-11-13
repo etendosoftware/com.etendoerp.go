@@ -258,8 +258,14 @@ final class ReturnInvoiceSupport {
     try {
       OBDal.getInstance().save(invoice);
       OBDal.getInstance().flush();
+      // ETP-6179: the SIF fields the caller chose (or R4 in every active system) and the
+      // rectification guard, which this one-step creation never reached before. Written on the
+      // header now; the completion in finalizeReturnInvoice reads them after the lines.
+      InvoiceSifPreset.applyBeforeCompletion(invoice, body);
       return finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler, rectifiedIds,
           obContext, returnDoc, previous);
+    } catch (InvoiceSifPreset.Refused sifRefusal) {
+      return sifRefusal.toResponse();
     } catch (Exception e) {
       // From the first save on, ANY failure must discard the draft: the request filter commits
       // unless an exception escapes, and the handlers turn this one into an error answer. The
