@@ -20,6 +20,9 @@ package com.etendoerp.go.signup;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,11 +32,14 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.accounts.AccountGroupService;
+import com.etendoerp.go.accounts.DemoExpiryService;
 import com.etendoerp.go.rest.AccountRegistrationService;
 import com.etendoerp.go.rest.SignupAccountService;
 
@@ -43,12 +49,22 @@ import com.etendoerp.go.rest.SignupAccountService;
  * {@code docs/signup-api.md}.
  *
  * <pre>
- * GET  /config                       what an account may be created with
- * POST /accounts                     create a passwordless account and its demo environment
- * GET  /accounts/{id}                the account's signup state
- * POST /accounts/{id}/login-link     a fresh one-time login link, optionally mailed
- * POST /accounts/{id}/retry          run a failed environment creation again
+ * GET    /config                             what an account may be created with
+ * POST   /accounts                           create a passwordless account and its demo environment
+ * GET    /accounts/{id}                      the account's signup state
+ * PATCH  /accounts/{id}                      move the expiry of the account's demo (ETP-6223)
+ * POST   /accounts/{id}/login-link           a fresh one-time login link, optionally mailed
+ * POST   /accounts/{id}/retry                run a failed environment creation again
+ * GET    /groups                             the account groups (ETP-6223)
+ * POST   /groups                             create a group
+ * GET    /groups/{key}/accounts              the members of a group
+ * PUT    /groups/{key}/accounts/{accountId}  add an account to a group (idempotent)
+ * DELETE /groups/{key}/accounts/{accountId}  take an account out of a group (idempotent)
  * </pre>
+ *
+ * <p>The ETP-6223 calls manage <b>any</b> account, whichever way it was created: their main use is
+ * on accounts that already exist (the Beta group, extending a demo). {@code GET /accounts/{id}},
+ * {@code login-link} and {@code retry} still see only the accounts this API created.
  *
  * <p><b>Every call carries a key</b> ({@link SignupApiKeys}), so the API is never called from a
  * browser and has no CORS: a key in a page would be a key handed to anyone who opens it.
@@ -71,6 +87,10 @@ public class SignupApiServlet extends HttpBaseServlet {
   /** {@code /accounts/{id}} and {@code /accounts/{id}/<action>}; ids are Etendo UUIDs. */
   private static final Pattern ACCOUNT_PATH =
       Pattern.compile("^/accounts/([0-9A-Fa-f]{32})(/login-link|/retry)?$");
+  static final String PATH_GROUPS = "/groups";
+  /** {@code /groups/{key}/accounts} and {@code /groups/{key}/accounts/{accountId}}. */
+  private static final Pattern GROUP_ACCOUNTS_PATH =
+      Pattern.compile("^/groups/([a-z0-9][a-z0-9_-]{0,59})/accounts(?:/([0-9A-Fa-f]{32}))?$");
   private static final String ACTION_LOGIN_LINK = "/login-link";
   private static final String ACTION_RETRY = "/retry";
 
@@ -85,15 +105,26 @@ public class SignupApiServlet extends HttpBaseServlet {
   static final String CODE_RETRY_NOT_ALLOWED = "RETRY_NOT_ALLOWED";
   static final String CODE_LOGIN_LINK_UNAVAILABLE = "LOGIN_LINK_UNAVAILABLE";
   static final String CODE_SIGNUP_SERVER_ERROR = "SIGNUP_SERVER_ERROR";
+  static final String CODE_ACCOUNT_HAS_NO_DEMO = "ACCOUNT_HAS_NO_DEMO";
+  static final String CODE_GROUP_ALREADY_EXISTS = "GROUP_ALREADY_EXISTS";
+  static final String CODE_GROUP_NOT_FOUND = "GROUP_NOT_FOUND";
 
   private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_PUT = "PUT";
+  private static final String METHOD_DELETE = "DELETE";
   private static final String FIELD_ACCOUNT_ID = "accountId";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_STATUS = "status";
+  private static final String FIELD_KEY = "key";
+  private static final String FIELD_GROUPS = "groups";
+  private static final String FIELD_DEMO_EXPIRES_AT = SignupAdminRequests.FIELD_DEMO_EXPIRES_AT;
 
   private final transient AccountRegistrationService registration;
   private final transient SignupAccountService signups;
+  private final transient DemoExpiryService demoExpiry;
+  private final transient AccountGroupService groups;
 
   /** Creates the servlet wired to the runtime services. */
   public SignupApiServlet() {
@@ -101,8 +132,15 @@ public class SignupApiServlet extends HttpBaseServlet {
   }
 
   SignupApiServlet(AccountRegistrationService registration, SignupAccountService signups) {
+    this(registration, signups, new DemoExpiryService(), new AccountGroupService());
+  }
+
+  SignupApiServlet(AccountRegistrationService registration, SignupAccountService signups,
+      DemoExpiryService demoExpiry, AccountGroupService groups) {
     this.registration = registration;
     this.signups = signups;
+    this.demoExpiry = demoExpiry;
+    this.groups = groups;
   }
 
   @Override
@@ -141,6 +179,20 @@ public class SignupApiServlet extends HttpBaseServlet {
       handleCreate(channel, request, response);
       return;
     }
+    if (PATH_GROUPS.equals(path)) {
+      if (METHOD_POST.equals(method)) {
+        handleCreateGroup(request, response);
+      } else {
+        requireMethod(METHOD_GET, method);
+        handleListGroups(response);
+      }
+      return;
+    }
+    Matcher groupAccounts = GROUP_ACCOUNTS_PATH.matcher(path);
+    if (groupAccounts.matches()) {
+      routeGroupAccounts(method, groupAccounts.group(1), groupAccounts.group(2), response);
+      return;
+    }
     Matcher account = ACCOUNT_PATH.matcher(path);
     if (!account.matches()) {
       throw new SignupException(HttpServletResponse.SC_NOT_FOUND, CODE_NOT_FOUND, null,
@@ -148,7 +200,9 @@ public class SignupApiServlet extends HttpBaseServlet {
     }
     String accountId = account.group(1).toUpperCase();
     String action = StringUtils.defaultString(account.group(2));
-    if (action.isEmpty()) {
+    if (action.isEmpty() && METHOD_PATCH.equals(method)) {
+      handleDemoExpiry(accountId, request, response);
+    } else if (action.isEmpty()) {
       requireMethod(METHOD_GET, method);
       handleStatus(accountId, response);
     } else if (ACTION_LOGIN_LINK.equals(action)) {
@@ -213,7 +267,115 @@ public class SignupApiServlet extends HttpBaseServlet {
     if (status.error() != null) {
       body.put("error", status.error());
     }
+    // ETP-6223, additive: always present, null and empty when there is nothing to report.
+    SignupAccountService.Details details = signups.details(accountId);
+    body.put(FIELD_DEMO_EXPIRES_AT, details == null || details.demoExpiresAt() == null
+        ? JSONObject.NULL : details.demoExpiresAt().toString());
+    body.put(FIELD_GROUPS, new JSONArray(details == null || details.groups() == null
+        ? List.of() : details.groups()));
     writeJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /**
+   * {@code PATCH /accounts/{id}} with {@code { "demoExpiresAt": "YYYY-MM-DD" }}: the day the
+   * account's demo expires; {@code null} goes back to the standard trial (ETP-6223).
+   */
+  private void handleDemoExpiry(String accountId, HttpServletRequest request,
+      HttpServletResponse response) throws IOException, SignupException, JSONException {
+    LocalDate expiresOn = SignupAdminRequests.parseDemoExpiry(readBody(request));
+    DemoExpiryService.Result result = demoExpiry.update(accountId, expiresOn);
+    if (result.outcome() == DemoExpiryService.Outcome.ACCOUNT_NOT_FOUND) {
+      throw anyAccountNotFound();
+    }
+    if (result.outcome() == DemoExpiryService.Outcome.NO_DEMO) {
+      throw conflict(CODE_ACCOUNT_HAS_NO_DEMO, null,
+          "The account owns no demo environment whose expiry can be changed");
+    }
+    writeJson(response, HttpServletResponse.SC_OK, new JSONObject()
+        .put(FIELD_ACCOUNT_ID, accountId)
+        .put(FIELD_DEMO_EXPIRES_AT, result.demoExpiresAt() == null ? JSONObject.NULL
+            : result.demoExpiresAt().toString()));
+  }
+
+  /** {@code POST /groups}: {@code 201} with the group, {@code 409} when the key is taken. */
+  private void handleCreateGroup(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, SignupException, JSONException {
+    SignupAdminRequests.NewGroup group = SignupAdminRequests.parseNewGroup(readBody(request));
+    Optional<AccountGroupService.GroupInfo> created = groups.create(group.key(), group.name(),
+        group.description());
+    if (created.isEmpty()) {
+      throw conflict(CODE_GROUP_ALREADY_EXISTS, FIELD_KEY, "A group with this key already exists");
+    }
+    writeJson(response, HttpServletResponse.SC_CREATED, groupJson(created.get()));
+  }
+
+  /** {@code GET /groups}: every group, active or not, by key. */
+  private void handleListGroups(HttpServletResponse response) throws IOException, JSONException {
+    JSONArray list = new JSONArray();
+    for (AccountGroupService.GroupInfo group : groups.list()) {
+      list.put(groupJson(group));
+    }
+    writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_GROUPS, list));
+  }
+
+  private void routeGroupAccounts(String method, String key, String accountId,
+      HttpServletResponse response) throws IOException, SignupException, JSONException {
+    if (accountId == null) {
+      requireMethod(METHOD_GET, method);
+      handleGroupMembers(key, response);
+      return;
+    }
+    String id = accountId.toUpperCase();
+    AccountGroupService.MembershipOutcome outcome;
+    boolean member;
+    if (METHOD_PUT.equals(method)) {
+      outcome = groups.add(key, id);
+      member = true;
+    } else {
+      requireMethod(METHOD_DELETE, method);
+      outcome = groups.remove(key, id);
+      member = false;
+    }
+    if (outcome == AccountGroupService.MembershipOutcome.GROUP_NOT_FOUND) {
+      throw groupNotFound();
+    }
+    if (outcome == AccountGroupService.MembershipOutcome.ACCOUNT_NOT_FOUND) {
+      throw anyAccountNotFound();
+    }
+    writeJson(response, HttpServletResponse.SC_OK, new JSONObject()
+        .put(FIELD_KEY, key)
+        .put(FIELD_ACCOUNT_ID, id)
+        .put("member", member)
+        .put("changed", outcome == AccountGroupService.MembershipOutcome.CHANGED));
+  }
+
+  /** {@code GET /groups/{key}/accounts}: the group's members, by email. */
+  private void handleGroupMembers(String key, HttpServletResponse response)
+      throws IOException, SignupException, JSONException {
+    Optional<List<AccountGroupService.Member>> members = groups.members(key);
+    if (members.isEmpty()) {
+      throw groupNotFound();
+    }
+    JSONArray accounts = new JSONArray();
+    for (AccountGroupService.Member member : members.get()) {
+      accounts.put(new JSONObject()
+          .put(FIELD_ACCOUNT_ID, member.accountId())
+          .put(FIELD_EMAIL, member.email())
+          .put("name", member.name())
+          .put("addedAt", member.addedAt() == null ? JSONObject.NULL
+              : member.addedAt().toInstant().toString()));
+    }
+    writeJson(response, HttpServletResponse.SC_OK, new JSONObject()
+        .put(FIELD_KEY, key)
+        .put("accounts", accounts));
+  }
+
+  private static JSONObject groupJson(AccountGroupService.GroupInfo group) throws JSONException {
+    return new JSONObject()
+        .put(FIELD_KEY, group.key())
+        .put("name", group.name())
+        .put("description", group.description() == null ? JSONObject.NULL : group.description())
+        .put("active", group.active());
   }
 
   /**
@@ -319,6 +481,17 @@ public class SignupApiServlet extends HttpBaseServlet {
   private static SignupException accountNotFound() {
     return new SignupException(HttpServletResponse.SC_NOT_FOUND, CODE_ACCOUNT_NOT_FOUND, null,
         "No account created through the signup API has this id");
+  }
+
+  /** The ETP-6223 calls reach any account, so their not-found says so. */
+  private static SignupException anyAccountNotFound() {
+    return new SignupException(HttpServletResponse.SC_NOT_FOUND, CODE_ACCOUNT_NOT_FOUND, null,
+        "No active account has this id");
+  }
+
+  private static SignupException groupNotFound() {
+    return new SignupException(HttpServletResponse.SC_NOT_FOUND, CODE_GROUP_NOT_FOUND, null,
+        "No group has this key");
   }
 
   private static SignupException conflict(String code, String field, String message) {
