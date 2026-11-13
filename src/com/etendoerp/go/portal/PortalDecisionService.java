@@ -255,11 +255,25 @@ public class PortalDecisionService {
     private final State state;
     private final Decision decision;
     private final Order quotation;
+    private final boolean appliedNow;
 
     View(State state, Decision decision, Order quotation) {
+      this(state, decision, quotation, false);
+    }
+
+    View(State state, Decision decision, Order quotation, boolean appliedNow) {
       this.state = state;
       this.decision = decision;
       this.quotation = quotation;
+      this.appliedNow = appliedNow;
+    }
+
+    /**
+     * Whether this very call applied the decision; {@code false} when it was already confirmed
+     * (the email link opened again), so the landing can say "ya estaba aplicada".
+     */
+    public boolean isAppliedNow() {
+      return appliedNow;
     }
 
     public State getState() {
@@ -455,9 +469,14 @@ public class PortalDecisionService {
   }
 
   /**
-   * Confirms a decision: the first confirmed wins. One transaction, committed here.
+   * Confirms a decision: the first confirmed wins. One transaction, committed here. Reached by the
+   * landing's automatic POST when the customer opens the email's button (one step, ETP-6209 call
+   * with the PO): the page's script sends it on load, so a link scanner that only GETs the URL
+   * applies nothing.
    *
-   * @return the resulting view: {@code CONFIRMED} when this call applied it, else the state found
+   * @return the resulting view: {@code CONFIRMED} with {@link View#isAppliedNow} when this call
+   *     applied it, else the state found (an already confirmed decision answers {@code CONFIRMED}
+   *     without {@code appliedNow})
    */
   public View confirm(String rawToken) {
     Decision decision = findByToken(rawToken);
@@ -493,13 +512,13 @@ public class PortalDecisionService {
         voided.addAll(voidOthers(current));
         OBDal.getInstance().commitAndClose();
         current.status = STATUS_CONFIRMED;
-        return new View(State.CONFIRMED, current, quotation);
+        return new View(State.CONFIRMED, current, quotation, true);
       } catch (RuntimeException e) {
         OBDal.getInstance().rollbackAndClose();
         throw e;
       }
     });
-    if (result.getState() == State.CONFIRMED) {
+    if (result.isAppliedNow()) {
       PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.decision);
       if (!voided.isEmpty()) {
         PortalDecisionEvents.voided(decision.quotationId, voided.size());

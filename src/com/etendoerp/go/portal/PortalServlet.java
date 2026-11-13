@@ -525,7 +525,8 @@ public class PortalServlet extends HttpBaseServlet {
    * (or a scanner pre-fetching it) only reads.
    *
    * <pre>
-   * 200 {"state": "pending" | "confirmed" | "voided" | "not_pending" | "expired", "decision",
+   * 200 {"state": "pending" | "confirmed" | "voided" | "not_pending" | "expired", "appliedNow",
+   *      "decision",
    *      "reasonCode"?, "reasonText"?, "documentNo", "tenantName"}
    * 401                                      unknown, not sent or malformed token
    * </pre>
@@ -541,7 +542,10 @@ public class PortalServlet extends HttpBaseServlet {
 
   /**
    * Part C: confirms the decision — single use, never expires, the first confirmed request of a
-   * quotation wins. Answers the same shape as the view, with the state reached.
+   * quotation wins. Answers the same shape as the view, with the state reached and
+   * {@code appliedNow} ({@code true} only for the call that applied it). The landing sends it by
+   * script as soon as the email's button opens it (one step); a bare GET of the link applies
+   * nothing.
    */
   private void handleDecisionConfirm(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
@@ -561,6 +565,7 @@ public class PortalServlet extends HttpBaseServlet {
     PortalDecisionService.Decision decision = view.getDecision();
     JSONObject body = new JSONObject();
     body.put(FIELD_STATE, view.getState().getCode());
+    body.put("appliedNow", view.isAppliedNow());
     body.put("decision", decision.getDecision());
     if (decision.getReasonCode() != null) {
       body.put("reasonCode", decision.getReasonCode());

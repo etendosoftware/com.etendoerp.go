@@ -170,7 +170,10 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
       content.detail(EmailMessages.get(KEY_PREFIX + "reason.label", language),
           reasonText == null ? reason : reason + " — " + reasonText);
     }
-    content.cta(EmailMessages.get(KEY_PREFIX + "confirm.cta", language), minted.get().getUrl())
+    // The button names the decision ("Confirmar rechazo"): one click on it applies it (the
+    // landing auto-submits the confirmation; a bare GET of the link applies nothing).
+    content.cta(EmailMessages.get(KEY_PREFIX + "confirm.cta." + decision, language),
+            minted.get().getUrl())
         .linkFallbackText(EmailMessages.get("link.fallback", language))
         .note(EmailMessages.get(KEY_PREFIX + "confirm.note", language))
         .signature(EmailMessages.get("signature", language));
