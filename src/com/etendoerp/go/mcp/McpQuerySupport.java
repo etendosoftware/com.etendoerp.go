@@ -32,6 +32,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -209,6 +210,19 @@ final class McpQuerySupport {
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
       org.apache.logging.log4j.Logger log) throws JSONException {
+    return buildWhereFromFilters(filters, adTab, sfEntity, aliases, applied, null, log);
+  }
+
+  /**
+   * As above, with the entity's property-path fields already in hand (ETP-6148): the caller's
+   * own field filter has them, so they are not looked up again. {@code null} looks them up on
+   * the first key that is no property of the entity.
+   *
+   * @param knownPaths the entity's property-path fields, or {@code null}
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
+      java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
+      NeoPropertyPaths knownPaths, org.apache.logging.log4j.Logger log) throws JSONException {
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
@@ -226,23 +240,62 @@ final class McpQuerySupport {
     excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
+    PathFieldLookup pathFields = new PathFieldLookup(sfEntity, dalEntity, knownPaths);
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = filters.get(key);
-      if (McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key) && value instanceof String
-          && appendStatusCondition(where, sfEntity, (String) value, log)) {
-        continue;
-      }
-      Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
-      Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
-      if (value instanceof JSONObject) {
-        appendOperatorConditions(where, prop, target, key, (JSONObject) value);
-      } else {
-        appendEqualityCondition(where, key, prop, target, value);
+      boolean statusApplied = McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key)
+          && value instanceof String
+          && appendStatusCondition(where, sfEntity, (String) value, log);
+      NeoPropertyPaths.PathField pathField = statusApplied ? null : pathFields.of(key);
+      if (pathField != null) {
+        McpHqlConditions.appendPathCondition(where, pathField, key, value);
+      } else if (!statusApplied) {
+        Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+        appendPropertyCondition(where, prop, aliasTarget(dalEntity, prop, aliases, excluded,
+            applied), key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * ETP-6148: the property-path field a filter key names, looked up lazily — a property-path
+   * field's API key is never a property of the entity, so the paths are only read (one query) for
+   * the first key that is not one, and never when the caller already has them.
+   */
+  private static final class PathFieldLookup {
+    private final SFEntity sfEntity;
+    private final Entity dalEntity;
+    private NeoPropertyPaths paths;
+
+    PathFieldLookup(SFEntity sfEntity, Entity dalEntity, NeoPropertyPaths knownPaths) {
+      this.sfEntity = sfEntity;
+      this.dalEntity = dalEntity;
+      this.paths = knownPaths;
+    }
+
+    /** @return the path field named {@code key}, or {@code null} for a property of the entity */
+    NeoPropertyPaths.PathField of(String key) {
+      if (dalEntity.getPropertyByColumnName(key, false) != null || dalEntity.hasProperty(key)) {
+        return null;
+      }
+      if (paths == null) {
+        paths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+      }
+      return paths.get(key);
+    }
+  }
+
+  /** The condition of a filter on a property of the entity, evaluated on its alias target. */
+  private static void appendPropertyCondition(StringBuilder where, Property prop, Property target,
+      String key, Object value) throws JSONException {
+    if (value instanceof JSONObject) {
+      appendOperatorConditions(where, prop, target, key, (JSONObject) value);
+    } else {
+      appendEqualityCondition(where, key, prop, target, value);
+    }
   }
 
   /**
@@ -685,92 +738,15 @@ final class McpQuerySupport {
   private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
       Property target,
       Object value) {
-    appendAnd(where);
-    if (!prop.isPrimitive()) {
-      where.append(filterPath(prop, target, ".id")).append('=')
-          .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
-    } else {
-      where.append(filterPath(prop, target, "")).append('=').append(
-          McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
-    }
+    McpHqlConditions.appendEqualityAt(where, key, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), value);
   }
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Property prop,
       Property target, String key, JSONObject operators) throws JSONException {
-    String path = filterPath(prop, target, "");
-    Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
-    java.util.Iterator<String> ops = operators.keys();
-    while (ops.hasNext()) {
-      String op = ops.next();
-      appendAnd(where);
-      if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
-        where.append(betweenCondition(path, prop, type, key, operators.optJSONArray(op)));
-      } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
-        where.append(containsCondition(path, prop, type, key, operators.get(op)));
-      } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
-        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
-            inValues(key, operators.optJSONArray(op))));
-      } else {
-        String sql = McpBusinessFilters.operatorToSql(op);
-        if (sql == null) {
-          throw McpRoutingException.unknownFilterOperator(key, op,
-              McpBusinessFilters.operatorKeys());
-        }
-        where.append(path).append(' ').append(sql).append(' ')
-            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
-      }
-    }
-  }
-
-  private static String betweenCondition(String path, Property prop, Class<?> type, String key,
-      JSONArray bounds) throws JSONException {
-    if (bounds == null || bounds.length() != 2) {
-      // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
-      // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
-      // the opposite of the narrowing the caller asked for.
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_BETWEEN,
-          "the 'between' operator takes a two-element [from, to] array");
-    }
-    return path + " between "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0))
-        + " and "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1));
-  }
-
-  /**
-   * ETP-5852: partial text search. Only on a text column — on a number, date, boolean or foreign
-   * key a substring match is meaningless, so it is refused instead of guessed.
-   */
-  private static String containsCondition(String path, Property prop, Class<?> type, String key,
-      Object text) {
-    if (!prop.isPrimitive()) {
-      throw McpRequestRefusals.containsOnReference(key, text);
-    }
-    if (!String.class.equals(type)) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "'contains' works only on text fields; use exact match, 'in' or a range here");
-    }
-    if (!(text instanceof String) || ((String) text).isEmpty()) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "the 'contains' operator takes a non-empty text value");
-    }
-    return McpBusinessFilters.containsCondition(path, text);
-  }
-
-  /** ETP-5852: the values of an {@code in}, one request for several exact values. */
-  private static java.util.List<Object> inValues(String key, JSONArray values)
-      throws JSONException {
-    if (values == null || values.length() == 0) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_IN,
-          "the 'in' operator takes a non-empty array of values");
-    }
-    java.util.List<Object> list = new java.util.ArrayList<>();
-    for (int i = 0; i < values.length(); i++) {
-      list.add(values.get(i));
-    }
-    return list;
+    McpHqlConditions.appendOperatorConditionsAt(where, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), key, operators);
   }
 
   /**
@@ -801,15 +777,9 @@ final class McpQuerySupport {
           McpNamedFilters.summarize(sfEntity.getNamedFilters()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
-    appendAnd(where);
+    McpHqlConditions.appendAnd(where);
     where.append('(').append(fragment).append(')');
     return true;
-  }
-
-  private static void appendAnd(StringBuilder where) {
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
   }
 
   /**
@@ -888,6 +858,15 @@ final class McpQuerySupport {
    * none, in which case the caller leaves the response full.
    */
   static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab) {
+    return gridFields(sfEntity, adTab, null);
+  }
+
+  /**
+   * As {@link #gridFields(SFEntity, Tab)}, with the entity's property-path fields already in hand
+   * (ETP-6148); {@code null} looks them up on the first path row.
+   */
+  static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab,
+      NeoPropertyPaths knownPaths) {
     java.util.Set<String> result = new java.util.LinkedHashSet<>();
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
@@ -899,12 +878,25 @@ final class McpQuerySupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     crit.add(Restrictions.isNotNull(SFField.PROPERTY_GRIDPOSITION));
     crit.addOrder(org.hibernate.criterion.Order.asc(SFField.PROPERTY_GRIDPOSITION));
+    NeoPropertyPaths propertyPaths = knownPaths;
     for (SFField sfField : crit.list()) {
       Column col = sfField.getADColumn();
       Property prop = col == null ? null
           : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
       if (prop != null) {
         result.add(prop.getName());
+        continue;
+      }
+      // ETP-6148: a property-path list column, in its list position, under its API key.
+      String path = NeoFieldFilter.propertyPathOf(sfField);
+      if (col == null && path != null) {
+        if (propertyPaths == null) {
+          propertyPaths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+        }
+        NeoPropertyPaths.PathField pathField = propertyPaths.byPath(path);
+        if (pathField != null) {
+          result.add(pathField.getApiKey());
+        }
       }
     }
     return result;
@@ -937,7 +929,8 @@ final class McpQuerySupport {
     } else if (listDefault && !McpFieldProjection.isFullView(view)) {
       requested = McpListSection.configuredFields(sfEntity);
       if (requested.isEmpty()) {
-        requested = gridFields(sfEntity, adTab);
+        requested = gridFields(sfEntity, adTab,
+            fieldFilter == null ? null : NeoPropertyPaths.of(fieldFilter));
       }
       McpFieldProjection.reportOmittedFields(responseJson, requested);
     } else {

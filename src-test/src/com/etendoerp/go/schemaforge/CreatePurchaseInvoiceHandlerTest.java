@@ -2501,6 +2501,9 @@ public class CreatePurchaseInvoiceHandlerTest {
     assertEquals(1, data.length());
     assertEquals("inv-l", data.getJSONObject(0).getString("id"));
     assertEquals("PINV-L", data.getJSONObject(0).getString("documentNo"));
+    org.junit.Assert.assertFalse(
+        "the purchase rows are unchanged: no rectificative flag (ETP-6002 is sales only)",
+        data.getJSONObject(0).has("isRectificative"));
   }
 
   @Test

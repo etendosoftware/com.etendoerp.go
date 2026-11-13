@@ -19,8 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubProviderLookup;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -30,6 +33,9 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.Date;
 
+import org.apache.logging.log4j.Level;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -39,6 +45,8 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.usageevents.LogCapture;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -63,6 +71,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * asserted to short-circuit BEFORE any DAL work, via {@code verifyNoInteractions} on the mocked
  * {@link OBDal} — that ordering is what keeps {@code GET status} from paying for a criteria query
  * on every account that cannot sync anyway.
+ *
+ * <p>ETP-6151: {@code maxFetchIntervalOfProvider} is the same lookup keyed by a bare provider code
+ * ({@code GET accounts} has no connection yet), {@code maxFetchIntervalOfProviderOrNull} its total
+ * form, and {@code addFetchIntervalAdvisory} the one envelope the three write actions answer the
+ * advisory with.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionSupport
  */
@@ -390,5 +403,120 @@ public class FinancialAccountBankConnectionSupportFetchIntervalTest {
     Provider provider = mock(Provider.class);
     when(provider.getMaxFetchInterval()).thenReturn(maxFetchInterval);
     return provider;
+  }
+
+  // ── ETP-6151: maxFetchIntervalOfProvider / maxFetchIntervalOfProviderOrNull ──
+
+  /** A blank or null code cannot resolve a catalog row: null, before any DAL work. */
+  @Test
+  public void testProviderLimitOfABlankCodeIsNullWithoutAQuery() {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      assertNull(FinancialAccountBankConnectionSupport.maxFetchIntervalOfProvider(null));
+      assertNull(FinancialAccountBankConnectionSupport.maxFetchIntervalOfProvider("  "));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** A registered provider's positive limit comes back as an int; an unknown one as null. */
+  @Test
+  public void testProviderLimitIsReadFromTheRegisteredRow() {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubProviderLookup(obDal, provider(new BigDecimal("180.00")));
+      assertEquals(Integer.valueOf(180),
+          FinancialAccountBankConnectionSupport.maxFetchIntervalOfProvider(PROVIDER_CODE));
+    }
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubProviderLookup(obDal, null);
+      assertNull(FinancialAccountBankConnectionSupport.maxFetchIntervalOfProvider(PROVIDER_CODE));
+    }
+  }
+
+  /**
+   * The total form answers the same value on success, and null plus a warning naming the provider
+   * when the lookup throws: in {@code GET accounts} the limit is an extra, never a failure.
+   */
+  @Test
+  public void testProviderLimitOrNullSwallowsALookupFailure() {
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubProviderLookup(obDal, provider(BigDecimal.valueOf(90)));
+      assertEquals(Integer.valueOf(90),
+          FinancialAccountBankConnectionSupport.maxFetchIntervalOfProviderOrNull(PROVIDER_CODE));
+    }
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        LogCapture log = LogCapture.of(FinancialAccountBankConnectionSupport.class)) {
+      obDal.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
+
+      assertNull(FinancialAccountBankConnectionSupport.maxFetchIntervalOfProviderOrNull(PROVIDER_CODE));
+      assertEquals(1, log.messages(Level.WARN).size());
+      String warning = log.messages(Level.WARN).get(0);
+      assertTrue(warning, warning.contains(PROVIDER_CODE) && warning.contains("no session"));
+    }
+  }
+
+  // ── ETP-6151: addFetchIntervalAdvisory ─────────────────────────────────────
+
+  /**
+   * Runs {@code addFetchIntervalAdvisory} on a fresh {@code okData} answer with the rule stubbed to
+   * {@code exceeded} for 2019-03-01, for a request of the given origin.
+   *
+   * @param exceeded what the fetch-interval rule reports, or {@code null} for "within the history"
+   * @param mcp      whether the request comes from the MCP
+   * @return the annotated answer's body
+   */
+  private static JSONObject advisedBody(
+      FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded, boolean mcp)
+      throws Exception {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    Date importFrom = utcMidnight(LocalDate.of(2019, 3, 1));
+    NeoContext context = mock(NeoContext.class);
+    when(context.isMcpOrigin()).thenReturn(mcp);
+    NeoResponse response = FinancialAccountBankConnectionSupport.okData(new JSONObject());
+    try (MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      language.when(NeoLanguage::currentCode).thenReturn("en_US");
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(finAcc), eq(importFrom))).thenReturn(exceeded);
+      FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(response, context, finAcc,
+          importFrom);
+    }
+    return response.getBody();
+  }
+
+  /**
+   * An import-from date beyond the history adds ONE {@code {type: "warning", text}} message with
+   * the limit and the earliest usable day: at the top level for the SPA, inside {@code response}
+   * for an MCP caller, and never in both.
+   */
+  @Test
+  public void testAdvisoryIsAddedWhereTheOriginReadsIt() throws Exception {
+    FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
+        new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(90, TODAY.minusDays(90));
+    for (boolean mcp : new boolean[] {false, true}) {
+      JSONObject body = advisedBody(exceeded, mcp);
+
+      JSONObject holder = mcp ? body.getJSONObject("response") : body;
+      JSONObject other = mcp ? body : body.getJSONObject("response");
+      JSONArray messages = holder.getJSONArray("messages");
+      assertEquals("mcp=" + mcp, 1, messages.length());
+      assertEquals("mcp=" + mcp, "warning", messages.getJSONObject(0).getString("type"));
+      String text = messages.getJSONObject(0).getString("text");
+      assertTrue(text, text.contains("90") && text.contains(TODAY.minusDays(90).toString()));
+      assertFalse("mcp=" + mcp, other.has("messages"));
+    }
+  }
+
+  /** Within the history (the rule says nothing), the answer is left untouched. */
+  @Test
+  public void testAdvisoryIsNotAddedWithinTheHistory() throws Exception {
+    JSONObject body = advisedBody(null, false);
+
+    assertFalse(body.has("messages"));
+    assertFalse(body.getJSONObject("response").has("messages"));
   }
 }

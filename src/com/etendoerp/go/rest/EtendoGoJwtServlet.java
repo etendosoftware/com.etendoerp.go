@@ -135,6 +135,7 @@ import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingDefaultContactCategoryService;
+import com.etendoerp.go.onboarding.OnboardingRemittanceSetupService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -504,6 +505,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
   OnboardingDefaultContactCategoryService onboardingDefaultContactCategoryService =
       new OnboardingDefaultContactCategoryService();
+  OnboardingRemittanceSetupService onboardingRemittanceSetupService =
+      new OnboardingRemittanceSetupService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
       new DevProvisioningFailureFixtureService();
@@ -5529,6 +5532,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // costing schedule is activated (so the background costing never races the import).
     importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
         paidUpgrade);
+    // ETP-6148: after the sample data, the only source of a new tenant's bank account.
+    applyRemittanceSetupBestEffort(clientId, accountEmail);
     onboardingCostingScheduleService.activateSchedule(clientId);
     sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
     sendProgress(writer, "finalize", "done", "Environment ready");
@@ -5645,6 +5650,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("ETP-5791 default contact category could not be set for client {}; it keeps the "
           + "dataset default", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("default contact category", e, log);
+    }
+  }
+
+  /**
+   * ETP-6148 — with the {@code sepa-remittances} flag on for the receiving account, links the
+   * tenant's Bank accounts to the SEPA remittance payment methods (see
+   * {@link OnboardingRemittanceSetupService}). Runs after the commit and the sample data, in its own
+   * transaction; never fails the caller — on any failure only this step rolls back and the
+   * accounts stay without the remittance methods.
+   *
+   * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant — the
+   *     flag is per account, and this step runs as System
+   */
+  void applyRemittanceSetupBestEffort(String clientId, String accountEmail) {
+    try {
+      if (onboardingRemittanceSetupService.applyIfEnabled(clientId, accountEmail)) {
+        EtendoGoDalHelper.commitDalChanges("remittance setup", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("ETP-6148 remittance setup failed for client {}; its bank accounts stay without "
+          + "the remittance methods", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("remittance setup", e, log);
     }
   }
 

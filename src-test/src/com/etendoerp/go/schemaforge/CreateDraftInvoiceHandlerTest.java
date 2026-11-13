@@ -2611,6 +2611,8 @@ public class CreateDraftInvoiceHandlerTest {
   @Test
   @SuppressWarnings("unchecked")
   public void testHandleListMergesDeduplicatesAndFormatsRows() throws Exception {
+    // The rectificative flag column is probed with SQL, so this test decides by doc category
+    RectificativeSupport.setColumnPresentForTests(false);
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       mockAdminMode(obContextMock);
@@ -2635,6 +2637,9 @@ public class CreateDraftInvoiceHandlerTest {
       Currency euro = mock(Currency.class);
       when(euro.getISOCode()).thenReturn("EUR");
       when(invoiceFromLines.getCurrency()).thenReturn(euro);
+      DocumentType rectificativeType = mock(DocumentType.class);
+      when(rectificativeType.getDocumentCategory()).thenReturn("ARC");
+      when(invoiceFromLines.getTransactionDocument()).thenReturn(rectificativeType);
 
       Invoice directOnlyInvoice = mock(Invoice.class);
       when(directOnlyInvoice.getId()).thenReturn("inv-2");
@@ -2673,6 +2678,12 @@ public class CreateDraftInvoiceHandlerTest {
       assertFalse(data.getJSONObject(1).has("invoiceDate"));
       assertTrue(data.getJSONObject(1).has("currency$_identifier"));
       assertTrue(data.getJSONObject(1).isNull("currency$_identifier"));
+      // ETP-6002: each sales row says whether it is a rectificative, so the order's and the
+      // quotation's related documents can leave it out (the rows themselves are unchanged).
+      assertTrue(data.getJSONObject(0).getBoolean("isRectificative"));
+      assertFalse(data.getJSONObject(1).getBoolean("isRectificative"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
     }
   }
 
