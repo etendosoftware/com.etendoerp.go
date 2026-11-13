@@ -350,12 +350,20 @@ class NeoCrudHandler {
           ? NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName, context.getQueryParams())
           : NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
+      if ("GET".equals(context.getHttpMethod())) {
+        // ETP-6148: property-path fields are read through core's _extraProperties, and their API
+        // keys in criteria/_sortBy/_distinct/_summary are rewritten to the path core joins on.
+        NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);
+      }
       if ("GET".equals(context.getHttpMethod()) && context.getRecordId() == null
           && !params.containsKey(JsonConstants.DISTINCT_PARAMETER)
           && !params.containsKey(JsonConstants.SUMMARY_PARAMETER)) {
         // ETP-5778: let a customization's afterHandle aggregate the whole filtered set, not just
         // the page. FK dropdowns (_distinct) and grid summaries (_summary) never need it.
         NeoListAggregateQuery.remember(context, params);
+        // A customization whose page order is not a property path (NeoHandler#orderedPage) narrows
+        // the fetch to its page here; reorder() below restores its order and the paging figures.
+        NeoOrderedListPage.apply(context, params);
       }
 
       return executeJsonServiceAndBuildResponse(
@@ -642,6 +650,7 @@ class NeoCrudHandler {
     // Kept even for an ids-only response: it renames DAL properties to the API keys a
     // customization's afterHandle reads, so skipping it would change what the hook sees.
     fieldFilter.filterGetResponse(responseJson);
+    NeoOrderedListPage.reorder(context, responseJson);
     enrichResponseIdentifiers(context, responseJson);
     return NeoResponse.ok(responseJson);
   }
@@ -1255,12 +1264,18 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Unknown DAL entity: " + dalEntityName);
     }
-    Property prop = NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
+    // ETP-6148: a property-path field offers the distinct values of the property its path ends
+    // on, projected through the path; its API key is not a property of the entity.
+    NeoPropertyPaths propertyPaths = context == null ? NeoPropertyPaths.of(null)
+        : NeoPropertyPaths.of(NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName));
+    NeoPropertyPaths.PathField pathField = propertyPaths.get(fieldName);
+    Property prop = pathField != null ? pathField.getTarget()
+        : NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
     if (prop == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Unknown field '" + fieldName + "' on entity " + dalEntityName);
     }
-    String resolvedProperty = prop.getName();
+    String resolvedProperty = pathField != null ? pathField.getPath() : prop.getName();
 
     int startRow = Math.max(0,
         parseIntOrDefault(queryParams.get(JsonConstants.STARTROW_PARAMETER), 0));
@@ -1287,8 +1302,11 @@ class NeoCrudHandler {
       // silently offering the values of the rows it was meant to exclude.
       // ETP-5561: the filtered set is the list's own — same params, same where clause — so the
       // tab, the parent filter, the read predicates AND the grid `criteria` all narrow the values.
+      Map<String, String> listParams = buildDalParams(context, adTab, dalEntityName);
+      // ETP-6148: a path field's key in the grid criteria narrows the values too.
+      propertyPaths.applyToReadParams(listParams);
       Map<String, String> params = NeoDistinctFetchSupport.toDistinctFilterParams(
-          buildDalParams(context, adTab, dalEntityName), context, startRow, pageSize);
+          listParams, context, startRow, pageSize);
 
       Map<String, Object> searchParams = searchPredicate == null ? null
           : Map.of("search", "%" + search.toLowerCase() + "%");

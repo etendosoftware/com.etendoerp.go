@@ -465,6 +465,63 @@ public final class GoFeatureFlags {
   public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
+   * ETP-6148 (epic ETP-3504, "SEPA remittances") — gates the <b>behaviour</b> of SEPA remittances,
+   * never their schema. Positive polarity: {@code true} = remittances are enabled. Strictly off by
+   * default: an unconfigured flag, an unreachable control plane and any evaluation error all read
+   * as {@code false}.
+   *
+   * <p><b>What it gates.</b> The remittance provisioning of a new Bank financial account — on,
+   * a Bank account created through NEO (REST, batch, MCP), the bank-connection flow or the
+   * onboarding sample data gets the two SEPA remittance payment methods, provisioning the client
+   * on first use; off, it is created as before; existing accounts are never revisited — the default
+   * SEPA mandate of a customer — off, its keys are dropped from the write body; and the
+   * {@code remittance} spec (header and lines) — off, 403 {@code feature_disabled}. <b>Not
+   * gated:</b> the messages, and the DAL observer that keeps remittance methods on Bank accounts —
+   * an observer cannot read a per-account flag, and remittance data only exists where the flag was
+   * on. The
+   * remittance status is not this module's: it is {@code REM_REMITTANCE.REMITTANCE_STATUS}, owned
+   * and maintained by {@code org.openbravo.module.remittance} (added by ETP-6148).
+   *
+   * <p><b>One reader.</b> Only {@code SepaRemittancesFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the context carries the {@code ETGO_ACCOUNT}
+   * email of the request user (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; a Datadog rule must be written on the lowercase {@code email} attribute alone.
+   * Locally {@code etendo.go.flags.sepa-remittances} / {@code ETGO_FLAG_SEPA_REMITTANCES}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. The web client reads
+   * {@code capabilities.sepaRemittances} off {@code SFWindowAccessMap} and never evaluates the flag.
+   * TTL 2027-03-31 (provisional, to confirm with product).
+   */
+  public static final String FLAG_SEPA_REMITTANCES = "sepa-remittances";
+
+  /**
+   * ETP-6151 — the <b>PSD2 statement import settings</b> of bank-connected financial accounts.
+   * Positive polarity: {@code true} = the new behaviour; the default and every failure read
+   * {@code false}, which is the behaviour before ETP-6151.
+   *
+   * <p><b>What it gates.</b> {@code link} / {@code createAndLink} requiring, validating and storing
+   * {@code importFromDate} and {@code statementGrouping} (and clearing a stale import-to date);
+   * {@code import-settings} requiring an import-from date and a valid grouping and answering a
+   * malformed date with 400; the {@code PUT}/{@code PATCH} of a financial account validating the
+   * PSD2 import keys; {@code accounts} answering {@code maxFetchInterval}; and deleting a statement
+   * of a bank-connected account (processed ones are reactivated and deleted instead of answering
+   * the 409 {@code Statements from a bank-connected account cannot be deleted.}). With the flag
+   * off every one of them answers as before ETP-6151.
+   *
+   * <p><b>One reader.</b> Only {@code Psd2ImportSettingsFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the request
+   * user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed lookup
+   * reads off. Locally {@code etendo.go.flags.psd2-statement-import-settings} /
+   * {@code ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS}.
+   *
+   * <p><b>Also evaluated by the SPA</b> (same key, same account email as targeting key), which
+   * shows the import-settings fields and the delete affordance only when it reads on. TTL
+   * 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_PSD2_STATEMENT_IMPORT_SETTINGS =
+      "psd2-statement-import-settings";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

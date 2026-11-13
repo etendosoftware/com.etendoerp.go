@@ -111,6 +111,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionEndpoint
  * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
@@ -143,7 +145,10 @@ class NeoExtensionMigrationTest {
       new Binding(ReconciliationHandler.class, "bank-reconciliation", "bank-reconciliation"),
       new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements"),
       new Binding(BusinessPartnerHandler.class, "contacts", "businessPartner"),
-      new Binding(ContactsLocationAddressHandler.class, "contacts", "locationAddress") };
+      new Binding(ContactsLocationAddressHandler.class, "contacts", "locationAddress"),
+      // ETP-6148 / ETP-6154: the bank connection report spec, its row's qualifier removed.
+      new Binding(FinancialAccountBankConnectionHandler.class, "financial-account-bank-connection",
+          "financial-account-bank-connection") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)
@@ -248,7 +253,7 @@ class NeoExtensionMigrationTest {
           q -> "customerAccountingHandler".equals(q) ? legacy : null));
       assertTrue(NeoHandlerLookup.hasCustomization(qualified));
 
-      SFEntity plain = entity("contacts", "contact", null);
+      SFEntity plain = entity("contacts", "bp-trend", null);
       assertNull(NeoHandlerLookup.forEntity(plain, q -> fail("a blank qualifier is never resolved")));
       assertFalse(NeoHandlerLookup.hasCustomization(plain));
     }
@@ -359,6 +364,68 @@ class NeoExtensionMigrationTest {
     }
   }
 
+  /**
+   * ETP-6148 (B1): {@code financial-account-bank-connection} lost its row's {@code Java_Qualifier};
+   * its handler is now bound by {@code @NeoExtension} alone. The two readers that reach it by spec
+   * rather than by entity must still find it: the SPA's report route and
+   * {@link FinancialAccountBankConnectionEndpoint}, which the account's bank connection actions
+   * call for the agent. Neither may fall back on a qualifier: there is none.
+   */
+  @Nested
+  @DisplayName("ETP-6148 B1 — the bank connection spec resolves by annotation alone")
+  class BankConnectionByAnnotation {
+
+    @Test
+    @DisplayName("REST report route: ?action= reaches FinancialAccountBankConnectionHandler")
+    void theReportRouteReachesTheHandler() throws Exception {
+      try (ReportFixture f = new ReportFixture(BANK_CONNECTION, BoundBy.ANNOTATION_ONLY);
+          MockedStatic<NeoRequestBodyParser> body = mockStatic(NeoRequestBodyParser.class);
+          MockedStatic<NeoCsvExportService> csv = mockStatic(NeoCsvExportService.class)) {
+        NeoResponse answer = NeoResponse.ok(new JSONObject().put("answeredBy", "bank"));
+        doReturn(answer).when(f.handler).handle(any());
+        NeoServlet servlet = f.servlet();
+        when(servlet.extractQueryParams(any()))
+            .thenReturn(Map.of("action", BANK_CONNECTION.restAction()));
+        HttpServletResponse response = mock(HttpServletResponse.class);
+
+        new NeoRequestRouter(servlet).handleReportSpecRequest(f.spec,
+            new NeoServlet.NeoPathInfo(BANK_CONNECTION.spec(), null, null), "GET",
+            mock(HttpServletRequest.class), response);
+
+        verify(servlet).writeResponse(response, answer);
+        assertSame(f.handler, NeoReportCallability.resolveReportHandler(f.spec));
+        f.assertQualifierResolvers(true);
+      }
+    }
+
+    @ParameterizedTest(name = "mcp={0}")
+    @org.junit.jupiter.params.provider.ValueSource(booleans = { false, true })
+    @DisplayName("FinancialAccountBankConnectionEndpoint reaches the handler on REST and MCP")
+    void theEndpointReachesTheHandler(boolean mcp) throws Exception {
+      try (ReportFixture f = new ReportFixture(BANK_CONNECTION, BoundBy.ANNOTATION_ONLY)) {
+        f.support.when(() -> NeoServletSupport.findSpec(
+            FinancialAccountBankConnectionEndpoint.SPEC)).thenReturn(f.spec);
+        NeoResponse answer = NeoResponse.ok(new JSONObject().put("answeredBy", "bank"));
+        doReturn(answer).when(f.handler).handle(any());
+        NeoContext context = NeoContext.builder()
+            .specName(FinancialAccountBankConnectionEndpoint.SPEC)
+            .entityName(FinancialAccountBankConnectionEndpoint.SPEC)
+            .httpMethod("POST")
+            .queryParams(Map.of("action", "disconnect"))
+            .requestBody(new JSONObject())
+            .endpointType(NeoEndpointType.CRUD)
+            .mcpOrigin(mcp)
+            .build();
+
+        NeoResponse result = FinancialAccountBankConnectionEndpoint.call(context);
+
+        assertSame(answer, result, "the handler answered, not the not-configured fallback");
+        verify(f.handler).handle(context);
+        f.assertQualifierResolvers(false);
+      }
+    }
+  }
+
   /** How a report pair is bound in one test. */
   enum BoundBy {
     /** The row has no qualifier; the class's {@code @NeoExtension} is the only binding. */
@@ -385,6 +452,10 @@ class NeoExtensionMigrationTest {
       "bank-reconciliation", "bankReconciliation", "pendingLines");
   static final ReportPair BANK_STATEMENTS = new ReportPair(BankStatementsHandler.class,
       "bank-statements", "bank-statements", "lines");
+  /** ETP-6148 (B1); its former qualifier is the spec name. */
+  static final ReportPair BANK_CONNECTION = new ReportPair(
+      FinancialAccountBankConnectionHandler.class, "financial-account-bank-connection",
+      "financial-account-bank-connection", "status");
 
   /**
    * The two report specs migrated to {@code @NeoExtension} by ETP-5581, each bound once by its

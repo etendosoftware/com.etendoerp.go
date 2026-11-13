@@ -68,7 +68,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * <p>Covers: parseRequestPath (valid, null, exception), handleSpecRequest dispatch
  * (process/report/window), handleProcessSpecRequest (access denied, GET describe,
  * GET with null process, POST execute, unsupported methods), handleWindowSpecRequest
- * (access denied, spec describe on GET without entity, method not allowed without entity).
+ * (access denied, spec describe on GET without entity, method not allowed without entity, a
+ * write action refused for a read-only window tier).
  *
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  */
@@ -642,6 +643,37 @@ class NeoRequestRouterTest {
   }
 
   // ── handleWindowSpecRequest ──────────────────────────────────────────────
+
+  /**
+   * ETP-6148: a declared write action of a window spec — the remittance header's {@code process}
+   * and {@code reactivate} — is a POST, so it is refused 403 by the window write-access check for
+   * a role whose window tier is read-only ({@code hasWindowAccessForSpec(spec, "POST")} false; the
+   * read-only tier itself is pinned in {@code NeoAccessHelperTest}), before any sub-endpoint or
+   * customization runs.
+   */
+  @Test
+  void testHandleWindowSpecRefusesAWriteActionForAReadOnlyTier() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+
+    for (String action : new String[] { "process", "reactivate" }) {
+      NeoPathInfo pathInfo = new NeoPathInfo("remittance", "remittance", "REM-1", false, null,
+          true, action);
+
+      router.handleWindowSpecRequest(spec, pathInfo, "POST", request, response);
+    }
+
+    verify(servlet, org.mockito.Mockito.times(2)).sendError(eq(response),
+        eq(HttpServletResponse.SC_FORBIDDEN), anyString());
+    verify(servlet.subEndpointDispatcher, org.mockito.Mockito.never())
+        .handleWindowSubEndpoint(org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any(), anyString(), org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any());
+    verify(servlet.crudHandler, org.mockito.Mockito.never()).handleWindowEntityCrud(
+        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), anyString(),
+        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+  }
 
   /**
    * Verifies that access denied to the window returns 403.
