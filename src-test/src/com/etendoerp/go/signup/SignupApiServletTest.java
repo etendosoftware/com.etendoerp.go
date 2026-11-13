@@ -35,9 +35,12 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.time.LocalDate;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -50,6 +53,8 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.accounts.AccountGroupService;
+import com.etendoerp.go.accounts.DemoExpiryService;
 import com.etendoerp.go.rest.AccountRegistrationService;
 import com.etendoerp.go.rest.AccountRegistrationService.EmailStatus;
 import com.etendoerp.go.rest.SignupAccountService;
@@ -61,8 +66,12 @@ import com.etendoerp.go.rest.SignupAccountService.RetryOutcome;
  * Routing, key authentication and the error contract of the signup API (ETP-5847). The services
  * are mocked: what is under test is what the caller receives.
  *
+ * <p>ETP-6223: the demo expiry and the account groups, on a servlet wired to mocked
+ * {@link DemoExpiryService} and {@link AccountGroupService}.
+ *
  * @covers com.etendoerp.go.signup.SignupApiServlet
  * @covers com.etendoerp.go.signup.SignupOptions
+ * @covers com.etendoerp.go.signup.SignupAdminRequests
  */
 class SignupApiServletTest {
 
@@ -72,6 +81,10 @@ class SignupApiServletTest {
   private final AccountRegistrationService registration = mock(AccountRegistrationService.class);
   private final SignupAccountService signups = mock(SignupAccountService.class);
   private final SignupApiServlet servlet = new SignupApiServlet(registration, signups);
+  private final DemoExpiryService demoExpiry = mock(DemoExpiryService.class);
+  private final AccountGroupService groups = mock(AccountGroupService.class);
+  private final SignupApiServlet adminServlet =
+      new SignupApiServlet(registration, signups, demoExpiry, groups);
 
   private final HttpServletRequest request = mock(HttpServletRequest.class);
   private final HttpServletResponse response = mock(HttpServletResponse.class);
@@ -107,6 +120,15 @@ class SignupApiServletTest {
 
   private void call(String method, String path, String json) throws Exception {
     call(method, path, KEY, json);
+  }
+
+  /** A call to the servlet whose ETP-6223 services are mocked. */
+  private void admin(String method, String path, String json) throws Exception {
+    when(request.getMethod()).thenReturn(method);
+    when(request.getPathInfo()).thenReturn(path);
+    when(request.getHeader(SignupApiKeys.HEADER)).thenReturn(KEY);
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader(json)));
+    adminServlet.service(request, response);
   }
 
   private JSONObject json() throws Exception {
@@ -339,5 +361,283 @@ class SignupApiServletTest {
     call("GET", "/accounts/" + ACCOUNT_ID + "/retry", "");
 
     assertEquals(405, status);
+  }
+
+  // ===================== ETP-6223: demo expiry =====================
+
+  private static final LocalDate DECEMBER_FIRST = LocalDate.of(2026, 12, 1);
+
+  @Test
+  void theStatusAddsTheDemoExpiryAndTheGroups() throws Exception {
+    when(signups.status(ACCOUNT_ID)).thenReturn(
+        new SignupAccountService.Status(ACCOUNT_ID, "ana@empresa.es", "ready", null));
+    when(signups.details(ACCOUNT_ID)).thenReturn(
+        new SignupAccountService.Details(DECEMBER_FIRST, List.of("beta")));
+
+    admin("GET", "/accounts/" + ACCOUNT_ID, "");
+
+    assertEquals(200, status);
+    assertEquals("ready", json().getString("status"));
+    assertEquals("ana@empresa.es", json().getString("email"));
+    assertEquals("2026-12-01", json().getString("demoExpiresAt"));
+    assertEquals("beta", json().getJSONArray("groups").getString(0));
+  }
+
+  @Test
+  void theStatusOfAnAccountWithNoDemoYetReportsNoExpiryAndNoGroups() throws Exception {
+    when(signups.status(ACCOUNT_ID)).thenReturn(
+        new SignupAccountService.Status(ACCOUNT_ID, "ana@empresa.es", "provisioning", null));
+    when(signups.details(ACCOUNT_ID)).thenReturn(
+        new SignupAccountService.Details(null, List.of()));
+
+    admin("GET", "/accounts/" + ACCOUNT_ID, "");
+
+    assertEquals(200, status);
+    assertTrue(json().isNull("demoExpiresAt"));
+    assertEquals(0, json().getJSONArray("groups").length());
+  }
+
+  @Test
+  void patchMovesTheDemoExpiry() throws Exception {
+    when(demoExpiry.update(ACCOUNT_ID, DECEMBER_FIRST)).thenReturn(
+        new DemoExpiryService.Result(DemoExpiryService.Outcome.UPDATED, DECEMBER_FIRST));
+
+    admin("PATCH", "/accounts/" + ACCOUNT_ID.toLowerCase(), "{\"demoExpiresAt\":\"2026-12-01\"}");
+
+    assertEquals(200, status);
+    assertEquals(ACCOUNT_ID, json().getString("accountId"));
+    assertEquals("2026-12-01", json().getString("demoExpiresAt"));
+    verifyNoInteractions(registration);
+  }
+
+  @Test
+  void patchWithANullDateGoesBackToTheStandardTrial() throws Exception {
+    LocalDate standardEnd = LocalDate.of(2026, 11, 20);
+    when(demoExpiry.update(ACCOUNT_ID, null)).thenReturn(
+        new DemoExpiryService.Result(DemoExpiryService.Outcome.UPDATED, standardEnd));
+
+    admin("PATCH", "/accounts/" + ACCOUNT_ID, "{\"demoExpiresAt\":null}");
+
+    assertEquals(200, status);
+    assertEquals("2026-11-20", json().getString("demoExpiresAt"));
+  }
+
+  @Test
+  void patchWithAnInvalidDateIsRefusedBeforeTouchingTheAccount() throws Exception {
+    for (String value : List.of("\"2026-02-30\"", "\"01/12/2026\"", "\"2026-12-1\"",
+        "\"tomorrow\"", "20261201", "\"\"")) {
+      admin("PATCH", "/accounts/" + ACCOUNT_ID, "{\"demoExpiresAt\":" + value + "}");
+
+      assertEquals(400, status, value);
+      assertEquals("INVALID_DATE", error().getString("code"), value);
+      assertEquals("demoExpiresAt", error().getString("field"), value);
+      body.getBuffer().setLength(0);
+      when(response.getWriter()).thenReturn(new PrintWriter(body));
+    }
+    verifyNoInteractions(demoExpiry);
+  }
+
+  @Test
+  void patchWithoutTheDateIsRefused() throws Exception {
+    admin("PATCH", "/accounts/" + ACCOUNT_ID, "{}");
+
+    assertEquals(400, status);
+    assertEquals("REQUIRED_FIELD", error().getString("code"));
+    assertEquals("demoExpiresAt", error().getString("field"));
+    verifyNoInteractions(demoExpiry);
+  }
+
+  @Test
+  void patchOfAnAccountWithoutADemoIsRefused() throws Exception {
+    when(demoExpiry.update(ACCOUNT_ID, DECEMBER_FIRST)).thenReturn(
+        new DemoExpiryService.Result(DemoExpiryService.Outcome.NO_DEMO, null));
+
+    admin("PATCH", "/accounts/" + ACCOUNT_ID, "{\"demoExpiresAt\":\"2026-12-01\"}");
+
+    assertEquals(409, status);
+    assertEquals("ACCOUNT_HAS_NO_DEMO", error().getString("code"));
+  }
+
+  @Test
+  void patchOfAnUnknownAccountIsNotFound() throws Exception {
+    when(demoExpiry.update(ACCOUNT_ID, DECEMBER_FIRST)).thenReturn(
+        new DemoExpiryService.Result(DemoExpiryService.Outcome.ACCOUNT_NOT_FOUND, null));
+
+    admin("PATCH", "/accounts/" + ACCOUNT_ID, "{\"demoExpiresAt\":\"2026-12-01\"}");
+
+    assertEquals(404, status);
+    assertEquals("ACCOUNT_NOT_FOUND", error().getString("code"));
+  }
+
+  @Test
+  void patchNeedsAKey() throws Exception {
+    when(request.getMethod()).thenReturn("PATCH");
+    when(request.getPathInfo()).thenReturn("/accounts/" + ACCOUNT_ID);
+    when(request.getReader()).thenReturn(
+        new BufferedReader(new StringReader("{\"demoExpiresAt\":\"2026-12-01\"}")));
+
+    adminServlet.service(request, response);
+
+    assertEquals(401, status);
+    verifyNoInteractions(demoExpiry);
+  }
+
+  // ===================== ETP-6223: groups =====================
+
+  private static final AccountGroupService.GroupInfo BETA =
+      new AccountGroupService.GroupInfo("beta", "Beta", "Beta users", true);
+
+  @Test
+  void aGroupIsCreated() throws Exception {
+    when(groups.create("early-access", "Early access", null)).thenReturn(Optional.of(
+        new AccountGroupService.GroupInfo("early-access", "Early access", null, true)));
+
+    admin("POST", "/groups", "{\"key\":\"early-access\",\"name\":\" Early access \"}");
+
+    assertEquals(201, status);
+    assertEquals("early-access", json().getString("key"));
+    assertEquals("Early access", json().getString("name"));
+    assertTrue(json().isNull("description"));
+    assertTrue(json().getBoolean("active"));
+  }
+
+  @Test
+  void aDuplicateGroupKeyIsRefused() throws Exception {
+    when(groups.create("beta", "Beta", "Again")).thenReturn(Optional.empty());
+
+    admin("POST", "/groups", "{\"key\":\"beta\",\"name\":\"Beta\",\"description\":\"Again\"}");
+
+    assertEquals(409, status);
+    assertEquals("GROUP_ALREADY_EXISTS", error().getString("code"));
+    assertEquals("key", error().getString("field"));
+  }
+
+  @Test
+  void aGroupKeyOutsideItsAlphabetIsRefused() throws Exception {
+    for (String key : List.of("Beta", "beta users", "-beta", "beta.users", "béta")) {
+      admin("POST", "/groups", new JSONObject().put("key", key).put("name", "Beta").toString());
+
+      assertEquals(400, status, key);
+      assertEquals("INVALID_GROUP_KEY", error().getString("code"), key);
+      body.getBuffer().setLength(0);
+      when(response.getWriter()).thenReturn(new PrintWriter(body));
+    }
+    verifyNoInteractions(groups);
+  }
+
+  @Test
+  void aGroupNeedsAKeyAndAName() throws Exception {
+    admin("POST", "/groups", "{\"key\":\"beta\"}");
+
+    assertEquals(400, status);
+    assertEquals("REQUIRED_FIELD", error().getString("code"));
+    assertEquals("name", error().getString("field"));
+    verifyNoInteractions(groups);
+  }
+
+  @Test
+  void aGroupFieldOverItsColumnIsTooLong() throws Exception {
+    admin("POST", "/groups", new JSONObject().put("key", "beta").put("name", "Beta")
+        .put("description", "x".repeat(256)).toString());
+
+    assertEquals(400, status);
+    assertEquals("FIELD_TOO_LONG", error().getString("code"));
+    assertEquals("description", error().getString("field"));
+    assertEquals(255, error().getInt("max"));
+  }
+
+  @Test
+  void theGroupsAreListed() throws Exception {
+    when(groups.list()).thenReturn(List.of(BETA));
+
+    admin("GET", "/groups", "");
+
+    assertEquals(200, status);
+    JSONObject first = json().getJSONArray("groups").getJSONObject(0);
+    assertEquals("beta", first.getString("key"));
+    assertEquals("Beta users", first.getString("description"));
+  }
+
+  @Test
+  void theMembersOfAGroupAreListed() throws Exception {
+    when(groups.members("beta")).thenReturn(Optional.of(List.of(new AccountGroupService.Member(
+        ACCOUNT_ID, "ana@empresa.es", "Ana", new Date(0)))));
+
+    admin("GET", "/groups/beta/accounts", "");
+
+    assertEquals(200, status);
+    assertEquals("beta", json().getString("key"));
+    JSONObject member = json().getJSONArray("accounts").getJSONObject(0);
+    assertEquals(ACCOUNT_ID, member.getString("accountId"));
+    assertEquals("ana@empresa.es", member.getString("email"));
+    assertEquals("1970-01-01T00:00:00Z", member.getString("addedAt"));
+  }
+
+  @Test
+  void theMembersOfAnUnknownGroupAreNotFound() throws Exception {
+    when(groups.members("nope")).thenReturn(Optional.empty());
+
+    admin("GET", "/groups/nope/accounts", "");
+
+    assertEquals(404, status);
+    assertEquals("GROUP_NOT_FOUND", error().getString("code"));
+  }
+
+  @Test
+  void addingAMemberIsIdempotent() throws Exception {
+    when(groups.add("beta", ACCOUNT_ID)).thenReturn(AccountGroupService.MembershipOutcome.CHANGED,
+        AccountGroupService.MembershipOutcome.UNCHANGED);
+
+    admin("PUT", "/groups/beta/accounts/" + ACCOUNT_ID.toLowerCase(), "");
+    assertEquals(200, status);
+    assertTrue(json().getBoolean("member"));
+    assertTrue(json().getBoolean("changed"));
+
+    body.getBuffer().setLength(0);
+    when(response.getWriter()).thenReturn(new PrintWriter(body));
+    admin("PUT", "/groups/beta/accounts/" + ACCOUNT_ID, "");
+    assertEquals(200, status);
+    assertTrue(json().getBoolean("member"));
+    assertFalse(json().getBoolean("changed"));
+  }
+
+  @Test
+  void removingAMemberIsIdempotent() throws Exception {
+    when(groups.remove("beta", ACCOUNT_ID))
+        .thenReturn(AccountGroupService.MembershipOutcome.UNCHANGED);
+
+    admin("DELETE", "/groups/beta/accounts/" + ACCOUNT_ID, "");
+
+    assertEquals(200, status);
+    assertFalse(json().getBoolean("member"));
+    assertFalse(json().getBoolean("changed"));
+  }
+
+  @Test
+  void aMembershipOfAnUnknownGroupOrAccountIsNotFound() throws Exception {
+    when(groups.add("nope", ACCOUNT_ID))
+        .thenReturn(AccountGroupService.MembershipOutcome.GROUP_NOT_FOUND);
+    admin("PUT", "/groups/nope/accounts/" + ACCOUNT_ID, "");
+    assertEquals(404, status);
+    assertEquals("GROUP_NOT_FOUND", error().getString("code"));
+
+    body.getBuffer().setLength(0);
+    when(response.getWriter()).thenReturn(new PrintWriter(body));
+    when(groups.remove("beta", ACCOUNT_ID))
+        .thenReturn(AccountGroupService.MembershipOutcome.ACCOUNT_NOT_FOUND);
+    admin("DELETE", "/groups/beta/accounts/" + ACCOUNT_ID, "");
+    assertEquals(404, status);
+    assertEquals("ACCOUNT_NOT_FOUND", error().getString("code"));
+  }
+
+  @Test
+  void theGroupPathsRefuseOtherMethods() throws Exception {
+    admin("POST", "/groups/beta/accounts", "");
+    assertEquals(405, status);
+    admin("POST", "/groups/beta/accounts/" + ACCOUNT_ID, "");
+    assertEquals(405, status);
+    admin("DELETE", "/groups", "");
+    assertEquals(405, status);
+    verifyNoInteractions(groups);
   }
 }

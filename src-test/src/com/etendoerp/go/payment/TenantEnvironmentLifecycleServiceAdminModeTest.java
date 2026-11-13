@@ -50,7 +50,8 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
   private static final String TRANSITION_ACTIVATION = "2026-01-01T00:00:00Z";
 
   private final TenantEnvironmentLifecycleService service =
-      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class));
+      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class),
+          new SubscriptionService());
 
   @Test
   public void aRoleThatCannotReadPreferencesStillGetsTheLegacyDecision() {
@@ -93,7 +94,8 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
     stored.put(TenantPlanService.PREFERENCE_ATTRIBUTE, TenantPlanService.PLAN_PRODUCTIVE);
     Writes writes = new Writes();
     TenantEnvironmentLifecycleService withRealPlan =
-        new TenantEnvironmentLifecycleService(new TenantPlanService());
+        new TenantEnvironmentLifecycleService(new TenantPlanService(),
+            new SubscriptionService());
     withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(stored, writes,
         () -> assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED,
             withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
@@ -105,7 +107,8 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
   public void aFreeTenantGetsItsTransitionStartWithoutPreferenceAccess() {
     Writes writes = new Writes();
     TenantEnvironmentLifecycleService withRealPlan =
-        new TenantEnvironmentLifecycleService(new TenantPlanService());
+        new TenantEnvironmentLifecycleService(new TenantPlanService(),
+            new SubscriptionService());
     withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(new HashMap<>(), writes,
         () -> assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED,
             withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
@@ -125,7 +128,8 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
     stored.put(TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE, " ");
     Writes writes = new Writes();
     TenantEnvironmentLifecycleService withRealPlan =
-        new TenantEnvironmentLifecycleService(new TenantPlanService());
+        new TenantEnvironmentLifecycleService(new TenantPlanService(),
+            new SubscriptionService());
     withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(stored, writes,
         () -> assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED,
             withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
