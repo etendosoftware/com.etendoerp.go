@@ -78,9 +78,23 @@ public class EnsureLegacyPlanScript extends ModuleScript {
    * {@code ETGO_PLAN_VALUE_UQ} nor the primary key can ever reject it.
    */
   static final String INSERT_IF_MISSING_SQL = "INSERT INTO ETGO_Plan (ETGO_Plan_ID, AD_Client_ID, "
-      + "AD_Org_ID, IsActive, Created, CreatedBy, Updated, UpdatedBy, Value, Name, Description) "
-      + "SELECT ?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, ? "
+      + "AD_Org_ID, IsActive, Created, CreatedBy, Updated, UpdatedBy, Value, Name, Description, "
+      + "Billing_Interval) "
+      + "SELECT ?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, ?, 'month' "
       + "WHERE NOT EXISTS (SELECT 1 FROM ETGO_Plan WHERE Value = ? OR ETGO_Plan_ID = ?)";
+
+  /**
+   * ETP-5053 — the billing interval of the grandfathered plan. It has no price of its own, so no
+   * provider price ever derives one, but plan changes compare intervals: left empty, a change from
+   * it to a monthly plan read as a billing-interval change (another note, and a quota year taken
+   * from the provider period instead of inherited). The legacy price fallback sells a monthly
+   * subscription, so {@code month}. Filled only when empty, so a value an operator set in the
+   * Plans window is never overwritten; this backfills every install that predates it.
+   */
+  static final String LEGACY_BILLING_INTERVAL = "month";
+
+  static final String FILL_INTERVAL_IF_EMPTY_SQL = "UPDATE ETGO_Plan SET Billing_Interval = ?, "
+      + "Updated = now() WHERE ETGO_Plan_ID = ? AND Billing_Interval IS NULL";
 
   static final String KEY_EXISTS_SQL = "SELECT 1 FROM ETGO_Plan WHERE Value = ?";
 
@@ -94,7 +108,8 @@ public class EnsureLegacyPlanScript extends ModuleScript {
   }
 
   /**
-   * Inserts the legacy plan when no row carries its key or its id.
+   * Inserts the legacy plan when no row carries its key or its id, and gives it its billing
+   * interval when it has none.
    *
    * @return the number of rows inserted: 1 on a database that lacked the row, 0 otherwise
    */
@@ -108,6 +123,16 @@ public class EnsureLegacyPlanScript extends ModuleScript {
       ps.setString(5, LEGACY_PLAN_KEY);
       ps.setString(6, LEGACY_PLAN_ID);
       inserted = ps.executeUpdate();
+    }
+    int filled;
+    try (PreparedStatement ps = cp.getPreparedStatement(FILL_INTERVAL_IF_EMPTY_SQL)) {
+      ps.setString(1, LEGACY_BILLING_INTERVAL);
+      ps.setString(2, LEGACY_PLAN_ID);
+      filled = ps.executeUpdate();
+    }
+    if (filled > 0) {
+      log4j.info("Set the billing interval of the grandfathered " + LEGACY_PLAN_KEY + " plan to "
+          + LEGACY_BILLING_INTERVAL);
     }
     if (inserted > 0) {
       log4j.info("Created the grandfathered " + LEGACY_PLAN_KEY + " plan (" + LEGACY_PLAN_ID + ")");

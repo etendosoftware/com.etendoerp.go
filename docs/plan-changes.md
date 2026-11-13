@@ -60,6 +60,13 @@ once, at seed time, because the operator reviews the result in the tab. The seed
 an empty table**: one row present, active or not, and it does nothing, so operator decisions are
 never overwritten or re-added.
 
+**The grandfathered `legacy-productive` plan** has no price of its own, so no provider price ever
+derives its interval, but transitions compare intervals: `EnsureLegacyPlanScript` gives it
+`Billing_Interval = month` (the legacy price fallback sells a monthly subscription) on insert, and
+fills it on every `update.database` while it is empty, so a value set in the Plans window stays.
+The seed above adds no rows from it (it is unpriced): an operator who wants legacy tenants to
+change plan adds those rows by hand.
+
 ## 3. Mechanics at the provider
 
 All provider calls are made by `PlanChangeService`, through `StripeApiClient`.
