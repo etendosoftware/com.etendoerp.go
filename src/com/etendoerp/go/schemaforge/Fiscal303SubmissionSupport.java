@@ -74,6 +74,8 @@ class Fiscal303SubmissionSupport {
    * {@code FiscalDeclCrudHandler#PROPERTY_SUBMISSION_METHOD}.
    */
   private static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
+  /** {@code Model} of this handler's rows in the AEAT attempt log. */
+  private static final String MODEL_303 = "303";
   private static final String ERR_NO_CERTIFICATE = "NO_CERTIFICATE";
   private static final String ERR_MISSING_PRESENTER = "MISSING_PRESENTER";
   private static final String ERR_SUBMISSION_FAILED = "SUBMISSION_FAILED";
@@ -362,6 +364,12 @@ class Fiscal303SubmissionSupport {
     String nrcToSubmit =
         Fiscal303BoxesHandler.resolveNrcForSubmission(data.getDeclarationType(), nrc);
 
+    // From here on the AEAT is called: whatever comes back — an answer or a failure — is an
+    // attempt and leaves its row in the attempt log (own connection, ETP-5716).
+    FiscalAeatAttemptLog.Declaration attempted = new FiscalAeatAttemptLog.Declaration(
+        MODEL_303, year, period, declId, orgId);
+    FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
+    String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
     AEAT303SubmissionResult result;
     try {
       if (testMode) {
@@ -380,11 +388,16 @@ class Fiscal303SubmissionSupport {
       }
     } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
+      owner.attemptLog().record(attempted,
+          FiscalAeatValidationOutcome.unanswered(MODEL_303, path, testMode, e), endpoint);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
               NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
+
+    owner.attemptLog().record(attempted,
+        FiscalAeatValidationOutcome.answered(MODEL_303, path, result), endpoint);
 
     persistIncidentsBestEffort(decl, declId, result);
 

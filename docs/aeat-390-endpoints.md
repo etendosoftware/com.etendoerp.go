@@ -291,11 +291,18 @@ The validation never fails the request and never delays it indefinitely: the cla
 used with `withTimeouts(10 s connect, 30 s read)` (its interactive defaults are 30 s / 120 s) and
 every exception becomes an unanswered outcome. `FiscalAeatValidationOutcome` is the single value
 of an attempt (path, test mode, outcome, AEAT error codes without free text) and
-`Fiscal390FileValidationSupport#recordOutcome` the single place it is handed to — where a future
-attempt log hooks in. Like every AEAT attempt, an answer REPLACES the previous AEAT incidents.
+`Fiscal390FileValidationSupport#recordOutcome` the single place it is handed to. Like every AEAT
+attempt, an answer REPLACES the previous AEAT incidents; every attempt, answered or not, also
+leaves a row in the append-only attempt log (`ETGO_Fiscal_AEAT_Attempt`, path `download` — see
+`aeat-attempt-log.md`).
 `GET generate` is unchanged: the file only, no validation, no write.
 
 ## `POST /fiscal390/submit` — AEAT telematic filing
+
+Every call that reaches the AEAT — an answer or a connection failure (`502 SUBMISSION_FAILED`) —
+leaves a row in the append-only attempt log (`ETGO_Fiscal_AEAT_Attempt`): path
+`direct_submission`, or `manual_validation` in test mode. The guards below write none. See
+`aeat-attempt-log.md`.
 
 Request body (JSON): `{ testMode, idi, presenterNif, presenterName }` — the same shape as
 `/fiscal303/submit` (see `aeat-303-submit-endpoint.md`), without `nrc`: a 390 is informative (the

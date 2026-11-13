@@ -167,6 +167,12 @@ class Fiscal390SubmissionSupport {
     }
 
     String fiscalYear = String.valueOf(year);
+    // From here on the AEAT is called: whatever comes back — an answer or a failure — is an
+    // attempt and leaves its row in the attempt log (own connection, ETP-5716).
+    FiscalAeatAttemptLog.Declaration attempted = new FiscalAeatAttemptLog.Declaration(
+        Fiscal390BoxesHandler.MODEL, year, period, declId, orgId);
+    FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
+    String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
     AEAT303SubmissionResult result;
     try {
       if (testMode) {
@@ -188,12 +194,16 @@ class Fiscal390SubmissionSupport {
       }
     } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 390 submission failed (decl=" + declId + ")", e);
+      owner.attemptLog().record(attempted, FiscalAeatValidationOutcome.unanswered(
+          Fiscal390BoxesHandler.MODEL, path, testMode, e), endpoint);
       FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           FiscalAeatSubmissionSupport.failureJson(testMode, ERR_SUBMISSION_FAILED,
               translatedMessage(e)));
       return;
     }
 
+    owner.attemptLog().record(attempted, FiscalAeatValidationOutcome.answered(
+        Fiscal390BoxesHandler.MODEL, path, result), endpoint);
     persistAeatIncidentsBestEffort(decl, result);
     if (result.isSuccessful()) {
       recordAcceptedSubmission(decl, org, year, period, result, snapshot, testMode);

@@ -23,6 +23,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -33,7 +34,7 @@ import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 /**
  * The outcome of ONE attempt to have the AEAT check a declaration file (ETP-5716) — the single
  * value every consumer of an attempt reads: the HTTP answer, the "Incidencias" persistence and,
- * later, the attempt log.
+ * the attempt log ({@link FiscalAeatAttemptLog}).
  *
  * <p>It says which {@link Path} the attempt came from, whether it ran against the validation
  * service ({@code testMode}), its {@link Outcome}, and the AEAT answer. {@link #errorCodes()} is
@@ -47,8 +48,15 @@ final class FiscalAeatValidationOutcome {
   enum Path {
     /** "Generar fichero": the file is validated before it is downloaded. */
     DOWNLOAD,
-    /** The direct presentation ("Presentación directa"), in test mode or not. */
-    DIRECT_SUBMISSION;
+    /** The direct presentation ("Presentación directa") — a filing. */
+    DIRECT_SUBMISSION,
+    /** "Validar sin presentar": the test mode of the direct presentation; nothing is filed. */
+    MANUAL_VALIDATION;
+
+    /** The path of a submit request: a validation in test mode, a presentation otherwise. */
+    static Path ofSubmission(boolean testMode) {
+      return testMode ? MANUAL_VALIDATION : DIRECT_SUBMISSION;
+    }
 
     String key() {
       return name().toLowerCase(Locale.ROOT);
@@ -70,6 +78,14 @@ final class FiscalAeatValidationOutcome {
       return name().toLowerCase(Locale.ROOT);
     }
   }
+
+  /**
+   * What {@link #loggedErrorCodes()} holds for an AEAT error whose code cannot be read — the
+   * error stays countable, and its text (which can carry fiscal data) is never stored.
+   */
+  static final String UNCODED = "UNCODED";
+  /** An AEAT error code: short and alphanumeric. Anything else is not stored as a code. */
+  private static final Pattern LOGGABLE_CODE = Pattern.compile("^[A-Za-z0-9]{1,20}$");
 
   private final String model;
   private final Path path;
@@ -159,6 +175,19 @@ final class FiscalAeatValidationOutcome {
       }
     }
     return new ArrayList<>(codes);
+  }
+
+  /**
+   * The AEAT errors for the attempt log: one entry per distinct error, its code when it has a
+   * readable one, {@link #UNCODED} otherwise. Never any AEAT text.
+   */
+  List<String> loggedErrorCodes() {
+    List<String> codes = new ArrayList<>();
+    for (String raw : new LinkedHashSet<>(errors)) {
+      String code = FiscalDeclCrudHandler.splitAeatError(raw)[0];
+      codes.add(LOGGABLE_CODE.matcher(code).matches() ? code : UNCODED);
+    }
+    return codes;
   }
 
   /**

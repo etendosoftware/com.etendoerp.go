@@ -51,7 +51,7 @@ import com.etendoerp.go.schemaforge.data.FiscalDecl;
  * <p>An answer of the AEAT replaces the declaration's AEAT incidents, exactly like an attempt of
  * the direct presentation ({@link FiscalDeclCrudHandler#replaceAeatIncidentsNoCommit}); no answer
  * leaves them as they were. Everything an attempt produces goes through
- * {@link #recordOutcome} — the one place a future attempt log hooks into.
+ * {@link #recordOutcome}, which also leaves the attempt's row in the attempt log.
  *
  * <p>Answer (JSON, 200): {@code { fileName, fileBase64, taxReport, layoutYear, validation }} —
  * {@code fileBase64} is the file's ISO-8859-1 bytes, the same bytes {@code GET generate} serves.
@@ -91,8 +91,13 @@ class Fiscal390FileValidationSupport {
 
     Fiscal390GenerateSupport.Generated generated =
         owner.generateSupport().generateContent(orgId, year, inputs);
-    FiscalAeatValidationOutcome outcome = validate(generated.content, year, period);
-    recordOutcome(decl, outcome);
+    AEAT303SubmissionService service = newValidationService();
+    String endpoint = FiscalAeatAttemptLog.endpointOf(service, true);
+    FiscalAeatValidationOutcome outcome = validate(service, generated.content, year, period);
+    recordOutcome(decl,
+        new FiscalAeatAttemptLog.Declaration(Fiscal390BoxesHandler.MODEL, year, period, declId,
+            orgId),
+        outcome, endpoint);
 
     JSONObject out = new JSONObject();
     out.put("fileName", Fiscal390GenerateSupport.fileName(year) + ".txt");
@@ -110,9 +115,9 @@ class Fiscal390FileValidationSupport {
    * Sends the file to the AEAT validation service. Never throws: whatever goes wrong becomes an
    * unanswered outcome, so the caller can always hand the file over.
    */
-  FiscalAeatValidationOutcome validate(String fileContent, int year, String period) {
+  FiscalAeatValidationOutcome validate(AEAT303SubmissionService service, String fileContent,
+      int year, String period) {
     try {
-      AEAT303SubmissionService service = newValidationService();
       service.withTimeouts(CONNECT_TIMEOUT_MILLIS, READ_TIMEOUT_MILLIS);
       return FiscalAeatValidationOutcome.answered(Fiscal390BoxesHandler.MODEL,
           FiscalAeatValidationOutcome.Path.DOWNLOAD,
@@ -133,14 +138,18 @@ class Fiscal390FileValidationSupport {
 
   /**
    * The single point every validation attempt of the download path goes through, with its full
-   * {@link FiscalAeatValidationOutcome} (path, test mode, outcome, AEAT error codes). Today it
-   * stores the AEAT answer in the declaration's incidents — an answer replaces the previous AEAT
-   * incidents (a clean one leaves none), no answer keeps them. An attempt log hooks in here.
+   * {@link FiscalAeatValidationOutcome} (path, test mode, outcome, AEAT error codes). Every
+   * attempt — answered or not — leaves its row in the attempt log
+   * ({@link FiscalAeatAttemptLog}, own connection). An AEAT answer is also stored in the
+   * declaration's incidents: it replaces the previous AEAT incidents (a clean one leaves none);
+   * no answer keeps them.
    *
    * <p>Best-effort: a persistence failure is logged and never reaches the caller, which still
    * has a file to hand over.
    */
-  void recordOutcome(FiscalDecl decl, FiscalAeatValidationOutcome outcome) {
+  void recordOutcome(FiscalDecl decl, FiscalAeatAttemptLog.Declaration declaration,
+      FiscalAeatValidationOutcome outcome, String endpoint) {
+    owner.attemptLog().record(declaration, outcome, endpoint);
     if (!outcome.answered()) {
       return;
     }
