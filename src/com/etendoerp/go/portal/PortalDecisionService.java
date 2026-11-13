@@ -536,9 +536,11 @@ public class PortalDecisionService {
   private static void appendNote(Order quotation, Decision decision) {
     String reason = EmailMessages.get(
         "portal-quotation-decision.reason." + decision.reasonCode, decision.language);
-    String line = EmailMessages.get(
-        "portal-quotation-decision.note", decision.language, reason,
-        StringUtils.defaultString(decision.reasonText));
+    String text = StringUtils.trimToNull(decision.reasonText);
+    String line = text == null
+        ? EmailMessages.get("portal-quotation-decision.note", decision.language, reason)
+        : EmailMessages.get("portal-quotation-decision.note.withText", decision.language, reason,
+            text);
     String current = StringUtils.trimToNull(quotation.getDescription());
     quotation.setDescription(current == null ? line.trim() : current + "\n" + line.trim());
   }

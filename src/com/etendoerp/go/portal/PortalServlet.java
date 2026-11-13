@@ -490,8 +490,8 @@ public class PortalServlet extends HttpBaseServlet {
     }
     JSONObject body = readJson(request);
     PortalDecisionService.RequestResult result = decisionService.request(session.get(),
-        quotationId, body.optString("decision", null), body.optString("reasonCode", null),
-        body.optString("reasonText", null));
+        quotationId, textField(body, "decision"), textField(body, "reasonCode"),
+        textField(body, "reasonText"));
     switch (result.getOutcome()) {
       case SENT:
         JSONObject sent = new JSONObject();
@@ -574,6 +574,15 @@ public class PortalServlet extends HttpBaseServlet {
     body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
         .map(PortalLink::getClientName).orElse(""));
     sendJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /**
+   * A string field of a request body, or {@code null} when it is absent, JSON {@code null} or
+   * blank. Never {@code optString}: jettison renders a JSON {@code null} as the text "null", which
+   * reached the confirmation email and the quotation's notes (ETP-6209 live test).
+   */
+  static String textField(JSONObject body, String key) {
+    return body == null || body.isNull(key) ? null : StringUtils.trimToNull(body.optString(key));
   }
 
   /** The request's JSON body, bounded; an empty or malformed body reads as {@code {}}. */
