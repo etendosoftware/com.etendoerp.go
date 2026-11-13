@@ -202,8 +202,10 @@ closing instant more than five minutes ahead of the clock is refused
 action on a renewing subscription with a catalog plan; the dialog offers only the listed targets,
 states the direction, the timing, **for an upgrade the amount charged today and the card it goes
 on**, and the quota consequence (every exceeded quota with its numbers) before confirming; when
-the payment needs the customer it says so and links to the invoice page ("Complete the payment"),
-and the page shows a persistent "Your plan changes to X on <date>" line while a
+the payment needs the customer it says so and links to the invoice page ("Complete the payment",
+in a new tab: the provider's hosted invoice page never redirects back, so the dialog re-reads the
+subscription each time its tab is shown again and confirms "Plan changed" once the paid change has
+applied), and the page shows a persistent "Your plan changes to X on <date>" line while a
 downgrade is pending. Strings in `en_US.json`, `es_ES.json`, `es_AR.json`; amounts through
 `formatCurrency`, dates through `formatCalendarDate`.
 
