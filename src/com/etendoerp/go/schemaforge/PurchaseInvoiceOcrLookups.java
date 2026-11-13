@@ -22,10 +22,15 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -37,14 +42,18 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.plm.Product;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
 import com.etendoerp.go.schemaforge.ocr.TaxIdNormalizer;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * The lookups of the purchase-invoice OCR review (ETP-5715): what the application's review steps ask
@@ -88,7 +97,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   /** What the invoice form hands the vendor selectors. */
   private static Map<String, String> vendorContext() {
-    return new java.util.HashMap<>(Map.of("isSOTrx", "N", "isVendor", "Y"));
+    return new HashMap<>(Map.of("isSOTrx", "N", "isVendor", "Y"));
   }
 
   @Override
@@ -102,7 +111,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   @Override
   public List<Party> vendorsByTaxId(String cleanTaxId, int limit) {
-    java.util.Set<String> spellings = TaxIdNormalizer.variants(cleanTaxId);
+    Set<String> spellings = TaxIdNormalizer.variants(cleanTaxId);
     if (spellings.isEmpty()) {
       return List.of();
     }
@@ -156,6 +165,148 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   }
 
   @Override
+  public Optional<Party> productById(String id) {
+    try {
+      Product product = StringUtils.isBlank(id) ? null : OBDal.getInstance().get(Product.class, id);
+      if (product == null || !Boolean.TRUE.equals(product.isActive())
+          || !TenantOwnership.isVisibleToCurrentTenant(product)) {
+        return Optional.empty();
+      }
+      return Optional.of(new Party(product.getId(), product.getName()));
+    } catch (RuntimeException e) {
+      log.warn("OCR product lookup by id failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  @Override
+  public Map<String, VendorDetails> vendorDetails(Collection<String> vendorIds) {
+    Collection<String> ids = distinctIds(vendorIds);
+    Map<String, VendorDetails> out = new HashMap<>();
+    if (ids.isEmpty()) {
+      return out;
+    }
+    try {
+      OBQuery<BusinessPartner> query = OBDal.getInstance().createQuery(BusinessPartner.class,
+          "as bp where bp.id in (:ids)");
+      query.setNamedParameter("ids", ids);
+      List<BusinessPartner> visible = new ArrayList<>();
+      for (BusinessPartner partner : query.list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(partner)) {
+          visible.add(partner);
+        }
+      }
+      Map<String, String> cities = firstCities(visible);
+      for (BusinessPartner partner : visible) {
+        out.put(partner.getId(), new VendorDetails(StringUtils.defaultString(partner.getName()),
+            StringUtils.trimToEmpty(partner.getTaxID()), cities.getOrDefault(partner.getId(), "")));
+      }
+    } catch (RuntimeException e) {
+      log.warn("OCR vendor details lookup failed: {}", e.getClass().getSimpleName());
+    }
+    return out;
+  }
+
+  /**
+   * The city of each partner's first (oldest) active address, one query for all of them. A failure
+   * only costs the cities: the caller keeps name and tax id.
+   */
+  private static Map<String, String> firstCities(List<BusinessPartner> partners) {
+    Map<String, String> cities = new HashMap<>();
+    if (partners.isEmpty()) {
+      return cities;
+    }
+    try {
+      List<String> ids = new ArrayList<>();
+      for (BusinessPartner partner : partners) {
+        ids.add(partner.getId());
+      }
+      OBQuery<Location> query = OBDal.getInstance().createQuery(Location.class,
+          "as l where l.businessPartner.id in (:ids) and l.active = true"
+              + " order by l.creationDate, l.id");
+      query.setNamedParameter("ids", ids);
+      for (Location location : query.list()) {
+        String partnerId = location.getBusinessPartner().getId();
+        if (!cities.containsKey(partnerId)) {
+          cities.put(partnerId, location.getLocationAddress() == null ? ""
+              : StringUtils.trimToEmpty(location.getLocationAddress().getCityName()));
+        }
+      }
+    } catch (RuntimeException e) {
+      log.warn("OCR vendor city lookup failed: {}", e.getClass().getSimpleName());
+    }
+    return cities;
+  }
+
+  @Override
+  public Map<String, ProductDetails> productDetails(Collection<String> productIds) {
+    Collection<String> ids = distinctIds(productIds);
+    Map<String, ProductDetails> out = new HashMap<>();
+    if (ids.isEmpty()) {
+      return out;
+    }
+    try {
+      OBQuery<Product> query = OBDal.getInstance().createQuery(Product.class,
+          "as p where p.id in (:ids)");
+      query.setNamedParameter("ids", ids);
+      List<Product> visible = new ArrayList<>();
+      for (Product product : query.list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(product)) {
+          visible.add(product);
+        }
+      }
+      // Names follow the session language like the selectors do (NeoTrl, the *_Trl rows), and fall
+      // back to the base name. BusinessPartner has no translation table.
+      String language = NeoLanguage.currentCode();
+      Map<String, String> productNames = NeoTrl.translatedNames("Product", ids, language);
+      Map<String, String> categoryNames = NeoTrl.translatedNames("ProductCategory",
+          idsOf(visible, true), language);
+      Map<String, String> uomNames = NeoTrl.translatedNames("UOM", idsOf(visible, false),
+          language);
+      for (Product product : visible) {
+        String category = product.getProductCategory() == null ? ""
+            : categoryNames.getOrDefault(product.getProductCategory().getId(),
+                StringUtils.defaultString(product.getProductCategory().getName()));
+        String uom = product.getUOM() == null ? ""
+            : uomNames.getOrDefault(product.getUOM().getId(),
+                StringUtils.defaultString(product.getUOM().getName()));
+        out.put(product.getId(), new ProductDetails(productNames.getOrDefault(product.getId(),
+            StringUtils.defaultString(product.getName())),
+            StringUtils.defaultString(product.getSearchKey()), category, uom));
+      }
+    } catch (RuntimeException e) {
+      log.warn("OCR product details lookup failed: {}", e.getClass().getSimpleName());
+    }
+    return out;
+  }
+
+  /** The category ids (or unit ids) of the products, once each. */
+  private static Collection<String> idsOf(List<Product> products, boolean categories) {
+    Set<String> out = new LinkedHashSet<>();
+    for (Product product : products) {
+      if (categories && product.getProductCategory() != null) {
+        out.add(product.getProductCategory().getId());
+      } else if (!categories && product.getUOM() != null) {
+        out.add(product.getUOM().getId());
+      }
+    }
+    return out;
+  }
+
+  /** Non-blank ids, once each, in first-seen order. */
+  private static Collection<String> distinctIds(Collection<String> ids) {
+    Set<String> out = new LinkedHashSet<>();
+    if (ids != null) {
+      for (String id : ids) {
+        if (!StringUtils.isBlank(id)) {
+          out.add(id);
+        }
+      }
+    }
+    return out;
+  }
+
+  @Override
   public Address vendorAddress(String vendorId) {
     Map<String, String> context = vendorContext();
     context.put(COLUMN_VENDOR, vendorId);
@@ -185,7 +336,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
               + " and upper(trim(i.orderReference)) = :reference"
               + " and i.documentStatus <> :voided");
       query.setNamedParameter("vendorId", vendorId);
-      query.setNamedParameter("reference", wanted.toUpperCase(java.util.Locale.ROOT));
+      query.setNamedParameter("reference", wanted.toUpperCase(Locale.ROOT));
       query.setNamedParameter("voided", VOIDED);
       query.setMaxResult(DUPLICATE_LIMIT);
       List<Duplicate> found = new ArrayList<>();

@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge.ocr;
 
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -64,6 +66,112 @@ public interface OcrLookups {
      */
     public String name() {
       return name;
+    }
+  }
+
+  /** What the review panel shows of a vendor next to its name (ETP-6050). */
+  final class VendorDetails {
+    private final String name;
+    private final String taxId;
+    private final String city;
+
+    /**
+     * Describes a vendor for display.
+     *
+     * @param name  the partner name
+     * @param taxId the tax id as stored, may be empty
+     * @param city  the city of its first address, empty when it has none
+     */
+    public VendorDetails(String name, String taxId, String city) {
+      this.name = name;
+      this.taxId = taxId;
+      this.city = city;
+    }
+
+    /**
+     * Returns the name.
+     *
+     * @return the partner name
+     */
+    public String name() {
+      return name;
+    }
+
+    /**
+     * Returns the tax id.
+     *
+     * @return the tax id as stored, may be empty
+     */
+    public String taxId() {
+      return taxId;
+    }
+
+    /**
+     * Returns the city.
+     *
+     * @return the city of its first address, empty when it has none
+     */
+    public String city() {
+      return city;
+    }
+  }
+
+  /** What the review panel shows of a product next to its name (ETP-6050). */
+  final class ProductDetails {
+    private final String name;
+    private final String searchKey;
+    private final String category;
+    private final String uom;
+
+    /**
+     * Describes a product for display.
+     *
+     * @param name      the product name
+     * @param searchKey the product search key (its code)
+     * @param category  the product category name, empty when none
+     * @param uom       the unit of measure name, empty when none
+     */
+    public ProductDetails(String name, String searchKey, String category, String uom) {
+      this.name = name;
+      this.searchKey = searchKey;
+      this.category = category;
+      this.uom = uom;
+    }
+
+    /**
+     * Returns the name.
+     *
+     * @return the product name
+     */
+    public String name() {
+      return name;
+    }
+
+    /**
+     * Returns the search key.
+     *
+     * @return the product code
+     */
+    public String searchKey() {
+      return searchKey;
+    }
+
+    /**
+     * Returns the category.
+     *
+     * @return the category name, empty when none
+     */
+    public String category() {
+      return category;
+    }
+
+    /**
+     * Returns the unit of measure.
+     *
+     * @return the unit name, empty when none
+     */
+    public String uom() {
+      return uom;
     }
   }
 
@@ -348,6 +456,43 @@ public interface OcrLookups {
    */
   default String vendorTaxId(String vendorId) {
     return "";
+  }
+
+  /**
+   * A product the session can use, by id (ETP-6050).
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id the product id
+   * @return the product, empty when it does not exist, is inactive or is not the tenant's
+   */
+  default Optional<Party> productById(String id) {
+    return Optional.empty();
+  }
+
+  /**
+   * Name, tax id and city of several vendors, in one query (ETP-6050), for the review panel.
+   *
+   * <p>Default: nothing known. Ids that do not resolve for the session are absent from the map.</p>
+   *
+   * @param vendorIds the partner ids
+   * @return the details by partner id, empty when none or the lookup failed
+   */
+  default Map<String, VendorDetails> vendorDetails(Collection<String> vendorIds) {
+    return Map.of();
+  }
+
+  /**
+   * Name, search key, category and unit of several products, in one query (ETP-6050), for the
+   * review panel.
+   *
+   * <p>Default: nothing known. Ids that do not resolve for the session are absent from the map.</p>
+   *
+   * @param productIds the product ids
+   * @return the details by product id, empty when none or the lookup failed
+   */
+  default Map<String, ProductDetails> productDetails(Collection<String> productIds) {
+    return Map.of();
   }
 
   /**

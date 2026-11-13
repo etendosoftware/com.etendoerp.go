@@ -16,6 +16,8 @@ After confirmed checkout payment, migrate its subscription to a schedule and ret
 exact current phase start/end returned by Stripe. Append one discounted calendar month,
 then one normal month and release the schedule to normal recurrence. No fixed 30-day dates.
 The 100-percent coupon is confined to the second phase. Annual purchases never use it.
+Empty `add_invoice_items` lists are omitted from the phase update because Stripe rejects
+attempts to unset this parameter; existing invoice items remain confined to the first phase.
 
 The provider schedule is tagged with request/version metadata; retries recognize completion
 before making changes. Deterministic coupon and request-scoped idempotency keys fence POSTs.

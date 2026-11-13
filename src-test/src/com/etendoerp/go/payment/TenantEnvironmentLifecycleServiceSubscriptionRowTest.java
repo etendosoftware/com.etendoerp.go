@@ -718,6 +718,69 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         + fixture.savedPreferenceAttributes, fixture.savedPreferenceAttributes.isEmpty());
   }
 
+  // ===================== ETP-6223: an edited demo expiry =====================
+
+  private final AccountDemoExpiry demoExpiry = mock(AccountDemoExpiry.class);
+  private final TenantEnvironmentLifecycleService serviceWithExpiry =
+      new TenantEnvironmentLifecycleService(tenantPlanService, new SubscriptionService(), demoExpiry);
+
+  /** A demo started at {@code startedAt} whose owner's account says it ends at {@code endsAt}. */
+  private TenantEnvironmentLifecycleService.EnvironmentSnapshot resolveDemoEditedTo(
+      Instant startedAt, Instant endsAt, String frozenDays) {
+    givenEveryPlanLookupSaysFree();
+    String clientId = freshClientId();
+    when(demoExpiry.findTrialEnd(clientId)).thenReturn(endsAt);
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            startedAt.toString());
+    if (frozenDays != null) {
+      fixture.withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE,
+          frozenDays);
+    }
+    return fixture.run(() -> serviceWithExpiry.resolve(clientId));
+  }
+
+  @Test
+  public void anEditedExpiryInTheFutureReopensADemoWhoseTrialEnded() {
+    Instant endsAt = Instant.now().plus(java.time.Duration.ofDays(10)).minusSeconds(60);
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        resolveDemoEditedTo(LONG_AGO, endsAt, null);
+
+    assertEquals(endsAt, snapshot.getTrialEndsAt());
+    assertEquals(LONG_AGO, snapshot.getTrialStartedAt());
+    assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED, access(snapshot));
+    assertEquals(10L, daysLeft(snapshot));
+  }
+
+  @Test
+  public void anEditedExpiryInThePastEndsADemoBeforeItsStandardTrial() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = resolveDemoEditedTo(
+        Instant.now().minus(java.time.Duration.ofDays(1)), Instant.now().minusSeconds(60), null);
+
+    assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED, access(snapshot));
+    assertEquals(0L, daysLeft(snapshot));
+  }
+
+  @Test
+  public void withoutAnEditedExpiryTheStandardTrialApplies() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        resolveDemoEditedTo(LONG_AGO, null, null);
+
+    assertNull(snapshot.getTrialEndsAt());
+    assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED, access(snapshot));
+  }
+
+  @Test
+  public void aFrozenTrialWinsOverAnEditedExpiry() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        resolveDemoEditedTo(LONG_AGO, Instant.now().minusSeconds(60), "14");
+
+    assertNull(snapshot.getTrialEndsAt());
+    assertEquals(14L, daysLeft(snapshot));
+    verify(demoExpiry, never()).findTrialEnd(anyString());
+  }
+
   // ===================== review fix B1: any row makes the tenant productive =====================
 
   private static final String LEGACY_ACTIVATION = "2026-01-01T00:00:00Z";

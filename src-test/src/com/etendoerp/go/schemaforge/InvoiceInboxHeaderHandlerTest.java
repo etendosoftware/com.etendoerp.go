@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import java.lang.reflect.Modifier;
 import java.util.Set;
@@ -37,7 +39,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
- * The feature-flag gate and the {@code discard} dispatch of the invoice inbox header customization.
+ * The feature-flag gate and the {@code discard} and {@code review} dispatch of the invoice inbox header customization.
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandler
  */
@@ -45,6 +47,7 @@ class InvoiceInboxHeaderHandlerTest {
 
   private MockedStatic<InvoiceInboxFlag> flag;
   private MockedStatic<InvoiceInboxDiscard> discard;
+  private MockedStatic<InvoiceInboxReview> review;
   private MockedStatic<OBMessageUtils> messages;
   private final InvoiceInboxHeaderHandler handler = new InvoiceInboxHeaderHandler();
 
@@ -52,6 +55,7 @@ class InvoiceInboxHeaderHandlerTest {
   void openStaticMocks() {
     flag = mockStatic(InvoiceInboxFlag.class);
     discard = mockStatic(InvoiceInboxDiscard.class);
+    review = mockStatic(InvoiceInboxReview.class);
     // Unstubbed messageBD answers null: the English default is used.
     messages = mockStatic(OBMessageUtils.class);
   }
@@ -59,6 +63,7 @@ class InvoiceInboxHeaderHandlerTest {
   @AfterEach
   void closeStaticMocks() {
     messages.close();
+    review.close();
     discard.close();
     flag.close();
   }
@@ -157,12 +162,60 @@ class InvoiceInboxHeaderHandlerTest {
     discard.verifyNoInteractions();
   }
 
+  // ---------------------------------------------------------------- review
+
+  @Test
+  void flagOffRefusesTheReviewBeforeAnythingElseAndNeverRunsIt() throws Exception {
+    flag(false);
+
+    assertDisabled(handler.handle(ctx("GET", NeoEndpointType.ACTION, "ID-1", "review")));
+    assertDisabled(handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "review")));
+
+    review.verify(() -> InvoiceInboxReview.review(org.mockito.ArgumentMatchers.anyString()),
+        never());
+  }
+
+  @Test
+  void flagOnGetReviewDelegatesWithTheRecordIdAndReturnsItsAnswer() {
+    flag(true);
+    NeoResponse answer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    review.when(() -> InvoiceInboxReview.review("ID-1")).thenReturn(answer);
+
+    NeoResponse response = handler.handle(ctx("GET", NeoEndpointType.ACTION, "ID-1", "review"));
+
+    assertSame(answer, response);
+    review.verify(() -> InvoiceInboxReview.review("ID-1"));
+    discard.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnReviewIs405AndNeitherReviewsNorDiscards() {
+    flag(true);
+
+    NeoResponse response = handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "review"));
+
+    assertEquals(405, response.getHttpStatus());
+    review.verify(() -> InvoiceInboxReview.review(org.mockito.ArgumentMatchers.anyString()),
+        never());
+    discard.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnDiscardNeverTouchesTheReview() {
+    flag(true);
+    discard.when(() -> InvoiceInboxDiscard.discard("ID-1")).thenReturn(NeoResponse.error(409, "x"));
+
+    handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "discard"));
+
+    review.verifyNoInteractions();
+  }
+
   // ---------------------------------------------------------------- contract
 
   @Test
-  void itServesActionsAndHidesDiscardFromAgents() {
+  void itServesActionsAndHidesDiscardAndReviewFromAgents() {
     assertTrue(handler.servesActions());
-    assertEquals(Set.of("discard"), handler.agentExcludedActions());
+    assertEquals(Set.of("discard", "review"), handler.agentExcludedActions());
   }
 
   @Test

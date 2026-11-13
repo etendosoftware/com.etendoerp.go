@@ -240,6 +240,46 @@ public class EnvironmentAccessPolicyTest {
     }
   }
 
+  // ===================== ETP-6223: an edited trial end =====================
+
+  @Test
+  public void anEditedTrialEndReplacesTheConfiguredTrialLength() {
+    Instant endsAt = START.plus(Duration.ofDays(40));
+    Environment demo = Environment.demo(START, null, endsAt);
+
+    assertEquals(endsAt, policy.trialExpiresAt(demo, DEFAULTS));
+    assertEquals(Decision.ALLOWED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
+        endsAt.minusNanos(1), DEFAULTS));
+    assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
+        endsAt, DEFAULTS));
+    assertEquals(25, policy.remainingTrialDays(demo, START.plus(Duration.ofDays(15)), DEFAULTS));
+  }
+
+  @Test
+  public void anEditedTrialEndCanCloseADemoBeforeItsStandardTrial() {
+    Environment demo = Environment.demo(START, null, START.plus(Duration.ofDays(2)));
+
+    assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
+        START.plus(Duration.ofDays(3)), DEFAULTS));
+  }
+
+  @Test
+  public void aDemoAssociatedWithAProductiveEnvironmentStaysClosedWhateverItsEditedEnd() {
+    // The association ignores the trial: an edited end is carried only by the plain demo.
+    Environment associated = Environment.associatedDemo(START, null);
+
+    assertNull(associated.getTrialEndsAt());
+    assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(associated, true,
+        SubscriptionStatus.NONE, START, DEFAULTS));
+  }
+
+  @Test
+  public void withoutAnEditedTrialEndTheConfiguredTrialDecides() {
+    Environment demo = Environment.demo(START, null, null);
+
+    assertEquals(START.plus(Duration.ofDays(15)), policy.trialExpiresAt(demo, DEFAULTS));
+  }
+
   // ===================== graceEndsAt =====================
 
   @Test
