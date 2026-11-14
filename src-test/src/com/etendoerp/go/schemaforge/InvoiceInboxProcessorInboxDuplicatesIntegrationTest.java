@@ -21,7 +21,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import java.lang.reflect.Method;
 import java.util.Random;
 import java.util.UUID;
 
@@ -49,6 +48,7 @@ import com.etendoerp.go.schemaforge.data.IncomingDocument;
  * committed: rows live in the test transaction.
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInboxProcessor
+ * @covers com.etendoerp.go.schemaforge.InvoiceInboxDuplicates
  */
 public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends WeldBaseTest {
 
@@ -139,6 +139,22 @@ public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends WeldBas
     assertEquals(first.getId(), inbox.getJSONObject(0).getString("id"));
   }
 
+  @Test
+  public void findAnswersTheIdAndTheFileNameOfTheOtherRowsForTheReview() throws Exception {
+    IncomingDocument first = row(CLIENT_ID, "PENDING_REVIEW", base, "F-1", null);
+    first.setFileName("first.pdf");
+    IncomingDocument self = row(CLIENT_ID, "PROCESSING", base, "F-1", null);
+    JSONObject document = unlinked(base, "F-1");
+
+    JSONArray found = InvoiceInboxDuplicates.find(self, document.getJSONObject("header"));
+
+    assertEquals(1, found.length());
+    assertEquals(first.getId(), found.getJSONObject(0).getString("id"));
+    assertEquals("first.pdf", found.getJSONObject(0).getString("fileName"));
+    assertEquals("find alone writes nothing into the document", 0,
+        document.getJSONObject("header").getJSONObject("duplicate").length());
+  }
+
   // ---------------------------------------------------------------- helpers
 
   private static JSONObject unlinked(String taxId, String documentNo) throws Exception {
@@ -153,12 +169,13 @@ public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends WeldBas
     return document.getJSONObject("header").getJSONObject("duplicate").getJSONArray("inbox");
   }
 
-  /** Runs the private worker step on the document, as the worker does in admin mode. */
+  /**
+   * Runs the worker step on the document, as the worker does in admin mode. The step moved out of
+   * the processor to {@link InvoiceInboxDuplicates} (ETP-6050, so the review's {@code apply} asks
+   * the very same question); its behaviour is the one these specs have always pinned.
+   */
   private static JSONObject run(IncomingDocument self, JSONObject document) throws Exception {
-    Method method = InvoiceInboxProcessor.class.getDeclaredMethod("addInboxDuplicates",
-        IncomingDocument.class, JSONObject.class);
-    method.setAccessible(true);
-    method.invoke(null, self, document);
+    InvoiceInboxDuplicates.addInboxDuplicates(self, document);
     return document;
   }
 
