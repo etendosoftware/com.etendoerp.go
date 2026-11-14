@@ -170,4 +170,103 @@ class InvoiceInboxStatusPolicyTest {
     verify(row, never()).setAdjusted(any());
     verify(row, never()).setReviewed(any());
   }
+
+  // ---------------------------------------------------------------- after a user edit (ETP-6050)
+
+  @Test
+  @DisplayName("applyAfterEdit: a valid edit of a pending row keeps it pending and reports no change")
+  void editValidKeepsPending() {
+    IncomingDocument row = row(PENDING_REVIEW, null);
+
+    assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(row, valid()));
+
+    verify(row).setStatus(PENDING_REVIEW);
+    verify(row).setErrorCode(null);
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: an invalid edit of a pending row moves it to ERROR with the verdict's code")
+  void editInvalidMovesToError() throws Exception {
+    IncomingDocument row = row(PENDING_REVIEW, null);
+
+    assertTrue(InvoiceInboxStatusPolicy.applyAfterEdit(row, failed(MISSING_FIELDS)));
+
+    verify(row).setStatus(ERROR);
+    verify(row).setErrorCode(MISSING_FIELDS);
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: the codes decided by the worker are movable, both ways (D9, decision 9)")
+  void editMovesTheWorkerCodes() throws Exception {
+    for (String code : new String[] { "UNREADABLE", "SERVICE_FAILURE", "CONFIRM_FAILED" }) {
+      IncomingDocument completed = row(ERROR, code);
+      assertTrue(InvoiceInboxStatusPolicy.applyAfterEdit(completed, valid()), code);
+      verify(completed).setStatus(PENDING_REVIEW);
+      verify(completed).setErrorCode(null);
+
+      IncomingDocument stillBroken = row(ERROR, code);
+      assertTrue(InvoiceInboxStatusPolicy.applyAfterEdit(stillBroken, failed(MISSING_FIELDS)),
+          code);
+      verify(stillBroken).setStatus(ERROR);
+      verify(stillBroken).setErrorCode(MISSING_FIELDS);
+    }
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: an error that stays the same reports no change")
+  void editSameErrorIsNotAChange() throws Exception {
+    IncomingDocument row = row(ERROR, MISSING_FIELDS);
+
+    assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(row, failed(MISSING_FIELDS)));
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: the validation codes move between themselves")
+  void editMovesBetweenValidationErrors() throws Exception {
+    IncomingDocument row = row(ERROR, MISSING_FIELDS);
+
+    assertTrue(InvoiceInboxStatusPolicy.applyAfterEdit(row, failed(TOO_LONG)));
+
+    verify(row).setErrorCode(TOO_LONG);
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: a foreign receiver is never moved by an edit")
+  void editNeverMovesAForeignReceiver() throws Exception {
+    for (InvoiceInboxValidator.Result verdict : List.of(valid(), failed(MISSING_FIELDS))) {
+      IncomingDocument row = row(ERROR, InvoiceInboxValidator.FOREIGN_RECEIVER);
+
+      assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(row, verdict));
+
+      verify(row, never()).setStatus(any());
+      verify(row, never()).setErrorCode(any());
+    }
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: only PENDING_REVIEW and ERROR rows move; the caller resets READY first")
+  void editLeavesEveryOtherStateUntouched() throws Exception {
+    for (String status : new String[] { "READY", "CONFIRMED", "DISCARDED", "PROCESSING" }) {
+      IncomingDocument row = row(status, null);
+
+      assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(row, valid()), status);
+      assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(row, failed(MISSING_FIELDS)), status);
+
+      verify(row, never()).setStatus(any());
+      verify(row, never()).setErrorCode(any());
+    }
+  }
+
+  @Test
+  @DisplayName("applyAfterEdit: never touches the adjusted or reviewed flags, and apply keeps its narrower rule")
+  void editLeavesFlagsAloneAndApplyIsUnchanged() throws Exception {
+    IncomingDocument row = row(PENDING_REVIEW, null);
+    InvoiceInboxStatusPolicy.applyAfterEdit(row, failed(MISSING_FIELDS));
+    verify(row, never()).setAdjusted(any());
+    verify(row, never()).setReviewed(any());
+
+    IncomingDocument unreadable = row(ERROR, "UNREADABLE");
+    assertFalse(InvoiceInboxStatusPolicy.apply(unreadable, valid()));
+    verify(unreadable, never()).setStatus(any());
+  }
 }

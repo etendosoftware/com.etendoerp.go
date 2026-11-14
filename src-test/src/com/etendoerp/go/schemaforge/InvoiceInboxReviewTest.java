@@ -513,4 +513,39 @@ class InvoiceInboxReviewTest {
     verify(lookups, never()).vendorDetails(anyCollection());
     verify(lookups, never()).productDetails(anyCollection());
   }
+
+  // ---------------------------------------------------------------- shared with apply (ETP-6050)
+
+  @Test
+  void isEditableIsTheOneRuleOfTheEditingActions() {
+    assertTrue(InvoiceInboxReview.isEditable("PENDING_REVIEW", null));
+    assertTrue(InvoiceInboxReview.isEditable("READY", null));
+    assertTrue(InvoiceInboxReview.isEditable("ERROR", "UNREADABLE"));
+    assertTrue(InvoiceInboxReview.isEditable("ERROR", "MISSING_FIELDS"));
+    assertFalse(InvoiceInboxReview.isEditable("ERROR", "FOREIGN_RECEIVER"));
+    for (String status : new String[] { "PROCESSING", "CONFIRMED", "DISCARDED", "", "NOPE" }) {
+      assertFalse(InvoiceInboxReview.isEditable(status, null), status);
+    }
+  }
+
+  @Test
+  void theSkeletonIsTheEmptyVersionOneDocumentWithTotalFromTheLines() throws Exception {
+    JSONObject skeleton = InvoiceInboxReview.skeleton();
+
+    assertEquals(1, skeleton.getInt("version"));
+    assertEquals(0, skeleton.getJSONArray("lines").length());
+    assertEquals(0, skeleton.getJSONArray("notices").length());
+    JSONObject header = skeleton.getJSONObject("header");
+    assertEquals("none", header.getJSONObject("vendor").getString("state"));
+    assertEquals("lines", header.getString("totalSource"));
+    assertEquals("unknown", header.getJSONObject("duplicate").getString("state"));
+    assertTrue(header.isNull("invoiceDate"));
+    assertFalse(InvoiceInboxValidator.validate(skeleton).isValid());
+  }
+
+  @Test
+  void lookupsForAnUnknownOrMissingTargetTypeIsEmpty() {
+    assertTrue(InvoiceInboxReview.lookupsFor(null).isEmpty());
+    assertTrue(InvoiceInboxReview.lookupsFor("NOT_A_TARGET").isEmpty());
+  }
 }

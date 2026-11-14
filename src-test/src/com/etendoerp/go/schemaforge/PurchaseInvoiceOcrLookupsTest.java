@@ -1090,6 +1090,111 @@ class PurchaseInvoiceOcrLookupsTest {
       assertTrue(lookups.productDetails(List.of("P1")).isEmpty());
     }
 
+    // ---- productCategoryById / uomById (ETP-6050)
+
+    private ProductCategory category(String id, String name, boolean active, boolean visible) {
+      ProductCategory category = mock(ProductCategory.class);
+      when(category.getId()).thenReturn(id);
+      when(category.get("name")).thenReturn(name);
+      when(category.isActive()).thenReturn(active);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(category))
+          .thenReturn(visible);
+      return category;
+    }
+
+    private void givenCategory(String id, String name, boolean active, boolean visible) {
+      ProductCategory made = category(id, name, active, visible);
+      when(dal.get(ProductCategory.class, id)).thenReturn(made);
+    }
+
+    private void givenUnit(String id, String name, boolean active, boolean visible) {
+      UOM made = unit(id, name, active, visible);
+      when(dal.get(UOM.class, id)).thenReturn(made);
+    }
+
+    private UOM unit(String id, String name, boolean active, boolean visible) {
+      UOM unit = mock(UOM.class);
+      when(unit.getId()).thenReturn(id);
+      when(unit.get("name")).thenReturn(name);
+      when(unit.isActive()).thenReturn(active);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(unit)).thenReturn(visible);
+      return unit;
+    }
+
+    @Test
+    @DisplayName("a category by id is returned only when active and visible to the tenant")
+    void productCategoryById() {
+      givenCategory("C1", "Office", true, true);
+      givenCategory("C2", "Other", true, false);
+      givenCategory("C3", "Gone", false, true);
+
+      Party found = lookups.productCategoryById("C1").orElseThrow();
+
+      assertEquals("C1", found.id());
+      assertEquals("Office", found.name());
+      assertTrue(lookups.productCategoryById("C2").isEmpty(), "another tenant's");
+      assertTrue(lookups.productCategoryById("C3").isEmpty(), "inactive");
+      assertTrue(lookups.productCategoryById("nope").isEmpty());
+      assertTrue(lookups.productCategoryById(" ").isEmpty());
+      assertTrue(lookups.productCategoryById(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a unit by id is returned only when active and visible to the tenant")
+    void uomById() {
+      givenUnit("U1", "Unit", true, true);
+      givenUnit("U2", "Other", true, false);
+      givenUnit("U3", "Gone", false, true);
+
+      Party found = lookups.uomById("U1").orElseThrow();
+
+      assertEquals("U1", found.id());
+      assertEquals("Unit", found.name());
+      assertTrue(lookups.uomById("U2").isEmpty());
+      assertTrue(lookups.uomById("U3").isEmpty());
+      assertTrue(lookups.uomById("nope").isEmpty());
+      assertTrue(lookups.uomById("").isEmpty());
+      assertTrue(lookups.uomById(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the category and unit names follow the session language and fall back to the base name")
+    void categoryAndUnitNamesAreTranslated() {
+      givenCategory("C1", "Office", true, true);
+      givenUnit("U1", "Unit", true, true);
+      givenUnit("U2", "Box", true, true);
+      trlMock.when(() -> NeoTrl.translatedNames(eq("ProductCategory"), any(), eq("es_ES")))
+          .thenReturn(Map.of("C1", "Oficina"));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("UOM"), any(), eq("es_ES")))
+          .thenReturn(Map.of("U1", "Unidad"));
+
+      assertEquals("Oficina", lookups.productCategoryById("C1").orElseThrow().name());
+      assertEquals("Unidad", lookups.uomById("U1").orElseThrow().name());
+      assertEquals("Box", lookups.uomById("U2").orElseThrow().name(),
+          "no translation: the base name");
+    }
+
+    @Test
+    @DisplayName("a DAL or translation failure on a category or unit is an empty answer, never a throw")
+    void categoryAndUnitFailures() {
+      when(dal.get(ProductCategory.class, "C1")).thenThrow(new IllegalStateException("db"));
+      givenUnit("U1", "Unit", true, true);
+      trlMock.when(() -> NeoTrl.translatedNames(eq("UOM"), any(), anyString()))
+          .thenThrow(new IllegalStateException("trl"));
+
+      assertTrue(lookups.productCategoryById("C1").isEmpty());
+      assertTrue(lookups.uomById("U1").isEmpty());
+    }
+
+    @Test
+    @DisplayName("the interface defaults of the category and unit lookups resolve nothing")
+    void categoryAndUnitDefaultsResolveNothing() {
+      OcrLookups bare = mock(OcrLookups.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+
+      assertTrue(bare.productCategoryById("C1").isEmpty());
+      assertTrue(bare.uomById("U1").isEmpty());
+    }
+
     // ---- the interface defaults
 
     @Test

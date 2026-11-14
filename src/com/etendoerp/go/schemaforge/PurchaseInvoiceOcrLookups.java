@@ -180,6 +180,37 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   }
 
   @Override
+  public Optional<Party> productCategoryById(String id) {
+    return translatedById(org.openbravo.model.common.plm.ProductCategory.class, "ProductCategory",
+        id);
+  }
+
+  @Override
+  public Optional<Party> uomById(String id) {
+    return translatedById(org.openbravo.model.common.uom.UOM.class, "UOM", id);
+  }
+
+  /** An active row of the tenant by id, named in the session language (falling back to the base name). */
+  private static <T extends org.openbravo.base.structure.BaseOBObject
+      & org.openbravo.base.structure.ActiveEnabled> Optional<Party> translatedById(
+      Class<T> type, String entityName, String id) {
+    try {
+      T row = StringUtils.isBlank(id) ? null : OBDal.getInstance().get(type, id);
+      if (row == null || !Boolean.TRUE.equals(row.isActive())
+          || !TenantOwnership.isVisibleToCurrentTenant(row)) {
+        return Optional.empty();
+      }
+      String base = String.valueOf(row.get("name"));
+      String name = NeoTrl.translatedNames(entityName, List.of(id), NeoLanguage.currentCode())
+          .getOrDefault(id, base);
+      return Optional.of(new Party(id, name));
+    } catch (RuntimeException e) {
+      log.warn("OCR {} lookup by id failed: {}", entityName, e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  @Override
   public Map<String, VendorDetails> vendorDetails(Collection<String> vendorIds) {
     Collection<String> ids = distinctIds(vendorIds);
     Map<String, VendorDetails> out = new HashMap<>();

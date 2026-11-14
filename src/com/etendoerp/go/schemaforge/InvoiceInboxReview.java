@@ -93,7 +93,7 @@ final class InvoiceInboxReview {
   static final String CODE_NOT_FOUND = "not_found";
   static final String CODE_PROCESSING = "processing";
 
-  /** The states a document can be edited in (the editor itself arrives in a later slice). */
+  /** The states a document can be edited in ({@code apply} and {@code mark-reviewed} judge it too). */
   private static final Set<String> EDITABLE = Set.of("PENDING_REVIEW", "ERROR", "READY");
   private static final String STATUS_PROCESSING = "PROCESSING";
   private static final String TABLE = "ETGO_Incoming_Document";
@@ -129,6 +129,34 @@ final class InvoiceInboxReview {
     }
   }
 
+  /**
+   * Whether a document in this state can be edited: waiting for the user and not addressed to
+   * another company. The one rule of the {@code editable} flag of the answer and of the refusals of
+   * {@code apply} and {@code mark-reviewed}.
+   *
+   * @param status    the row status
+   * @param errorCode the row error code, may be {@code null}
+   * @return {@code true} when the document is editable
+   */
+  static boolean isEditable(String status, String errorCode) {
+    return EDITABLE.contains(status) && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode);
+  }
+
+  /**
+   * The review answer of a row already loaded (what {@code apply} and {@code mark-reviewed} answer
+   * after saving).
+   *
+   * @param row the inbox row
+   * @return 200 with the review document
+   */
+  static NeoResponse respond(IncomingDocument row) {
+    try {
+      return NeoResponse.ok(answer(row));
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the review answer", e);
+    }
+  }
+
   private static JSONObject answer(IncomingDocument row) throws JSONException {
     String status = row.getStatus();
     String errorCode = row.getErrorCode();
@@ -140,8 +168,7 @@ final class InvoiceInboxReview {
     out.put("reviewed", Boolean.TRUE.equals(row.isReviewed()));
     out.put("adjusted", Boolean.TRUE.equals(row.isAdjusted()));
     out.put("updated", orNull(NeoDateFormat.toAuditToken(row.getUpdated())));
-    out.put("editable", EDITABLE.contains(status)
-        && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode));
+    out.put("editable", isEditable(status, errorCode));
     out.put("fileName", StringUtils.defaultString(row.getFileName()));
     out.put("sender", StringUtils.defaultString(row.getSender()));
     out.put("source", StringUtils.defaultString(row.getSource()));
@@ -247,7 +274,7 @@ final class InvoiceInboxReview {
         .put(K_LINES, new JSONArray()).put(K_NOTICES, new JSONArray());
   }
 
-  private static Optional<OcrLookups> lookupsFor(String targetType) {
+  static Optional<OcrLookups> lookupsFor(String targetType) {
     String spec = targetType == null ? null : InvoiceInboxProcessor.SPEC_BY_TARGET.get(targetType);
     Optional<OcrDocType> type = spec == null ? Optional.empty() : OcrConfig.get().forSpec(spec);
     return type.flatMap(t -> OcrLookupsRegistry.forResolver(t.getResolver()));

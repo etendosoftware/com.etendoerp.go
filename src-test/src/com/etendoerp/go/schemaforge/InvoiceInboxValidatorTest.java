@@ -242,33 +242,119 @@ class InvoiceInboxValidatorTest {
     assertMissing(none, "line[0].product");
   }
 
+  /** ETP-6050 D8: a new product also needs the category and the unit it will be created with. */
+  private static JSONObject newProductWithCategoryAndUnit() throws Exception {
+    return new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("categoryId", "CAT").put("uomId", "UOM"));
+  }
+
   @Test
   @DisplayName("D8: a new product is complete with a description, a quantity above zero and a price of zero or more")
   void aNewProductNeedsDescriptionQuantityAndPrice() throws Exception {
     JSONObject full = complete();
-    firstLine(full).put(PRODUCT, new JSONObject().put(STATE, NEW));
+    firstLine(full).put(PRODUCT, newProductWithCategoryAndUnit());
     assertTrue(validate(full).isValid());
 
     JSONObject free = complete();
-    firstLine(free).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(UNIT_PRICE, 0);
+    firstLine(free).put(PRODUCT, newProductWithCategoryAndUnit()).put(UNIT_PRICE, 0);
     assertTrue(validate(free).isValid(), "a price of zero is allowed");
 
     String[][] broken = { { "description", "  " }, { QUANTITY, "0" }, { QUANTITY, "-1" },
         { UNIT_PRICE, "-0.01" } };
     for (String[] change : broken) {
       JSONObject document = complete();
-      firstLine(document).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(change[0],
+      firstLine(document).put(PRODUCT, newProductWithCategoryAndUnit()).put(change[0],
           "description".equals(change[0]) ? change[1] : Double.valueOf(change[1]));
       assertMissing(document, "line[0].product");
     }
     for (String key : new String[] { "description", QUANTITY, UNIT_PRICE }) {
       JSONObject asNull = complete();
-      firstLine(asNull).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(key, JSONObject.NULL);
+      firstLine(asNull).put(PRODUCT, newProductWithCategoryAndUnit()).put(key, JSONObject.NULL);
       assertMissing(asNull, "line[0].product");
       JSONObject absent = complete();
-      firstLine(absent).put(PRODUCT, new JSONObject().put(STATE, NEW)).remove(key);
+      firstLine(absent).put(PRODUCT, newProductWithCategoryAndUnit()).remove(key);
       assertMissing(absent, "line[0].product");
     }
+  }
+
+  @Test
+  @DisplayName("ETP-6050 D8: a new product also needs its category and its unit, each non-blank")
+  void aNewProductNeedsItsCategoryAndItsUnit() throws Exception {
+    String[][] cases = { { "categoryId", null }, { "categoryId", "  " }, { "uomId", null },
+        { "uomId", "" } };
+    for (String[] change : cases) {
+      JSONObject document = complete();
+      JSONObject draft = new JSONObject().put("categoryId", "CAT").put("uomId", "UOM");
+      if (change[1] == null) {
+        draft.remove(change[0]);
+      } else {
+        draft.put(change[0], change[1]);
+      }
+      firstLine(document).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new", draft));
+      assertMissing(document, "line[0].product");
+    }
+    JSONObject noBlock = complete();
+    firstLine(noBlock).put(PRODUCT, new JSONObject().put(STATE, NEW));
+    assertMissing(noBlock, "line[0].product");
+    JSONObject nullIds = complete();
+    firstLine(nullIds).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("categoryId", JSONObject.NULL).put("uomId", JSONObject.NULL)));
+    assertMissing(nullIds, "line[0].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050 D8: the name of a new product is its own, else the line description")
+  void theEffectiveNameOfANewProduct() throws Exception {
+    JSONObject ownName = complete();
+    firstLine(ownName).put("description", "").put(PRODUCT, new JSONObject().put(STATE, NEW)
+        .put("new", new JSONObject().put("name", "Tornillo").put("categoryId", "CAT")
+            .put("uomId", "UOM")));
+    assertTrue(validate(ownName).isValid());
+
+    JSONObject blankName = complete();
+    firstLine(blankName).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("name", "  ").put("categoryId", "CAT").put("uomId", "UOM")));
+    assertTrue(validate(blankName).isValid(), "a blank own name falls back to the description");
+
+    JSONObject neither = complete();
+    firstLine(neither).put("description", " ").put(PRODUCT, new JSONObject().put(STATE, NEW)
+        .put("new", new JSONObject().put("name", "").put("categoryId", "CAT")
+            .put("uomId", "UOM")));
+    assertMissing(neither, "line[0].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the codes of a line use its stable index, not its position")
+  void theLineCodesUseTheStableIndex() throws Exception {
+    JSONObject document = complete();
+    JSONObject first = firstLine(document).put("index", 3);
+    first.put(TAX, new JSONObject().put(STATE, "unknown"));
+    JSONObject second = line().put("index", 7);
+    second.put(PRODUCT, new JSONObject().put(STATE, AMBIGUOUS));
+    document.getJSONArray("lines").put(second);
+
+    assertMissing(document, "line[3].tax", "line[7].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a line without an index, or with a null one, is coded by its position")
+  void aLineWithoutIndexIsCodedByItsPosition() throws Exception {
+    JSONObject document = complete();
+    firstLine(document).remove(PRODUCT);
+    JSONObject second = line().put("index", JSONObject.NULL);
+    second.remove(TAX);
+    document.getJSONArray("lines").put(second);
+
+    assertMissing(document, "line[0].product", "line[1].tax");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: after a removed line the surviving one keeps its index in the code")
+  void aSurvivingLineKeepsItsIndex() throws Exception {
+    JSONObject document = complete();
+    firstLine(document).put("index", 1).remove(PRODUCT);
+
+    assertMissing(document, "line[1].product");
   }
 
   @Test

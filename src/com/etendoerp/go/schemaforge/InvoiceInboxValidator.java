@@ -22,10 +22,13 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DESCRIPTION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_HEADER;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INDEX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICE_DATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LINES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_MISSING;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RECEIVER;
@@ -35,6 +38,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MAX_DOCUMENT_NO;
@@ -59,7 +63,9 @@ import com.etendoerp.go.schemaforge.ocr.ReceiverTaxIdCheck;
  * every edit (ETP-6050) apply the very same rules.
  *
  * <p>It answers with codes only: {@code vendor}, {@code invoiceDate}, {@code amount}, {@code lines},
- * {@code line[i].tax}, {@code line[i].product} (and {@code receiver} for a foreign receiver). The
+ * {@code line[i].tax}, {@code line[i].product} (and {@code receiver} for a foreign receiver). {@code i}
+ * is the line's stable {@code index} (ETP-6050: it survives deleting and adding lines), the position
+ * for a document whose lines carry none. The
  * error code follows the priority {@code FOREIGN_RECEIVER > REFERENCE_TOO_LONG > MISSING_FIELDS}.</p>
  */
 public final class InvoiceInboxValidator {
@@ -172,11 +178,12 @@ public final class InvoiceInboxValidator {
     }
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.optJSONObject(i);
+      int id = line == null || line.isNull(K_INDEX) ? i : line.optInt(K_INDEX, i);
       if (line == null || !taxComplete(line)) {
-        missing.add("line[" + i + "].tax");
+        missing.add("line[" + id + "].tax");
       }
       if (line == null || !productComplete(line)) {
-        missing.add("line[" + i + "].product");
+        missing.add("line[" + id + "].product");
       }
     }
   }
@@ -189,14 +196,21 @@ public final class InvoiceInboxValidator {
         || (T_PENDING_VENDOR.equals(state) && !line.isNull(K_TAX_RATE) && line.has(K_TAX_RATE));
   }
 
-  /** Linked, or new with a description, a quantity above zero and a price of zero or more. */
+  /**
+   * Linked, or new with a name (the line description by default), a quantity above zero, a price of
+   * zero or more, and the category and the unit the product will be created with (ETP-6050, D8).
+   */
   private static boolean productComplete(JSONObject line) {
     JSONObject product = line.optJSONObject(K_PRODUCT);
     String state = product == null ? "" : product.optString(K_STATE, "");
     if (S_LINKED.equals(state)) {
       return true;
     }
-    return S_NEW.equals(state) && StringUtils.isNotBlank(stringOf(line, K_DESCRIPTION))
+    JSONObject draft = product == null ? null : product.optJSONObject(K_NEW);
+    String name = StringUtils.defaultIfBlank(stringOf(draft, K_NAME), stringOf(line, K_DESCRIPTION));
+    return S_NEW.equals(state) && StringUtils.isNotBlank(name)
+        && StringUtils.isNotBlank(stringOf(draft, K_CATEGORY_ID))
+        && StringUtils.isNotBlank(stringOf(draft, K_UOM_ID))
         && !line.isNull(K_QUANTITY) && line.optDouble(K_QUANTITY, 0d) > 0d
         && !line.isNull(K_UNIT_PRICE) && line.optDouble(K_UNIT_PRICE, -1d) >= 0d;
   }
