@@ -45,6 +45,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry;
 
 /**
  * Post-hook for the Goods Shipment header entity.
@@ -209,6 +210,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       // header's CURRENT warehouse right before the native completion flow runs.
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
       refreshDraftMatchQuantities(context.getRecordId());
+      GoodsShipmentTelemetry.beforeAction(context);
       return null; // let NEO native process handle completion
     }
     context.setAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE, INVOICE_IMPORT_POLICY);
@@ -251,6 +253,12 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && ACTION_DOCUMENT_ACTION.equals(context.getFieldName())
+        && "POST".equals(context.getHttpMethod())) {
+      GoodsShipmentTelemetry.afterAction(context);
+      return null;
+    }
     try {
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {

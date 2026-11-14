@@ -9059,6 +9059,10 @@ after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_so
 `change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
 `account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
+**KPI telemetry (ETP-5908), goods shipment.** `GoodsShipmentHeaderHandler` emits
+`backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
+after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:

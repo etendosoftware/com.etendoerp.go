@@ -6,7 +6,7 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (37)
+# --- con mocks (38)
 com.etendoerp.go.schemaforge.AgingReportHandlerTest
 com.etendoerp.go.schemaforge.BpLocationHandlerTest
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerTest
@@ -40,6 +40,7 @@ com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaultsTest
 com.etendoerp.go.schemaforge.handlers.ContactTypeRulesTest
 com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetryTest
 com.etendoerp.go.schemaforge.handlers.CustomerAccountingHandlerTest
+com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetryTest
 com.etendoerp.go.schemaforge.handlers.VendorAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
