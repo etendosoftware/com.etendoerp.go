@@ -282,6 +282,10 @@ public class McpToolRouter {
           // etendo-ai#53: the identity this call already runs under; reads only the context.
           case McpConstants.TOOL_NEO_WHOAMI:
             return McpWhoamiTool.handle(arguments, scopes);
+          // ETP-6236: every step is a call of this same router, under the same role and scopes.
+          case McpConstants.TOOL_NEO_ROUTINE:
+            return McpRoutineTool.route(arguments,
+                (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes));
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:

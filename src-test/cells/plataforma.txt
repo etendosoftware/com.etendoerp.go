@@ -44,6 +44,7 @@ com.etendoerp.go.hubspot.StripeSubscriptionEventsTest
 com.etendoerp.go.llm.LlmDeciderTest
 com.etendoerp.go.mcp.Context7DocsClientTest
 com.etendoerp.go.mcp.McpActionBatchTest
+com.etendoerp.go.mcp.McpRoutineToolTest
 com.etendoerp.go.mcp.McpActionEnvelopeTest
 com.etendoerp.go.mcp.McpActionsCompactTest
 com.etendoerp.go.mcp.McpActionsViewTest

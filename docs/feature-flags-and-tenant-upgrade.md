@@ -189,6 +189,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | `sepa-remittances` | `etendo.go.flags.sepa-remittances` | `ETGO_FLAG_SEPA_REMITTANCES` | absent ⇒ **`false`** (no SEPA remittances: settings and the `remittance` spec refused, mandate keys dropped; per account on a hosted arm only; TTL 2027-03-31, provisional) — see its section below |
 | `psd2-statement-import-settings` | `etendo.go.flags.psd2-statement-import-settings` | `ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS` | absent ⇒ **`false`** (PSD2 import settings, `maxFetchInterval` on `accounts` and deleting statements of connected accounts all as before ETP-6151; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
+| `mcp-routines` | `etendo.go.flags.mcp-routines` | `ETGO_FLAG_MCP_ROUTINES` | absent ⇒ **`false`** (`etendo_routine` neither listed nor routed: the MCP as before ETP-6236; per account on a hosted arm only; placeholder TTL 2027-03-31) — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -927,6 +928,29 @@ setting. Keep the registry feature entry in `etendo_schema_forge`. Retiring the 
 the Bank accounts created before (or with the flag off): they still answer
 `ETGO_RemittanceAccountNotAllowed` in the remittance window. Whether they get a data-fix then is a
 product decision; none exists today.
+
+### `mcp-routines` (ETP-6236) — backend-only, per account, off by default
+
+> Registry entry `mcp-routines` in `etendo_schema_forge` `flags-registry.json`. The only evaluator is
+> `McpRoutinesFlag` (`GoFeatureFlags.FLAG_MCP_ROUTINES`), evaluated per request for the
+> `ETGO_ACCOUNT` email of the request user; no account reads off.
+
+Gates the MCP tool `etendo_routine` (several tool calls in one call, and personal, versioned saved
+routines — `docs/neo-headless.md` §4.12.44). Toggle points:
+
+- `ToolRegistry.generateTools` — the tool is listed in `tools/list` only while the flag is on.
+- `McpToolRouter` — a call to it while off answers `tool_disabled` (405) naming the plain
+  alternative, one tool call per step, exactly like the withdrawn `etendo_batch`.
+
+**Not gated:** the tables `ETGO_MCP_ROUTINE`, `ETGO_MCP_ROUTINE_VERSION` and `ETGO_MCP_ROUTINE_EXEC`
+and their rows. Turning the flag off hides the tool; a user's saved routines are back, unchanged,
+when it is turned on again.
+
+**Turning it on locally:** `etendo.go.flags.mcp-routines=true` in `Openbravo.properties` (or
+`ETGO_FLAG_MCP_ROUTINES=true`) and restart Tomcat. On a shared environment, create the
+`mcp-routines` **boolean** setting in Datadog (ConfigCat while it is the fallback) and target the
+accounts that should see the tool. The mcp-tests harness needs it on for a target with
+`routines = true`: without the tool the run is refused before anything is measured.
 
 ### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
 

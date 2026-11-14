@@ -423,19 +423,19 @@ final class McpActionBatch {
     try {
       OBDal.getInstance().rollbackAndClose();
     } catch (RuntimeException rollbackFailure) {
-      log.warn("etendo_action_batch rollback did not complete: {}", rollbackFailure.getMessage());
+      log.warn("MCP multi-call tool rollback did not complete: {}", rollbackFailure.getMessage());
     }
   }
 
   /**
-   * Puts the administrator mode the router opened back if a handler lost it, so a document never
-   * runs with less than the one before. A lost mode is a pop too many; one extra push balances
-   * the router's own restore at the end of the call.
+   * Puts the administrator mode the router opened back if a handler lost it, so a document (or a
+   * step of etendo_routine) never runs with less than the one before. A lost mode is a pop too
+   * many; one extra push balances the router's own restore at the end of the call.
    */
-  private static void ensureAdminMode() {
+  static void ensureAdminMode() {
     OBContext context = OBContext.getOBContext();
     if (context != null && !context.isInAdministratorMode()) {
-      log.warn("etendo_action_batch: administrator mode was lost by a document; restoring it");
+      log.warn("MCP multi-call tool: administrator mode was lost by a call; restoring it");
       OBContext.setAdminMode(true);
     }
   }

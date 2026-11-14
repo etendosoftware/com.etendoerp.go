@@ -93,6 +93,8 @@ class ToolRegistryGenerateToolsTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<NeoAccessUtils> accessMock;
+  /** ETP-6236: etendo_routine is behind its flag; off unless a test turns it on. */
+  private MockedStatic<McpRoutinesFlag> routinesFlagMock;
 
   private ToolRegistry registry;
 
@@ -115,6 +117,8 @@ class ToolRegistryGenerateToolsTest {
     // access denial override this with a spec-specific stub.
     accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(any(), anyString()))
         .thenReturn(true);
+    routinesFlagMock = mockStatic(McpRoutinesFlag.class);
+    routinesFlagMock.when(McpRoutinesFlag::isEnabled).thenReturn(false);
     registry = new ToolRegistry();
   }
 
@@ -125,6 +129,9 @@ class ToolRegistryGenerateToolsTest {
     }
     if (accessMock != null) {
       accessMock.close();
+    }
+    if (routinesFlagMock != null) {
+      routinesFlagMock.close();
     }
   }
 
@@ -241,6 +248,19 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
       assertEquals(6, tools.size(), names.toString());
+    }
+
+    @Test
+    @DisplayName("etendo_routine is listed after the read built-ins only while its flag is on")
+    void routineToolFollowsItsFlag() {
+      mockSpecCriteria(Collections.emptyList());
+      assertFalse(toolNames(registry.generateTools(scopesOf("neo:read")))
+          .contains(McpConstants.TOOL_NEO_ROUTINE));
+
+      routinesFlagMock.when(McpRoutinesFlag::isEnabled).thenReturn(true);
+      List<String> names = toolNames(registry.generateTools(scopesOf("neo:read")));
+      assertEquals(names.indexOf(McpConstants.TOOL_NEO_FEEDBACK) + 1,
+          names.indexOf(McpConstants.TOOL_NEO_ROUTINE), names.toString());
     }
 
     @Test
