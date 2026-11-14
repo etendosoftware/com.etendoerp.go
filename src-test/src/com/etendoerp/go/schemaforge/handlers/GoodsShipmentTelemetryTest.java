@@ -472,6 +472,7 @@ class GoodsShipmentTelemetryTest {
     ThreadPoolExecutor sender = (ThreadPoolExecutor) senderField.get(null);
     CountDownLatch release = new CountDownLatch(1);
     CountDownLatch busy = new CountDownLatch(1);
+    CountDownLatch drained = new CountDownLatch(1);
     sender.execute(() -> {
       busy.countDown();
       try {
@@ -482,19 +483,18 @@ class GoodsShipmentTelemetryTest {
     });
     try {
       assertTrue(busy.await(WAIT_MS, TimeUnit.MILLISECONDS), "the sender worker never started");
-      while (sender.getQueue().remainingCapacity() > 0) {
+      while (sender.getQueue().remainingCapacity() > 1) {
         sender.execute(() -> { });
       }
+      // the last queued task: the worker is FIFO, so once it runs the whole queue has drained
+      sender.execute(drained::countDown);
 
       assertDoesNotThrow(() -> completeFor(obContext));
 
       verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
     } finally {
       release.countDown();
-      long deadline = System.currentTimeMillis() + 10_000L;
-      while (!sender.getQueue().isEmpty() && System.currentTimeMillis() < deadline) {
-        Thread.sleep(20L);
-      }
+      assertTrue(drained.await(10, TimeUnit.SECONDS), "the sender queue never drained");
     }
   }
 
