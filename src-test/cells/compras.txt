@@ -6,17 +6,21 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (36)
+# --- con mocks (41)
 com.etendoerp.go.schemaforge.AgingPayableReportHandlerTest
 com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerTest
 com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerTest
 com.etendoerp.go.schemaforge.CreatePurchaseReturnHandlerTest
 com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandlerTest
 com.etendoerp.go.schemaforge.GoodsReceiptLineHandlerTest
+com.etendoerp.go.schemaforge.InvoiceInboxAdjustedPolicyTest
+com.etendoerp.go.schemaforge.InvoiceInboxApplyTest
 com.etendoerp.go.schemaforge.InvoiceInboxDiscardTest
+com.etendoerp.go.schemaforge.InvoiceInboxEditGateTest
 com.etendoerp.go.schemaforge.InvoiceInboxFlagTest
 com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandlerTest
 com.etendoerp.go.schemaforge.InvoiceInboxIntakeTest
+com.etendoerp.go.schemaforge.InvoiceInboxMarkReviewedTest
 com.etendoerp.go.schemaforge.InvoiceInboxMessagesTest
 com.etendoerp.go.schemaforge.InvoiceInboxProcessorTest
 com.etendoerp.go.schemaforge.InvoiceInboxReviewTest
@@ -37,6 +41,7 @@ com.etendoerp.go.schemaforge.ocr.CopilotOcrServiceClientTest
 com.etendoerp.go.schemaforge.ocr.InboxLineMatcherTest
 com.etendoerp.go.schemaforge.ocr.InboxMatcherTest
 com.etendoerp.go.schemaforge.ocr.InboxVendorMatcherTest
+com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotalsTest
 com.etendoerp.go.schemaforge.ocr.OcrConfigTest
 com.etendoerp.go.schemaforge.ocr.OcrExtractionParserTest
 com.etendoerp.go.schemaforge.ocr.OcrExtractionServiceTest

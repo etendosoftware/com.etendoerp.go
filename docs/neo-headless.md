@@ -2460,7 +2460,95 @@ the document reaches the browser.
     receiver:{check:"absent"}}, lines:[], notices:[]}` plus its validation. It is not persisted.
 - Texts of the document come from an external extraction and are untrusted data: they are copied,
   never interpreted. The lookups are bound by the row's `TARGET_TYPE` the way the worker binds them.
-- **Hidden from MCP**: `agentExcludedActions()` returns `discard` and `review` (§4.12.9).
+- **Hidden from MCP**: `agentExcludedActions()` returns `discard`, `review`, `apply` and `mark-reviewed` (§4.12.9).
+
+**Edit (ETP-6050 S2): `apply` and `mark-reviewed`.** Two more actions of `InvoiceInboxHeaderHandler`
+(`InvoiceInboxApply`, `InvoiceInboxMarkReviewed`); the spec stays read-only. Both are `POST`
+(`GET` -> 405), answer the **review body of the saved row** (above) with the NEW `updated` token, and
+are judged in this order: flag (`403 feature_disabled`), shape of the body (400), window write access
+(`403 access_denied`, `NeoAccessHelper.hasWindowAccess(WINDOW_ID, "POST")` as the upload does),
+tenant (`404 not_found`), organization (`403 org_not_allowed`), `processing` (409), `not_editable`
+(409: `CONFIRMED`, `DISCARDED`, `FOREIGN_RECEIVER`), then the row is locked (`SELECT ... FOR UPDATE`),
+the state is judged again under the lock, the row is refreshed and the optimistic token is compared
+(`stale_document` 409; the token is the `updated` of the review, which carries milliseconds: it is
+accepted when it is the very string of the row's current token, otherwise `NeoRecordVersion.isStale`
+decides, to the millisecond for a token with a fraction of a second and only to the second for one
+without; a token not shaped like an audit token is refused as stale). A discard racing an
+edit therefore makes the edit 409. The shared guards live in `InvoiceInboxEditGate`.
+
+`POST .../action/apply` body `{updated, operations[]}` (1 to 50, applied in order on a working copy of
+`CURRENT_DATA`; atomic; request body at most 64 KB, else 413 `request_too_large`; unknown `op`, unknown
+key, non-object, missing `index`/`id`: 400 `invalid_request`; no `updated`: 400 `missing_updated`):
+
+| `op` | Payload | Effect |
+|---|---|---|
+| `setHeader` | `documentNo`, `invoiceDate` (patch) | text cleaned like an extracted one (`OcrSanitizer.text`, at most 200 chars; over 20 is the validation `REFERENCE_TOO_LONG`, not a refusal); date `yyyy-MM-dd`, year 1900-2100, `null`/`""` clears; any other key is 400 |
+| `setLine` | `index`, any of `description`, `quantity`, `unitPrice` (within +/-1e9), `taxRate` (0-100 or null), `discount` (0-100, null = 0) | scales HALF_UP: quantity 4, unitPrice 4, taxRate 2, discount 4; out of range or not a number: 422 `invalid_value`; `null` is accepted for `quantity`/`unitPrice`/`taxRate` (stored null, the validator reports the line) |
+| `addLine` | none | `{index: max+1, description:"", quantity:1, unitPrice:0, product:none}`; `taxRate` = the previous (last) line's, else the vendor address' default tax and its rate; `pending_vendor` without address; over 100 lines: 422 `too_many_lines` |
+| `removeLine` | `index` | 422 `line_not_found` when absent |
+| `selectVendor` | `id` | must resolve through `OcrLookups.vendorById` (else 422 `unknown_vendor`); `vendor = linked, matchedBy manual`, address state/location read again, taxes rebuilt |
+| `newVendor` | `fields?` (`name, taxId, address, postalCode, city, countryName, email, phone`) | patch of `vendor.extracted`; `vendor = new`, `addressState UNKNOWN`, every line tax `pending_vendor`. Nothing is created: the contact is created on confirm (ETP-6051), which must apply the single-invoice OCR flow's seed |
+| `selectProduct` | `index`, `id` | `OcrLookups.productById` (else 422 `unknown_product`); `product = linked, matchedBy manual` |
+| `newProduct` | `index`, `name?`, `categoryId?`, `uomId?` | `product = new` with `new = {name, categoryId, category, uomId, uom}`; ids resolved by `OcrLookups.productCategoryById` / `uomById` (422 `unknown_category` / `unknown_uom`), names in the session language |
+
+The line `index` is a stable id: never renumbered, a new line takes the highest index plus one (a
+document whose lines carry none gets its positions on the first edit); the validator codes are
+`line[<index>].tax|product`. `EXTRACTED_DATA` is never touched. After the operations the server
+recomputes, in one transaction and in this order: taxes (lines whose rate changed, every line when the
+date or the vendor changed, the new line; once per distinct rate, through
+`InboxLineMatcher.taxState`, the one function the worker uses), duplicates when the number or the
+vendor changed (`OcrLookups.duplicates` plus the in-inbox check extracted to
+`InvoiceInboxDuplicates`), `totalAmount` when `totalSource = lines` (a PRINTED total never changes),
+the validation, the status (`READY` goes back to `PENDING_REVIEW` with `REVIEWED = N`; then
+`InvoiceInboxStatusPolicy.applyAfterEdit`: a `PENDING_REVIEW` or `ERROR` row, whatever its code but
+`FOREIGN_RECEIVER`, becomes `PENDING_REVIEW` when valid or `ERROR` with the verdict's code when not),
+`ADJUSTED`, the document, the summary columns (`InvoiceInboxSummary.syncFrom`). A request whose
+operations change nothing writes nothing and `updated` does not move. `CURRENT_DATA` over 1 MB:
+413 `document_too_large`.
+
+**`ADJUSTED`** is sticky (only ever set) and decided in ONE place, `InvoiceInboxAdjustedPolicy`. An
+operation marks when it changes what is stored (compared at the stored scale, `10` equals `10.0000`,
+absent discount equals 0, `null` equals `""`), `addLine`/`removeLine` always, `selectVendor` /
+`selectProduct` always except re-selecting the id already linked, `newVendor` only when a field
+differs from the extracted data or it replaces an auto-linked vendor. **N1 (product owner,
+2026-11-13, overrides the plan):** choosing the category and/or unit of a NEW product counts as
+modifying the alta, so `newProduct` marks whenever it changes anything
+(`InvoiceInboxAdjustedPolicy.NEW_PRODUCT_ALWAYS_MARKS`; flip the constant to go back to "only a changed
+name or a replaced linked product marks"). A no-op, a refused request and server-derived changes
+(tax, duplicates, total, status) never mark; `mark-reviewed`, discard and `review` are not edits.
+
+**Line discount.** `ocr-config.json` `line_items[]` gains `discount_percent` and `discount_amount`
+(both nullable and in `required`, like `total_amount`). `InboxLineMatcher.discountPercent` converts
+server-side, never the LLM: the printed percent wins when in (0,100], else the amount becomes
+`amount / (quantity x unitPrice) x 100` (scale 4, HALF_UP) when it is in (0, quantity x unitPrice];
+anything else is ignored. `CURRENT_DATA` line `discount` (percent 0-100, scale 4) is emitted only
+when above 0; absent means 0; the document `version` stays 1. `InvoiceInboxTotals` (package `ocr`) is
+the one amount rule, GO's own: `unit6 = round6(unitPrice x (1 - discount/100))`,
+`lineNet = round2(quantity x unit6)` (two roundings, HALF_UP), tax per rate on the sum of nets,
+lines without a rate add to the base only. `InboxMatcher.totalOfLines` now uses it too (declared
+worker change: the lines total moves by cents, and includes the discount). The `ocrconfig` served to
+the single-invoice flow and the MCP OCR tools carries the two new keys (null when not read); those
+flows keep ignoring the discount. Rows read before the change have no discount and are not re-read.
+**Known effect on the shared flows (decided, ETP-6050).** The descriptions of the two new keys tell the
+model that `unit_price` stays the price exactly as printed in the price column, before the line
+discount. `unit_price` itself has no description, so the single-invoice "Extraer y completar" and the
+MCP OCR tools get that instruction only through the new keys: for a discounted line a model that used
+to return the net price may now return the printed (gross) one, and those flows, which ignore the
+discount, will then show the line at its gross amount. Kept on purpose: the inbox needs a
+deterministic gross price (a net `unit_price` plus a `discount_percent` would discount twice), and
+"as printed" is what the flows' users expect to see. Mapping the discount in the single-invoice flow
+is the follow-up that closes the gap (`flags-registry.json` `$gatingComment` must state it).
+
+`POST .../action/mark-reviewed` body `{updated}` (no other key): after the guards, `READY` answers 200
+unchanged (nothing written, for a caller holding the current token: a retry with the OLD token gets 409 `stale_document` first, because the token is checked before the status, and the re-read shows `READY`); a status other than `PENDING_REVIEW` is 409 `not_reviewable`; the
+verdict is RECOMPUTED and, if not valid, 422 `not_valid` with `error.missing`; otherwise
+`status = READY`, `REVIEWED = Y`, `updated` moves, `ADJUSTED` and the document are untouched.
+
+Error details are keys of the `error` object: `field` and `index` (`invalid_value`), `index`
+(`line_not_found`, `unknown_product`, `unknown_category`, `unknown_uom`), `max` (`too_many_lines`),
+`missing` (`not_valid`), `documentStatus` (`not_editable`, `not_reviewable`: `error.status` already
+holds the HTTP code). The server texts are the English defaults of `InvoiceInboxMessages` (no
+`AD_MESSAGE` row, like discard and review); the SPA translates by `error.code`.
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
@@ -6572,16 +6660,20 @@ handlers do, so `buildingNumber` no longer blocks the request here either — `s
 `country` are unaffected. With both layers fixed, the "no longer a UI-vs-API divergence" claim two
 paragraphs above now holds for the onboarding endpoint too, not only for the 3 entity handlers.
 
-**Declared divergence: `discard` and `review` of the invoice inbox are REST-only (ETP-6049,
-ETP-6050).** The action
+**Declared divergence: `discard`, `review`, `apply` and `mark-reviewed` of the invoice inbox are REST-only
+(ETP-6049, ETP-6050).** The action
 `POST /sws/neo/invoice-inbox/header/{id}/action/discard` works from the SPA and plain REST, and is
 hidden from MCP (`InvoiceInboxHeaderHandler.agentExcludedActions()` = `discard`: `etendo_action`
 answers 405 `actionHidden`). It is irreversible and ships for people first; it will be declared with
 an `actionContract` next to the confirm action (ETP-6051) so agents get both at once. Exposing it
 earlier is removing that one override. `GET .../action/review` (ETP-6050) is hidden the same way
-(`agentExcludedActions()` = `discard`, `review`): it is the review panel's own read, up to 1 MB of
-document plus enrichment, which would only cost an agent context; agents read the row with
-`etendo_get` (no `currentData`).
+(`agentExcludedActions()` = `discard`, `review`, `apply`, `mark-reviewed`): `review` is the review
+panel's own read, up to 1 MB of document plus enrichment, which would only cost an agent context;
+agents read the row with `etendo_get` (no `currentData`). `POST .../action/apply` and
+`.../action/mark-reviewed` (ETP-6050 S2) are the panel's own autosave and review mark, hidden the same
+way: an agent has no review to make until the confirm action (ETP-6051) is declared with its
+`actionContract`, and all of them arrive together. The batch path (`etendo_batch`) does not run these
+actions.
 
 > **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
 > (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
