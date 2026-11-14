@@ -36,14 +36,11 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LOCATION_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NOTICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ORG_TAX_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RECEIVER;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_SOURCE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VERSION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
@@ -78,7 +75,6 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
 public final class InboxMatcher {
 
   private static final int TWO_DECIMALS = 2;
-  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
 
   private final OcrLookups lookups;
 
@@ -224,26 +220,12 @@ public final class InboxMatcher {
     }
   }
 
-  /** Sum of quantity x price x (1 + rate/100) over the lines that carry quantity and price; null if none. */
+  /**
+   * The total of the lines with the rule of GO's own invoice line ({@link InvoiceInboxTotals}: the
+   * discount, the two roundings, tax per rate); {@code null} when no line carries quantity and price.
+   */
   private static BigDecimal totalOfLines(JSONArray lines) {
-    BigDecimal sum = null;
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject line = lines.optJSONObject(i);
-      BigDecimal quantity = decimalOf(line, K_QUANTITY);
-      BigDecimal price = decimalOf(line, K_UNIT_PRICE);
-      if (quantity == null || price == null) {
-        continue;
-      }
-      BigDecimal rate = decimalOf(line, K_TAX_RATE);
-      BigDecimal factor = rate == null ? BigDecimal.ONE
-          : BigDecimal.ONE.add(rate.divide(HUNDRED));
-      BigDecimal amount = quantity.multiply(price).multiply(factor);
-      sum = sum == null ? amount : sum.add(amount);
-    }
-    return sum;
-  }
-
-  private static BigDecimal decimalOf(JSONObject line, String key) {
-    return OcrJson.decimal(line, key);
+    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(lines);
+    return totals == null ? null : totals.total();
   }
 }

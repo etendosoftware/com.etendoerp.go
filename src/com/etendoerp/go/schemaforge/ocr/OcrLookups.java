@@ -471,6 +471,32 @@ public interface OcrLookups {
   }
 
   /**
+   * A product category the session can use, by id (ETP-6050), to create a new product with it. The
+   * name is the one of the session language.
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id the category id
+   * @return the category, empty when it does not exist, is inactive or is not the tenant's
+   */
+  default Optional<Party> productCategoryById(String id) {
+    return Optional.empty();
+  }
+
+  /**
+   * A unit of measure the session can use, by id (ETP-6050), to create a new product with it. The
+   * name is the one of the session language.
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id the unit id
+   * @return the unit, empty when it does not exist, is inactive or is not the tenant's
+   */
+  default Optional<Party> uomById(String id) {
+    return Optional.empty();
+  }
+
+  /**
    * Name, tax id and city of several vendors, in one query (ETP-6050), for the review panel.
    *
    * <p>Default: nothing known. Ids that do not resolve for the session are absent from the map.</p>

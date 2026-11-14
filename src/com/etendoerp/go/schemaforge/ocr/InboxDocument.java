@@ -69,9 +69,27 @@ public final class InboxDocument {
   public static final String K_TAX = "tax";
   public static final String K_SIMILARITY = "similarity";
   public static final String K_RATE = "rate";
+  /** Line key (ETP-6050): the discount of the line, percent 0-100; absent means 0. */
+  public static final String K_DISCOUNT = "discount";
+  /** Product key (ETP-6050): the data of the product to create, {@code state = new}. */
+  public static final String K_NEW = "new";
+  public static final String K_CATEGORY_ID = "categoryId";
+  public static final String K_CATEGORY = "category";
+  public static final String K_UOM_ID = "uomId";
+  public static final String K_UOM = "uom";
 
   public static final String K_VALID = "valid";
   public static final String K_MISSING = "missing";
+
+  /** {@code matchedBy} value of a vendor or product the user chose (ETP-6050). */
+  public static final String MATCHED_MANUAL = "manual";
+
+  /** Notice code: the document carries a number already in another inbox document. */
+  public static final String N_DUPLICATE_IN_INBOX = "duplicate_in_inbox";
+  /** Notice code: the duplicate lookup could not be made. */
+  public static final String N_DUPLICATE_CHECK_UNKNOWN = "duplicate_check_unknown";
+  /** Notice code: the linked vendor has no address. */
+  public static final String N_VENDOR_ADDRESS_MISSING = "vendor_address_missing";
 
   /** Matching state: matched with certainty to an existing record. */
   public static final String S_LINKED = "linked";

@@ -363,6 +363,66 @@ class InboxMatcherTest {
   }
 
   @Test
+  @DisplayName("ETP-6050: the computed total applies the line discount (percent read, amount converted)")
+  void theTotalAppliesTheLineDiscount() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", 10).put("discount_amount", JSONObject.NULL)));
+
+    JSONObject document = build(extraction);
+
+    // 2 x 50 less 10 % = 90.00, tax 21 % = 18.90
+    assertEquals(108.9, header(document).getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals(10.0, document.getJSONArray("lines").getJSONObject(0).getDouble("discount"), 0.0);
+
+    JSONObject byAmount = extraction();
+    byAmount.put(TOTAL, JSONObject.NULL);
+    byAmount.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", JSONObject.NULL).put("discount_amount", 10)));
+    assertEquals(108.9, header(build(byAmount)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a printed total is kept as printed whatever the discount")
+  void aPrintedTotalIgnoresTheDiscount() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", 10)));
+
+    JSONObject header = header(build(extraction));
+
+    assertEquals(121.0, header.getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("printed", header.getString("totalSource"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the total rounds twice, like GO: the price after the discount to six decimals, then the line to cents")
+  void theTotalRoundsInTwoSteps() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 48324, 0.2771, 0)
+        .put("discount_percent", 77.1721)));
+    lookups.taxByRate.put("0", new TaxAnswer(true, new Tax("T0", "IVA 0%", BigDecimal.ZERO),
+        List.of()));
+
+    // rounded once the product would be 3056.79
+    assertEquals(3056.78, header(build(extraction)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the tax is rounded per rate on the sum of the nets, not per line")
+  void theTaxIsRoundedPerRate() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("A", 1, 0.05, 10)).put(line("B", 1, 0.05, 10)));
+    lookups.products = List.of(List.of(), List.of());
+
+    // base 0.10, tax 0.01 (per line 0.005 would round to 0.01 twice = 0.02)
+    assertEquals(0.11, header(build(extraction)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
   @DisplayName("no printed total and nothing to add up leaves the total null, sourced from the lines")
   void noTotalAtAll() throws Exception {
     JSONObject extraction = extraction();
