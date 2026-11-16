@@ -71,10 +71,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   prefills its "Datos fiscales" step from the backend and both sides never disagree.</li>
  *   <li>{@link #applyBeforeCompletion} runs right before the completion: it writes what the caller
  *   sent under {@code sifFields} (validated: only the editable fields of the active systems, only
- *   their allowed codes) and the previewed value of every field it did not send — so a caller
- *   that sends nothing gets exactly the preview (the document type's VERI*FACTU type and
- *   description; {@code R4} on a rectificative; …) — sets the structural
- *   fields (SII {@code R}/{@code I}, the TicketBAI and VERI*FACTU reverse types) and then asks
+ *   their allowed codes) and the previewed value of every field it did not send (the document
+ *   type's VERI*FACTU type and description, …); a caller that sends no {@code sifFields} at all
+ *   also gets the rectification fallback ({@link #unattendedRectificationFallback}). It then
+ *   sets the structural
+ *   fields (SII {@code R}/{@code I}, the TicketBAI and VERI*FACTU reverse types) and asks
  *   {@link RectificationFiscalCodeGuard#evaluate} — the same per-system rule and 422 bodies the
  *   header's own completion uses.</li>
  * </ul>
@@ -85,10 +86,16 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Normal invoice: VERI*FACTU type from the document type that will be used, {@code F1} when
  *   it configures none (or configures a rectificative code). SII key: the customer's own default
  *   key when it declares one ({@code AEATSII_INVOICE_TRG}'s rule), else {@code F1}.</li>
- *   <li>Rectificative invoice: {@code R4} preselected for SII's motive, TicketBAI's code and
- *   VERI*FACTU's type, all editable. This supersedes, for these creation flows only, the ETP-5745
- *   CP-14 stance that no motive is ever preselected: the user still sees and confirms it in the
- *   step, and a caller that sends nothing gets the same value the screen would have offered.</li>
+ *   <li>Rectificative invoice: the preview leaves SII's motive, TicketBAI's code and
+ *   VERI*FACTU's type EMPTY, so the user has to choose each one in the step — the ETP-5745 CP-14
+ *   stance (a rectification code is a fiscal judgement, never preselected) holds on the screen
+ *   of these creation flows too. A {@code sifFields} that leaves one blank is refused by
+ *   {@link RectificationFiscalCodeGuard} with its 422.</li>
+ *   <li>Rectificative invoice, <b>no {@code sifFields} at all</b> (an MCP/API caller, or the SPA
+ *   when the preview could not be read and the step failed open): {@code R4} in the three
+ *   systems, so the creation is not refused for a code nobody was asked for. This is the one
+ *   place where what is applied differs from what the preview shows; it lives in
+ *   {@link #unattendedRectificationFallback} alone.</li>
  * </ul>
  *
  * <p>A key the caller did not send takes its previewed value, so the invoice ends up with
@@ -136,7 +143,8 @@ final class InvoiceSifPreset {
   static final String F_VF_NO_RECIPIENT_61D = Invoice.PROPERTY_ETVFACINVNOIDART61D;
   static final String F_TBAI_CODE = Invoice.PROPERTY_TBAIREVERSEINVOICECODE;
 
-  static final String RECTIFICATION_DEFAULT = "R4";
+  /** The code {@link #unattendedRectificationFallback} applies; never shown by the preview. */
+  static final String RECTIFICATION_FALLBACK = "R4";
   static final String DEFAULT_INV_TYPE = "F1";
   private static final String CLAVE_TIPO_RECTIFICATIVA = "R";
   private static final String TIPO_RECTIF_DEFAULT = "I";
@@ -290,7 +298,10 @@ final class InvoiceSifPreset {
     return systems;
   }
 
-  /** The value each editable field gets when the caller does not change it. */
+  /**
+   * The value each editable field shows in the preview and gets when the caller's
+   * {@code sifFields} omits it. A rectification code has none: it is the user's choice.
+   */
   static Map<String, Object> defaults(Facts f) {
     Map<String, Object> values = new LinkedHashMap<>();
     for (FieldSpec spec : fields(f)) {
@@ -309,7 +320,8 @@ final class InvoiceSifPreset {
         return DEFAULT_INV_TYPE;
       case F_SII_MOTIVE:
       case F_TBAI_CODE:
-        return RECTIFICATION_DEFAULT;
+        // Never preselected: the user chooses it in the step.
+        return null;
       case F_SII_DESCRIPTION:
         return f.siiDescription();
       case F_SII_AUTHORIZATION:
@@ -330,12 +342,13 @@ final class InvoiceSifPreset {
   }
 
   /**
-   * VERI*FACTU type: {@code R4} on a rectificative; otherwise the document type's own type when
-   * it is a normal ({@code F*}) one the step offers, else {@code F1}.
+   * VERI*FACTU type: none on a rectificative (the field carries the rectification code there, so
+   * it is the user's choice and must not read as an ordinary {@code F1}); otherwise the document
+   * type's own type when it is a normal ({@code F*}) one the step offers, else {@code F1}.
    */
   static String defaultVerifactuInvType(Facts f) {
     if (f.rectificative()) {
-      return RECTIFICATION_DEFAULT;
+      return null;
     }
     String docInvType = StringUtils.trimToNull(f.docInvType());
     return docInvType != null && VF_NORMAL_TYPES.contains(docInvType) ? docInvType
@@ -343,13 +356,34 @@ final class InvoiceSifPreset {
   }
 
   /**
+   * The rectification codes applied when the caller sent NO {@code sifFields} at all: {@code R4}
+   * for each rectification field the invoice has ({@link #fields} lists them on a sales
+   * rectificative, for its active systems only). Nobody reviewed the step in that case — an
+   * MCP/API caller, or the SPA after a preview it could not read — and without this the
+   * completion would be refused for a code nobody was asked for.
+   *
+   * <p><b>This is the only place where the applied values differ from the preview.</b> To drop
+   * the fallback (so that such a caller gets {@link RectificationFiscalCodeGuard}'s 422 instead),
+   * return an empty map here; nothing else changes.
+   */
+  static Map<String, Object> unattendedRectificationFallback(Facts f) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    for (FieldSpec spec : fields(f)) {
+      if (RECTIFICATION_CODES.equals(spec.options())) {
+        values.put(spec.name(), RECTIFICATION_FALLBACK);
+      }
+    }
+    return values;
+  }
+
+  /**
    * The values to write: every editable field of the active systems with its previewed value
    * ({@link #defaults}, exactly what {@code sifDefaults} answers), overridden by the caller's
-   * {@code sifFields}, validated against those fields. A caller that sends nothing gets the
-   * preview as it is.
+   * {@code sifFields}, validated against those fields. A caller that sends no {@code sifFields}
+   * (absent, or an empty object) gets the preview plus {@link #unattendedRectificationFallback}.
    *
    * @param f the facts of the invoice
-   * @param requested the caller's {@code sifFields}; {@code null} reads as empty
+   * @param requested the caller's {@code sifFields}; {@code null} when it sent none
    * @return the field values to write, by DAL property name
    * @throws Refused 422 {@link #MSG_FIELD_INVALID} for a field that is not editable on this
    *     invoice or a value it does not accept
@@ -362,17 +396,19 @@ final class InvoiceSifPreset {
     // QA BUG-1: start from EVERY previewed value, so a caller that sends nothing gets exactly
     // what sifDefaults showed; what the caller sends then overrides field by field.
     Map<String, Object> values = new LinkedHashMap<>(defaults(f));
-    if (requested != null) {
-      Iterator<?> keys = requested.keys();
-      while (keys.hasNext()) {
-        String key = String.valueOf(keys.next());
-        FieldSpec spec = specs.get(key);
-        if (spec == null) {
-          throw invalid(key, "is not an editable SIF field of this invoice (active systems: "
-              + String.join(", ", systems(f)) + ")");
-        }
-        values.put(key, coerce(spec, requested.opt(key)));
+    if (requested == null || requested.length() == 0) {
+      values.putAll(unattendedRectificationFallback(f));
+      return values;
+    }
+    Iterator<?> keys = requested.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      FieldSpec spec = specs.get(key);
+      if (spec == null) {
+        throw invalid(key, "is not an editable SIF field of this invoice (active systems: "
+            + String.join(", ", systems(f)) + ")");
       }
+      values.put(key, coerce(spec, requested.opt(key)));
     }
     return values;
   }
@@ -539,13 +575,15 @@ final class InvoiceSifPreset {
         + "it is completed. Only the editable fields of the fiscal systems active for its "
         + "organization are accepted, with their codes; read them and their defaults with "
         + ACTION_SIF_DEFAULTS + " first. A field you omit takes exactly the value "
-        + ACTION_SIF_DEFAULTS + " shows for it (send nothing to get the preview as it is). ";
+        + ACTION_SIF_DEFAULTS + " shows for it. ";
     String direction = sales
-        ? "A rectificative invoice gets R4 as the SII motive, TicketBAI code and VERI*FACTU "
-            + "type, a normal one the VERI*FACTU type and description of its document type (F1 "
-            + "when it has none). Refused with 422 " + MSG_FIELD_INVALID + " for an unknown "
-            + "field or code, and with 422 ETGO_InvoiceRectificationCodeRequired when a "
-            + "rectificative invoice is left without a code for an active system."
+        ? "A normal invoice gets the VERI*FACTU type and description of its document type (F1 "
+            + "when it has none). On a rectificative invoice " + ACTION_SIF_DEFAULTS + " shows "
+            + "no SII motive, TicketBAI code or VERI*FACTU type: choose each one (R1-R5) and "
+            + "send it; only when you send no " + PARAM_SIF_FIELDS + " at all are they set to "
+            + RECTIFICATION_FALLBACK + ". Refused with 422 " + MSG_FIELD_INVALID + " for an "
+            + "unknown field or code, and with 422 ETGO_InvoiceRectificationCodeRequired when "
+            + "a rectificative invoice is left without a code for an active system."
         : "A purchase invoice only has SII fields: " + F_OPERATION_DATE + ", "
             + F_SII_KEY_PURCHASE + " (F6, LC, F5, F1), " + F_SII_DESCRIPTION + ", "
             + F_SII_AUTHORIZATION + " and " + F_SII_ACCOUNTING_REG_DATE + "; there is no "

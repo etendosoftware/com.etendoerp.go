@@ -258,7 +258,8 @@ final class ReturnInvoiceSupport {
     try {
       OBDal.getInstance().save(invoice);
       OBDal.getInstance().flush();
-      // ETP-6179: the SIF fields the caller chose (or R4 in every active system) and the
+      // ETP-6179: the SIF fields the caller chose (R4 in every active system only when it sent
+      // no sifFields at all, InvoiceSifPreset#unattendedRectificationFallback) and the
       // rectification guard, which this one-step creation never reached before. Written on the
       // header now; the completion in finalizeReturnInvoice reads them after the lines.
       InvoiceSifPreset.applyBeforeCompletion(invoice, body);

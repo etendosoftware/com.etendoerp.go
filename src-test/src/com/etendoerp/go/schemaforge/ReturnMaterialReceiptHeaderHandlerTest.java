@@ -2054,10 +2054,11 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
   /**
    * sifDefaults on a customer return previews the factura rectificativa createReturnInvoice would
-   * create: every active system, and R4 as SII motive, TicketBAI code and VERI*FACTU type.
+   * create: every active system, with SII's motive, TicketBAI's code and VERI*FACTU's type left
+   * empty for the user to choose.
    */
   @Test
-  public void handle_sifDefaultsPreviewsR4InEveryActiveSystem() throws Exception {
+  public void handle_sifDefaultsPreviewsNoRectificationCodeInAnyActiveSystem() throws Exception {
     try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
         new InvoiceSifPreviewTestSupport.PreviewMocks(true)) {
       ShipmentInOut returnDoc = mock(ShipmentInOut.class);
@@ -2078,9 +2079,12 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertTrue(data.getBoolean("sales"));
       assertTrue(data.getBoolean("rectificative"));
       JSONObject fields = data.getJSONObject("fields");
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_ETVFACINVTYPE));
+      assertTrue(fields.isNull(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+      assertTrue(fields.has(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+      assertTrue(fields.isNull(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+      assertTrue(fields.has(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+      assertTrue(fields.isNull(Invoice.PROPERTY_ETVFACINVTYPE));
+      assertTrue(fields.has(Invoice.PROPERTY_ETVFACINVTYPE));
       Mockito.verify(mocks.dal, Mockito.never()).save(any());
     }
   }

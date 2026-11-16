@@ -67,7 +67,8 @@ public class InvoiceSifPresetTest {
 
   /**
    * A rectificative generated from a return used to complete as F1 with no SII motive and no
-   * TicketBAI code. With nothing sent, every active system now gets R4.
+   * TicketBAI code. With no sifFields at all (nobody reviewed the step), every active system
+   * gets the R4 fallback.
    */
   @Test
   public void aRectificativeWithNothingSentGetsR4InEveryActiveSystem() {
@@ -93,7 +94,9 @@ public class InvoiceSifPresetTest {
   /**
    * QA BUG-1: a caller that sends no sifFields (MCP, REST) got only the corrective defaults, so the
    * invoice kept e.g. the creation path's VERI*FACTU description ("Ventas") while sifDefaults
-   * previewed the document type's ("Rectificaciones de Ventas"). Every previewed field is applied.
+   * previewed the document type's ("Rectificaciones de Ventas"). Every previewed field is applied;
+   * the rectification codes, which the preview leaves empty, are the only ones that differ: they
+   * take the unattended fallback.
    */
   @Test
   public void nothingSentAppliesEveryPreviewedFieldExactly() {
@@ -102,7 +105,9 @@ public class InvoiceSifPresetTest {
 
     Map<String, Object> values = InvoiceSifPreset.merge(facts, null);
 
-    assertEquals(InvoiceSifPreset.defaults(facts), values);
+    Map<String, Object> expected = new java.util.LinkedHashMap<>(InvoiceSifPreset.defaults(facts));
+    expected.putAll(InvoiceSifPreset.unattendedRectificationFallback(facts));
+    assertEquals(expected, values);
     assertEquals("Rectificaciones de Ventas", values.get(Invoice.PROPERTY_ETVFACVERIFACDESC));
     assertEquals("Devoluciones", values.get(Invoice.PROPERTY_AEATSIIDESCRIPCIONSII));
     assertEquals("2026-11-12", values.get(Invoice.PROPERTY_ETSGDATEOPERATION));
@@ -329,14 +334,19 @@ public class InvoiceSifPresetTest {
     assertEquals("F1", InvoiceSifPreset.defaultVerifactuInvType(salesFacts(false, "F1")));
   }
 
-  /** A rectificative gets R4 in VERI*FACTU even when its document type configures F2. */
+  /**
+   * A rectificative has no preselected VERI*FACTU type, whatever its document type configures:
+   * the field carries the rectification code there, so it must not read as an ordinary F type.
+   */
   @Test
-  public void aRectificativeGetsR4InVerifactuWhateverItsDocumentTypeSays() {
-    assertEquals("R4", InvoiceSifPreset.defaultVerifactuInvType(salesFacts(true, "F2")));
+  public void aRectificativeHasNoPreselectedVerifactuTypeWhateverItsDocumentTypeSays() {
+    assertNull(InvoiceSifPreset.defaultVerifactuInvType(salesFacts(true, "F2")));
+    assertNull(InvoiceSifPreset.defaultVerifactuInvType(salesFacts(true, "R1")));
   }
 
   /**
-   * End to end on a sales rectificative with every system active: R4 is written as SII motive,
+   * End to end on a sales rectificative with every system active and no sifFields: R4 is written
+   * (the unattended fallback) as SII motive,
    * TicketBAI code and VERI*FACTU type, the structural SII key R and type I are set, and the
    * TicketBAI / VERI*FACTU reverse types are computed.
    */
@@ -417,15 +427,18 @@ public class InvoiceSifPresetTest {
   // merge: what the caller sends
   // ---------------------------------------------------------------------------
 
-  /** A rectification code that is sent replaces R4 in that system only. */
+  /**
+   * Once sifFields is sent, the fallback is off: a rectification code that is sent is written,
+   * and the ones left out stay empty, as the preview shows them, for the guard to refuse.
+   */
   @Test
-  public void aSentRectificationCodeReplacesR4InThatSystemOnly() throws Exception {
+  public void aSentSifFieldsLeavesTheOmittedRectificationCodesEmpty() throws Exception {
     Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(true, "F1"),
         new JSONObject().put(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1"));
 
     assertEquals("R1", values.get(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-    assertEquals("R4", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
-    assertEquals("R4", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
+    assertNull(values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+    assertNull(values.get(Invoice.PROPERTY_ETVFACINVTYPE));
   }
 
   /** A field that is not an editable SIF field of this invoice is refused with 422. */

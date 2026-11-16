@@ -14314,8 +14314,9 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
 - **Body key `sifFields`** (optional object, declared in every one of those contracts through
   `InvoiceSifPreset.sifFieldsParam(sales)`): `{field: value}` with the DAL property names of the SIF tab.
   The contract text is worded per direction: the sales actions (`createDraftInvoice`, the customer
-  return's `createReturnInvoice`) describe the `R4` rectificative default, the VERI\*FACTU type of
-  the document type and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
+  return's `createReturnInvoice`) describe the VERI\*FACTU type of the document type, the
+  rectification codes a rectificative needs (none previewed, `R4` only when no `sifFields` is sent
+  at all) and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
   (`createPurchaseInvoice`, the return to vendor's `createReturnInvoice`) list the five SII fields
   only and state that there is no rectification code, not even on a purchase rectificative.
   Only the editable fields of the systems active for the invoice's organization are accepted — SII
@@ -14329,14 +14330,18 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   `ETGO_InvoiceSiiAuthorizationUnavailable`.
 - **A field not sent takes its previewed value** (MCP, REST, and the SPA alike): the invoice ends up
   with exactly what `sifDefaults` shows for every editable field of the active systems, and only the
-  fields sent override it — a caller that sends nothing gets the preview as it is. The preview
+  fields sent override it. The preview
   values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
   when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
   customer's own default key, else `F1`; on a purchase always `F1`), the SII description (the
   order's, else the organization's default one for the direction, `aeatsii_description`), the
   operation date (the order's, else today), the SII authorization unticked, on a purchase the
-  accounting registration date (today, empty when the SII configuration declares posted invoices),
-  and on a sales rectificative `R4` for SII's motive, TicketBAI's code and VERI\*FACTU's type.
+  accounting registration date (today, empty when the SII configuration declares posted invoices).
+  **On a sales rectificative the three rectification codes are previewed EMPTY** — SII's motive
+  (`aeatsiiMotivoRectif`), TicketBAI's code (`tbaiReverseinvoicecode`) and VERI\*FACTU's type
+  (`etvfacInvType`, which there only accepts `R1`–`R5` and is never previewed as an ordinary `F1`):
+  the user has to choose each one, and the SPA step keeps its primary button disabled until they
+  are chosen (ETP-6179 review follow-up; the earlier version preselected `R4`).
   **The order is part of the preview only when the invoice header will carry it** (ETP-6179 review
   W2): the order route and a single shipment/receipt with an order build the header from the order,
   while several shipments/receipts invoiced together (and a receipt without an order) build it from
@@ -14347,9 +14352,17 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   corrective ones — type and rectification codes — so a factura rectificativa created without
   `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
   document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
-  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes,
-  for these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
-  mandatory step before anything is confirmed (decided by the user, ETP-6179).
+  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`).
+- **No `sifFields` at all → the unattended fallback.** A caller that sends no `sifFields` (the key
+  absent, `null` or an empty object: an MCP/REST caller, or the SPA when the preview could not be
+  read and the step failed open) gets the preview plus `R4` in each rectification field the invoice
+  has, so the creation is not refused for a code nobody was asked for. This is the ONE place where
+  the applied values differ from what `sifDefaults` shows, and it is the same on every channel (no
+  §4.12.9 divergence). It lives in `InvoiceSifPreset.unattendedRectificationFallback` alone:
+  returning an empty map there removes it, and such a caller then gets the guard's 422. As soon as
+  `sifFields` carries any key, the fallback is off: a rectification code left out or sent blank
+  stays empty and the guard refuses the creation naming the systems that need one — the CP-14
+  "never preselect a motive" stance, which now holds on the screen of these flows too.
 - **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
   the header completion (`ETGO_InvoiceRectificationCodeRequired`,
   `ETGO_InvoiceVerifactuInvTypeNotRectificative`). A refusal rolls the whole creation back
