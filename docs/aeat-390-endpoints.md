@@ -639,6 +639,45 @@ every `FiscalDeclCrudHandler` (`setSingleOrdinaryModel`). `POST /declarations` o
 `existingId` is the latest ordinary (highest `DECL_SEQ`). A substitute declaration
 (`type: "com"`) is still allowed. 303/349 are unchanged (rectificativa flow, ETP-5187).
 
+## Manual test against a stub (ETP-5716)
+
+Repeatable checks of the AEAT validation for QA. **Never against the real AEAT and never a real
+presentation:** a client with a fiscal certificate and `ETSG_ForceTestMode` off would file for
+real. Use a client without the SIF fiscal setup, or keep the presentation steps on the stub.
+
+1. **Stub.** Any local HTTP server on `POST /ServValiDos` that answers one fixed JSON body per run:
+
+   | Scenario | Body |
+   |---|---|
+   | accepted | `{"respuesta":{"pdf":["JVBERi0xLjQK"]}}` |
+   | accepted with warnings | `{"respuesta":{"avisos":["W123 - aviso de prueba"],"pdf":["JVBERi0xLjQK"]}}` |
+   | rejected | `{"respuesta":{"errores":["PAR016 - error de prueba","Error sin código"]}}` |
+   | not validated | `{"respuesta":{}}` (neither a PDF nor an error), or an HTML page |
+   | connection failure | stop the stub (refused), or let it sleep more than 30 s (read timeout) |
+
+2. **Point the validator at it.** Insert the `AEAT303_ValidationEndpoint` preference by SQL (it
+   cannot be created from the Preference window: it is read as a property-list preference but
+   not registered in the property list — SQL in "AEAT protocol summary" of
+   `modules/org.openbravo.module.aeat303.es/doc/aeat-303-electronic-submission.md`). Delete the
+   row when done.
+3. **390 download.** On a draft 390 with no blocking rule, "Generar fichero 390", once per
+   scenario. Expect: the file downloads every time; accepted → success toast and
+   `VALIDACION-390-<year>-0A.pdf` in the Justificante tab (a second accepted run replaces it,
+   never two); warnings → amber result step, warning rows in Incidencias; rejected → red result
+   step, `AEAT-PAR016` and the uncoded error as blocking rows, Incidencias banner red with
+   "Revísalas antes de presentar la declaración.", Generar/Presentar still enabled; not validated
+   / connection failure → amber "No se ha podido validar…", incidents unchanged; connection
+   failure by timeout returns in about 30 s.
+4. **Attempt log.** After each run:
+   `SELECT outcome, environment, aeat_host, error_codes, warning_codes FROM etgo_fiscal_aeat_attempt ORDER BY created DESC LIMIT 1;`
+   — path `download`, environment `override` (host `localhost`), rejected codes `PAR016,UNCODED`.
+5. **Validation before a presentation.** Only with "Validar sin presentar" checked is nothing
+   filed — a real presentation (unchecked) with the stub answering `rejected` stops at the
+   validation (`stage: "validation"`, "Declaración no presentada…", draft unchanged, one
+   `pre_submission_validation` row and no `direct_submission` row). Run the "accepted" or
+   "no answer" variants of this step only when the presentation endpoint is also a stub
+   (`AEAT303_ProdEndpoint`) or `ETSG_ForceTestMode` is on, since they proceed to present.
+
 ## Module dependencies
 
 GO imports classic 390 classes. The jars come from the `localization.spain.extensions` bundle

@@ -65,7 +65,11 @@ Indexes: `ETGO_FISCAL_AEAT_ATT_MODEL (Model, Fiscal_Year, Attempt_Path)`,
   seven digits, then ` - ` (`35068`, `E00`, `A001`, `PAR016`, `E010124`, `E0100803`). Anything
   else — an identity number such as `B12345678`, `12345678Z` or `X1234567L`, a word, an entry
   without code — becomes `UNCODED`. Codes are distinct: a repeated code is stored once and
-  `UNCODED` once, and the counts are the number of distinct codes.
+  `UNCODED` once, and the counts are the number of distinct codes. The pattern is
+  `^([A-Z]{0,4}\d{2,7})\s+-\s` (`FiscalAeatValidationOutcome.LOGGABLE_CODE`). Known trade-off:
+  a genuine 9-character AEAT code with eight digits, such as `E39000101`, has the shape of a CIF
+  and is logged `UNCODED` — privacy wins over completeness. The full text still reaches the
+  declaration's incidents; only this log loses the code.
 - **Retry.** The insert is retried without the warning columns only for SQLState `42703`
   (undefined column: a table that predates them); a failed insert is rolled back.
 - **Warnings** come from the validator's `avisos`. The classic parser reads them on an accepted
