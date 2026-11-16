@@ -79,6 +79,24 @@ public final class UsageEventTypes {
    */
   public static final String PUBLIC_API_REQUEST = "publicapi.request";
 
+  /**
+   * ETP-6209 — a customer portal link left with a document email. {@code sessionKey} is the link's
+   * root ({@code etgo_portal_link.root_link_id}): one send.
+   */
+  public static final String PORTAL_LINK_SENT = "portal.link.sent";
+
+  /** ETP-6209 — a still-valid portal link opened the portal (once per page load). */
+  public static final String PORTAL_LINK_OPENED = "portal.link.opened";
+
+  /**
+   * ETP-6209 — an expired portal link asked for a new one: {@code ok} when the renewal email left,
+   * {@code error} with the refusal reason in {@code errorCode} otherwise.
+   */
+  public static final String PORTAL_LINK_RENEWED = "portal.link.renewed";
+
+  /** ETP-6209 — a document PDF was downloaded through the customer portal. */
+  public static final String PORTAL_DOCUMENT_DOWNLOADED = "portal.document.downloaded";
+
   /** Every accepted event type. Keep in sync with the constants above. */
   private static final Set<String> KNOWN = Set.of(
       AI_AGENT_MESSAGE,
@@ -86,7 +104,11 @@ public final class UsageEventTypes {
       AI_TOOL_EXECUTE,
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
-      PUBLIC_API_REQUEST);
+      PUBLIC_API_REQUEST,
+      PORTAL_LINK_SENT,
+      PORTAL_LINK_OPENED,
+      PORTAL_LINK_RENEWED,
+      PORTAL_DOCUMENT_DOWNLOADED);
 
   /**
    * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
@@ -97,7 +119,13 @@ public final class UsageEventTypes {
   private static final Set<String> SERVER_ONLY = Set.of(
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
-      PUBLIC_API_REQUEST);
+      PUBLIC_API_REQUEST,
+      // ETP-6209: the portal KPIs are facts about what a tenant's customers did; a browser must not
+      // be able to forge an open or a send.
+      PORTAL_LINK_SENT,
+      PORTAL_LINK_OPENED,
+      PORTAL_LINK_RENEWED,
+      PORTAL_DOCUMENT_DOWNLOADED);
 
   private UsageEventTypes() {
   }

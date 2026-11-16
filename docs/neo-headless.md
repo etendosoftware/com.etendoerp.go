@@ -2777,6 +2777,16 @@ delete-old-then-mark-new semantics), so there is nothing left to serve.
 The send event remains audited by the transactional email service, but download authorization does
 not rely on in-memory audit state.
 
+**Shared with the customer portal (ETP-6209).** The lookup and the streaming now live in
+`AnonymousAttachmentStreamer`, and the customer portal's `GET /sws/portal/documents/{kind}/{id}/pdf`
+(and the detail's `hasPdf`) uses the same code: `findMainAttachmentOfClient` (native SQL plus the
+explicit client check against the caller's credential: the signed token here, the portal link
+there), then `stream`, which bypasses `AttachImplementationManager.download()` exactly as described
+in ETP-5304 (filesystem attachments read their recorded `path`; others go through their own
+handler). Neither caller can use `NeoAttachmentsHelper.handleGetMain` or `NeoAttachmentsDownloader`:
+both resolve through the session's tenant, and these requests have none. The email link's answers
+(403, 404, 500 messages) are unchanged.
+
 **Attachment links (ETP-5715).** The MCP's download links are the same token with one more claim, `att` (the attachment id), valid 10 minutes
 (`DocumentDownloadTokenService#createAttachmentToken`). With the claim present the endpoint serves exactly that attachment — never the main one —
 after checking it belongs to the signed record and client; without it, nothing changes. See §4.12.37.
@@ -15050,7 +15060,7 @@ refusal of what the server would repair.
 - **Annotations.** `openWorldHint:true` (destructive true, idempotent false) for this tool only: it emails third parties. The attachment tools reach nobody else and stay closed-world.
 - **Logging.** An unexpected failure logs the exception class only, no throwable (its message or stack could carry an address); the PDF tool does the same.
 - **Registry.** Built once per call path (`McpDocumentEmailContracts#registry()`, passed on), never cached across requests (CDI beans, hot reload); an empty `supportedSpecs` builds none; an empty registry is logged once at warn level and the tool fails closed.
-- **Subject and message** also refuse C1 controls and bidi embedding/override/isolate characters. The preview omits the optional extra paragraph some contracts add (`resolveAdditionalParagraphHtml`, the portal link on sales invoices): it is protected and needs the send command.
+- **Subject and message** also refuse C1 controls and bidi embedding/override/isolate characters. The preview omits the optional extra paragraph some contracts add (the customer portal link of the sales quotation, order, shipment and invoice sends, ETP-6209): it mints a pending link row, so it only runs on a real send. With a portal link the real email's button goes to the portal ("Ver documento en el portal") instead of downloading the PDF, while the MCP preview still shows the download button, because it never mints the link.
 - **Language (measured).** The modal posts `language` = its UI locale, which lives only in the browser (`localStorage` key `schema-forge-locale`, default `es_ES`, `useLocaleState`; locales shipped: `es_ES`, `en_US`, `es_AR`). The user's AD language and the business partner's are never consulted, and the contract uses only `command.language` (the module's catalog exists in `es_ES` and `en_US`; anything else falls back to Spanish). The MCP therefore defaults to **`es_ES`**, the modal's default, and accepts an optional `language` in those three values (`422` otherwise); the preview shows the language it will use. (Before this change the tool used the AD language, so an `en_US` user got English copy the SPA would not have sent.)
 - **Duplicate addresses.** The server dedupes across channels (`to` wins over `cc`) and the modal does the same silently; the MCP keeps that and reports every dropped address (repeated in a list, or a cc already in `to`) as `removedDuplicates`, with a sentence in the hint.
 

@@ -30,6 +30,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
+import com.etendoerp.go.portal.PortalDocumentKind;
+import com.etendoerp.go.portal.PortalLinkService;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
@@ -153,7 +155,11 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
     this.includeAmount = includeAmount;
     this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
-    this.specName = deriveSpecName(this.name);
+    // Inverts the frontend's `${windowName}-send` contract-name convention to recover the
+    // window (NEO spec) this contract serves; null when the name carries no suffix.
+    this.specName = this.name == null || !this.name.endsWith(CONTRACT_NAME_SUFFIX) ? null
+        : StringUtils.trimToNull(
+            this.name.substring(0, this.name.length() - CONTRACT_NAME_SUFFIX.length()));
   }
 
   /**
@@ -190,19 +196,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           configured, defaultValue);
       return defaultValue;
     }
-  }
-
-  /**
-   * Inverts the frontend's {@code `${windowName}-send`} contract-name convention to recover the
-   * window (NEO spec) a contract serves.
-   *
-   * @param contractName contract name, may be {@code null}
-   * @return spec name without the {@code -send} suffix, or {@code null} when there is none
-   */
-  private static String deriveSpecName(String contractName) {
-    return contractName == null || !contractName.endsWith(CONTRACT_NAME_SUFFIX) ? null
-        : StringUtils.trimToNull(
-            contractName.substring(0, contractName.length() - CONTRACT_NAME_SUFFIX.length()));
   }
 
   @Override
@@ -480,14 +473,27 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       // who sent it. Derived from the session, never from the command body.
       String replyTo = EmailSenderIdentity.resolveReplyTo();
       // Resolved here, at the top of the send, rather than deep inside buildContent: a subclass's
-      // hook may consult feature gates and hit the database (see SalesInvoiceSendEmailContract),
-      // and that belongs where the command is still in scope and the decision is readable.
+      // hook may consult feature gates and hit the database, and that belongs where the command is
+      // still in scope and the decision is readable.
       Optional<String> extraParagraphHtml =
           resolveAdditionalParagraphHtml(command, document.get(), language);
+      // ETP-6209 — the customer portal link, for a contract that declared a portal document kind.
+      // Minted pending: it becomes usable only in onDelivered, i.e. only if this email leaves.
+      Optional<PortalLinkService.MintedLink> portalLink = DocumentSendPortalLink.mint(
+          portalLinkService(), portalDocumentKind().orElse(null), document.get().getRecordId(),
+          recipients, language, name);
+      // ETP-6209 Part B — with a portal link the portal is the email's one call to action and the
+      // download button goes: the portal shows the same printable. Branches only on whether a link
+      // was minted, never on which contract this is; with no link the email is unchanged.
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo,
-              extraParagraphHtml),
-          replyTo));
+          buildTemplateData(document.get(), downloadLink.get(),
+              DocumentSendPortalLink.callToAction(portalLink.orElse(null), downloadLink.get(),
+                  language),
+              language, messageEdits, replyTo,
+              DocumentSendPortalLink.withParagraph(extraParagraphHtml.orElse(null),
+                  portalLink.orElse(null), language)),
+          replyTo).withSendCorrelationId(portalLink.map(PortalLinkService.MintedLink::getId)
+              .orElse(null)));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -500,13 +506,14 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         EmailContractCommandSupport.FIELD_RECORD_ID);
     Optional<EmailDocumentRecord> document = resolveDocument(command);
     String tenantId = document.map(EmailDocumentRecord::getClientId).orElse(null);
-    String documentRecordId = resolveEffectiveRecordId(document.orElse(null), recordId);
+    String documentRecordId = EmailContractCommandSupport.firstNonBlank(
+        document.map(EmailDocumentRecord::getRecordId).orElse(null), recordId);
     EmailRecipientSet finalRecipients = recipient.getRecipientSet() != null
         ? recipient.getRecipientSet()
         : providerRequest.getRecipients();
     return EmailDeliveryPolicy.serverDerived(
         resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients,
-            messageEditsQuietly(command)),
+            EmailMessageEdits.fromBodyQuietly(command == null ? null : command.getBody())),
         java.util.Arrays.asList(
             EmailThrottleRule.perTenant(maxAttempts(PROP_MAX_PER_TENANT, ENV_MAX_PER_TENANT,
                 DEFAULT_MAX_PER_TENANT), THROTTLE_WINDOW_SECONDS),
@@ -527,9 +534,9 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    *
    * <p><b>Empty by default, and that default is the guarantee.</b> Every contract that does not
    * override this produces a byte-identical email to the one it produced before the hook existed —
-   * not because the caller is careful, but because there is nothing to append. The one override
-   * today is {@code SalesInvoiceSendEmailContract}, for the Business Partner portal link
-   * (ETP-5267), and it answers empty unless both of that feature's gates are open.
+   * not because the caller is careful, but because there is nothing to append. No contract
+   * overrides it today: the customer portal link, its first user (ETP-5267), moved to
+   * {@link #portalDocumentKind()} in ETP-6209.
    *
    * <p>Rendered between the body copy and the summary block (see {@link #buildContent}). It is
    * <em>not</em> a second call to action: {@link EmailContent} carries one button, which belongs to
@@ -545,8 +552,62 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     return Optional.empty();
   }
 
+  /**
+   * Per-contract declaration: the kind of sales document this contract sends, when its email
+   * should carry a customer portal link (ETP-6209).
+   *
+   * <p><b>Empty by default, and that default is the guarantee</b> that no other contract's email
+   * changes and no link row is ever minted for it. The four sales contracts (quotation, order,
+   * goods shipment, invoice — credit notes travel through the invoice one) override it. This base
+   * class only asks whether a kind was declared; it never names a window, a table or a contract,
+   * so the shared send path stays free of entity identity. Whether the link actually goes out is
+   * still the {@code bp-portal-link} flag's decision, evaluated inside
+   * {@link PortalLinkService#mintForSend} for the sending account.
+   *
+   * @return the declared kind, or empty for a contract whose email carries no portal link
+   */
+  protected Optional<PortalDocumentKind> portalDocumentKind() {
+    return Optional.empty();
+  }
+
+  /**
+   * The portal link service this contract mints and confirms links with. Overridable so a unit
+   * test can exercise the send without the DAL.
+   *
+   * @return the service
+   */
+  protected PortalLinkService portalLinkService() {
+    return PortalLinkServiceHolder.INSTANCE;
+  }
+
+  /** Lazy holder: a contract never sending a portal link never builds the service. */
+  private static final class PortalLinkServiceHolder {
+    private static final PortalLinkService INSTANCE = new PortalLinkService();
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Confirms the portal link this email carried (ETP-6209): only now, with the email gone, does
+   * the link start its lifetime. A send that was throttled, refused as duplicate or failed never
+   * reaches here, so its link stays pending and never works.</p>
+   */
+  @Override
+  public void onDelivered(EmailSendContext context, String sendLogId) {
+    String linkId = context == null || context.getProviderRequest() == null ? null
+        : context.getProviderRequest().getSendCorrelationId();
+    if (linkId == null || !portalDocumentKind().isPresent()) {
+      return;
+    }
+    EmailRecipientSet recipients = context.getRecipientSet();
+    portalLinkService().confirm(linkId, sendLogId,
+        recipients == null ? 0 : recipients.totalCount());
+  }
+
+  // Private composition step; grouping these into a holder would only move the list elsewhere.
+  @SuppressWarnings("java:S107")
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
+      DocumentSendPortalLink.CallToAction cta, String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml)
       throws JSONException {
     JSONObject data = new JSONObject();
@@ -563,7 +624,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
     data.put("download_link", downloadLink);
     data.put(FIELD_SUBJECT, resolveSubject(document, language, messageEdits));
-    data.put(FIELD_BODY, EmailLayout.render(buildContent(document, downloadLink, language,
+    data.put(FIELD_BODY, EmailLayout.render(buildContent(document, cta, language,
         messageEdits, replyTo, extraParagraphHtml)));
     return data;
   }
@@ -571,12 +632,13 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   /**
    * Composes the document email from shared layout blocks.
    *
-   * <p>An operator-authored message replaces only the introductory paragraph. The download button
+   * <p>An operator-authored message replaces only the introductory paragraph. The call to action
    * and its link fallback are always appended after it, because the whole point of the email is
    * the document and an operator rewriting the greeting must not be able to remove it (ETP-4717,
-   * reopened).</p>
+   * reopened). The button is the download link, or the customer portal when the email carries a
+   * portal link (ETP-6209 Part B).</p>
    */
-  private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
+  private EmailContent buildContent(EmailDocumentRecord document, DocumentSendPortalLink.CallToAction cta,
       String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml) {
     EmailContent.Builder content = EmailContent.builder();
@@ -604,7 +666,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     // reads with the sentence above it rather than after the facts table.
     extraParagraphHtml.ifPresent(content::paragraphHtml);
     appendDetails(content, document, language);
-    content.cta(EmailMessages.get("document.cta", language), downloadLink)
+    content.cta(cta.getLabel(), cta.getUrl())
         .linkFallbackText(EmailMessages.get("link.fallback", language));
     // A document email is the one place where answering reaches a person, so it closes by saying
     // so instead of with the generic team signature. Only when there is genuinely an address to
@@ -690,7 +752,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
     String recordId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID);
-    String documentRecordId = resolveEffectiveRecordId(document, recordId);
+    String documentRecordId = EmailContractCommandSupport.firstNonBlank(
+        document == null ? null : document.getRecordId(), recordId);
     // The download-link token key stays stable per record so re-sends with edited recipients do
     // not mint new tokens; it must not depend on the recipient-set hash.
     String downloadTokenKey = EmailContractCommandSupport.idempotencyKey(name,
@@ -698,7 +761,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (StringUtils.isAnyBlank(documentRecordId, document.getClientId(), downloadTokenKey)) {
       return Optional.empty();
     }
-    return DocumentDownloadTokenService.createDownloadLink(name, inferSpecName(), documentRecordId,
+    return DocumentDownloadTokenService.createDownloadLink(name, StringUtils.removeEnd(name, CONTRACT_NAME_SUFFIX), documentRecordId,
         document.getClientId(), downloadTokenKey);
   }
 
@@ -718,28 +781,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     String key = name + ":" + normalizedTenant + ":" + recordId + ":send:"
         + EmailContractCommandSupport.VERSION + ":" + finalRecipients.recipientSetHash();
     return messageEdits.isPresent() ? key + ":" + messageEdits.get().contentHash() : key;
-  }
-
-  /**
-   * Re-reads {@code messageEdits} for delivery-policy purposes. {@link #resolve} already rejected
-   * malformed payloads with a 400, so a parse failure here cannot reach a real send and degrades to
-   * "no edits".
-   */
-  private Optional<EmailMessageEdits> messageEditsQuietly(EmailContractCommand command) {
-    try {
-      return EmailMessageEdits.fromBody(command == null ? null : command.getBody());
-    } catch (EmailMessageEdits.InvalidMessageEditsException e) {
-      return Optional.empty();
-    }
-  }
-
-  private String resolveEffectiveRecordId(EmailDocumentRecord document, String fallbackRecordId) {
-    return EmailContractCommandSupport.firstNonBlank(
-        document == null ? null : document.getRecordId(), fallbackRecordId);
-  }
-
-  private String inferSpecName() {
-    return StringUtils.removeEnd(name, "-send");
   }
 
   private Optional<EmailDocumentRecord> resolveDocument(EmailContractCommand command) {
