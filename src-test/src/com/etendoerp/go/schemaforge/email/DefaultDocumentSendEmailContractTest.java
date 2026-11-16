@@ -506,7 +506,12 @@ public class DefaultDocumentSendEmailContractTest {
     // The intro is a plain sentence; the only link is the button.
     assertTrue(body, body.contains("<strong>portal de cliente</strong>. El enlace es válido"
         + " durante 48 horas."));
-    assertFalse("no inline anchor in the intro: " + body, body.contains("sf-link"));
+    // The layout's "copy this link" fallback under the button is a link too; the intro is not.
+    int intro = body.indexOf("<strong>portal de cliente</strong>");
+    String introParagraph = body.substring(body.lastIndexOf("<p", intro),
+        body.indexOf("</p>", intro));
+    assertFalse("no inline anchor in the intro: " + introParagraph,
+        introParagraph.contains("<a "));
     // Pending until the email is delivered.
     verify(portalLinks, never()).confirm(any(), any(), anyInt());
   }

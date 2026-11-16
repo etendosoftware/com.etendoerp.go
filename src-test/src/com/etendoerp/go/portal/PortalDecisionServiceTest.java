@@ -421,7 +421,7 @@ public class PortalDecisionServiceTest {
     assertFalse(view.isAppliedNow());
     verify(quotation, never()).setDocumentStatus(anyString());
     assertTrue("no second notice", emails.constructed().isEmpty());
-    assertFalse(executed("UPDATE"));
+    assertFalse(updated());
   }
 
   @Test
@@ -462,7 +462,7 @@ public class PortalDecisionServiceTest {
 
       assertEquals(closed, PortalDecisionService.State.NOT_PENDING, view.getState());
       assertFalse(closed, view.isAppliedNow());
-      assertFalse(closed, executed("UPDATE"));
+      assertFalse(closed, updated());
     }
     // A link that can no longer be read fails closed the same way.
     when(linkService.findLink("LINK-1")).thenReturn(Optional.empty());
@@ -566,6 +566,11 @@ public class PortalDecisionServiceTest {
 
   private boolean executed(String fragment) {
     return statements.stream().anyMatch(s -> ((String) s[0]).contains(fragment));
+  }
+
+  /** Whether any UPDATE statement ran (a {@code SELECT ... FOR UPDATE} lock is not one). */
+  private boolean updated() {
+    return statements.stream().anyMatch(s -> ((String) s[0]).trim().startsWith("UPDATE"));
   }
 
   private static Object[] row(String decision, String reasonCode, String reasonText,

@@ -343,18 +343,22 @@ public class PortalDocumentsEndpointTest {
     // Columns: organization id, its name, issuer shown.
     Object[][] cases = { { "ORG-9", "Acme Norte SL", "Acme Norte SL" }, { "0", "*", "Acme" },
         { "ORG-9", " ", "Acme" } };
-    for (Object[] c : cases) {
-      Organization organization = mock(Organization.class);
-      when(organization.getId()).thenReturn((String) c[0]);
-      when(organization.getName()).thenReturn((String) c[1]);
-      Invoice document = invoice("INV-1", null, null, null);
-      when(document.get("organization")).thenReturn(organization);
-      query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.INVOICE,
-          "INV-1")).thenReturn(document);
+    // No stored printable: the detail's hasPdf must not reach the real attachment lookup.
+    try (MockedStatic<AnonymousAttachmentStreamer> stored =
+        mockStatic(AnonymousAttachmentStreamer.class)) {
+      for (Object[] c : cases) {
+        Organization organization = mock(Organization.class);
+        when(organization.getId()).thenReturn((String) c[0]);
+        when(organization.getName()).thenReturn((String) c[1]);
+        Invoice document = invoice("INV-1", null, null, null);
+        when(document.get("organization")).thenReturn(organization);
+        query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.INVOICE,
+            "INV-1")).thenReturn(document);
 
-      JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "invoice", "INV-1");
+        JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "invoice", "INV-1");
 
-      assertEquals(Arrays.toString(c), c[2], body.getString("issuer"));
+        assertEquals(Arrays.toString(c), c[2], body.getString("issuer"));
+      }
     }
   }
 
@@ -367,31 +371,32 @@ public class PortalDocumentsEndpointTest {
     Object[][] cases = { { null, true, null },
         { PortalDecisionService.Blocked.EXPIRED, false, "expired" },
         { PortalDecisionService.Blocked.NOT_PENDING, false, "not_pending" } };
-    for (Object[] c : cases) {
-      try (MockedConstruction<PortalDecisionService> decisions = mockConstruction(
-          PortalDecisionService.class, (service, context) -> when(service.blockedReason(any(),
-              any())).thenReturn((PortalDecisionService.Blocked) c[0]))) {
-
-        JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
-            .getJSONObject("decision");
-
-        assertEquals(c[1], decision.getBoolean("canDecide"));
-        if (c[2] == null) {
-          assertTrue(decision.isNull("blockedReason"));
-        } else {
-          assertEquals(c[2], decision.getString("blockedReason"));
-        }
-        assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
-            decision.getBoolean("acceptAvailable"));
-        verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
-      }
-    }
-    // Only a quotation carries the block: an order's detail has none.
-    Order order = order("ORD-1", "SO");
-    query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.ORDER,
-        "ORD-1")).thenReturn(order);
+    // No stored printable: the detail's hasPdf must not reach the real attachment lookup.
     try (MockedStatic<AnonymousAttachmentStreamer> stored =
         mockStatic(AnonymousAttachmentStreamer.class)) {
+      for (Object[] c : cases) {
+        try (MockedConstruction<PortalDecisionService> decisions = mockConstruction(
+            PortalDecisionService.class, (service, context) -> when(service.blockedReason(any(),
+                any())).thenReturn((PortalDecisionService.Blocked) c[0]))) {
+
+          JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
+              .getJSONObject("decision");
+
+          assertEquals(c[1], decision.getBoolean("canDecide"));
+          if (c[2] == null) {
+            assertTrue(decision.isNull("blockedReason"));
+          } else {
+            assertEquals(c[2], decision.getString("blockedReason"));
+          }
+          assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
+              decision.getBoolean("acceptAvailable"));
+          verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
+        }
+      }
+      // Only a quotation carries the block: an order's detail has none.
+      Order order = order("ORD-1", "SO");
+      query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.ORDER,
+          "ORD-1")).thenReturn(order);
       assertFalse(PortalDocumentsEndpoint.detail(SESSION, "order", "ORD-1").has("decision"));
     }
   }

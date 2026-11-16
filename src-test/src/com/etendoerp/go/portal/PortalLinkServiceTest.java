@@ -517,6 +517,8 @@ public class PortalLinkServiceTest {
     BaseOBObject row = mock(BaseOBObject.class);
     dal.when(() -> PortalLinkDal.findById(LINK_ID)).thenReturn(row);
     dal.when(() -> PortalLinkDal.toLink(row)).thenReturn(expiredLink());
+    // The insert logs the new row's client: the expired link's client must resolve.
+    when(obDal.get(eq(Client.class), anyString())).thenReturn(mock(Client.class));
 
     try (MockedStatic<PortalLinkPolicy> policy = mockStatic(PortalLinkPolicy.class);
         MockedStatic<SequenceIdData> ids = mockStatic(SequenceIdData.class)) {

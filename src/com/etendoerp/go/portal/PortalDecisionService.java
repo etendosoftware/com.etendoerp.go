@@ -377,7 +377,8 @@ public class PortalDecisionService {
       return false;
     }
     if (DECISION_REJECT.equals(decision)
-        && (!REASON_CODES.contains(reason) || REASON_OTHER.equals(reason) && text == null)) {
+        && (reason == null || !REASON_CODES.contains(reason)
+            || REASON_OTHER.equals(reason) && text == null)) {
       return false;
     }
     return text == null || text.length() <= MAX_REASON_TEXT;
