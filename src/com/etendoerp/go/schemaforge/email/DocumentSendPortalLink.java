@@ -41,7 +41,7 @@ final class DocumentSendPortalLink {
    * becomes usable only in {@code onDelivered}, i.e. only if the email leaves.
    *
    * @param service the portal link service
-   * @param kind the contract's declared kind, empty for a contract with no portal link
+   * @param kind the contract's declared kind, {@code null} for a contract with no portal link
    * @param recordId the document
    * @param recipients the send's recipients (To and CC renew the link later)
    * @param language the email's language
@@ -49,47 +49,47 @@ final class DocumentSendPortalLink {
    * @return the minted link, or empty
    */
   static Optional<PortalLinkService.MintedLink> mint(PortalLinkService service,
-      Optional<PortalDocumentKind> kind, String recordId, EmailRecipientSet recipients,
-      String language, String contractName) {
-    if (!kind.isPresent()) {
+      PortalDocumentKind kind, String recordId, EmailRecipientSet recipients, String language,
+      String contractName) {
+    if (kind == null) {
       return Optional.empty();
     }
-    return service.mintForSend(kind.get(), recordId, recipients.getTo(), recipients.getCc(),
+    return service.mintForSend(kind, recordId, recipients.getTo(), recipients.getCc(),
         language, contractName);
   }
 
   /**
    * Appends the portal sentence to the contract's own extra paragraph, if any.
    *
-   * @param extraParagraphHtml the contract's extra paragraph
-   * @param link the minted link, or empty
+   * @param extraParagraphHtml the contract's extra paragraph, or {@code null}
+   * @param link the minted link, or {@code null}
    * @param language the email's language
    * @return both paragraphs, either one, or empty
    */
-  static Optional<String> withParagraph(Optional<String> extraParagraphHtml,
-      Optional<PortalLinkService.MintedLink> link, String language) {
-    Optional<String> portal = link.map(minted -> paragraph(minted, language));
-    if (!extraParagraphHtml.isPresent()) {
-      return portal;
+  static Optional<String> withParagraph(String extraParagraphHtml,
+      PortalLinkService.MintedLink link, String language) {
+    String portal = link == null ? null : paragraph(link, language);
+    if (extraParagraphHtml == null) {
+      return Optional.ofNullable(portal);
     }
-    return portal.isPresent() ? Optional.of(extraParagraphHtml.get() + "<br><br>" + portal.get())
-        : extraParagraphHtml;
+    return Optional.of(portal == null ? extraParagraphHtml
+        : extraParagraphHtml + "<br><br>" + portal);
   }
 
   /**
    * The email's one button: the portal when a link was minted, else the document download
    * (ETP-6209 Part B: with a link, the portal shows the same printable).
    *
-   * @param link the minted link, or empty
+   * @param link the minted link, or {@code null}
    * @param downloadLink the document's download link
    * @param language the email's language
    * @return the button
    */
-  static CallToAction callToAction(Optional<PortalLinkService.MintedLink> link,
-      String downloadLink, String language) {
+  static CallToAction callToAction(PortalLinkService.MintedLink link, String downloadLink,
+      String language) {
     return new CallToAction(
-        EmailMessages.get(link.isPresent() ? "document.portal.cta" : "document.cta", language),
-        link.map(PortalLinkService.MintedLink::getUrl).orElse(downloadLink));
+        EmailMessages.get(link != null ? "document.portal.cta" : "document.cta", language),
+        link != null ? link.getUrl() : downloadLink);
   }
 
   /**

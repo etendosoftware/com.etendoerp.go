@@ -489,16 +489,18 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       // ETP-6209 — the customer portal link, for a contract that declared a portal document kind.
       // Minted pending: it becomes usable only in onDelivered, i.e. only if this email leaves.
       Optional<PortalLinkService.MintedLink> portalLink = DocumentSendPortalLink.mint(
-          portalLinkService(), portalDocumentKind(), document.get().getRecordId(), recipients,
-          language, name);
+          portalLinkService(), portalDocumentKind().orElse(null), document.get().getRecordId(),
+          recipients, language, name);
       // ETP-6209 Part B — with a portal link the portal is the email's one call to action and the
       // download button goes: the portal shows the same printable. Branches only on whether a link
       // was minted, never on which contract this is; with no link the email is unchanged.
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
           buildTemplateData(document.get(), downloadLink.get(),
-              DocumentSendPortalLink.callToAction(portalLink, downloadLink.get(), language),
+              DocumentSendPortalLink.callToAction(portalLink.orElse(null), downloadLink.get(),
+                  language),
               language, messageEdits, replyTo,
-              DocumentSendPortalLink.withParagraph(extraParagraphHtml, portalLink, language)),
+              DocumentSendPortalLink.withParagraph(extraParagraphHtml.orElse(null),
+                  portalLink.orElse(null), language)),
           replyTo).withSendCorrelationId(portalLink.map(PortalLinkService.MintedLink::getId)
               .orElse(null)));
     } catch (JSONException e) {
