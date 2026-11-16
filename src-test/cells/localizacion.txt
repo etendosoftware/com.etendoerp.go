@@ -3,7 +3,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=localizacion [-Pkind=mock|integration|all]
 
-# --- con mocks (44)
+# --- con mocks (47)
 com.etendoerp.go.schemaforge.AbstractFiscalHandlerTest
 com.etendoerp.go.schemaforge.ClassicMessageRemapTest
 com.etendoerp.go.schemaforge.CorrectInvoiceHandlerTest
@@ -17,11 +17,14 @@ com.etendoerp.go.schemaforge.Fiscal349SnapshotSupportTest
 com.etendoerp.go.schemaforge.Fiscal349ViesValidationTest
 com.etendoerp.go.schemaforge.Fiscal390BoxesCalculatorTest
 com.etendoerp.go.schemaforge.Fiscal390BoxesHandlerTest
+com.etendoerp.go.schemaforge.Fiscal390FileValidationSupportTest
 com.etendoerp.go.schemaforge.Fiscal390IncidentRulesTest
 com.etendoerp.go.schemaforge.Fiscal390IncidentsSupportTest
 com.etendoerp.go.schemaforge.Fiscal390PreloadAggregatorTest
 com.etendoerp.go.schemaforge.Fiscal390SourcesSupportTest
 com.etendoerp.go.schemaforge.Fiscal390SubmissionSupportTest
+com.etendoerp.go.schemaforge.FiscalAeatAttemptLogTest
+com.etendoerp.go.schemaforge.FiscalAeatValidationOutcomeTest
 com.etendoerp.go.schemaforge.FiscalDeclCrudHandlerTest
 com.etendoerp.go.schemaforge.FiscalDeclSubmittedSnapshotColumnTest
 com.etendoerp.go.schemaforge.FiscalHandlerExceptionTest

@@ -31,6 +31,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -39,10 +40,12 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
@@ -79,6 +82,8 @@ import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
+import com.etendoerp.go.schemaforge.FiscalAeatValidationOutcome.Outcome;
+import com.etendoerp.go.schemaforge.FiscalAeatValidationOutcome.Path;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
@@ -101,6 +106,8 @@ import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
  *       pre-flight gates (missing id, declaration not found, missing presenter, no certificate)
  *       and the full outcomes (test-mode success, production success with declaration
  *       persistence, AEAT error without persistence).</li>
+ *   <li>The validation that precedes a real presentation and the attempt-log rows every AEAT
+ *       call leaves (ETP-5716), through {@code submit(...)} / {@code SubmitRun}.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.Fiscal303BoxesHandler
@@ -2425,6 +2432,329 @@ public class Fiscal303SubmitHandlerTest {
         return new JSONObject(SNAPSHOT_JSON);
       }
     };
+  }
+
+  // ── validation before a real presentation + attempt log (ETP-5716) ─────────────────────
+
+  private static final String PRODUCTION_REQUEST =
+      "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}";
+  private static final String VALIDATOR_ERROR = "E0100803 - Razon social del Declarante.";
+  private static final String VALIDATOR_WARNING = "A001 - Aviso informativo AEAT.";
+
+  /** One {@code POST /fiscal303/submit} run: its fixtures, and what it left behind. */
+  private static final class SubmitRun {
+    final FiscalAeatAttemptLog attemptLog = mock(FiscalAeatAttemptLog.class);
+    final FiscalDecl decl = matchingDecl("client1", "org1");
+    final BaseOBObject staleIncident = mock(BaseOBObject.class);
+    final BaseOBObject newIncident = mock(BaseOBObject.class);
+    /** Makes the submission snapshot fail to compute. */
+    boolean snapshotFails;
+    OBDal obDal;
+    HttpServletResponse response;
+    JSONObject body;
+    /** The AEAT service the request built; null when it stopped before building one. */
+    AEAT303SubmissionService service;
+
+    /** The rows left in the attempt log, in order — all for the submitted declaration. */
+    List<FiscalAeatValidationOutcome> attemptRows(int expected) {
+      ArgumentCaptor<FiscalAeatAttemptLog.Declaration> declaration =
+          ArgumentCaptor.forClass(FiscalAeatAttemptLog.Declaration.class);
+      ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+          ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+      verify(attemptLog, times(expected)).record(declaration.capture(), outcome.capture(), any());
+      for (FiscalAeatAttemptLog.Declaration d : declaration.getAllValues()) {
+        assertEquals(new FiscalAeatAttemptLog.Declaration("303", 2026, "T2", "decl-1", "org1"), d);
+      }
+      for (FiscalAeatValidationOutcome o : outcome.getAllValues()) {
+        assertEquals("303", o.model());
+      }
+      return outcome.getAllValues();
+    }
+
+    /** Asserts that neither the validator nor the presentation was called, and no row written. */
+    void assertTheAeatWasNeverCalled() {
+      if (service != null) {
+        verify(service, never()).submitValidation(anyString(), anyString(), anyString(),
+            anyString(), anyString());
+        verify(service, never()).submitValidation(anyString(), anyString(), anyString(),
+            anyString());
+        verify(service, never()).submitProduction(any());
+      }
+      verifyNoInteractions(attemptLog);
+    }
+  }
+
+  /**
+   * Runs {@code POST /fiscal303/submit} for declaration {@code decl-1} with the file generation
+   * and the incidents persistence stubbed, the attempt log replaced by {@code run.attemptLog}
+   * and the AEAT service built by the handler prepared by {@code aeat}.
+   */
+  @SuppressWarnings("unchecked")
+  private static SubmitRun submit(String jsonBody, SubmitRun run,
+      MockedConstruction.MockInitializer<AEAT303SubmissionService> aeat) throws Exception {
+    when(run.decl.getId()).thenReturn("decl-1");
+    StringWriter capturedBody = new StringWriter();
+    run.response = responseCapturing(capturedBody);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+        if (run.snapshotFails) {
+          throw new IllegalStateException("No periods found");
+        }
+        return new JSONObject(SNAPSHOT_JSON);
+      }
+
+      @Override
+      FiscalAeatAttemptLog attemptLog() {
+        return run.attemptLog;
+      }
+    };
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, aeat)) {
+      run.obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(run.obDal);
+      stubNoSiblingDeclarations(run.obDal);
+      when(run.obDal.get(FiscalDecl.class, "decl-1")).thenReturn(run.decl);
+      when(run.obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(run.obDal);
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(run.obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT),
+          anyString())).thenReturn(incQuery);
+      when(incQuery.list()).thenReturn(Collections.singletonList(run.staleIncident));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT))
+          .thenReturn(run.newIncident);
+
+      h.handle("submit", "POST", requestFor("2026", "T2", "decl-1", jsonBody), run.response);
+
+      run.service = serviceMock.constructed().isEmpty() ? null : serviceMock.constructed().get(0);
+      assertTrue("one AEAT service per request at most", serviceMock.constructed().size() <= 1);
+    }
+    run.body = new JSONObject(capturedBody.toString());
+    return run;
+  }
+
+  private static AEAT303SubmissionResult validatorResult(boolean accepted) {
+    AEAT303SubmissionResult r = new AEAT303SubmissionResult();
+    r.setStatus(accepted ? AEAT303SubmissionResult.Status.SUCCESS
+        : AEAT303SubmissionResult.Status.ERROR);
+    r.setTestMode(true);
+    return r;
+  }
+
+  private static AEAT303SubmissionResult presentationResult(boolean accepted) {
+    AEAT303SubmissionResult r = new AEAT303SubmissionResult();
+    r.setStatus(accepted ? AEAT303SubmissionResult.Status.SUCCESS
+        : AEAT303SubmissionResult.Status.ERROR);
+    r.setTestMode(false);
+    return r;
+  }
+
+  private static Object requestField(Object request, String name) throws Exception {
+    Field f = request.getClass().getDeclaredField(name);
+    f.setAccessible(true);
+    return f.get(request);
+  }
+
+  /**
+   * The validator rejects the file a real presentation is about to send: nothing is presented,
+   * the validator's errors and warnings replace the declaration's AEAT incidents, the
+   * declaration stays as it was and the only attempt row is the validation's.
+   */
+  @Test
+  public void testHandleSubmit_productionValidatorRejects_neverPresents() throws Exception {
+    AEAT303SubmissionResult rejected = validatorResult(false);
+    rejected.addError(VALIDATOR_ERROR);
+    rejected.addWarning(VALIDATOR_WARNING);
+
+    SubmitRun run = submit(PRODUCTION_REQUEST, new SubmitRun(), (service, ctx) -> {
+      when(service.hasOrgCertificate(any())).thenReturn(true);
+      when(service.submitValidation(eq("303"), anyString(), anyString(), anyString(),
+          anyString())).thenReturn(rejected);
+    });
+
+    verify(run.service, never()).submitProduction(any());
+    verify(run.obDal).remove(run.staleIncident);
+    verify(run.obDal, times(2)).save(run.newIncident);
+    verify(run.newIncident).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "E0100803");
+    verify(run.newIncident).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+        FiscalDeclCrudHandler.SEVERITY_BLOCK);
+    verify(run.newIncident).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "A001");
+    verify(run.newIncident).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+        FiscalDeclCrudHandler.SEVERITY_WARN);
+    verify(run.obDal, times(1)).commitAndClose();
+    verify(run.decl, never()).setDeclarationStatus(anyString());
+    verify(run.decl, never()).setSubmissionMethod(anyString());
+    verify(run.decl, never()).setSubmittedSnapshot(any());
+    verify(run.obDal, never()).save(run.decl);
+
+    verify(run.response).setStatus(HttpServletResponse.SC_OK);
+    assertEquals("ERROR", run.body.getString("status"));
+    assertEquals(FiscalAeatSubmissionSupport.STAGE_VALIDATION, run.body.getString("stage"));
+    assertFalse(run.body.getBoolean("testMode"));
+    assertEquals(VALIDATOR_ERROR, run.body.getJSONArray("errors").getString(0));
+    assertTrue(run.body.has("declarationData"));
+
+    List<FiscalAeatValidationOutcome> rows = run.attemptRows(1);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.REJECTED, rows.get(0).outcome());
+    assertEquals(List.of("E0100803"), rows.get(0).loggedErrorCodes());
+  }
+
+  /**
+   * The validator accepts: the presentation goes ahead with the very file that was validated,
+   * and the request leaves two rows — the validation, then the presentation.
+   */
+  @Test
+  public void testHandleSubmit_productionValidatorAccepts_presentsTheValidatedFile()
+      throws Exception {
+    SubmitRun run = submit(PRODUCTION_REQUEST, new SubmitRun(), (service, ctx) -> {
+      when(service.hasOrgCertificate(any())).thenReturn(true);
+      when(service.submitValidation(eq("303"), anyString(), anyString(), anyString(),
+          anyString())).thenReturn(validatorResult(true));
+      when(service.submitProduction(any())).thenReturn(presentationResult(true));
+    });
+
+    ArgumentCaptor<String> validated = ArgumentCaptor.forClass(String.class);
+    verify(run.service).submitValidation(eq("303"), validated.capture(), anyString(),
+        anyString(), eq("ES"));
+    ArgumentCaptor<AEAT303SubmissionService.ProductionSubmissionRequest> presented =
+        ArgumentCaptor.forClass(AEAT303SubmissionService.ProductionSubmissionRequest.class);
+    verify(run.service).submitProduction(presented.capture());
+    assertEquals(SAMPLE_303_CONTENT, validated.getValue());
+    assertEquals(validated.getValue(), requestField(presented.getValue(), "fileContent"));
+
+    assertEquals("SUCCESS", run.body.getString("status"));
+    assertFalse(run.body.has("stage"));
+    verify(run.decl).setDeclarationStatus("submitted_ack");
+
+    List<FiscalAeatValidationOutcome> rows = run.attemptRows(2);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertTrue(rows.get(0).testMode());
+    assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(1).outcome());
+    assertFalse(rows.get(1).testMode());
+  }
+
+  /**
+   * The validator does not answer: what happens next is
+   * {@link FiscalAeatSubmissionSupport#PRESENT_WHEN_VALIDATOR_UNANSWERED} — present anyway, or
+   * stop with {@code VALIDATION_UNAVAILABLE}.
+   */
+  @Test
+  public void testHandleSubmit_productionValidatorThrows_followsThePolicy() throws Exception {
+    SubmitRun run = submit(PRODUCTION_REQUEST, new SubmitRun(), (service, ctx) -> {
+      when(service.hasOrgCertificate(any())).thenReturn(true);
+      when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+          anyString())).thenThrow(new OBException("timeout", new java.net.ConnectException()));
+      when(service.submitProduction(any())).thenReturn(presentationResult(true));
+    });
+
+    if (FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED) {
+      verify(run.service).submitProduction(any());
+      assertEquals("SUCCESS", run.body.getString("status"));
+      List<FiscalAeatValidationOutcome> rows = run.attemptRows(2);
+      assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+      assertEquals(Outcome.CONNECTION_FAILURE, rows.get(0).outcome());
+      assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    } else {
+      verify(run.service, never()).submitProduction(any());
+      verify(run.response).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
+      assertEquals(FiscalAeatSubmissionSupport.ERR_VALIDATION_UNAVAILABLE,
+          run.body.getString("errorCode"));
+      assertEquals(Outcome.CONNECTION_FAILURE, run.attemptRows(1).get(0).outcome());
+    }
+  }
+
+  /** "Validar sin presentar": ONE call to the validator, one {@code manual_validation} row. */
+  @Test
+  public void testHandleSubmit_testMode_validatesOnceAndLeavesAManualValidationRow()
+      throws Exception {
+    SubmitRun run = submit("{\"testMode\":true}", new SubmitRun(), (service, ctx) ->
+        when(service.submitValidation(anyString(), anyString(), anyString(), anyString()))
+            .thenReturn(validatorResult(true)));
+
+    verify(run.service, times(1)).submitValidation(eq(SAMPLE_303_CONTENT), anyString(),
+        anyString(), eq("ES"));
+    verify(run.service, never()).submitValidation(anyString(), anyString(), anyString(),
+        anyString(), anyString());
+    verify(run.service, never()).submitProduction(any());
+    assertEquals("TEST_SUCCESS", run.body.getString("status"));
+
+    List<FiscalAeatValidationOutcome> rows = run.attemptRows(1);
+    assertEquals(Path.MANUAL_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertTrue(rows.get(0).testMode());
+  }
+
+  /** No certificate: refused before the validator is asked; not an attempt. */
+  @Test
+  public void testHandleSubmit_noCertificate_neverValidatesNorLogsAnAttempt() throws Exception {
+    SubmitRun run = submit(PRODUCTION_REQUEST, new SubmitRun(), (service, ctx) ->
+        when(service.hasOrgCertificate(any())).thenReturn(false));
+
+    verify(run.response).setStatus(HttpServletResponse.SC_CONFLICT);
+    assertEquals("NO_CERTIFICATE", run.body.getString("errorCode"));
+    run.assertTheAeatWasNeverCalled();
+  }
+
+  /** Already submitted: refused before the AEAT service even exists; not an attempt. */
+  @Test
+  public void testHandleSubmit_alreadySubmitted_neverValidatesNorLogsAnAttempt()
+      throws Exception {
+    SubmitRun fixtures = new SubmitRun();
+    when(fixtures.decl.getDeclarationStatus()).thenReturn("submitted_ack");
+
+    SubmitRun run = submit(PRODUCTION_REQUEST, fixtures, (service, ctx) ->
+        when(service.hasOrgCertificate(any())).thenReturn(true));
+
+    verify(run.response).setStatus(HttpServletResponse.SC_CONFLICT);
+    assertEquals("ALREADY_SUBMITTED", run.body.getString("errorCode"));
+    assertTrue("the AEAT service must not even be built", run.service == null);
+    run.assertTheAeatWasNeverCalled();
+  }
+
+  /** Figures that cannot be frozen: stopped before the validator is asked; not an attempt. */
+  @Test
+  public void testHandleSubmit_snapshotFails_neverValidatesNorLogsAnAttempt() throws Exception {
+    SubmitRun fixtures = new SubmitRun();
+    fixtures.snapshotFails = true;
+
+    SubmitRun run = submit(PRODUCTION_REQUEST, fixtures, (service, ctx) ->
+        when(service.hasOrgCertificate(any())).thenReturn(true));
+
+    verify(run.response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+    assertEquals("SNAPSHOT_FAILED", run.body.getString("errorCode"));
+    run.assertTheAeatWasNeverCalled();
+  }
+
+  /** A presentation that fails with an exception is an attempt too: its row is still written. */
+  @Test
+  public void testHandleSubmit_presentationThrows_stillLeavesItsAttemptRow() throws Exception {
+    SubmitRun run = submit(PRODUCTION_REQUEST, new SubmitRun(), (service, ctx) -> {
+      when(service.hasOrgCertificate(any())).thenReturn(true);
+      when(service.submitValidation(eq("303"), anyString(), anyString(), anyString(),
+          anyString())).thenReturn(validatorResult(true));
+      when(service.submitProduction(any()))
+          .thenThrow(new OBException("AEAT unreachable", new java.net.SocketTimeoutException()));
+    });
+
+    verify(run.response).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
+    assertEquals("SUBMISSION_FAILED", run.body.getString("errorCode"));
+    verify(run.decl, never()).setDeclarationStatus(anyString());
+
+    List<FiscalAeatValidationOutcome> rows = run.attemptRows(2);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    assertEquals(Outcome.CONNECTION_FAILURE, rows.get(1).outcome());
+    assertFalse(rows.get(1).testMode());
   }
 
   private static FiscalDecl matchingDecl(String clientId, String orgId) {
