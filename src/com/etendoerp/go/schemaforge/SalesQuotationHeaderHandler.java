@@ -110,6 +110,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   /** The defaults endpoint's object of field values. */
   private static final String KEY_DEFAULTS = "defaults";
+  /** The evaluate-display answer's map of field to read-only state. */
+  private static final String KEY_READ_ONLY = "readOnly";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
@@ -201,6 +203,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
       return withoutRejectReasonDefault(context, result);
     }
+    if (NeoEndpointType.EVALUATE_DISPLAY.equals(context.getEndpointType())) {
+      return withoutClassicRejectReasonLock(context, result);
+    }
     if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
       return result;
     }
@@ -235,6 +240,27 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
     defaults.remove(Order.PROPERTY_REJECTREASON);
     defaults.remove(Order.PROPERTY_REJECTREASON + IDENTIFIER_SUFFIX);
+    return NeoResponse.ok(effective.getBody());
+  }
+
+  /**
+   * The reject reason is editable on a rejected quotation in GO (ETP-6209): the seller sets the
+   * tenant's internal reason after a portal rejection. The window declares that rule itself
+   * ({@code decisions.json} {@code readOnlyLogic: @DocStatus@!'CJ'}). evaluate-display, however,
+   * answers the Classic column logic ({@code @DocStatus@='CJ'|@DocStatus@='CA'}: locked exactly once
+   * rejected), and the SPA ORs it with the window's, so the field stayed grey. The Classic row is
+   * shared and never edited; this quotation's answer drops that one key, so the window's own
+   * {@code readOnlyLogic} decides. Every other field keeps the AD answer.
+   */
+  private static NeoResponse withoutClassicRejectReasonLock(NeoContext context,
+      NeoResponse result) {
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    JSONObject readOnly = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_READ_ONLY);
+    if (readOnly == null || !readOnly.has(Order.PROPERTY_REJECTREASON)) {
+      return result;
+    }
+    readOnly.remove(Order.PROPERTY_REJECTREASON);
     return NeoResponse.ok(effective.getBody());
   }
 
