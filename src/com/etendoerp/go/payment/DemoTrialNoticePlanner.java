@@ -155,7 +155,8 @@ public final class DemoTrialNoticePlanner {
       if (!now.isBefore(trialEndsAt.plus(EXPIRED_NOTICE_WINDOW_DAYS, ChronoUnit.DAYS))) {
         return Optional.empty();
       }
-      return Optional.of(DemoTrialNotice.expired(snapshot.getTrialStartedAt(), trialEndsAt));
+      return Optional.of(edited(snapshot,
+          DemoTrialNotice.expired(snapshot.getTrialStartedAt(), trialEndsAt)));
     }
     // Still allowed past the end of the trial means something else grants access; there is no
     // trial left to remind anybody about.
@@ -165,10 +166,16 @@ public final class DemoTrialNoticePlanner {
     long remainingDays = policy.remainingTrialDays(environment, now, configuration);
     for (int threshold : reminderDays) {
       if (remainingDays <= threshold) {
-        return Optional.of(DemoTrialNotice.reminder(threshold, remainingDays,
-            snapshot.getTrialStartedAt(), trialEndsAt));
+        return Optional.of(edited(snapshot, DemoTrialNotice.reminder(threshold, remainingDays,
+            snapshot.getTrialStartedAt(), trialEndsAt)));
       }
     }
     return Optional.empty();
+  }
+
+  /** ETP-6223 — marks the notice of a trial whose end was edited, so a new date re-arms it. */
+  private static DemoTrialNotice edited(TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot,
+      DemoTrialNotice notice) {
+    return snapshot.getTrialEndsAt() == null ? notice : notice.withEditedTrialEnd();
   }
 }
