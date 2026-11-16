@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -340,7 +342,7 @@ class InvoiceInboxReviewTest {
     assertEquals("unknown", header.getJSONObject("duplicate").getString("state"));
     assertEquals("absent", header.getJSONObject("receiver").getString("check"));
     assertFalse(document.getJSONObject("validation").getBoolean("valid"));
-    assertEquals(new JSONArray(List.of("vendor", "invoiceDate", "amount", "lines")).toString(),
+    assertEquals(new JSONArray(List.of("vendor", "invoiceDate", "lines")).toString(),
         document.getJSONObject("validation").getJSONArray("missing").toString());
   }
 
@@ -440,6 +442,239 @@ class InvoiceInboxReviewTest {
         .getJSONArray("candidates").getJSONObject(0);
     assertFalse(unresolved.has("searchKey"));
     verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void theNamesOfANewProductsCategoryAndUnitAreResolvedFromTheStoredIdsAtReadTime()
+      throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"product\":{\"state\":\"new\",\"new\":{\"name\":\"X\",\"categoryId\":\"C1\","
+            + "\"category\":\"Stale\",\"uomId\":\"U1\",\"uom\":\"Stale\"}}},"
+            + "{\"product\":{\"state\":\"new\",\"new\":{\"categoryId\":\"GONE\","
+            + "\"category\":\"Stale\"}}}]"));
+    when(lookups.productCategoryById("C1"))
+        .thenReturn(Optional.of(new OcrLookups.Party("C1", "Bebidas")));
+    when(lookups.uomById("U1")).thenReturn(Optional.of(new OcrLookups.Party("U1", "Unidad")));
+    when(lookups.productCategoryById("GONE")).thenReturn(Optional.empty());
+
+    org.codehaus.jettison.json.JSONArray lines = ok().getJSONObject("document")
+        .getJSONArray("lines");
+    JSONObject first = lines.getJSONObject(0).getJSONObject("product").getJSONObject("new");
+    JSONObject second = lines.getJSONObject(1).getJSONObject("product").getJSONObject("new");
+
+    assertEquals("Bebidas", first.getString("category"));
+    assertEquals("Unidad", first.getString("uom"));
+    assertFalse(second.has("category"), "an id that no longer resolves leaves no (stale) name");
+    verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void theNameOfALinesTaxIsResolvedFromItsIdAtReadTime() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"resolved\",\"id\":\"T1\",\"name\":\"Stale\",\"rate\":21}},"
+            + "{\"tax\":{\"state\":\"pending_vendor\"}}]"));
+    when(lookups.taxNames(anyCollection())).thenReturn(Map.of("T1", "IVA 21%"));
+
+    org.codehaus.jettison.json.JSONArray lines = ok().getJSONObject("document")
+        .getJSONArray("lines");
+
+    assertEquals("IVA 21%", lines.getJSONObject(0).getJSONObject("tax").getString("name"));
+    assertFalse(lines.getJSONObject(1).getJSONObject("tax").has("name"));
+    verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void theCurrencyBlockCarriesTheScaleOfTheStoredCurrencyOrOfTheOneDerivedWithoutWriting()
+      throws Exception {
+    when(lookups.currencyById("JPY")).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0)));
+    when(lookups.documentCurrency(eq("V1"), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("USD", "USD", "$", 2)));
+    String vendor = "{\"state\":\"linked\",\"id\":\"V1\",\"candidates\":[]}";
+
+    when(row.getCurrentData()).thenReturn(doc(vendor, "[]")
+        .replace("\"header\":{", "\"header\":{\"currencyId\":\"JPY\","));
+    JSONObject stored = ok().getJSONObject("currency");
+    assertEquals("JPY", stored.getString("id"));
+    assertEquals(0, stored.getInt("scale"));
+
+    when(row.getCurrentData()).thenReturn(doc(vendor, "[]"));
+    JSONObject derived = ok().getJSONObject("currency");
+    assertEquals("USD", derived.getString("isoCode"));
+    assertEquals(2, derived.getInt("scale"));
+    verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void theTaxRoundingModeIsStampedOnTheLinesOfTheAnswer() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"resolved\",\"id\":\"T1\"}},{\"tax\":{\"state\":\"resolved\","
+            + "\"id\":\"T2\"}}]"));
+    when(lookups.taxDocAmountModes(anyCollection())).thenReturn(Map.of("T1", "L"));
+
+    org.codehaus.jettison.json.JSONArray lines = ok().getJSONObject("document")
+        .getJSONArray("lines");
+
+    assertEquals("L", lines.getJSONObject(0).getJSONObject("tax").getString("docTaxAmount"));
+    assertEquals("D", lines.getJSONObject(1).getJSONObject("tax").getString("docTaxAmount"));
+  }
+
+  @Test
+  void aTaxThatDoesNotResolveKeepsWhatTheDocumentHoldsAsPlainText() throws Exception {
+    String hostile = "<script>alert(1)</script> ' OR 1=1 --";
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"resolved\",\"id\":\"GONE\",\"name\":"
+            + JSONObject.quote(hostile) + ",\"rate\":21}}]"));
+    when(lookups.taxNames(anyCollection())).thenReturn(Map.of());
+
+    JSONObject tax = ok().getJSONObject("document").getJSONArray("lines").getJSONObject(0)
+        .getJSONObject("tax");
+
+    assertEquals(hostile, tax.getString("name"), "copied as data, never interpreted");
+    assertEquals("GONE", tax.getString("id"));
+    verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void aLineWithoutATaxIdIsNeverAskedForANameNorAMode() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"pending_vendor\"}},{\"description\":\"x\"}]"));
+
+    ok();
+
+    verify(lookups, never()).taxNames(anyCollection());
+    verify(lookups, never()).taxDocAmountModes(anyCollection());
+  }
+
+  @Test
+  void aFailingTaxModeLookupNeverFailsTheCallAndEveryTaxReadsAsD() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"resolved\",\"id\":\"T1\"}}]"));
+    when(lookups.taxNames(anyCollection())).thenReturn(Map.of("T1", "IVA 21%"));
+    when(lookups.taxDocAmountModes(anyCollection())).thenThrow(new IllegalStateException("boom"));
+
+    JSONObject tax = ok().getJSONObject("document").getJSONArray("lines").getJSONObject(0)
+        .getJSONObject("tax");
+
+    assertEquals("IVA 21%", tax.getString("name"), "the enrichment before it is kept");
+    assertFalse(tax.has("docTaxAmount"), "nothing is stamped: the totals read it as D");
+  }
+
+  @Test
+  void aFailingTaxNameLookupNeverFailsTheCall() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}",
+        "[{\"tax\":{\"state\":\"resolved\",\"id\":\"T1\",\"name\":\"Kept\"}}]"));
+    when(lookups.taxNames(anyCollection())).thenThrow(new IllegalStateException("boom"));
+
+    JSONObject tax = ok().getJSONObject("document").getJSONArray("lines").getJSONObject(0)
+        .getJSONObject("tax");
+
+    assertEquals("Kept", tax.getString("name"));
+  }
+
+  @Test
+  void aStoredCurrencyThatCannotBeReadFallsBackToTheOrganizationWithTwoDecimals()
+      throws Exception {
+    Organization org = mock(Organization.class);
+    Currency eur = currency("EUR-ID", "EUR", "E");
+    when(org.getCurrency()).thenReturn(eur);
+    when(row.getOrganization()).thenReturn(org);
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\",\"candidates\":[]}", "[]")
+        .replace("\"header\":{", "\"header\":{\"currencyId\":\"GONE\","));
+    when(lookups.currencyById("GONE")).thenReturn(Optional.empty());
+
+    JSONObject currency = ok().getJSONObject("currency");
+
+    assertEquals("EUR", currency.getString("isoCode"));
+    assertEquals(2, currency.getInt("scale"));
+  }
+
+  @Test
+  void aFailingCurrencyLookupFallsBackToTheOrganizationAndNeverFailsTheCall() throws Exception {
+    Organization org = mock(Organization.class);
+    Currency eur = currency("EUR-ID", "EUR", "E");
+    when(org.getCurrency()).thenReturn(eur);
+    when(row.getOrganization()).thenReturn(org);
+    when(lookups.documentCurrency(any(), any())).thenThrow(new IllegalStateException("boom"));
+
+    JSONObject currency = ok().getJSONObject("currency");
+
+    assertEquals("EUR", currency.getString("isoCode"));
+    assertEquals(2, currency.getInt("scale"));
+  }
+
+  @Test
+  void withoutLookupsTheCurrencyIsTheOrganizationsWithTwoDecimals() throws Exception {
+    registry.when(() -> OcrLookupsRegistry.forResolver(anyString())).thenReturn(Optional.empty());
+    Organization org = mock(Organization.class);
+    Currency eur = currency("EUR-ID", "EUR", "E");
+    when(org.getCurrency()).thenReturn(eur);
+    when(row.getOrganization()).thenReturn(org);
+
+    JSONObject currency = ok().getJSONObject("currency");
+
+    assertEquals("EUR", currency.getString("isoCode"));
+    assertEquals(2, currency.getInt("scale"));
+  }
+
+  @Test
+  void theCurrencyIsDerivedWithTheOrganizationOfTheRowNotTheSessions() throws Exception {
+    Organization rowOrganization = mock(Organization.class);
+    when(rowOrganization.getId()).thenReturn("ROW-ORG");
+    when(row.getOrganization()).thenReturn(rowOrganization);
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.empty());
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"none\"}", "[]"));
+
+    ok();
+
+    verify(lookups).documentCurrency(isNull(), eq("ROW-ORG"));
+  }
+
+  @Test
+  void noCurrencyAnywhereStillAnswersAScaleOfTwo() throws Exception {
+    assertEquals(2, ok().getJSONObject("currency").getInt("scale"));
+  }
+
+  @Test
+  void theDerivedCurrencyIsAskedWithTheLinkedVendorOnlyAndNothingIsWritten() throws Exception {
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.empty());
+
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"linked\",\"id\":\"V1\"}", "[]"));
+    ok();
+    verify(lookups).documentCurrency(eq("V1"), any());
+
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"ambiguous\",\"id\":\"V1\"}",
+        "[]"));
+    ok();
+    verify(lookups).documentCurrency(isNull(), any());
+    verify(row, never()).setCurrentData(anyString());
+  }
+
+  @Test
+  void aStoredCurrencyIsReadByIdAndTheVendorIsNotConsulted() throws Exception {
+    when(lookups.currencyById("JPY")).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("JPY", "JPY", null, 0)));
+    when(row.getCurrentData()).thenReturn(doc("{\"state\":\"linked\",\"id\":\"V1\"}", "[]")
+        .replace("\"header\":{", "\"header\":{\"currencyId\":\"JPY\","));
+
+    JSONObject currency = ok().getJSONObject("currency");
+
+    assertTrue(currency.isNull("symbol"));
+    assertEquals(0, currency.getInt("scale"));
+    verify(lookups, never()).documentCurrency(any(), any());
+  }
+
+  @Test
+  void aCreditDocumentWithNegativeLinesAndTotalIsAValidDocumentInTheAnswer() throws Exception {
+    when(row.getCurrentData()).thenReturn("{\"version\":1,\"header\":{\"vendor\":{\"state\":"
+        + "\"linked\",\"id\":\"V1\"},\"invoiceDate\":\"2026-11-02\",\"totalAmount\":-121,"
+        + "\"receiver\":{\"check\":\"absent\"}},\"lines\":[{\"index\":0,\"quantity\":-2,"
+        + "\"unitPrice\":50,\"product\":{\"state\":\"linked\",\"id\":\"P1\"},"
+        + "\"tax\":{\"state\":\"resolved\",\"id\":\"T21\"}}]}");
+
+    JSONObject validation = ok().getJSONObject("document").getJSONObject("validation");
+
+    assertTrue(validation.getBoolean("valid"), validation.toString());
   }
 
   @Test

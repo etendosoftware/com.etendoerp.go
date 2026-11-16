@@ -184,7 +184,7 @@ class InvoiceInboxMarkReviewedTest {
   @Test
   void anInvalidDocumentIsNotValidAndListsWhatIsMissing() throws Exception {
     currentData = "{version:1,header:{vendor:{state:'none',candidates:[],extracted:{}},"
-        + "documentNo:'',invoiceDate:null,totalAmount:0,totalSource:'lines'},lines:[],notices:[]}";
+        + "documentNo:'',invoiceDate:null,totalAmount:null,totalSource:'lines'},lines:[],notices:[]}";
 
     NeoResponse response = mark();
 
@@ -194,9 +194,85 @@ class InvoiceInboxMarkReviewedTest {
     assertTrue(missing.toString().contains("invoiceDate"));
     assertTrue(missing.toString().contains("amount"));
     assertTrue(missing.toString().contains("lines"));
-    verify(dal, never()).save(any());
-    assertEquals("PENDING_REVIEW", status);
+    // the stored status is brought in line with the verdict, and the answer says so
+    verify(dal).save(row);
+    assertEquals("ERROR", status);
     assertFalse(reviewed);
+    assertEquals("ERROR", response.getBody().getJSONObject("error").getString("documentStatus"));
+  }
+
+  @Test
+  void aCreditDocumentWithNegativeLinesAndATotalBelowZeroIsMarkedReady() throws Exception {
+    currentData = VALID.replace("quantity:10,unitPrice:10", "quantity:-10,unitPrice:10")
+        .replace("totalAmount:121", "totalAmount:-121");
+
+    NeoResponse response = mark();
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("READY", status);
+    assertTrue(reviewed);
+  }
+
+  @Test
+  void aFreeDocumentWithAZeroQuantityLineAndATotalOfZeroIsMarkedReady() throws Exception {
+    currentData = VALID.replace("quantity:10,unitPrice:10", "quantity:0,unitPrice:0")
+        .replace("totalAmount:121", "totalAmount:0");
+
+    assertEquals(200, mark().getHttpStatus());
+    assertEquals("READY", status);
+  }
+
+  @Test
+  void aLineWithoutQuantityOrPriceIsNotValidAndNamesTheLineAndTheField() throws Exception {
+    currentData = VALID.replace("quantity:10,unitPrice:10", "quantity:null,description2:'x'");
+
+    NeoResponse response = mark();
+
+    assertRefusal(response, 422, "not_valid");
+    String missing = response.getBody().getJSONObject("error").getJSONArray("missing")
+        .toString();
+    assertTrue(missing.contains("line[0].quantity"), missing);
+    assertTrue(missing.contains("line[0].unitPrice"), missing);
+    assertEquals("ERROR", status);
+    verify(row).setErrorCode("MISSING_FIELDS");
+    assertFalse(reviewed);
+  }
+
+  @Test
+  void anInvalidPendingRowWithATooLongReferenceMovesToItsOwnErrorCode() throws Exception {
+    currentData = VALID.replace("documentNo:'FC-1'", "documentNo:'" + "X".repeat(21) + "'");
+
+    NeoResponse response = mark();
+
+    assertRefusal(response, 422, "not_valid");
+    assertEquals("ERROR", status);
+    verify(row).setErrorCode("REFERENCE_TOO_LONG");
+  }
+
+  @Test
+  void theNotValidAnswerCarriesTheDocumentStatusAndTheNewUpdatedTokenAndIsFlushed()
+      throws Exception {
+    currentData = VALID.replace("totalAmount:121", "totalAmount:null");
+    when(row.getUpdated()).thenReturn(new java.util.Date(1_700_000_000_000L));
+
+    JSONObject error = mark().getBody().getJSONObject("error");
+
+    assertEquals("ERROR", error.getString("documentStatus"));
+    assertTrue(error.getString("updated").startsWith("2023-11-14"), error.toString());
+    org.mockito.InOrder order = org.mockito.Mockito.inOrder(dal);
+    order.verify(dal).save(row);
+    order.verify(dal).flush();
+    order.verify(dal).refresh(row);
+  }
+
+  @Test
+  void anErrorRowIsNotReviewableEvenWhenItsDocumentIsInvalid() throws Exception {
+    status = "ERROR";
+    errorCode = "MISSING_FIELDS";
+    currentData = "{version:1,header:{vendor:{state:'none'}},lines:[]}";
+
+    assertRefusal(mark(), 409, "not_reviewable");
+    verify(dal, never()).save(any());
   }
 
   @Test
@@ -226,6 +302,7 @@ class InvoiceInboxMarkReviewedTest {
 
     assertRefusal(mark(), 422, "not_valid");
 
+    status = "PENDING_REVIEW";
     currentData = "{broken";
     assertRefusal(mark(), 422, "not_valid");
   }

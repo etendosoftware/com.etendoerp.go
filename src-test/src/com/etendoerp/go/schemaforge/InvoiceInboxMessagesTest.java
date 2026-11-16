@@ -195,8 +195,8 @@ class InvoiceInboxMessagesTest {
       }
     }
 
-    assertEquals(29, defaults.size());
-    assertEquals(29, keys.size());
+    assertEquals(30, defaults.size());
+    assertEquals(30, keys.size());
     assertEquals(keys, defaults.keySet());
   }
 }

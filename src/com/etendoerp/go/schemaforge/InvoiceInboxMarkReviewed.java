@@ -26,6 +26,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * ETP-6050 — the {@code mark-reviewed} action of the invoice inbox: {@code POST
@@ -34,7 +35,13 @@ import com.etendoerp.go.schemaforge.data.IncomingDocument;
  * {@code Y}. Nothing else moves: not {@code ADJUSTED}, not the summary columns, not the document.
  *
  * <p>The verdict is recomputed here (the stored one is not trusted) and the document must be
- * valid, else 422 {@code not_valid} with the {@code missing} codes. A document already
+ * valid, else 422 {@code not_valid} with the {@code missing} codes. The cases that can actually
+ * arrive: a valid {@code PENDING_REVIEW} row is marked; an invalid {@code PENDING_REVIEW} row (a
+ * row read before a rule changed, or whose stored status lags its document: the normal invalid
+ * row is already {@code ERROR}) is 422 and is moved to {@code ERROR}; an {@code ERROR} row is 409
+ * {@code not_reviewable} (it is invalid by definition: edit it first); {@code READY} is 200;
+ * {@code CONFIRMED}, {@code DISCARDED} and a foreign receiver are 409 {@code not_editable} from the
+ * guards. A document already
  * {@code READY} answers 200 unchanged and writes nothing, but only for a caller that holds the
  * current token: a retry that still carries the OLD token (the first call did save) is refused
  * first, 409 {@code stale_document}, because the token check runs before the status is looked at,
@@ -113,9 +120,7 @@ final class InvoiceInboxMarkReviewed {
     }
     InvoiceInboxValidator.Result verdict = InvoiceInboxValidator.validate(document(row));
     if (!verdict.isValid()) {
-      return InvoiceInboxEditGate.refuse(422, CODE_NOT_VALID, InvoiceInboxMessages.NOT_VALID,
-          InvoiceInboxEditGate.details(KEY_MISSING, new JSONArray(verdict.getMissing())),
-          KEY_MISSING, StringUtils.join(verdict.getMissing(), ", "));
+      return notValid(row, verdict);
     }
     row.setStatus(READY);
     row.setReviewed(true);
@@ -123,6 +128,29 @@ final class InvoiceInboxMarkReviewed {
     OBDal.getInstance().flush();
     OBDal.getInstance().refresh(row);
     return InvoiceInboxReview.respond(row);
+  }
+
+  /**
+   * A {@code PENDING_REVIEW} row that does not validate when judged again (a row read before a rule
+   * changed, or one whose stored status lags its document): 422 {@code not_valid} with the
+   * recomputed {@code missing}. The stored status is brought in line with the verdict
+   * ({@code ERROR} with its code, as an edit would) so the list says what the panel says. That
+   * write is committed with the request (an error {@code NeoResponse} is a returned value, not an
+   * exception), so the answer carries the NEW {@code updated} token and the new status for the
+   * caller to adopt without a reload.
+   */
+  private static NeoResponse notValid(IncomingDocument row, InvoiceInboxValidator.Result verdict)
+      throws JSONException {
+    InvoiceInboxStatusPolicy.applyAfterEdit(row, verdict);
+    OBDal.getInstance().save(row);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().refresh(row);
+    JSONObject details = new JSONObject()
+        .put(KEY_MISSING, new JSONArray(verdict.getMissing()))
+        .put(KEY_UPDATED, NeoDateFormat.toAuditToken(row.getUpdated()))
+        .put(InvoiceInboxEditGate.KEY_DOCUMENT_STATUS, row.getStatus());
+    return InvoiceInboxEditGate.refuse(422, CODE_NOT_VALID, InvoiceInboxMessages.NOT_VALID,
+        details, KEY_MISSING, StringUtils.join(verdict.getMissing(), ", "));
   }
 
   /** The stored document, the empty skeleton when it cannot be read. */

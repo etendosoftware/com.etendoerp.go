@@ -24,8 +24,8 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_NONE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_UNKNOWN;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ADDRESS_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CANDIDATES;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CURRENCY_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DESCRIPTION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DISCOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
@@ -53,7 +53,6 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_SOURCE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALIDATION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
@@ -92,6 +91,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
 import com.etendoerp.go.schemaforge.ocr.InboxLineMatcher;
+import com.etendoerp.go.schemaforge.ocr.InboxTaxModes;
 import com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotals;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Address;
@@ -146,6 +146,7 @@ final class InvoiceInboxApply {
   static final String CODE_UNKNOWN_PRODUCT = "unknown_product";
   static final String CODE_UNKNOWN_CATEGORY = "unknown_category";
   static final String CODE_UNKNOWN_UOM = "unknown_uom";
+  static final String CODE_UNKNOWN_TAX = "unknown_tax";
 
   static final String OP_SET_HEADER = "setHeader";
   static final String OP_SET_LINE = "setLine";
@@ -162,11 +163,15 @@ final class InvoiceInboxApply {
   private static final String KEY_ID = "id";
   private static final String KEY_FIELDS = "fields";
   private static final String KEY_FIELD = "field";
+  private static final String KEY_TAX_ID = "taxId";
   private static final String KEY_MAX = "max";
   private static final String PENDING_REVIEW = "PENDING_REVIEW";
   private static final String STATUS_READY = "READY";
   private static final int MAX_ID_LENGTH = 64;
-  private static final int QUANTITY_PRICE_SCALE = 4;
+  /** Decimals each editable number is rounded (HALF_UP) to and stored with. */
+  static final int QUANTITY_SCALE = 4;
+  static final int PRICE_SCALE = 6;
+  static final int DISCOUNT_SCALE = 4;
   private static final int RATE_SCALE = 2;
   private static final BigDecimal MAX_AMOUNT = new BigDecimal("1000000000");
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
@@ -182,7 +187,7 @@ final class InvoiceInboxApply {
   private static final Map<String, Set<String>> OP_KEYS = Map.of(
       OP_SET_HEADER, Set.of(KEY_OP, K_DOCUMENT_NO, K_INVOICE_DATE),
       OP_SET_LINE, Set.of(KEY_OP, K_INDEX, K_DESCRIPTION, K_QUANTITY, K_UNIT_PRICE, K_TAX_RATE,
-          K_DISCOUNT),
+          K_DISCOUNT, KEY_TAX_ID),
       OP_ADD_LINE, Set.of(KEY_OP),
       OP_REMOVE_LINE, Set.of(KEY_OP, K_INDEX),
       OP_SELECT_VENDOR, Set.of(KEY_OP, KEY_ID),
@@ -329,6 +334,10 @@ final class InvoiceInboxApply {
       throw invalidRequest();
     }
     if (allowed.contains(KEY_ID) && !isId(op.opt(KEY_ID))) {
+      throw invalidRequest();
+    }
+    Object taxId = op.opt(KEY_TAX_ID);
+    if (taxId != null && !JSONObject.NULL.equals(taxId) && !isId(taxId)) {
       throw invalidRequest();
     }
     if (OP_NEW_VENDOR.equals(op.optString(KEY_OP)) && op.has(KEY_FIELDS)) {
@@ -574,15 +583,22 @@ final class InvoiceInboxApply {
     }
     if (op.has(K_QUANTITY)) {
       setNumber(edit, line, K_QUANTITY, op.get(K_QUANTITY), index, MAX_AMOUNT.negate(),
-          MAX_AMOUNT, QUANTITY_PRICE_SCALE);
+          MAX_AMOUNT, QUANTITY_SCALE);
     }
     if (op.has(K_UNIT_PRICE)) {
       setNumber(edit, line, K_UNIT_PRICE, op.get(K_UNIT_PRICE), index, MAX_AMOUNT.negate(),
-          MAX_AMOUNT, QUANTITY_PRICE_SCALE);
+          MAX_AMOUNT, PRICE_SCALE);
     }
-    if (op.has(K_TAX_RATE) && setNumber(edit, line, K_TAX_RATE, op.get(K_TAX_RATE), index,
+    // The tax chosen by id wins over a rate typed in the same operation: the rate is not applied at all.
+    boolean taxIdWins = op.has(KEY_TAX_ID) && !JSONObject.NULL.equals(op.get(KEY_TAX_ID));
+    if (op.has(K_TAX_RATE) && !taxIdWins && setNumber(edit, line, K_TAX_RATE, op.get(K_TAX_RATE), index,
         BigDecimal.ZERO, HUNDRED, RATE_SCALE)) {
+      // A typed rate (legacy way of choosing a tax) drops a chosen tax: the tax is resolved again.
+      forgetChosenTax(line);
       edit.taxLines.add(index);
+    }
+    if (op.has(KEY_TAX_ID)) {
+      setTax(edit, line, index, op.get(KEY_TAX_ID));
     }
     if (op.has(K_DISCOUNT)) {
       setDiscount(edit, line, op.get(K_DISCOUNT), index);
@@ -611,8 +627,8 @@ final class InvoiceInboxApply {
   private static void setDiscount(Edit edit, JSONObject line, Object value, int index)
       throws JSONException {
     BigDecimal parsed = JSONObject.NULL.equals(value) ? BigDecimal.ZERO
-        : parseNumber(value, K_DISCOUNT, index, BigDecimal.ZERO, HUNDRED, QUANTITY_PRICE_SCALE);
-    BigDecimal stored = storedNumber(line, K_DISCOUNT, QUANTITY_PRICE_SCALE);
+        : parseNumber(value, K_DISCOUNT, index, BigDecimal.ZERO, HUNDRED, DISCOUNT_SCALE);
+    BigDecimal stored = storedNumber(line, K_DISCOUNT, DISCOUNT_SCALE);
     if (parsed.compareTo(stored == null ? BigDecimal.ZERO : stored) == 0) {
       return;
     }
@@ -621,6 +637,80 @@ final class InvoiceInboxApply {
     } else {
       line.put(K_DISCOUNT, parsed.doubleValue());
     }
+    edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(true));
+  }
+
+  /** Whether the line's tax is one the user chose (as opposed to the one the server resolved). */
+  private static boolean isChosenTax(JSONObject line) {
+    JSONObject tax = line.optJSONObject(K_TAX);
+    return tax != null && MATCHED_MANUAL.equals(tax.optString(K_MATCHED_BY));
+  }
+
+  private static void forgetChosenTax(JSONObject line) {
+    JSONObject tax = line.optJSONObject(K_TAX);
+    if (tax != null) {
+      tax.remove(K_MATCHED_BY);
+    }
+  }
+
+  /**
+   * Chooses the tax of a line by id, as the purchase invoice line's tax selector does (ETP-6050).
+   * The id must pass {@link OcrLookups#taxById} for the document date, else 422
+   * {@code unknown_tax}. The CHOSEN TAX WINS: the line's {@code taxRate} becomes its rate (what the
+   * totals read), its {@code tax} block becomes {@code {state: resolved, matchedBy: manual, id,
+   * rate}} and the name is never stored (the review adds it at read time). {@code null} drops a
+   * chosen tax: the server resolves one again, from the rate and the vendor's address. Choosing
+   * the id already chosen changes nothing; choosing the id the server resolved only pins it.
+   */
+  private static void setTax(Edit edit, JSONObject line, int index, Object value)
+      throws JSONException {
+    JSONObject tax = line.optJSONObject(K_TAX);
+    boolean chosen = isChosenTax(line);
+    if (JSONObject.NULL.equals(value)) {
+      if (chosen) {
+        forgetChosenTax(line);
+        edit.taxLines.add(index);
+        edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(true));
+      }
+      return;
+    }
+    String id = (String) value;
+    boolean sameId = tax != null && id.equals(tax.optString(K_ID));
+    if (chosen && sameId) {
+      return;
+    }
+    if (sameId && T_RESOLVED.equals(tax.optString(K_STATE))) {
+      tax.put(K_MATCHED_BY, MATCHED_MANUAL);
+      edit.taxLines.remove(index);
+      // The line follows the tax it now pins: its rate is the tax's (the totals read it first). Only
+      // a rate that actually changes marks; the pin itself does not.
+      BigDecimal taxRate = storedNumber(tax, K_RATE, RATE_SCALE);
+      boolean rateChanged = taxRate != null
+          && (storedNumber(line, K_TAX_RATE, RATE_SCALE) == null
+              || taxRate.compareTo(storedNumber(line, K_TAX_RATE, RATE_SCALE)) != 0);
+      if (rateChanged) {
+        line.put(K_TAX_RATE, taxRate.doubleValue());
+      }
+      edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(rateChanged));
+      return;
+    }
+    String date = text(edit.header(), K_INVOICE_DATE);
+    Optional<OcrLookups.Tax> found = edit.lookups == null ? Optional.empty()
+        : edit.lookups.taxById(id, date.isEmpty() ? null : date);
+    if (found.isEmpty()) {
+      throw new Refusal(InvoiceInboxEditGate.refuse(422, CODE_UNKNOWN_TAX,
+          InvoiceInboxMessages.UNKNOWN_TAX, InvoiceInboxEditGate.details(K_INDEX, index)));
+    }
+    BigDecimal rate = found.get().rate() == null ? null
+        : found.get().rate().setScale(RATE_SCALE, RoundingMode.HALF_UP);
+    line.put(K_TAX, new JSONObject().put(K_STATE, T_RESOLVED).put(K_MATCHED_BY, MATCHED_MANUAL)
+        .put(K_ID, found.get().id()).put(K_RATE, rate == null ? JSONObject.NULL
+            : (Object) rate.doubleValue()));
+    // On purpose: a chosen tax's rate goes to taxRate as it is (scale 2), WITHOUT the 0-100 clamp a
+    // typed rate gets: withholding taxes can carry a negative rate in Etendo.
+    line.put(K_TAX_RATE, rate == null ? JSONObject.NULL : (Object) rate.doubleValue());
+    edit.taxLines.remove(index);
+    edit.inheritRate.remove(index);
     edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(true));
   }
 
@@ -800,16 +890,18 @@ final class InvoiceInboxApply {
   }
 
   /**
-   * Resolves the category (or the unit) of the draft: the one asked for (checked, named in the
-   * session language), the stored one when the operation does not mention it, none when {@code null}.
+   * Resolves the category (or the unit) of the draft: the one asked for (its id is checked), the
+   * stored id when the operation does not mention it, none when {@code null}. Only the ID is stored:
+   * the name is a display value that {@link InvoiceInboxReview} adds at read time in the language of
+   * the request, so a stored copy can never be stale or in another language. A name stored by an
+   * earlier version is ignored here and dropped on the next write.
    */
   private static void resolveChoice(Edit edit, JSONObject op, JSONObject stored, JSONObject draft,
       int index, boolean category) throws JSONException {
     String idKey = category ? K_CATEGORY_ID : K_UOM_ID;
-    String nameKey = category ? K_CATEGORY : K_UOM;
     if (!op.has(idKey)) {
       if (stored != null && !StringUtils.isBlank(text(stored, idKey))) {
-        draft.put(idKey, text(stored, idKey)).put(nameKey, text(stored, nameKey));
+        draft.put(idKey, text(stored, idKey));
       }
       return;
     }
@@ -826,7 +918,7 @@ final class InvoiceInboxApply {
           category ? InvoiceInboxMessages.UNKNOWN_CATEGORY : InvoiceInboxMessages.UNKNOWN_UOM,
           InvoiceInboxEditGate.details(K_INDEX, index)));
     }
-    draft.put(idKey, found.get().id()).put(nameKey, found.get().name());
+    draft.put(idKey, found.get().id());
   }
 
   private static boolean sameDraft(JSONObject stored, JSONObject draft) {
@@ -844,6 +936,9 @@ final class InvoiceInboxApply {
 
   private static void recompute(Edit edit) throws JSONException {
     rebuildTaxes(edit);
+    if (edit.lookups != null) {
+      InboxTaxModes.stamp(edit.lines(), edit.lookups);
+    }
     if (edit.docNoChanged || edit.vendorChanged) {
       recheckDuplicates(edit);
     }
@@ -852,7 +947,36 @@ final class InvoiceInboxApply {
       setNotice(edit, N_VENDOR_ADDRESS_MISSING, S_LINKED.equals(vendor.optString(K_STATE))
           && OcrLookups.AddressState.MISSING.name().equals(vendor.optString(K_ADDRESS_STATE)));
     }
-    refreshTotal(edit);
+    refreshTotal(edit, ensureCurrency(edit));
+  }
+
+  /**
+   * The document currency: derived from the vendor (its purchase price list, else the
+   * organization's) and stored in the header when the document has none yet or the vendor changed,
+   * kept otherwise. Returns the decimals of its amounts, two when it cannot be known. The exchange
+   * rate and the currency picker of the invoice are not touched: this is the scale of the inbox's
+   * own amounts.
+   */
+  private static int ensureCurrency(Edit edit) throws JSONException {
+    if (edit.lookups == null) {
+      return InvoiceInboxTotals.AMOUNT_SCALE;
+    }
+    JSONObject header = edit.header();
+    String stored = text(header, K_CURRENCY_ID);
+    if (stored.isEmpty() || edit.vendorChanged) {
+      JSONObject vendor = vendorOf(edit);
+      String vendorId = S_LINKED.equals(vendor.optString(K_STATE)) ? vendor.optString(K_ID) : null;
+      Optional<OcrLookups.DocCurrency> derived = edit.lookups.documentCurrency(vendorId,
+          edit.row.getOrganization() == null ? null : edit.row.getOrganization().getId());
+      if (derived.isPresent()) {
+        header.put(K_CURRENCY_ID, derived.get().id());
+        return derived.get().scale();
+      }
+      header.remove(K_CURRENCY_ID);
+      return InvoiceInboxTotals.AMOUNT_SCALE;
+    }
+    return edit.lookups.currencyById(stored).map(OcrLookups.DocCurrency::scale)
+        .orElse(InvoiceInboxTotals.AMOUNT_SCALE);
   }
 
   /** The tax of the lines that depend on what changed, once per distinct rate. */
@@ -871,6 +995,9 @@ final class InvoiceInboxApply {
       if (line == null || !(all || edit.taxLines.contains(index))) {
         continue;
       }
+      if (isChosenTax(line) && stillValid(edit, line, date)) {
+        continue;
+      }
       BigDecimal rate = storedNumber(line, K_TAX_RATE, RATE_SCALE);
       JSONObject tax = InboxLineMatcher.taxState(edit.lookups, cache, rate, location,
           date.isEmpty() ? null : date);
@@ -880,6 +1007,12 @@ final class InvoiceInboxApply {
         line.put(K_TAX_RATE, tax.get(K_RATE));
       }
     }
+  }
+
+  /** A tax the user chose survives a vendor or date change while it still passes the tax rule. */
+  private static boolean stillValid(Edit edit, JSONObject line, String date) {
+    return edit.lookups.taxById(line.optJSONObject(K_TAX).optString(K_ID),
+        date.isEmpty() ? null : date).isPresent();
   }
 
   /** The vendor's address when it is linked and has one, else {@code null} (taxes stay pending). */
@@ -920,12 +1053,12 @@ final class InvoiceInboxApply {
   }
 
   /** The total follows the lines unless the document printed one (which never changes). */
-  private static void refreshTotal(Edit edit) throws JSONException {
+  private static void refreshTotal(Edit edit, int scale) throws JSONException {
     JSONObject header = edit.header();
     if (TOTAL_PRINTED.equals(header.optString(K_TOTAL_SOURCE))) {
       return;
     }
-    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(edit.lines());
+    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(edit.lines(), scale);
     header.put(K_TOTAL_AMOUNT, totals == null ? 0 : totals.total().doubleValue());
   }
 

@@ -63,7 +63,8 @@ import com.etendoerp.go.schemaforge.ocr.ReceiverTaxIdCheck;
  * every edit (ETP-6050) apply the very same rules.
  *
  * <p>It answers with codes only: {@code vendor}, {@code invoiceDate}, {@code amount}, {@code lines},
- * {@code line[i].tax}, {@code line[i].product} (and {@code receiver} for a foreign receiver). {@code i}
+ * {@code line[i].tax}, {@code line[i].product}, {@code line[i].quantity}, {@code line[i].unitPrice}
+ * (and {@code receiver} for a foreign receiver). {@code i}
  * is the line's stable {@code index} (ETP-6050: it survives deleting and adding lines), the position
  * for a document whose lines carry none. The
  * error code follows the priority {@code FOREIGN_RECEIVER > REFERENCE_TOO_LONG > MISSING_FIELDS}.</p>
@@ -152,7 +153,9 @@ public final class InvoiceInboxValidator {
     if (StringUtils.isBlank(stringOf(header, K_INVOICE_DATE))) {
       missing.add("invoiceDate");
     }
-    if (header.optDouble(K_TOTAL_AMOUNT, 0d) <= 0d) {
+    // The purchase invoice enforces no sign on its total (it is computed from the lines; a credit
+    // note is negative, a free one is zero): the total only has to exist.
+    if (!(header.opt(K_TOTAL_AMOUNT) instanceof Number)) {
       missing.add("amount");
     }
   }
@@ -185,6 +188,12 @@ public final class InvoiceInboxValidator {
       if (line == null || !productComplete(line)) {
         missing.add("line[" + id + "].product");
       }
+      if (line == null || !(line.opt(K_QUANTITY) instanceof Number)) {
+        missing.add("line[" + id + "].quantity");
+      }
+      if (line == null || !(line.opt(K_UNIT_PRICE) instanceof Number)) {
+        missing.add("line[" + id + "].unitPrice");
+      }
     }
   }
 
@@ -197,8 +206,9 @@ public final class InvoiceInboxValidator {
   }
 
   /**
-   * Linked, or new with a name (the line description by default), a quantity above zero, a price of
-   * zero or more, and the category and the unit the product will be created with (ETP-6050, D8).
+   * Linked, or new with a name (the line description by default) and the category and the unit the
+   * product will be created with (ETP-6050, D8). Quantity and price are NOT part of it: they are
+   * checked for every line alike, linked or new.
    */
   private static boolean productComplete(JSONObject line) {
     JSONObject product = line.optJSONObject(K_PRODUCT);
@@ -210,9 +220,7 @@ public final class InvoiceInboxValidator {
     String name = StringUtils.defaultIfBlank(stringOf(draft, K_NAME), stringOf(line, K_DESCRIPTION));
     return S_NEW.equals(state) && StringUtils.isNotBlank(name)
         && StringUtils.isNotBlank(stringOf(draft, K_CATEGORY_ID))
-        && StringUtils.isNotBlank(stringOf(draft, K_UOM_ID))
-        && !line.isNull(K_QUANTITY) && line.optDouble(K_QUANTITY, 0d) > 0d
-        && !line.isNull(K_UNIT_PRICE) && line.optDouble(K_UNIT_PRICE, -1d) >= 0d;
+        && StringUtils.isNotBlank(stringOf(draft, K_UOM_ID));
   }
 
   private static String stringOf(JSONObject object, String key) {

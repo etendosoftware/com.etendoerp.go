@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -199,6 +200,8 @@ class InvoiceInboxApplyTest {
     when(mocked.vendorAddress("V2")).thenReturn(new Address(AddressState.PRESENT, "LOC2"));
     when(mocked.vendorAddress("V3")).thenReturn(new Address(AddressState.MISSING, null));
     when(mocked.productById("P2")).thenReturn(Optional.of(new Party("P2", "Prod2")));
+    when(mocked.taxById(eq("T10"), any())).thenReturn(
+        Optional.of(new Tax("T10", "10%", new BigDecimal("10.00"))));
     when(mocked.productCategoryById("C1")).thenReturn(Optional.of(new Party("C1", "Cat")));
     when(mocked.uomById("U1")).thenReturn(Optional.of(new Party("U1", "Unit")));
     when(mocked.duplicates(anyString(), anyString())).thenReturn(new Duplicates(true, List.of()));
@@ -568,11 +571,226 @@ class InvoiceInboxApplyTest {
 
   @Test
   void theNumbersAreRoundedHalfUpToTheStoredScale() throws Exception {
-    apply("{op:'setLine',index:0,quantity:1.23455,unitPrice:0.35555,taxRate:7.005}");
+    apply("{op:'setLine',index:0,quantity:1.23455,unitPrice:0.3555555,taxRate:7.005}");
 
     assertEquals(1.2346, lineAt(0).getDouble("quantity"), 0);
-    assertEquals(0.3556, lineAt(0).getDouble("unitPrice"), 0);
+    assertEquals(0.355556, lineAt(0).getDouble("unitPrice"), 0, "the price keeps 6 decimals");
     assertEquals(7.01, lineAt(0).getDouble("taxRate"), 0);
+  }
+
+  @Test
+  void aLineBasedTaxIsRoundedPerLineAndStampedOnTheTaxBlock() throws Exception {
+    when(lookups.taxDocAmountModes(any())).thenReturn(java.util.Map.of("T21", "L"));
+    use(doc()).getJSONArray("lines").getJSONObject(0).put("quantity", 1).put("unitPrice", 0.25)
+        .put("taxRate", 10);
+    use(pending);
+    JSONObject second = pending.getJSONArray("lines").getJSONObject(1);
+    second.put("quantity", 1).put("unitPrice", 0.25).put("taxRate", 10);
+
+    apply("{op:'setLine',index:0,description:'x'}");
+
+    assertEquals("L", lineAt(0).getJSONObject("tax").getString("docTaxAmount"));
+    // two lines of 0.25 at 10 %, per line round2(0.025) = 0.03 twice: 0.50 + 0.06
+    assertEquals(0.56, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aPriceOfSixDecimalsIsKeptAsIs() throws Exception {
+    apply("{op:'setLine',index:0,unitPrice:0.123457}");
+
+    assertEquals(0.123457, lineAt(0).getDouble("unitPrice"), 0);
+  }
+
+  @Test
+  void theCurrencyIsDerivedFromTheVendorWhenMissingAndOnAVendorChange() throws Exception {
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0)));
+    when(lookups.documentCurrency(eq("V2"), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("USD", "USD", "$", 2)));
+
+    apply("{op:'setLine',index:0,quantity:3}");
+    assertEquals("JPY", header().getString("currencyId"));
+    // 3 x 10 + 2 x 20 = 70 at 21 % -> scale 0: tax round0(14.7) = 15, total 85
+    assertEquals(85, header().getDouble("totalAmount"), 0);
+
+    apply("{op:'selectVendor',id:'V2'}");
+    assertEquals("USD", header().getString("currencyId"));
+    assertEquals(84.7, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aStoredCurrencyGivesTheScaleWithoutDerivingItAgain() throws Exception {
+    when(lookups.currencyById("JPY")).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0)));
+    use(doc()).getJSONObject("header").put("currencyId", "JPY");
+
+    apply("{op:'setLine',index:0,quantity:3}");
+
+    assertEquals("JPY", header().getString("currencyId"));
+    // 3 x 10 + 2 x 20 = 70 at 21 % -> scale 0: tax round0(14.7) = 15, total 85
+    assertEquals(85, header().getDouble("totalAmount"), 0);
+    verify(lookups, never()).documentCurrency(any(), any());
+  }
+
+  @Test
+  void aStoredCurrencyThatCannotBeReadIsKeptAndTheTotalIsInCents() throws Exception {
+    use(doc()).getJSONObject("header").put("currencyId", "GONE");
+
+    apply("{op:'setLine',index:0,quantity:3}");
+
+    assertEquals("GONE", header().getString("currencyId"));
+    assertEquals(84.7, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aVendorChangeThatCannotDeriveACurrencyDropsTheStoredOneAndRoundsToCents()
+      throws Exception {
+    use(doc()).getJSONObject("header").put("currencyId", "JPY");
+
+    apply("{op:'selectVendor',id:'V2'}");
+
+    assertFalse(header().has("currencyId"));
+    assertEquals(169.4, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aVendorChangeAsksTheCurrencyOfTheNewVendorAndANonLinkedVendorAsksWithNone()
+      throws Exception {
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("EUR", "EUR", "E", 2)));
+
+    apply("{op:'selectVendor',id:'V2'}");
+    verify(lookups).documentCurrency(eq("V2"), any());
+
+    state = new RowState();
+    apply("{op:'newVendor'}");
+    verify(lookups).documentCurrency(isNull(), any());
+  }
+
+  @Test
+  void aPrintedTotalIsNeverTouchedByTheCurrencyNorTheEditsToTheLines() throws Exception {
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0)));
+    use(doc()).getJSONObject("header").put("totalSource", "printed").put("totalAmount", 169.4);
+
+    apply("{op:'setLine',index:0,quantity:3}", "{op:'selectVendor',id:'V2'}");
+
+    assertEquals(169.4, header().getDouble("totalAmount"), 0);
+    assertEquals("printed", header().getString("totalSource"));
+  }
+
+  @Test
+  void aCurrencyOfThreeDecimalsKeepsThreeInTheTotal() throws Exception {
+    when(lookups.documentCurrency(any(), any())).thenReturn(Optional.of(
+        new OcrLookups.DocCurrency("KWD", "KWD", "K", 3)));
+    use(doc()).getJSONArray("lines").getJSONObject(0).put("quantity", 1).put("unitPrice", 0.12345);
+    pending.getJSONArray("lines").getJSONObject(1).put("quantity", 1).put("unitPrice", 0);
+
+    apply("{op:'setLine',index:1,description:'x'}");
+
+    // net 0.123 (0.12345 to 3 decimals), tax 21 % = 0.02583 -> 0.026
+    assertEquals(0.149, header().getDouble("totalAmount"), 0.00001);
+  }
+
+  @Test
+  void theInputScalesAreFourSixFourAndTwoAndNothingBeyondIsStored() throws Exception {
+    apply("{op:'setLine',index:0,quantity:1.00005,unitPrice:0.0000005,discount:12.34565,"
+        + "taxRate:4.995}");
+
+    assertEquals(1.0001, lineAt(0).getDouble("quantity"), 0);
+    assertEquals(0.000001, lineAt(0).getDouble("unitPrice"), 0);
+    assertEquals(12.3457, lineAt(0).getDouble("discount"), 0);
+    assertEquals(5.0, lineAt(0).getDouble("taxRate"), 0);
+    assertEquals(4, InvoiceInboxApply.QUANTITY_SCALE);
+    assertEquals(6, InvoiceInboxApply.PRICE_SCALE);
+    assertEquals(4, InvoiceInboxApply.DISCOUNT_SCALE);
+  }
+
+  @Test
+  void aValueThatRoundsToTheStoredOneAtItsScaleIsNoChangeAndNeverMarks() throws Exception {
+    apply("{op:'setLine',index:0,unitPrice:0.1234567}");
+    assertEquals(0.123457, lineAt(0).getDouble("unitPrice"), 0);
+    assertTrue(state.adjusted);
+    state.adjusted = false;
+
+    assertSaved(apply("{op:'setLine',index:0,unitPrice:0.1234571}"));
+
+    assertFalse(state.adjusted, "0.1234571 is 0.123457 at six decimals: nothing changed");
+    verify(dal, times(1)).save(any());
+  }
+
+  @Test
+  void aSevenDecimalPriceThatDiffersAtTheSixthDecimalDoesMark() throws Exception {
+    apply("{op:'setLine',index:0,unitPrice:0.123457}");
+    state.adjusted = false;
+
+    apply("{op:'setLine',index:0,unitPrice:0.1234575}");
+
+    assertEquals(0.123458, lineAt(0).getDouble("unitPrice"), 0);
+    assertTrue(state.adjusted);
+  }
+
+  @Test
+  void aNegativeQuantityIsAcceptedAndTheTotalIsACredit() throws Exception {
+    assertSaved(apply("{op:'setLine',index:0,quantity:-3}"));
+
+    assertEquals(-3, lineAt(0).getDouble("quantity"), 0);
+    // -3 x 10 + 2 x 20 = 10 at 21 %
+    assertEquals(12.1, header().getDouble("totalAmount"), 0.0001);
+    assertEquals("PENDING_REVIEW", state.status, "a credit line is a valid document");
+  }
+
+  @Test
+  void aNegativePriceIsAcceptedAndTheTotalCanGoBelowZeroWithoutBecomingAnError()
+      throws Exception {
+    assertSaved(apply("{op:'setLine',index:0,unitPrice:-10}"));
+
+    assertEquals(-10, lineAt(0).getDouble("unitPrice"), 0);
+    // 10 x -10 + 2 x 20 = -60 at 21 % = -72.60
+    assertEquals(-72.6, header().getDouble("totalAmount"), 0.0001);
+    assertEquals("PENDING_REVIEW", state.status);
+    assertTrue(saved().getJSONObject("validation").getBoolean("valid"));
+  }
+
+  @Test
+  void aZeroQuantityIsAcceptedAndTheDocumentStaysValid() throws Exception {
+    assertSaved(apply("{op:'setLine',index:0,quantity:0,unitPrice:0}"));
+
+    assertEquals(0, lineAt(0).getDouble("quantity"), 0);
+    assertEquals(0, lineAt(0).getDouble("unitPrice"), 0);
+    assertEquals(48.4, header().getDouble("totalAmount"), 0.0001);
+    assertEquals("PENDING_REVIEW", state.status);
+  }
+
+  @Test
+  void aCreditDocumentWithLineBasedTaxRoundsEachNegativeLineAway() throws Exception {
+    when(lookups.taxDocAmountModes(any())).thenReturn(java.util.Map.of("T21", "L"));
+    use(doc()).getJSONArray("lines").getJSONObject(0).put("quantity", -1).put("unitPrice", 0.125);
+    pending.getJSONArray("lines").getJSONObject(1).put("quantity", -1).put("unitPrice", 0.125);
+
+    apply("{op:'setLine',index:0,description:'x'}");
+
+    // each net -0.13, tax per line -0.0273 -> -0.03: -0.26 + -0.06
+    assertEquals(-0.32, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aNullQuantityOrPriceMakesTheDocumentAnErrorWithTheLineAndFieldInTheVerdict()
+      throws Exception {
+    assertSaved(apply("{op:'setLine',index:1,quantity:null}"));
+
+    assertEquals("ERROR", state.status);
+    assertTrue(saved().getJSONObject("validation").getJSONArray("missing").toString()
+        .contains("line[1].quantity"));
+  }
+
+  @Test
+  void aDiscountOutsideZeroToHundredIsRefusedAndNothingIsWritten() throws Exception {
+    String before = commit();
+
+    assertRefusal(apply("{op:'setLine',index:0,discount:100.01}"), 422, "invalid_value");
+    assertRefusal(apply("{op:'setLine',index:0,discount:-1}"), 422, "invalid_value");
+    assertNothingWritten(before);
   }
 
   @Test
@@ -1067,6 +1285,277 @@ class InvoiceInboxApplyTest {
         eq(java.util.List.of(READABLE_ORG))));
   }
 
+  // ------------------------------------------------------------------ tax by id
+
+  private static final String CHOSEN_T10 = "{state:'resolved',matchedBy:'manual',id:'T10',rate:10}";
+
+  private void chooseT10OnLine0() throws Exception {
+    JSONObject line = use(doc()).getJSONArray("lines").getJSONObject(0);
+    line.put("tax", op(CHOSEN_T10)).put("taxRate", 10);
+  }
+
+  @Test
+  void aTaxChosenByIdWinsOverThePrintedRateAndMarks() throws Exception {
+    assertSaved(apply("{op:'setLine',index:0,taxId:'T10'}"));
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertEquals("T10", tax.getString("id"));
+    assertEquals("resolved", tax.getString("state"));
+    assertEquals("manual", tax.getString("matchedBy"));
+    assertEquals(10, tax.getDouble("rate"), 0);
+    assertFalse(tax.has("name"), "the name is never stored");
+    assertEquals(10, lineAt(0).getDouble("taxRate"), 0, "the line follows the chosen tax");
+    assertTrue(state.adjusted);
+    // 100 at 10 % and 40 at 21 %
+    assertEquals(158.4, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void anUnknownTaxIsRefusedWithTheLineIndex() throws Exception {
+    String before = commit();
+
+    NeoResponse response = apply("{op:'setLine',index:1,taxId:'NOPE'}");
+
+    assertRefusal(response, 422, "unknown_tax");
+    assertEquals(1, response.getBody().getJSONObject("error").getInt("index"));
+    assertEquals(before, state.currentData);
+  }
+
+  @Test
+  void choosingTheTaxAlreadyChosenWritesNothing() throws Exception {
+    chooseT10OnLine0();
+
+    assertSaved(apply("{op:'setLine',index:0,taxId:'T10'}"));
+
+    verify(dal, never()).save(any());
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void choosingTheTaxTheServerResolvedOnlyPinsItWithoutMarking() throws Exception {
+    apply("{op:'setLine',index:0,taxId:'T21'}");
+
+    assertEquals("manual", lineAt(0).getJSONObject("tax").getString("matchedBy"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void nullDropsTheChosenTaxAndTheServerResolvesItAgain() throws Exception {
+    chooseT10OnLine0();
+
+    apply("{op:'setLine',index:0,taxId:null}");
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertEquals("T10", tax.getString("id"), "resolved again from the rate that was left");
+    assertFalse(tax.has("matchedBy"));
+    assertTrue(state.adjusted);
+  }
+
+  @Test
+  void aChosenTaxSurvivesAVendorChangeWhileItIsStillValid() throws Exception {
+    chooseT10OnLine0();
+
+    apply("{op:'selectVendor',id:'V2'}");
+
+    assertEquals("manual", lineAt(0).getJSONObject("tax").getString("matchedBy"));
+    assertEquals("T10", lineAt(0).getJSONObject("tax").getString("id"));
+  }
+
+  @Test
+  void aChosenTaxThatNoLongerPassesTheRuleIsResolvedAgainWhenTheDateChanges() throws Exception {
+    chooseT10OnLine0();
+    when(lookups.taxById(eq("T10"), eq("2020-01-01"))).thenReturn(Optional.empty());
+
+    apply("{op:'setHeader',invoiceDate:'2020-01-01'}");
+
+    assertFalse(lineAt(0).getJSONObject("tax").has("matchedBy"));
+  }
+
+  @Test
+  void aTaxIdOfTheWrongTypeIsAnInvalidRequest() throws Exception {
+    assertRefusal(apply("{op:'setLine',index:0,taxId:5}"), 400, "invalid_request");
+  }
+
+  @Test
+  void aTypedRateThatChangesDropsAChosenTaxAndTheTaxIsResolvedByRateAgain() throws Exception {
+    chooseT10OnLine0();
+
+    apply("{op:'setLine',index:0,taxRate:5}");
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertFalse(tax.has("matchedBy"), "no longer chosen");
+    assertEquals("T5", tax.getString("id"), "resolved from the typed rate");
+    assertEquals(5, lineAt(0).getDouble("taxRate"), 0);
+    assertTrue(state.adjusted);
+  }
+
+  @Test
+  void aTypedRateEqualToTheStoredOneKeepsTheChosenTaxAndWritesNothing() throws Exception {
+    chooseT10OnLine0();
+
+    assertSaved(apply("{op:'setLine',index:0,taxRate:10}"));
+
+    assertEquals("manual", lineAt(0).getJSONObject("tax").getString("matchedBy"));
+    verify(dal, never()).save(any());
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void aTaxIdAndAChangedRateInOneOperationLetTheTaxIdWin() throws Exception {
+    apply("{op:'setLine',index:0,taxRate:5,taxId:'T10'}");
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertEquals("T10", tax.getString("id"));
+    assertEquals("manual", tax.getString("matchedBy"));
+    assertEquals(10, lineAt(0).getDouble("taxRate"), 0, "the line follows the chosen tax");
+    assertEquals(10, tax.getDouble("rate"), 0);
+    // 100 at 10 % and 40 at 21 %
+    assertEquals(158.4, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aTaxIdAlreadyChosenAndAChangedRateInOneOperationStillLetTheTaxIdWin() throws Exception {
+    chooseT10OnLine0();
+
+    // The description change makes the request effective: a request that changes nothing writes
+    // nothing, and the arranged document carries a stale seeded total (169.4) that only a recompute
+    // corrects. The typed rate must not reach the stored line nor the totals.
+    apply("{op:'setLine',index:0,description:'x',taxRate:5,taxId:'T10'}");
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertEquals("T10", tax.getString("id"));
+    assertEquals("manual", tax.getString("matchedBy"));
+    assertEquals(10, lineAt(0).getDouble("taxRate"), 0,
+        "the line's rate must be the chosen tax's, as the totals read it first");
+    // 100 at 10 % and 40 at 21 %
+    assertEquals(158.4, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aTypedRateAndTheSameChosenTaxIdWriteNothingAndDoNotMark() throws Exception {
+    chooseT10OnLine0();
+
+    assertSaved(apply("{op:'setLine',index:0,taxRate:5,taxId:'T10'}"));
+
+    verify(dal, never()).save(any());
+    assertFalse(state.adjusted);
+    assertEquals(10, lineAt(0).getDouble("taxRate"), 0);
+  }
+
+  @Test
+  void pinningTheServerResolvedTaxMakesTheLineRateFollowIt() throws Exception {
+    JSONObject line = use(doc()).getJSONArray("lines").getJSONObject(0);
+    line.put("taxRate", 21.5);
+
+    apply("{op:'setLine',index:0,taxId:'T21'}");
+
+    assertEquals(21, lineAt(0).getDouble("taxRate"), 0);
+    assertEquals("manual", lineAt(0).getJSONObject("tax").getString("matchedBy"));
+    assertTrue(state.adjusted, "the stored rate changed");
+  }
+
+  @Test
+  void aNullTaxIdOnATaxTheUserNeverChoseIsANoOp() throws Exception {
+    String before = commit();
+
+    assertSaved(apply("{op:'setLine',index:0,taxId:null}"));
+
+    assertEquals("T21", lineAt(0).getJSONObject("tax").getString("id"));
+    assertFalse(state.adjusted);
+    verify(dal, never()).save(any());
+    assertEquals(before, state.currentData);
+  }
+
+  @Test
+  void theTaxRuleIsAskedWithTheDocumentDateOrNullWhenThereIsNone() throws Exception {
+    apply("{op:'setLine',index:0,taxId:'T10'}");
+    verify(lookups).taxById("T10", "2026-11-02");
+
+    use(doc()).getJSONObject("header").put("invoiceDate", JSONObject.NULL);
+    apply("{op:'setLine',index:1,taxId:'T10'}");
+    verify(lookups).taxById("T10", null);
+  }
+
+  @Test
+  void anUnknownTaxInALaterOperationDiscardsTheEarlierOnesToo() throws Exception {
+    String before = commit();
+
+    NeoResponse response = apply("{op:'setLine',index:0,quantity:3}",
+        "{op:'setLine',index:1,taxId:'NOPE'}");
+
+    assertRefusal(response, 422, "unknown_tax");
+    assertEquals(1, response.getBody().getJSONObject("error").getInt("index"));
+    assertNothingWritten(before);
+  }
+
+  @Test
+  void aTaxIdWithoutLookupsIsUnknownTax() throws Exception {
+    lookupsAvailable = false;
+
+    assertRefusal(apply("{op:'setLine',index:0,taxId:'T10'}"), 422, "unknown_tax");
+  }
+
+  @Test
+  void aBlankOrTooLongTaxIdIsAnInvalidRequest() throws Exception {
+    assertRefusal(apply("{op:'setLine',index:0,taxId:''}"), 400, "invalid_request");
+    assertRefusal(apply("{op:'setLine',index:0,taxId:'   '}"), 400, "invalid_request");
+    assertRefusal(apply("{op:'setLine',index:0,taxId:'" + "T".repeat(65) + "'}"), 400,
+        "invalid_request");
+    assertRefusal(apply("{op:'setLine',index:0,taxId:true}"), 400, "invalid_request");
+    assertRefusal(apply("{op:'setLine',index:0,taxId:{}}"), 400, "invalid_request");
+  }
+
+  @Test
+  void aTaxWithoutARateIsStoredWithoutOneAndTheLineAddsToTheBaseOnly() throws Exception {
+    when(lookups.taxById(eq("TEX"), any())).thenReturn(
+        Optional.of(new Tax("TEX", "Exempt", null)));
+
+    apply("{op:'setLine',index:0,taxId:'TEX'}");
+
+    assertEquals("TEX", lineAt(0).getJSONObject("tax").getString("id"));
+    assertTrue(lineAt(0).getJSONObject("tax").isNull("rate"));
+    assertTrue(lineAt(0).isNull("taxRate"));
+    // 100 untaxed and 40 at 21 %
+    assertEquals(148.4, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aChosenTaxGetsTheRoundingModeOfItsTaxStampedAndTheTotalFollowsIt() throws Exception {
+    when(lookups.taxDocAmountModes(any())).thenReturn(java.util.Map.of("T10", "L"));
+    use(doc()).getJSONArray("lines").getJSONObject(0).put("quantity", 1).put("unitPrice", 0.25);
+    use(pending).getJSONArray("lines").getJSONObject(1).put("quantity", 1).put("unitPrice", 0.25);
+    pending.getJSONArray("lines").getJSONObject(1).put("tax", op(CHOSEN_T10)).put("taxRate", 10);
+
+    apply("{op:'setLine',index:0,taxId:'T10'}");
+
+    assertEquals("L", lineAt(0).getJSONObject("tax").getString("docTaxAmount"));
+    assertEquals("L", lineAt(1).getJSONObject("tax").getString("docTaxAmount"));
+    // two lines of 0.25 at 10 %, per line round2(0.025) = 0.03 twice: 0.50 + 0.06
+    assertEquals(0.56, header().getDouble("totalAmount"), 0.0001);
+  }
+
+  @Test
+  void aChosenTaxThatNoLongerPassesTheRuleAfterAVendorChangeIsResolvedAgain() throws Exception {
+    chooseT10OnLine0();
+    when(lookups.taxById(eq("T10"), any())).thenReturn(Optional.empty());
+
+    apply("{op:'selectVendor',id:'V2'}");
+
+    JSONObject tax = lineAt(0).getJSONObject("tax");
+    assertFalse(tax.has("matchedBy"));
+    assertEquals("T10", tax.getString("id"), "resolved again from the line's rate (10)");
+  }
+
+  @Test
+  void aChosenTaxSurvivesAChangeOfTheDateWhileItStillPassesTheRule() throws Exception {
+    chooseT10OnLine0();
+
+    apply("{op:'setHeader',invoiceDate:'2026-12-01'}");
+
+    assertEquals("manual", lineAt(0).getJSONObject("tax").getString("matchedBy"));
+    verify(lookups).taxById("T10", "2026-12-01");
+  }
+
   @Test
   void aChangeOfAnythingElseDoesNotRecheckDuplicates() throws Exception {
     apply("{op:'setLine',index:0,quantity:3}");
@@ -1264,9 +1753,9 @@ class InvoiceInboxApplyTest {
     JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
     assertEquals("Tornillo M8", draft.getString("name"));
     assertEquals("C1", draft.getString("categoryId"));
-    assertEquals("Cat", draft.getString("category"));
+    assertFalse(draft.has("category"), "only the id is stored: the name is added at read time");
     assertEquals("U1", draft.getString("uomId"));
-    assertEquals("Unit", draft.getString("uom"));
+    assertFalse(draft.has("uom"));
     assertTrue(saved().getJSONObject("validation").getJSONArray("missing").toString()
         .indexOf("line[0].product") < 0);
   }

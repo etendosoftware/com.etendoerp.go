@@ -61,6 +61,7 @@ final class InvoiceInboxMessages {
   static final String UNKNOWN_PRODUCT = "ETGO_InvoiceInboxUnknownProduct";
   static final String UNKNOWN_CATEGORY = "ETGO_InvoiceInboxUnknownCategory";
   static final String UNKNOWN_UOM = "ETGO_InvoiceInboxUnknownUom";
+  static final String UNKNOWN_TAX = "ETGO_InvoiceInboxUnknownTax";
   static final String NOT_VALID = "ETGO_InvoiceInboxNotValid";
 
   private static final Map<String, String> DEFAULTS = Map.ofEntries(
@@ -102,6 +103,7 @@ final class InvoiceInboxMessages {
       Map.entry(UNKNOWN_PRODUCT, "The product does not exist or cannot be used."),
       Map.entry(UNKNOWN_CATEGORY, "The product category does not exist or cannot be used."),
       Map.entry(UNKNOWN_UOM, "The unit of measure does not exist or cannot be used."),
+      Map.entry(UNKNOWN_TAX, "The tax does not exist or cannot be used on this document."),
       Map.entry(NOT_VALID, "The document is not complete: @missing@."));
 
   private InvoiceInboxMessages() {
