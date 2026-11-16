@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +40,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -73,6 +75,8 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
+
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 
 /**
  * Unit tests for SalesQuotationHeaderHandler.handle() and afterHandle().
@@ -897,6 +901,44 @@ public class SalesQuotationHeaderHandlerTest {
     assertFalse(result.getBody().has("salesOrderId"));
     verify(dal).rollbackAndClose();
     verify(dal, never()).commitAndClose();
+  }
+
+  /**
+   * ETP-6209 KPI — a conversion is an app acceptance when the quotation was Under Evaluation
+   * before it (its status is read before the conversion changes it); one the customer had already
+   * accepted from the portal ({@code ETGO_AC}) was counted then, and a conversion that fails
+   * records nothing.
+   */
+  @Test
+  public void testConvertQuotation_recordsAnAppAcceptanceOnlyForAnAcceptedUnderEvaluation()
+      throws Exception {
+    // Columns: quotation status before, reactivation throws, acceptances recorded.
+    Object[][] cases = { { "UE", false, 1 }, { "ETGO_AC", false, 0 }, { "UE", true, 0 } };
+    for (Object[] c : cases) {
+      Order order = orderWithStatus("CO", "DR");
+      Order quotation = mock(Order.class);
+      when(quotation.getDocumentStatus()).thenReturn((String) c[0], "CA");
+      try (MockedStatic<OrderDocActionSupport> docAction =
+               Mockito.mockStatic(OrderDocActionSupport.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        if ((Boolean) c[1]) {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE"))
+              .thenThrow(new java.sql.SQLException("statement timeout"));
+        } else {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+        }
+        kpi.when(() -> PortalKpiTelemetry.quotationOf("q-5528")).thenReturn(quotation);
+        kpi.when(() -> PortalKpiTelemetry.appQuotationConverted(any(), any()))
+            .thenCallRealMethod();
+
+        NeoResponse result = convertQuotation(order);
+
+        String label = Arrays.toString(c);
+        assertEquals(label, (Boolean) c[1] ? 500 : 200, result.getHttpStatus());
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(true, quotation),
+            times((Integer) c[2]));
+      }
+    }
   }
 
   /**
