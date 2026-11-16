@@ -1118,6 +1118,44 @@ public class SalesQuotationHeaderHandlerTest {
     assertEquals("EUR", answered.getString("currency"));
   }
 
+  /**
+   * ETP-6209: evaluate-display answers the Classic lock of the reject reason (read-only once
+   * rejected); the quotation drops that one key so the window's own readOnlyLogic decides. Every
+   * other read-only answer and the visibility are kept; with no such key nothing changes.
+   */
+  @Test
+  public void testAfterHandle_evaluateDisplayDropsOnlyTheClassicRejectReasonLock()
+      throws Exception {
+    // { read-only answer of the AD, read-only answer expected }
+    String[][] cases = {
+        { "{\"rejectReason\":true,\"documentNo\":true,\"orderDate\":false}",
+            "{\"documentNo\":true,\"orderDate\":false}" },
+        { "{\"documentNo\":true}", "{\"documentNo\":true}" },
+    };
+    for (String[] c : cases) {
+      JSONObject body = new JSONObject().put("readOnly", new JSONObject(c[0]))
+          .put("visibility", new JSONObject("{\"rejectReason\":true,\"documentNo\":true}"));
+      NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.EVALUATE_DISPLAY).build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      JSONObject answered = (result != null ? result : ctx.getPreviousResult()).getBody();
+      JSONObject expected = new JSONObject(c[1]);
+      JSONObject readOnly = answered.getJSONObject("readOnly");
+      assertEquals(c[0], expected.length(), readOnly.length());
+      java.util.Iterator<?> keys = expected.keys();
+      while (keys.hasNext()) {
+        String key = (String) keys.next();
+        assertEquals(c[0] + " " + key, expected.getBoolean(key), readOnly.getBoolean(key));
+      }
+      JSONObject visibility = answered.getJSONObject("visibility");
+      assertEquals("visibility is untouched", 2, visibility.length());
+      assertTrue(visibility.getBoolean("rejectReason"));
+    }
+  }
+
   @Test
   public void testAfterHandle_processedQuotation_notAdjusted() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
