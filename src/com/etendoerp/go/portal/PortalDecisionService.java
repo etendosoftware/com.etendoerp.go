@@ -290,13 +290,19 @@ public class PortalDecisionService {
   }
 
   private final PortalLinkService linkService;
+  private final PortalAccessChecks accessChecks;
 
   public PortalDecisionService() {
     this(new PortalLinkService());
   }
 
   PortalDecisionService(PortalLinkService linkService) {
+    this(linkService, new PortalAccessChecks());
+  }
+
+  PortalDecisionService(PortalLinkService linkService, PortalAccessChecks accessChecks) {
     this.linkService = linkService;
+    this.accessChecks = accessChecks;
   }
 
   // ─── Request ─────────────────────────────────────────────────────────────
@@ -350,6 +356,9 @@ public class PortalDecisionService {
     if (blocked != null) {
       return new RequestResult(RequestOutcome.BLOCKED, blocked, null);
     }
+    // Serializes concurrent requests on the quotation (the renewal's W1 pattern): held until this
+    // request's transaction ends, so two simultaneous clicks cannot both pass the cool-down and send.
+    lock("SELECT c_order_id FROM c_order WHERE c_order_id = :id FOR UPDATE", quotation.getId());
     if (inCooldown(quotation.getId())) {
       return new RequestResult(RequestOutcome.COOLDOWN, null, null);
     }
@@ -361,6 +370,9 @@ public class PortalDecisionService {
       PortalDecisionEvents.requested(session, quotation.getId(), normalizedDecision);
       return new RequestResult(RequestOutcome.SENT, null, mask(recipient));
     }
+    // The email did not leave: its pending row must not count against the cool-down (Part A's
+    // renewal rule), so a provider failure does not lock the customer out for the whole window.
+    deactivatePendingOf(quotation.getId());
     if (TransactionalEmailService.STATUS_THROTTLED.equals(status)
         || TransactionalEmailService.STATUS_DUPLICATE.equals(status)) {
       return new RequestResult(RequestOutcome.COOLDOWN, null, null);
@@ -483,6 +495,10 @@ public class PortalDecisionService {
     if (decision == null) {
       return new View(State.INVALID, null, null);
     }
+    View closed = closedForCustomer(decision);
+    if (closed != null) {
+      return closed;
+    }
     List<String> voided = new ArrayList<>();
     View result = SystemContext.call("the portal quotation decision", () -> {
       try {
@@ -526,6 +542,34 @@ public class PortalDecisionService {
       sendNotice(result.getDecision());
     }
     return result;
+  }
+
+  /**
+   * The portal's access checks at confirm time (blocked or inactive customer, expired plan), for
+   * the decision's link: a decision token never expires, so a customer blocked after asking must not
+   * still apply it. Closed → {@code NOT_PENDING} ("no se ha aplicado nada"), nothing is written and
+   * the row stays pending; the customer is never told why (as {@link PortalAccessChecks}). Fails
+   * closed when the link cannot be read.
+   *
+   * @return the answer when closed, else {@code null}
+   */
+  private View closedForCustomer(Decision decision) {
+    OBContext.setAdminMode(true);
+    try {
+      Optional<PortalLink> link = linkService.findLink(decision.linkId);
+      Optional<String> reason = link.isPresent()
+          ? accessChecks.blockReasonOrClosed(link.get().getClientId(),
+              link.get().getBusinessPartnerId())
+          : Optional.of(PortalAccessChecks.INACTIVE);
+      if (!reason.isPresent()) {
+        return null;
+      }
+      log.info("Portal decision {} was not applied: {}", decision.id, reason.get());
+      return new View(State.NOT_PENDING, decision,
+          OBDal.getInstance().get(Order.class, decision.quotationId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /** Applies the confirmed decision to the quotation, through the app's own writes. */
@@ -702,12 +746,30 @@ public class PortalDecisionService {
     return day.isBefore(LocalDate.now());
   }
 
+  /**
+   * The per-quotation cool-down: a request created inside the window that was sent or is still in
+   * flight counts (an in-flight one closes the race with a concurrent request, which the quotation
+   * lock serializes); a request whose email did not leave was deactivated
+   * ({@link #deactivatePendingOf}) and does not.
+   */
   private static boolean inCooldown(String quotationId) {
     Instant since = Instant.now().minus(PortalLinkConfig.decisionCooldown());
     List<?> rows = OBDal.getInstance().getSession().createNativeQuery("SELECT count(*)"
-        + " FROM etgo_portal_decision WHERE c_order_id = :id AND created > :since")
+        + " FROM etgo_portal_decision WHERE c_order_id = :id AND created > :since"
+        + " AND isactive = 'Y'")
         .setParameter("id", quotationId).setParameter("since", Timestamp.from(since)).list();
     return !rows.isEmpty() && ((Number) rows.get(0)).longValue() > 0;
+  }
+
+  /**
+   * Deactivates the quotation's requests whose email never left ({@code SENT_AT} null). Called
+   * under the quotation lock, so the only pending row it can meet is this request's own (or an
+   * abandoned one, which was never usable). Like {@code PortalLinkDal#deactivatePendingRenewalsOf}.
+   */
+  private static void deactivatePendingOf(String quotationId) {
+    OBDal.getInstance().getSession().createNativeQuery("UPDATE etgo_portal_decision"
+        + " SET isactive = 'N', updated = now() WHERE c_order_id = :id AND sent_at IS NULL"
+        + " AND isactive = 'Y'").setParameter("id", quotationId).executeUpdate();
   }
 
   private static void lock(String sql, String id) {

@@ -177,6 +177,9 @@ link and the app's preview reuse it and the app's freshness rule applies.
   environment that can render; the page then requests `/pdf` and falls back on its 404. Chosen over
   rendering inside the detail request so the detail answers fast and only a document actually
   looked at is rendered.
+- **Side effect in the app:** the first customer open of a document with no PDF stores a main
+  attachment credited to the sender (the render runs as that user); from then on it is the file the
+  app's preview shows and the one its emails attach.
 A stream failure answers a `text/plain` 500 (the email link's format), unlike the portal's other
 JSON errors — a known optional cleanup. Details: `neo-headless.md`, *Shared with the customer
 portal (ETP-6209)*.
@@ -209,7 +212,11 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
 
 - **`POST /quotations/{id}/decision`** `{decision, reasonCode?, reasonText?}` with `X-Portal-Token`.
   Same scope as the reads (`findInScope`), data rate limit, and a per-quotation cool-down
-  (`etendo.go.portal.decision.cooldownMinutes`, default 2). Decidable = `UE` only
+  (`etendo.go.portal.decision.cooldownMinutes`, default 2). The cool-down check runs under the
+  quotation row lock (`C_Order … FOR UPDATE`, held until the request ends), so two simultaneous
+  requests cannot both send; it counts requests sent or still in flight, and a request whose email
+  did not leave is deactivated so a provider failure does not block the customer (Part A's renewal
+  rule). Decidable = `UE` only
   (`QuotationDecisions.isDecidable`, PO answer Q3) and not expired (no `ValidUntil` = not expired). Reject
   needs one of `PRICE`, `DELIVERY`, `PAYMENT_TERMS`, `OTHER_SUPPLIER`, `NOT_NEEDED`, `OTHER` (text
   required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
@@ -228,7 +235,13 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   travels in **`X-Portal-Decision-Token`**. `GET /decisions/view` (read-only) is still served but
   the SPA no longer calls it. Confirm answers `appliedNow: true` only on the call that applied the
   decision (a re-opened link answers `confirmed` with `appliedNow: false`, and sends no second
-  notice or KPI event). Confirm, in one transaction: `C_Order` row `FOR UPDATE`, then the decision row;
+  notice or KPI event). **Accepted trade-off (PO, one-step flow):** a mail scanner that executes
+  the page's JavaScript could confirm a pending decision. The token is single-use, and the email
+  only ever reaches the quotation's main recipient (the first To of the original send).
+  **Access checks at confirm time:** a decision token never expires, so `confirm` re-runs
+  `PortalAccessChecks` (blocked or inactive customer, expired plan) for the link's client and
+  Business Partner; closed → `not_pending`, nothing applied, the row stays pending, the reason is
+  only logged. Confirm, in one transaction: `C_Order` row `FOR UPDATE`, then the decision row;
   not pending → its state again; quotation re-checked (decidable, not expired) else `NOT_APPLIED`;
   else applied through `QuotationDecisions` — reject: the app's own reject writes, `UE` → `CJ`,
   plus the reason in the notes; accept: `UE` → **`ETGO_AC` "Aceptado"** (module value of the order
