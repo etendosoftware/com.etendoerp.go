@@ -478,8 +478,7 @@ public class TransactionalEmailService {
         extra.put(FIELD_PROVIDER_STATUS, providerResponse.getStatusCode());
         extra.put(FIELD_DUPLICATE, false);
         extra.put(FIELD_RETRY_AFTER_SECONDS, JSONObject.NULL);
-        recordAudit(context, idempotencyKey, HttpServletResponse.SC_OK, STATUS_SENT, null,
-            providerResponse.getStatusCode(), false);
+        recordDeliveredAudit(context, idempotencyKey, providerResponse.getStatusCode());
         return observedResponse(startedAtNanos, context.getCommand(), context,
             ResponseOutcome.of(HttpServletResponse.SC_OK, STATUS_SENT, context.getContractName(),
                 null, extra, ObservationFields.provider(providerResponse.getStatusCode(),
@@ -536,6 +535,40 @@ public class TransactionalEmailService {
   }
 
   /**
+   * {@link #recordAudit} for a {@code SENT} outcome, then tells the contract the email left.
+   *
+   * <p><b>{@link EmailContract#onDelivered} runs after the audit row, never before it.</b> The DAL
+   * safety store commits a successful send that carries an idempotency key, so by the time the
+   * contract runs the history row and the anti-abuse audit row are already committed, and nothing
+   * the contract does can take them back. Running it before the audit (as first written for
+   * ETP-6209) let one Hibernate failure in the portal link confirmation roll back the history, the
+   * audit and the link together, while the endpoint still answered {@code SENT} and the customer
+   * already had the email. A contract failure is logged and swallowed: the email has left, and the
+   * send is reported as sent.</p>
+   */
+  private void recordDeliveredAudit(EmailSendContext context, String idempotencyKey,
+      Integer providerStatus) {
+    EmailAuditRecord auditRecord = EmailAuditRecord.create(context, idempotencyKey,
+        HttpServletResponse.SC_OK, STATUS_SENT, null, providerStatus, false);
+    Optional<String> sendLogId = recordSendHistory(context, auditRecord);
+    safetyStore.recordAudit(auditRecord);
+    notifyDelivered(context, sendLogId.orElse(null));
+  }
+
+  private void notifyDelivered(EmailSendContext context, String sendLogId) {
+    Optional<EmailContract> contract = contractRegistry.find(context.getContractName());
+    if (!contract.isPresent()) {
+      return;
+    }
+    try {
+      contract.get().onDelivered(context, sendLogId);
+    } catch (RuntimeException e) {
+      log.error("Email contract [{}] failed handling a delivered send",
+          context.getContractName(), e);
+    }
+  }
+
+  /**
    * Writes the readable per-document history row, for the contracts that declare they want one.
    *
    * <p>The gate is {@link EmailContract#logsSendHistory()}, resolved from the registry rather
@@ -547,17 +580,19 @@ public class TransactionalEmailService {
    * <p>Failures are swallowed. A history row is a convenience for the operator; the send and its
    * anti-abuse audit row are not, and neither is ever worth losing to it.</p>
    */
-  private void recordSendHistory(EmailSendContext context, EmailAuditRecord auditRecord) {
+  private Optional<String> recordSendHistory(EmailSendContext context,
+      EmailAuditRecord auditRecord) {
     Optional<EmailContract> contract = contractRegistry.find(context.getContractName());
     if (!contract.isPresent() || !contract.get().logsSendHistory()) {
-      return;
+      return Optional.empty();
     }
     try {
-      sendLogStore.recordSend(EmailSendHistoryRecord.create(context, auditRecord,
-          contract.get().getSpecName()));
+      return sendLogStore.recordSendReturningId(EmailSendHistoryRecord.create(context,
+          auditRecord, contract.get().getSpecName(context)));
     } catch (RuntimeException e) {
       log.error("Could not record email send history for contract [{}]",
           context.getContractName(), e);
+      return Optional.empty();
     }
   }
 
