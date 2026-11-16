@@ -958,8 +958,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           plans.put(item);
         }
       } else {
-        boolean accountHasPaid = checkoutRequestStore.hasPaidPurchase(account.getId(),
-            account.getEmail());
+        // Paid, provisioning or provisioned purchases only: the once-per-account free trial.
+        boolean accountHasPaid = !checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail()).isEmpty();
         for (Plan plan : planCatalogService.listPurchasablePlans()) {
           JSONObject item = buildPlanJson(plan, accountHasPaid);
           if (item != null) {

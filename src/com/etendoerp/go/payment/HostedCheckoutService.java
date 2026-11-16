@@ -271,10 +271,11 @@ public class HostedCheckoutService {
     // Persist intent before the purchase (and before locking an old one): this ledger commit
     // must neither leave a recoverable purchase without its offer nor release a replacement lock.
     // The free trial is once per account: a re-subscription, the legacy plan or an account that
-    // already paid a purchase pays from the first month.
+    // already paid a purchase (any PAID, PROVISIONING or PROVISIONED request) pays from the
+    // first month.
     JSONObject terms = promotionTerms.recordIntent(requestId, price,
         sessionOptions.reactivatedClientId == null && !PlanCatalogService.namesLegacyPlan(planKey)
-            && !checkoutRequestStore.hasPaidPurchase(accountId, accountEmail),
+            && checkoutRequestStore.findForAccount(accountId, accountEmail).isEmpty(),
         sessionOptions.language);
     CheckoutRequest predecessor = null;
     if (StringUtils.isNotBlank(replacePurchaseId)) {

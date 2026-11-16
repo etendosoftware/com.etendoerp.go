@@ -21,6 +21,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -33,6 +34,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
 
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
@@ -241,7 +243,8 @@ class HostedCheckoutSessionPlanTest {
     when(service.promotionTerms.recordIntent(anyString(), any(), anyBoolean(), any()))
         .thenAnswer(call -> CheckoutPromotionTerms.describe(call.getArgument(0), PRICE_ID, 2900,
             "EUR", "month", call.getArgument(2)));
-    when(checkoutRequestStore.hasPaidPurchase(ACCOUNT_ID, ACCOUNT_EMAIL)).thenReturn(false, true);
+    when(checkoutRequestStore.findForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(List.of(), List.of(mock(CheckoutRequest.class)));
 
     service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY);
     service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY);

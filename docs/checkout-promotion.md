@@ -5,7 +5,7 @@
 A monthly catalog plan with a price above zero starts with a **30-day free trial** (fixed days,
 not a calendar month), once per account:
 
-- **Who gets it.** An account that has never paid a purchase (`CheckoutRequestStore.hasPaidPurchase`:
+- **Who gets it.** An account that has never paid a purchase (`CheckoutRequestStore.findForAccount`:
   no `PAID`, `PROVISIONING` or `PROVISIONED` request). A second environment of the same account,
   a re-subscription and the legacy plan pay from the first month. Yearly prices already charge ten
   installments for twelve months: no trial.

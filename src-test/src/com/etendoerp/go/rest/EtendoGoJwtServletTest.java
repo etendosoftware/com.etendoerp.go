@@ -86,6 +86,7 @@ import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
@@ -2577,7 +2578,7 @@ public class EtendoGoJwtServletTest {
     servlet.planCatalogService = catalog;
     // An account that already paid a purchase is offered no free trial on any plan.
     CheckoutRequestStore purchases = mock(CheckoutRequestStore.class);
-    when(purchases.hasPaidPurchase(any(), any())).thenReturn(true);
+    when(purchases.findForAccount(any(), any())).thenReturn(List.of(mock(CheckoutRequest.class)));
     servlet.checkoutRequestStore = purchases;
 
     Account account = mockAccount();

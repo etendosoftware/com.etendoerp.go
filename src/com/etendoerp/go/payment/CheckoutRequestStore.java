@@ -850,19 +850,6 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   }
 
   /**
-   * Whether the account has ever paid a purchase, whatever became of its environment. The free
-   * trial of a monthly plan is offered only to an account that has not.
-   *
-   * @param accountId immutable platform account id
-   * @param accountEmail authenticated platform account email
-   * @return {@code true} when a paid, provisioning or provisioned purchase exists; {@code false}
-   *     also for a blank id or email, which identify no account
-   */
-  public boolean hasPaidPurchase(String accountId, String accountEmail) {
-    return !findForAccount(accountId, accountEmail).isEmpty();
-  }
-
-  /**
    * Company names of the account's paid purchases whose environment has not finished
    * provisioning, each with the moment it was paid.
    *
