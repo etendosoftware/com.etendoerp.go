@@ -36,6 +36,7 @@ Current constants:
 - `backend_write_operation_completed`
 - `backend_contact_created` (ETP-5791)
 - `backend_contact_type_changed` (ETP-5791)
+- `backend_goods_shipment_completed` (ETP-5908)
 - `backend_bank_bounce_pair_decided` (ETP-5581)
 - `backend_bank_bounce_pair_restored` (ETP-5581)
 - `backend_bank_bounce_suggestions_applied` (ETP-5581)
@@ -221,6 +222,44 @@ included, not distinguishable from each other), `mcp_batch` (`etendo_batch`, syn
 UI from document vs OCR apart would need a client-sent marker; none exists today.
 
 Contacts created outside NEO CRUD (demo-data transfer, onboarding sample data) emit nothing.
+
+## Goods Shipment Completion KPI (ETP-5908)
+
+`GoodsShipmentTelemetry` (`schemaforge/handlers`), called by `GoodsShipmentHeaderHandler`, emits
+`backend_goods_shipment_completed` when a **sales** goods shipment is completed through the NEO
+`documentAction` (REST single, REST batch or MCP). It feeds the *active client* definition of the
+Movements-tab KPIs: a client with at least 5 completed sales shipments in the Monday-Sunday week.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `flag_enabled` | `product-movements-tab` as evaluated for the request's account (`ProductMovementsPolicy.isEnabled()`); `false` when the evaluation fails |
+
+**Fires** once for a request that moves the shipment from any status other than `CO` to `CO`, for
+a shipment with `IsSOTrx='Y'` whose document type is not a return (`C_DocType.IsReturn='N'`, the
+same rule as the `goods-shipment` bucket of `ProductTransactionsHandler`). A cloned shipment
+(`CloneShipmentHook`) is created as a draft and fires when it is completed through the same action.
+
+**Does not fire** for a draft, a void, a failed or rejected completion (HTTP error, or the stored
+status is not `CO`), a re-run of the action on an already completed document, a customer return
+(`IsReturn='Y'`), a purchase receipt (`IsSOTrx='N'`), nor for a completion done outside the NEO
+action (SQL data-fixes, Classic window). Reactivating a completed shipment and completing it again
+is a new completion and fires again.
+
+**Only after commit, no retries.** Same mechanism as the Contact Type KPIs: the post-hook hands the
+event to `NeoBatchScope.runAfterCommit` (queued until the batch commits inside `/sws/neo/batch` and
+`etendo_batch`), sending runs on one bounded background thread (`goods-shipment-kpi-telemetry`,
+queue 1000, drop when full), each event is sent once, and the Mixpanel sink adds `$insert_id` and
+`environment`. The status reads run under a JDBC savepoint, rolled back on failure, so a failing read cannot
+abort the PostgreSQL transaction of the completion; a failure in the background send is caught and
+only logged. Cost on the request thread: two single-row reads per completion plus the
+`product-movements-tab` evaluation (account lookup and flag resolution), which is memoized per
+tenant for the duration of a batch (`NeoBatchScope.memoize`; the flag cannot change inside one
+batch) and evaluated once per completion outside a batch. No record identifier,
+document number or user data is sent.
+
+**Not implemented:** the common properties agreed on 2026-11-02 (`tenant_type`, `ad_user_id`,
+`ad_client_id`, `etgo_account_id`) are not sent by this event; they are blocked on ETP-6228.
 
 ## Bank Bounce-Pair KPIs (ETP-5581)
 

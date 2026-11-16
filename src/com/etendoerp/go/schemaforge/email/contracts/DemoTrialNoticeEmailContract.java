@@ -177,7 +177,8 @@ final class DemoTrialNoticeEmailContract implements EmailContract {
    * De-duplicates on the environment, its trial start and the milestone.
    *
    * <p>The trial start is part of the key so that a trial restarted with a new start instant is
-   * notified again, while a re-run, a restart or a retry of the same trial never is. There is no
+   * notified again, while a re-run, a restart or a retry of the same trial never is. A trial
+   * whose end was edited (ETP-6223) adds its end, so a new date is notified again. There is no
    * per-domain ceiling: a daily run legitimately mails many owners on the same provider
    * (gmail.com), and a ceiling there would only push real notices to a later day.</p>
    */
@@ -186,7 +187,7 @@ final class DemoTrialNoticeEmailContract implements EmailContract {
       EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
     String clientId = clientId(command);
     String recordId = findRecord(command)
-        .map(owed -> clientId + ":" + owed.getNotice().getTrialStartedAt() + ":"
+        .map(owed -> clientId + ":" + owed.getNotice().trialKey() + ":"
             + owed.getNotice().milestone())
         .orElse(clientId);
     return EmailContractCommandSupport.deliveryPolicy(

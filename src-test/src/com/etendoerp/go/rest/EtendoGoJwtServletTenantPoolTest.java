@@ -65,6 +65,8 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
+import com.etendoerp.go.onboarding.OnboardingRemittanceSetupService;
+import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionService;
@@ -74,7 +76,8 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * ETP-5389 — the servlet chooses between a claimed pooled tenant and the classic path, and the
- * pooled branch runs only the per-request steps.
+ * pooled branch runs only the per-request steps. ETP-6148 — the remittance setup runs after the
+ * sample data and before the costing schedule.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
@@ -85,39 +88,114 @@ public class EtendoGoJwtServletTenantPoolTest {
 
   @Test
   public void aClaimedPooledTenantSkipsClientCreationAndTheDatasetChain() throws Exception {
+    PooledRun run = runPooledOnboarding(BODY);
+
+    assertTrue(run.setupConstructed.isEmpty(), "InitialClientSetup must not run");
+    String ndjson = run.ndjson;
+    assertTrue(ndjson.contains("\"success\":true"), ndjson);
+    assertNotNull(run.claim.request);
+    assertEquals("Acme", run.claim.request.clientName());
+    assertEquals("es_ES", run.claim.request.language());
+    assertFalse(ndjson.contains("\"step\":\"dataset\""));
+    assertFalse(ndjson.contains("\"step\":\"organization\""));
+    assertTrue(ndjson.contains("\"step\":\"orgInfo\""));
+    assertTrue(ndjson.contains("\"step\":\"warehouseAddress\""));
+    verify(run.dataset, never()).importDataset(anyString(), anyString());
+    // ETP-5806 — the onboarding account's own email reaches the persistence step, so the flag
+    // gating what gets written there is evaluated for the same account the servlet validated for.
+    verify(run.orgInfo).ensureOrgInfo("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
+        new com.etendoerp.go.onboarding.OrgInfoInput("ES", "Calle Mayor 1", "", "", "", "", "",
+            "user@test.com"));
+    verify(run.warehouse).alignDefaultWarehouseAddress("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
+        "ADMIN-ROLE");
+    verify(run.lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));
+    verify(run.costing).activateSchedule("POOLED-CLIENT");
+    // ETP-5575 / ETP-5577: a pooled tenant gets its initial period state after the onboarding
+    // commit (the chain built it type-neutral, all periods never-opened), marked pending inside it.
+    assertTrue(run.commitBeforeWindow[0], "the period state runs after the onboarding commit");
+    // ETP-6148: the remittance setup runs on every signup, for the account receiving the tenant,
+    // after the period state and before the costing schedule.
+    InOrder order = inOrder(run.initialState, run.remittance, run.costing);
+    order.verify(run.initialState).markPending("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
+        "ADMIN-ROLE", false);
+    order.verify(run.initialState).applyIfPending("POOLED-CLIENT");
+    order.verify(run.remittance).applyIfEnabled("POOLED-CLIENT", "user@test.com");
+    order.verify(run.costing).activateSchedule("POOLED-CLIENT");
+    // ETP-5047: a demo has no subscription, so it never asks the provider for a billing period.
+    verify(run.subscriptions, never()).fillPeriodFromProviderAfterCommit(anyString());
+    // No opt-in: the sample data is never imported.
+    verify(run.sampleData, never()).importSampleData(anyString(), anyString(), anyString(),
+        anyString());
+  }
+
+  /**
+   * ETP-6148: the sample data is a new tenant's only source of a bank account («Cuenta de Banco»),
+   * so the remittance setup runs after it has been imported, and before the costing schedule.
+   */
+  @Test
+  public void theRemittanceSetupRunsAfterTheSampleDataImport() throws Exception {
+    PooledRun run = runPooledOnboarding(BODY.replace("}", ",\"includeSampleData\":true}"));
+
+    assertTrue(run.ndjson.contains("\"success\":true"), run.ndjson);
+    InOrder order = inOrder(run.sampleData, run.remittance, run.costing);
+    order.verify(run.sampleData).importSampleData("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
+        "ADMIN-ROLE");
+    order.verify(run.remittance).applyIfEnabled("POOLED-CLIENT", "user@test.com");
+    order.verify(run.costing).activateSchedule("POOLED-CLIENT");
+  }
+
+  /** The services a pooled onboarding run used, and what it wrote. */
+  private static final class PooledRun {
+    final StubClaimService claim = new StubClaimService("POOLED-CLIENT");
+    final OnboardingDatasetImportService dataset = mock(OnboardingDatasetImportService.class);
+    final OnboardingOrgInfoService orgInfo = mock(OnboardingOrgInfoService.class);
+    final OnboardingWarehouseAddressService warehouse =
+        mock(OnboardingWarehouseAddressService.class);
+    final OnboardingCostingScheduleService costing = mock(OnboardingCostingScheduleService.class);
+    final TenantEnvironmentLifecycleService lifecycle =
+        mock(TenantEnvironmentLifecycleService.class);
+    final OnboardingInitialPeriodStateService initialState =
+        mock(OnboardingInitialPeriodStateService.class);
+    final OnboardingSampleDataService sampleData = mock(OnboardingSampleDataService.class);
+    final OnboardingRemittanceSetupService remittance =
+        mock(OnboardingRemittanceSetupService.class);
+    final SubscriptionService subscriptions = mock(SubscriptionService.class);
+    final boolean[] commitBeforeWindow = new boolean[1];
+    java.util.List<InitialClientSetup> setupConstructed;
+    String ndjson;
+  }
+
+  /**
+   * Posts {@code requestBody} as a pooled onboarding of {@code POOLED-CLIENT}: every onboarding
+   * service is a mock, the DAL and the servlet's static helpers are mocked statically.
+   */
+  private static PooledRun runPooledOnboarding(String requestBody) throws Exception {
+    PooledRun run = new PooledRun();
     EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(mock(TransactionalAuthEmailSender.class));
     servlet.internalAlertService = mock(InternalAlertService.class);
-    StubClaimService claim = new StubClaimService("POOLED-CLIENT");
-    servlet.pooledTenantClaimService = claim;
-    OnboardingDatasetImportService dataset = mock(OnboardingDatasetImportService.class);
-    OnboardingOrgInfoService orgInfo = mock(OnboardingOrgInfoService.class);
-    OnboardingWarehouseAddressService warehouse = mock(OnboardingWarehouseAddressService.class);
-    OnboardingCostingScheduleService costing = mock(OnboardingCostingScheduleService.class);
-    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
-    when(lifecycle.markDemoReady(eq("POOLED-CLIENT"), any(Instant.class))).thenReturn(true);
-    when(lifecycle.configuration()).thenReturn(new EnvironmentAccessPolicy.Configuration(15, 7));
-    OnboardingPeriodControlService periods = mock(OnboardingPeriodControlService.class);
-    servlet.onboardingPeriodControlService = periods;
-    OnboardingInitialPeriodStateService initialState =
-        mock(OnboardingInitialPeriodStateService.class);
-    servlet.onboardingInitialPeriodStateService = initialState;
-    servlet.onboardingDatasetImportService = dataset;
-    servlet.onboardingOrgInfoService = orgInfo;
-    servlet.onboardingWarehouseAddressService = warehouse;
-    servlet.onboardingCostingScheduleService = costing;
-    servlet.tenantEnvironmentLifecycleService = lifecycle;
-    SubscriptionService subscriptions = mock(SubscriptionService.class);
-    servlet.subscriptionService = subscriptions;
+    servlet.pooledTenantClaimService = run.claim;
+    when(run.lifecycle.markDemoReady(eq("POOLED-CLIENT"), any(Instant.class))).thenReturn(true);
+    when(run.lifecycle.configuration())
+        .thenReturn(new EnvironmentAccessPolicy.Configuration(15, 7));
+    servlet.onboardingPeriodControlService = mock(OnboardingPeriodControlService.class);
+    servlet.onboardingInitialPeriodStateService = run.initialState;
+    servlet.onboardingDatasetImportService = run.dataset;
+    servlet.onboardingOrgInfoService = run.orgInfo;
+    servlet.onboardingWarehouseAddressService = run.warehouse;
+    servlet.onboardingCostingScheduleService = run.costing;
+    servlet.tenantEnvironmentLifecycleService = run.lifecycle;
+    servlet.subscriptionService = run.subscriptions;
+    servlet.onboardingSampleDataService = run.sampleData;
+    servlet.onboardingRemittanceSetupService = run.remittance;
     StringWriter body = new StringWriter();
     HttpServletResponse response = response(body);
 
     OBDal dalInstance = mock(OBDal.class);
-    boolean[] commitBeforeWindow = new boolean[1];
     doAnswer(inv -> {
-      commitBeforeWindow[0] = mockingDetails(dalInstance).getInvocations().stream()
+      run.commitBeforeWindow[0] = mockingDetails(dalInstance).getInvocations().stream()
           .anyMatch(i -> "commitAndClose".equals(i.getMethod().getName()));
       return true;
-    }).when(initialState).applyIfPending("POOLED-CLIENT");
+    }).when(run.initialState).applyIfPending("POOLED-CLIENT");
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
          MockedStatic<OBDal> dal = mockStatic(OBDal.class);
          MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
@@ -134,40 +212,12 @@ public class EtendoGoJwtServletTenantPoolTest {
           .thenReturn(org);
       support.when(() -> EtendoGoJwtSupport.findStarOrgId("POOLED-CLIENT")).thenReturn("STAR");
 
-      servlet.doPost(request(), response);
+      servlet.doPost(request(requestBody), response);
 
-      assertTrue(setup.constructed().isEmpty(), "InitialClientSetup must not run");
+      run.setupConstructed = setup.constructed();
     }
-
-    String ndjson = body.toString();
-    assertTrue(ndjson.contains("\"success\":true"), ndjson);
-    assertNotNull(claim.request);
-    assertEquals("Acme", claim.request.clientName());
-    assertEquals("es_ES", claim.request.language());
-    assertFalse(ndjson.contains("\"step\":\"dataset\""));
-    assertFalse(ndjson.contains("\"step\":\"organization\""));
-    assertTrue(ndjson.contains("\"step\":\"orgInfo\""));
-    assertTrue(ndjson.contains("\"step\":\"warehouseAddress\""));
-    verify(dataset, never()).importDataset(anyString(), anyString());
-    // ETP-5806 — the onboarding account's own email reaches the persistence step, so the flag
-    // gating what gets written there is evaluated for the same account the servlet validated for.
-    verify(orgInfo).ensureOrgInfo("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
-        new com.etendoerp.go.onboarding.OrgInfoInput("ES", "Calle Mayor 1", "", "", "", "", "",
-            "user@test.com"));
-    verify(warehouse).alignDefaultWarehouseAddress("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
-        "ADMIN-ROLE");
-    verify(lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));
-    verify(costing).activateSchedule("POOLED-CLIENT");
-    // ETP-5575 / ETP-5577: a pooled tenant gets its initial period state after the onboarding
-    // commit (the chain built it type-neutral, all periods never-opened), marked pending inside it.
-    assertTrue(commitBeforeWindow[0], "the period state runs after the onboarding commit");
-    InOrder order = inOrder(initialState, costing);
-    order.verify(initialState).markPending("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
-        false);
-    order.verify(initialState).applyIfPending("POOLED-CLIENT");
-    order.verify(costing).activateSchedule("POOLED-CLIENT");
-    // ETP-5047: a demo has no subscription, so it never asks the provider for a billing period.
-    verify(subscriptions, never()).fillPeriodFromProviderAfterCommit(anyString());
+    run.ndjson = body.toString();
+    return run;
   }
 
   @Test
@@ -228,11 +278,15 @@ public class EtendoGoJwtServletTenantPoolTest {
   }
 
   private static HttpServletRequest request() throws Exception {
+    return request(BODY);
+  }
+
+  private static HttpServletRequest request(String json) throws Exception {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getPathInfo()).thenReturn("/onboarding");
     when(request.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(request.getContentType()).thenReturn("application/json");
-    when(request.getReader()).thenReturn(new BufferedReader(new StringReader(BODY)));
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader(json)));
     return request;
   }
 

@@ -24,6 +24,8 @@ import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -184,5 +186,35 @@ final class McpFieldLabels {
       }
     }
     return byId;
+  }
+
+  /**
+   * Overlay a single field's curated label/description (helper for
+   * {@code McpSchemaFieldBuilder#applyCuratedLabels}). Returns early — leaving the field untouched — when the field, its {@code column}, or a matching
+   * curated entry is absent, or when the curated value is blank.
+   *
+   * @param field          one schema field descriptor, may be {@code null}
+   * @param labelsByColumn the curated label and description by upper-case column name
+   * @throws JSONException if a value cannot be written
+   */
+  static void overlayCurated(JSONObject field, Map<String, String[]> labelsByColumn)
+      throws JSONException {
+    if (field == null) {
+      return;
+    }
+    String column = field.optString("column", null);
+    if (column == null) {
+      return;
+    }
+    String[] labelDesc = labelsByColumn.get(column.toUpperCase());
+    if (labelDesc == null) {
+      return;
+    }
+    if (StringUtils.isNotBlank(labelDesc[0])) {
+      field.put(McpConstants.KEY_LABEL, labelDesc[0]);
+    }
+    if (StringUtils.isNotBlank(labelDesc[1])) {
+      field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
+    }
   }
 }

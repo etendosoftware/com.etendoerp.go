@@ -250,7 +250,8 @@ public final class BankStatementsSupport {
 
   /**
    * Whether the account is connected to its bank through PSD2 / Salt Edge, i.e. its statements are
-   * owned by the bank feed and must not be created, imported or deleted by hand (ETP-5471).
+   * owned by the bank feed and must not be created or imported by hand (ETP-5471). Deleting them
+   * is allowed under its own rule, see {@link BankStatementDeletion} (ETP-6151).
    *
    * <p>Same predicate as every other PSD2 connection check in this module
    * ({@link BankIntegrationConstants#FA_CONNECTION_STATUS_CONNECTED} against

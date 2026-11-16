@@ -86,7 +86,8 @@ class InvoiceInboxMessagesTest {
         InvoiceInboxMessages.REQUEST_TOO_LARGE, InvoiceInboxMessages.UNSUPPORTED_TYPE,
         InvoiceInboxMessages.EMPTY_FILE, InvoiceInboxMessages.STORE_FAILED,
         InvoiceInboxMessages.ORG_NOT_ALLOWED, InvoiceInboxMessages.NOT_FOUND,
-        InvoiceInboxMessages.NOT_DISCARDABLE, InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED };
+        InvoiceInboxMessages.NOT_DISCARDABLE, InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED,
+        InvoiceInboxMessages.PROCESSING };
     try (MockedStatic<OBMessageUtils> utils = mockStatic(OBMessageUtils.class)) {
       for (String key : keys) {
         utils.when(() -> OBMessageUtils.messageBD(key)).thenReturn(key);
@@ -194,8 +195,8 @@ class InvoiceInboxMessagesTest {
       }
     }
 
-    assertEquals(12, defaults.size());
-    assertEquals(12, keys.size());
+    assertEquals(13, defaults.size());
+    assertEquals(13, keys.size());
     assertEquals(keys, defaults.keySet());
   }
 }

@@ -307,6 +307,35 @@ final class InvoiceLineLinker {
   }
 
   /**
+   * Brings the match rows written at DRAFT time ({@link #linkInvoiceLineToInOutLine}, a later
+   * partial movement of an invoice line) up to the movement line's current quantity, right before
+   * the movement is completed (ETP-6002 review M4). Such a row froze the quantity the line had when
+   * it was created; if the user changed it on the draft, {@code M_INOUT_POST} — which writes no
+   * row for a line the invoice line's column does not point at — would leave it stale, and the
+   * invoice's delivery percentage ({@code ETGO_GET_DELIVERY_STATUS}) and the line's
+   * {@code QtyInvoiced} would read the old figure. Only rows of a DRAFT movement that are not
+   * posted are touched. Deleting the draft line or movement needs nothing: the match row
+   * cascade-deletes with the line; a voided draft keeps an inert row that no reader counts (every
+   * reader skips voided movements).
+   *
+   * @param inOutId the movement about to be completed
+   * @param matchTable the match table of its direction
+   * @return how many rows were brought up to date
+   */
+  static int refreshDraftMatchQuantities(String inOutId, InOutInvoiceLinks.MatchTable matchTable) {
+    return OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "UPDATE " + matchTable.tableName() + " mt "
+            + "SET qty = iol.movementqty, updated = now(), updatedby = :userId "
+            + "FROM m_inoutline iol JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
+            + "WHERE mt.m_inoutline_id = iol.m_inoutline_id AND iol.m_inout_id = :inOutId "
+            + "AND io.docstatus = 'DR' AND mt.posted = 'N' AND mt.qty <> iol.movementqty")
+        .setParameter(PARAM_USER_ID, currentUserIdOrSystem())
+        .setParameter("inOutId", inOutId)
+        .executeUpdate();
+  }
+
+  /**
    * Returns the current user's id, or the System user id when the context has
    * no user (background tasks, system-init paths). Avoids NPEs at the call
    * sites of {@link #linkPendingInvoiceLinesToInout}.

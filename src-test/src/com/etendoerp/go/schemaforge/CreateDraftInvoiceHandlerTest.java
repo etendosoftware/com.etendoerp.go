@@ -2611,6 +2611,8 @@ public class CreateDraftInvoiceHandlerTest {
   @Test
   @SuppressWarnings("unchecked")
   public void testHandleListMergesDeduplicatesAndFormatsRows() throws Exception {
+    // The rectificative flag column is probed with SQL, so this test decides by doc category
+    RectificativeSupport.setColumnPresentForTests(false);
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       mockAdminMode(obContextMock);
@@ -2635,6 +2637,9 @@ public class CreateDraftInvoiceHandlerTest {
       Currency euro = mock(Currency.class);
       when(euro.getISOCode()).thenReturn("EUR");
       when(invoiceFromLines.getCurrency()).thenReturn(euro);
+      DocumentType rectificativeType = mock(DocumentType.class);
+      when(rectificativeType.getDocumentCategory()).thenReturn("ARC");
+      when(invoiceFromLines.getTransactionDocument()).thenReturn(rectificativeType);
 
       Invoice directOnlyInvoice = mock(Invoice.class);
       when(directOnlyInvoice.getId()).thenReturn("inv-2");
@@ -2673,6 +2678,12 @@ public class CreateDraftInvoiceHandlerTest {
       assertFalse(data.getJSONObject(1).has("invoiceDate"));
       assertTrue(data.getJSONObject(1).has("currency$_identifier"));
       assertTrue(data.getJSONObject(1).isNull("currency$_identifier"));
+      // ETP-6002: each sales row says whether it is a rectificative, so the order's and the
+      // quotation's related documents can leave it out (the rows themselves are unchanged).
+      assertTrue(data.getJSONObject(0).getBoolean("isRectificative"));
+      assertFalse(data.getJSONObject(1).getBoolean("isRectificative"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
     }
   }
 
@@ -3811,6 +3822,68 @@ public class CreateDraftInvoiceHandlerTest {
       DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-9");
 
       assertSame(systemCandidate, result);
+    }
+  }
+
+  /**
+   * ETP-6179 repro: an ordinary invoice was generated with a return or rectificative document
+   * type whenever one ranked first (the org's own default "Factura rectificativa", say), and was
+   * then sent to SII/TicketBAI/VERI*FACTU as a correction of nothing.
+   */
+  @Test
+  public void testFindArInvoiceDocTypeNeverPicksAReturnOrRectificativeType() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType rectificative = mockCandidate("dt-rectif", "org-1", true, "SEQ-R");
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mockCandidate("dt-return", "org-1", false, "SEQ-RM");
+      when(returnType.isReturn()).thenReturn(true);
+      DocumentType ordinary = mockCandidate("dt-ordinary", "0", false, "SEQ-1");
+      mockDocumentTypeCriteria(dal, Arrays.asList(rectificative, returnType, ordinary));
+
+      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-1");
+
+      assertSame(ordinary, result);
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * ETP-6179 review W2 repro: several shipments are invoiced through a header that carries NO
+   * order (createInvoiceHeaderFromShipment links it for a single shipment only), so the sifDefaults
+   * preview must not read the order either — otherwise a caller sending no sifFields gets the
+   * order's SII description/operation date in the preview and today's/the org's on the invoice.
+   */
+  @Test
+  public void testShipmentSifTargetCarriesTheOrderOnlyForASingleShipment() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      Order order = mock(Order.class);
+      DocumentType orderDocType = mock(DocumentType.class);
+      DocumentType invoiceDocType = mock(DocumentType.class);
+      when(invoiceDocType.getDocumentSequence()).thenReturn(mock(Sequence.class));
+      when(orderDocType.getDocumentTypeForInvoice()).thenReturn(invoiceDocType);
+      when(order.getTransactionDocument()).thenReturn(orderDocType);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getOrganization()).thenReturn(org);
+      when(first.getSalesOrder()).thenReturn(order);
+      when(dal.get(ShipmentInOut.class, "sh-1")).thenReturn(first);
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler();
+
+      InvoiceSifPreset.Target several = handler.shipmentSifTarget(
+          new JSONObject().put("shipmentIds", new JSONArray().put("sh-1").put("sh-2")), "sh-1");
+      InvoiceSifPreset.Target single = handler.shipmentSifTarget(new JSONObject(), "sh-1");
+
+      assertNull("several shipments: the header carries no order", several.order());
+      assertSame(invoiceDocType, several.docType());
+      assertSame("one shipment: the header carries the order", order, single.order());
     }
   }
 

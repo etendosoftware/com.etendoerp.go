@@ -90,6 +90,15 @@ public final class NeoTelemetryEvents {
   public static final String BACKEND_CONTACT_TYPE_CHANGED = "backend_contact_type_changed";
 
   /**
+   * ETP-5908 — a SALES goods shipment (IsSOTrx=Y, non-return document type) was completed through
+   * the NEO documentAction and the completion was committed. Emitted once per completion by
+   * {@code GoodsShipmentTelemetry}; properties {@code account_id}, {@code flag_enabled}. Never a
+   * record identifier.
+   */
+  public static final String BACKEND_GOODS_SHIPMENT_COMPLETED =
+      "backend_goods_shipment_completed";
+
+  /**
    * ETP-5581 — one decision on one suggested bounce pair: applied (discarded or failed), left
    * unchecked or sent to the panel in the {@code applySuggestions} modal, or discarded / dismissed
    * ("No es un rebote") in the reconciliation panel. Emitted by {@code BankBounceKpiTelemetry},
