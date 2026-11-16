@@ -57,6 +57,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -359,6 +360,32 @@ public class PortalDocumentsEndpointTest {
 
         assertEquals(Arrays.toString(c), c[2], body.getString("issuer"));
       }
+    }
+  }
+
+  @Test
+  public void aShipmentDetailHasNoPaymentDataAndNeverReadsPropertiesItLacks() throws Exception {
+    // A shipment's entity has no payment method or terms; the real DAL throws on get() of a
+    // property the entity lacks, so the detail must not ask for them.
+    Entity entity = mock(Entity.class);
+    when(entity.hasProperty(anyString())).thenReturn(true);
+    when(entity.hasProperty("paymentMethod")).thenReturn(false);
+    when(entity.hasProperty("paymentTerms")).thenReturn(false);
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.getEntityName()).thenReturn(ShipmentInOut.ENTITY_NAME);
+    when(shipment.getEntity()).thenReturn(entity);
+    when(shipment.getId()).thenReturn("SH-1");
+    when(shipment.get("paymentMethod")).thenThrow(new IllegalStateException("no such property"));
+    when(shipment.get("paymentTerms")).thenThrow(new IllegalStateException("no such property"));
+    query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.SHIPMENT,
+        "SH-1")).thenReturn(shipment);
+
+    try (MockedStatic<AnonymousAttachmentStreamer> stored =
+        mockStatic(AnonymousAttachmentStreamer.class)) {
+      JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "shipment", "SH-1");
+
+      assertEquals("", body.getString("paymentMethod"));
+      assertEquals("", body.getString("paymentTerms"));
     }
   }
 
