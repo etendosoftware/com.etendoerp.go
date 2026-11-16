@@ -179,6 +179,17 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
     if (!STATUS_REJECTED.equals(value(header, "documentStatus"))) {
       return new String[] { notes, null };
     }
+    String[] split = splitPortalNote(description);
+    String tenant = textOrNull(value(header, "rejectReason$_identifier"));
+    return new String[] { split[0], tenant != null ? tenant : split[1] };
+  }
+
+  /**
+   * Takes the portal's note lines out of the notes.
+   *
+   * @return {@code {kept notes, portal reason}}, either {@code null}
+   */
+  private static String[] splitPortalNote(String description) {
     StringBuilder kept = new StringBuilder();
     String portalReason = null;
     for (String line : (description == null ? "" : description).split("\n", -1)) {
@@ -194,11 +205,12 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
       }
     }
     String keptNotes = kept.toString().trim();
-    Object tenantReason = value(header, "rejectReason$_identifier");
-    String tenant = tenantReason == null || String.valueOf(tenantReason).isEmpty() ? null
-        : String.valueOf(tenantReason);
-    return new String[] { keptNotes.isEmpty() ? null : keptNotes,
-        tenant != null ? tenant : portalReason };
+    return new String[] { keptNotes.isEmpty() ? null : keptNotes, portalReason };
+  }
+
+  /** A value as text, {@code null} when absent or empty. */
+  private static String textOrNull(Object raw) {
+    return raw == null || String.valueOf(raw).isEmpty() ? null : String.valueOf(raw);
   }
 
   /** The reason inside a portal note line: what follows its marker, without the closing period. */

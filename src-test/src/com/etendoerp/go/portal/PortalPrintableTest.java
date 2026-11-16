@@ -133,7 +133,7 @@ public class PortalPrintableTest {
 
   @Test
   public void theSenderIsTheRootLinksCreatorUnlessASystemUser() {
-    // { creator of the root row (null: no row), sender }
+    // Columns: creator of the root row (null: no row), sender.
     Object[][] cases = { { "SENDER", "SENDER" }, { " SENDER ", "SENDER" }, { "0", null },
         { "100", null }, { " ", null }, { null, null } };
     for (Object[] c : cases) {
@@ -182,7 +182,7 @@ public class PortalPrintableTest {
   @Test
   public void noSenderNoRoleOrNotConfiguredMeansNoRenderAtAll() {
     PortalSession portal = session("es_ES");
-    // { root creator, the creator's roles in the client, render configured }
+    // Columns: root creator, the creator's roles in the client, render configured.
     Object[][] cases = {
         { "100", Collections.singletonList("SENDER_ROLE"), true },
         { "SENDER", Collections.emptyList(), true },

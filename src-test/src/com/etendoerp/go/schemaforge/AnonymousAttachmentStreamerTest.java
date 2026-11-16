@@ -141,7 +141,7 @@ public class AnonymousAttachmentStreamerTest {
     File dir = new File(attachRoot, "318");
     Files.createDirectories(dir.toPath());
     Files.write(new File(dir, "stored.pdf").toPath(), FILE_BYTES);
-    // { file name, attach.path configured, expected }
+    // Columns: file name, attach.path configured, expected.
     Object[][] cases = { { "stored.pdf", true, true }, { "missing.pdf", true, false },
         { "stored.pdf", false, false } };
     for (Object[] c : cases) {

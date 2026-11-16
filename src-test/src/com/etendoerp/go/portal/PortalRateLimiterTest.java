@@ -40,7 +40,7 @@ public class PortalRateLimiterTest {
   public void eachConstructorHonoursItsCeilingPerKeyAndWindow() {
     Clock clock = mock(Clock.class);
     when(clock.millis()).thenReturn(WINDOW_START);
-    // { limiter, its ceiling }
+    // Columns: limiter, its ceiling.
     Object[][] cases = {
         { new PortalRateLimiter(clock), PortalRateLimiter.MAX_REQUESTS_PER_WINDOW },
         { new PortalRateLimiter(clock, 3), 3 },

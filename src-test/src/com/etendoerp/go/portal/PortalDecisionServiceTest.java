@@ -162,7 +162,7 @@ public class PortalDecisionServiceTest {
 
   @Test
   public void aRequestIsRefusedWithoutSendingAnyEmail() {
-    // { label, decision, reason code, text typed }
+    // Columns: label, decision, reason code, text typed.
     Object[][] cases = {
         { "invalid decision", "MAYBE", null, null },
         { "reject without reason", "REJECT", null, null },
@@ -226,7 +226,7 @@ public class PortalDecisionServiceTest {
 
   @Test
   public void freeTextIsKeptForOtherOnlyAndAcceptCarriesNoReason() throws Exception {
-    // { decision, reason, text typed, expected reasonCode, expected reasonText }
+    // Columns: decision, reason, text typed, expected reasonCode, expected reasonText.
     Object[][] cases = {
         { "REJECT", "PRICE", "typed before switching", "PRICE", null },
         { "REJECT", "other", "  muy caro  ", "OTHER", "muy caro" },
@@ -352,7 +352,7 @@ public class PortalDecisionServiceTest {
 
   @Test
   public void aConfirmedRejectClosesTheQuotationAndNotesTheReasonOnly() throws Exception {
-    // { reason, text, existing notes, expected notes }
+    // Columns: reason, text, existing notes, expected notes.
     Object[][] cases = {
         { "PRICE", null, null, "Rechazado por el cliente desde el portal. Motivo: Precio." },
         { "OTHER", "Llegó tarde", "Nota previa",
@@ -426,7 +426,7 @@ public class PortalDecisionServiceTest {
 
   @Test
   public void aDecisionIsNotAppliedWhenTheQuotationChangedOrExpired() {
-    // { status of the quotation now, validUntil, expected state }
+    // Columns: status of the quotation now, validUntil, expected state.
     Object[][] cases = {
         { "CO", null, PortalDecisionService.State.NOT_PENDING },
         { QuotationDecisions.STATUS_UNDER_EVALUATION, day(-1),

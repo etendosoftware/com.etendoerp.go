@@ -225,7 +225,7 @@ class PrintableDataTest {
     // Mirrors the it.each table of useQuotationPdf.vitest.jsx, case for case.
     String portalEs = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
     String portalEn = "Rejected by the customer from the portal. Reason: Delivery too late.";
-    // { status, description (null: JSON null), tenant reason, expected notes, expected reason }
+    // Columns: status, description (null: JSON null), tenant reason, expected notes, expected reason.
     String[][] cases = {
         { "CJ", "Gracias por la oferta\n" + portalEs, null, "Gracias por la oferta",
             "Precio demasiado alto" },

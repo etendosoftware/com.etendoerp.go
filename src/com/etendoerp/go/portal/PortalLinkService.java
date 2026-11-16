@@ -176,6 +176,7 @@ public class PortalLinkService {
   private final Function<PortalLink, String> renewalSender;
   private final Clock clock;
 
+  /** The service on the portal's own access checks, renewal email and the system clock. */
   public PortalLinkService() {
     this(new PortalAccessChecks(), PortalLinkService::sendRenewalEmail, Clock.systemUTC());
   }

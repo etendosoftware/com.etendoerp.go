@@ -100,7 +100,7 @@ public class PortalDocumentQueryTest {
 
   @Test
   public void everyBuilderBindsTheScopeTheKindFilterAndTheStatusAllowList() {
-    // { label, kind the query is about, the call }
+    // Columns: label, kind the query is about, the call.
     Object[][] cases = {
         { "count quotations", PortalDocumentKind.QUOTATION, (Runnable) () ->
             PortalDocumentQuery.count(SESSION, PortalDocumentKind.QUOTATION, none()) },
@@ -143,7 +143,7 @@ public class PortalDocumentQueryTest {
 
   @Test
   public void requestedStatusesAreIntersectedWithTheAllowList() {
-    // { kind, requested, bound }
+    // Columns: kind, requested, bound.
     Object[][] cases = {
         { PortalDocumentKind.INVOICE, Arrays.asList("DR", "CO"), Arrays.asList("CO") },
         { PortalDocumentKind.INVOICE, Arrays.asList("DR"), Arrays.asList("CO", "CL", "VO") },
@@ -236,7 +236,7 @@ public class PortalDocumentQueryTest {
   @Test
   public void aStatusGroupBindsItsStatusesItsConditionAndTodayOnlyWhenItNeedsIt() {
     Date today = new Date(86_400_000L);
-    // { kind, group, statuses bound, a fragment of its condition (null: none), binds :today }
+    // Columns: kind, group, statuses bound, a fragment of its condition (null: none), binds :today.
     Object[][] cases = {
         { PortalDocumentKind.QUOTATION, "awaiting", Arrays.asList("UE", "CO"), null, false },
         { PortalDocumentKind.QUOTATION, "accepted", Arrays.asList("ETGO_AC", "CA", "ETGO_CI"),
@@ -257,7 +257,7 @@ public class PortalDocumentQueryTest {
       PortalDocumentKind kind = (PortalDocumentKind) c[0];
       PortalDocumentQuery.Group group = PortalDocumentQuery.group(kind, (String) c[1]);
 
-      PortalDocumentQuery.count(SESSION, kind, PortalDocumentQuery.Filter.group(group, today));
+      PortalDocumentQuery.count(SESSION, kind, PortalDocumentQuery.Filter.ofGroup(group, today));
 
       Query query = built.keySet().iterator().next();
       String hql = built.get(query);

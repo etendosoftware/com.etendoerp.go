@@ -95,10 +95,10 @@ public class PortalDecisionService {
 
   public static final String DECISION_ACCEPT = "ACCEPT";
   public static final String DECISION_REJECT = "REJECT";
+  public static final String REASON_OTHER = "OTHER";
   /** The fixed reject reasons (PO spec); {@code OTHER} requires a text. */
   public static final List<String> REASON_CODES = List.of("PRICE", "DELIVERY", "PAYMENT_TERMS",
-      "OTHER_SUPPLIER", "NOT_NEEDED", "OTHER");
-  public static final String REASON_OTHER = "OTHER";
+      "OTHER_SUPPLIER", "NOT_NEEDED", REASON_OTHER);
   static final int MAX_REASON_TEXT = 2000;
 
   /**
@@ -185,7 +185,8 @@ public class PortalDecisionService {
     String clientId;
     String quotationId;
     String linkId;
-    String decision;
+    /** {@code ACCEPT} or {@code REJECT}. */
+    String action;
     String reasonCode;
     String reasonText;
     String recipientEmail;
@@ -210,7 +211,7 @@ public class PortalDecisionService {
     }
 
     public String getDecision() {
-      return decision;
+      return action;
     }
 
     public String getReasonCode() {
@@ -292,6 +293,7 @@ public class PortalDecisionService {
   private final PortalLinkService linkService;
   private final PortalAccessChecks accessChecks;
 
+  /** The service on the portal's own link service and access checks. */
   public PortalDecisionService() {
     this(new PortalLinkService());
   }
@@ -310,6 +312,10 @@ public class PortalDecisionService {
   /**
    * Why the session's quotation cannot be decided now, or {@code null} when it can. The detail's
    * {@code decision} block and {@link #request} share it. Admin mode by the caller.
+   *
+   * @param session the validated session (its root send names the confirmation's recipient)
+   * @param quotation the quotation, already in the session's scope
+   * @return the reason, or {@code null} when the quotation can be decided
    */
   public Blocked blockedReason(PortalSession session, Order quotation) {
     if (!QuotationDecisions.isDecidable(quotation)) {
@@ -329,6 +335,7 @@ public class PortalDecisionService {
    * @param decision {@code ACCEPT} or {@code REJECT}
    * @param reasonCode one of {@link #REASON_CODES} (reject only)
    * @param reasonText required for {@code OTHER}, at most {@value #MAX_REASON_TEXT} characters
+   * @return the outcome, with the masked recipient when the email left
    */
   public RequestResult request(PortalSession session, String quotationId, String decision,
       String reasonCode, String reasonText) {
@@ -340,10 +347,7 @@ public class PortalDecisionService {
     // Free text belongs to "Otros" only (PO spec): with any other reason it is discarded, so a text
     // typed before switching reason is never stored, emailed or noted.
     String text = REASON_OTHER.equals(reason) ? StringUtils.trimToNull(reasonText) : null;
-    if (!DECISION_ACCEPT.equals(normalizedDecision) && !DECISION_REJECT.equals(normalizedDecision)
-        || DECISION_REJECT.equals(normalizedDecision) && (!REASON_CODES.contains(reason)
-            || REASON_OTHER.equals(reason) && text == null)
-        || text != null && text.length() > MAX_REASON_TEXT) {
+    if (!isWellFormed(normalizedDecision, reason, text)) {
       return new RequestResult(RequestOutcome.INVALID_REASON, null, null);
     }
     BaseOBObject document = PortalDocumentQuery.findInScope(session, PortalDocumentKind.QUOTATION,
@@ -362,10 +366,31 @@ public class PortalDecisionService {
     if (inCooldown(quotation.getId())) {
       return new RequestResult(RequestOutcome.COOLDOWN, null, null);
     }
+    boolean reject = DECISION_REJECT.equals(normalizedDecision);
+    return deliverConfirmation(session, quotation, normalizedDecision, reject ? reason : null,
+        reject ? text : null);
+  }
+
+  /** A known decision; a reject with a known reason, and a text (within its limit) for "Otros". */
+  private static boolean isWellFormed(String decision, String reason, String text) {
+    if (!DECISION_ACCEPT.equals(decision) && !DECISION_REJECT.equals(decision)) {
+      return false;
+    }
+    if (DECISION_REJECT.equals(decision)
+        && (!REASON_CODES.contains(reason) || REASON_OTHER.equals(reason) && text == null)) {
+      return false;
+    }
+    return text == null || text.length() <= MAX_REASON_TEXT;
+  }
+
+  /**
+   * Sends the confirmation email under the quotation lock and maps its status to the outcome; a
+   * request whose email did not leave stops counting against the cool-down.
+   */
+  private RequestResult deliverConfirmation(PortalSession session, Order quotation,
+      String normalizedDecision, String reason, String text) {
     String recipient = confirmationRecipient(session.getRootLinkId());
-    String status = sendConfirmation(session, quotation, normalizedDecision,
-        DECISION_REJECT.equals(normalizedDecision) ? reason : null,
-        DECISION_REJECT.equals(normalizedDecision) ? text : null);
+    String status = sendConfirmation(session, quotation, normalizedDecision, reason, text);
     if (TransactionalEmailService.STATUS_SENT.equals(status)) {
       PortalDecisionEvents.requested(session, quotation.getId(), normalizedDecision);
       return new RequestResult(RequestOutcome.SENT, null, mask(recipient));
@@ -405,6 +430,15 @@ public class PortalDecisionService {
   /**
    * Mints the pending decision the confirmation email carries. Called from the confirmation
    * contract's {@code resolve}, inside {@link PortalDecisionScope}.
+   *
+   * @param linkId the session's link
+   * @param quotationId the quotation
+   * @param decision {@code ACCEPT} or {@code REJECT}
+   * @param reasonCode the reject reason, or {@code null}
+   * @param reasonText the "Otros" text, or {@code null}
+   * @param recipient the confirmation's recipient, for audit
+   * @param language the email's language
+   * @return the minted row and its URL; empty when the quotation is gone or no app URL is set
    */
   public Optional<MintedDecision> mint(String linkId, String quotationId, String decision,
       String reasonCode, String reasonText, String recipient, String language) {
@@ -426,16 +460,16 @@ public class PortalDecisionService {
           + " (etgo_portal_decision_id, ad_client_id, ad_org_id, isactive, created, createdby,"
           + " updated, updatedby, c_order_id, etgo_portal_link_id, decision, reason_code,"
           + " reason_text, token_hash, recipient_email, email_language, status)"
-          + " VALUES (:id, :client, :org, 'Y', now(), '0', now(), '0', :order, :link, :decision,"
-          + " :reasonCode, :reasonText, :hash, :recipient, :language, '" + STATUS_PENDING + "')")
+          + " VALUES (:id, :client, :org, 'Y', now(), '0', now(), '0', :order, :link, :action,"
+          + " :code, :text, :hash, :recipient, :language, '" + STATUS_PENDING + "')")
           .setParameter("id", id)
           .setParameter("client", quotation.getClient().getId())
           .setParameter("org", quotation.getOrganization().getId())
           .setParameter("order", quotationId)
           .setParameter("link", linkId)
-          .setParameter("decision", decision)
-          .setParameter("reasonCode", reasonCode)
-          .setParameter("reasonText", reasonText)
+          .setParameter("action", decision)
+          .setParameter("code", reasonCode)
+          .setParameter("text", reasonText)
           .setParameter("hash", PortalTokens.hash(token))
           .setParameter("recipient", recipient)
           .setParameter("language", StringUtils.defaultIfBlank(language, "es_ES"))
@@ -450,6 +484,8 @@ public class PortalDecisionService {
   /**
    * The confirmation email left: the decision's token becomes usable. Committed at once, like a
    * link's confirmation (Part A): the customer holds the email whatever happens next.
+   *
+   * @param decisionId the decision whose email was delivered
    */
   public void markSent(String decisionId) {
     try {
@@ -470,7 +506,12 @@ public class PortalDecisionService {
 
   // ─── Landing ─────────────────────────────────────────────────────────────
 
-  /** What the landing shows for a token. Never writes. Admin mode by the caller. */
+  /**
+   * What the landing shows for a token. Never writes. Admin mode by the caller.
+   *
+   * @param rawToken the token of the email's link
+   * @return the decision's state, or {@code INVALID}
+   */
   public View view(String rawToken) {
     Decision decision = findByToken(rawToken);
     if (decision == null) {
@@ -486,6 +527,7 @@ public class PortalDecisionService {
    * with the PO): the page's script sends it on load, so a link scanner that only GETs the URL
    * applies nothing.
    *
+   * @param rawToken the token of the email's link
    * @return the resulting view: {@code CONFIRMED} with {@link View#isAppliedNow} when this call
    *     applied it, else the state found (an already confirmed decision answers {@code CONFIRMED}
    *     without {@code appliedNow})
@@ -500,48 +542,66 @@ public class PortalDecisionService {
       return closed;
     }
     List<String> voided = new ArrayList<>();
-    View result = SystemContext.call("the portal quotation decision", () -> {
-      try {
-        lock("SELECT c_order_id FROM c_order WHERE c_order_id = :id FOR UPDATE",
-            decision.quotationId);
-        lock("SELECT etgo_portal_decision_id FROM etgo_portal_decision"
-            + " WHERE etgo_portal_decision_id = :id FOR UPDATE", decision.id);
-        Decision current = findById(decision.id);
-        Order quotation = OBDal.getInstance().get(Order.class, decision.quotationId);
-        if (current == null || quotation == null) {
-          return new View(State.INVALID, null, null);
-        }
-        OBDal.getInstance().refresh(quotation);
-        if (!STATUS_PENDING.equals(current.status)) {
-          return new View(stateOf(current, quotation), current, quotation);
-        }
-        State blocked = !QuotationDecisions.isDecidable(quotation) ? State.NOT_PENDING
-            : isExpired(quotation) ? State.EXPIRED : null;
-        if (blocked != null) {
-          setStatus(current.id, STATUS_NOT_APPLIED, "closed_at");
-          OBDal.getInstance().commitAndClose();
-          PortalDecisionEvents.notApplied(current.id, current.quotationId, blocked.getCode());
-          return new View(blocked, current, quotation);
-        }
-        apply(current, quotation);
-        setStatus(current.id, STATUS_CONFIRMED, "confirmed_at");
-        voided.addAll(voidOthers(current));
-        OBDal.getInstance().commitAndClose();
-        current.status = STATUS_CONFIRMED;
-        return new View(State.CONFIRMED, current, quotation, true);
-      } catch (RuntimeException e) {
-        OBDal.getInstance().rollbackAndClose();
-        throw e;
-      }
-    });
+    View result = SystemContext.call("the portal quotation decision",
+        () -> confirmInTransaction(decision, voided));
     if (result.isAppliedNow()) {
-      PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.decision);
+      PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.action);
       if (!voided.isEmpty()) {
         PortalDecisionEvents.voided(decision.quotationId, voided.size());
       }
       sendNotice(result.getDecision());
     }
     return result;
+  }
+
+  /**
+   * The confirmation's transaction (the first confirmed wins): locks the quotation, then the
+   * decision row, re-checks both and applies; committed or rolled back here.
+   *
+   * @param decision the decision the token named
+   * @param voided collects the ids of the other pending requests this confirmation voided
+   * @return the resulting view
+   */
+  private View confirmInTransaction(Decision decision, List<String> voided) {
+    try {
+      lock("SELECT c_order_id FROM c_order WHERE c_order_id = :id FOR UPDATE",
+          decision.quotationId);
+      lock("SELECT etgo_portal_decision_id FROM etgo_portal_decision"
+          + " WHERE etgo_portal_decision_id = :id FOR UPDATE", decision.id);
+      Decision current = findById(decision.id);
+      Order quotation = OBDal.getInstance().get(Order.class, decision.quotationId);
+      if (current == null || quotation == null) {
+        return new View(State.INVALID, null, null);
+      }
+      OBDal.getInstance().refresh(quotation);
+      if (!STATUS_PENDING.equals(current.status)) {
+        return new View(stateOf(current, quotation), current, quotation);
+      }
+      State blocked = notApplicableState(quotation);
+      if (blocked != null) {
+        setStatus(current.id, STATUS_NOT_APPLIED, "closed_at");
+        OBDal.getInstance().commitAndClose();
+        PortalDecisionEvents.notApplied(current.id, current.quotationId, blocked.getCode());
+        return new View(blocked, current, quotation);
+      }
+      apply(current, quotation);
+      setStatus(current.id, STATUS_CONFIRMED, "confirmed_at");
+      voided.addAll(voidOthers(current));
+      OBDal.getInstance().commitAndClose();
+      current.status = STATUS_CONFIRMED;
+      return new View(State.CONFIRMED, current, quotation, true);
+    } catch (RuntimeException e) {
+      OBDal.getInstance().rollbackAndClose();
+      throw e;
+    }
+  }
+
+  /** Why the quotation can no longer take the decision ({@code null} when it can). */
+  private static State notApplicableState(Order quotation) {
+    if (!QuotationDecisions.isDecidable(quotation)) {
+      return State.NOT_PENDING;
+    }
+    return isExpired(quotation) ? State.EXPIRED : null;
   }
 
   /**
@@ -574,15 +634,14 @@ public class PortalDecisionService {
 
   /** Applies the confirmed decision to the quotation, through the app's own writes. */
   private void apply(Decision decision, Order quotation) {
-    if (DECISION_ACCEPT.equals(decision.decision)) {
-      // Unreachable while ACCEPT_AVAILABLE is false: request() refuses accepts (PO question Q1).
+    if (DECISION_ACCEPT.equals(decision.action)) {
       QuotationDecisions.accept(quotation);
       return;
     }
-    // The portal's reason is never mapped to the tenant's C_Reject_Reason (PO decision, ETP-6209):
-    // a tenant's reasons can be internal ("deudor") and must never reach the customer, and a fixed
-    // portal reason, "Otros" included, never creates one. The reason and its text go to the notes;
-    // the seller sets the internal reason on the rejected quotation afterwards, if any.
+    // The portal's reason is never mapped to the tenant's reject reasons (PO decision, ETP-6209).
+    // A tenant's reasons can be internal, such as "deudor", and must never reach the customer, and
+    // no fixed portal reason ("Otros" included) ever creates one. The reason and its text go to the
+    // notes, and the seller may set the internal reason on the rejected quotation afterwards.
     appendNote(quotation, decision);
     QuotationDecisions.reject(quotation, null);
   }
@@ -663,6 +722,9 @@ public class PortalDecisionService {
    * filled by onboarding, so the account is the identity. {@code null} when it cannot be resolved
    * (a system-created root, an inactive user, no account): no notice, the decision still stands.
    * Admin mode by the caller.
+   *
+   * @param decision the confirmed decision
+   * @return the sender's account email, or {@code null}
    */
   public String senderEmail(Decision decision) {
     String userId = decision == null ? null : PortalPrintable.senderOfLink(decision.linkId);
@@ -679,7 +741,12 @@ public class PortalDecisionService {
 
   // ─── Reads and writes ────────────────────────────────────────────────────
 
-  /** A decision by id, for the contracts. Admin mode by the caller. */
+  /**
+   * A decision by id, for the contracts. Admin mode by the caller.
+   *
+   * @param decisionId the row's id
+   * @return the decision, or {@code null}
+   */
   public Decision findById(String decisionId) {
     List<?> rows = OBDal.getInstance().getSession().createNativeQuery(SELECT_DECISION
         + " WHERE etgo_portal_decision_id = :id").setParameter("id", decisionId).list();
@@ -708,7 +775,7 @@ public class PortalDecisionService {
     decision.clientId = (String) row[1];
     decision.quotationId = (String) row[2];
     decision.linkId = (String) row[3];
-    decision.decision = (String) row[4];
+    decision.action = (String) row[4];
     decision.reasonCode = (String) row[5];
     decision.reasonText = (String) row[6];
     decision.recipientEmail = (String) row[7];

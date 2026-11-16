@@ -152,7 +152,7 @@ public class PortalDocumentsEndpointTest {
 
   @Test
   public void limitAndOffsetAreClampedAndMalformedValuesIgnored() throws Exception {
-    // { limit, offset, expected limit, expected offset }
+    // Columns: limit, offset, expected limit, expected offset.
     Object[][] cases = { { null, null, 50, 0 }, { "0", "-5", 1, 0 }, { "500", "20", 200, 20 },
         { "abc", "x", 50, 0 }, { " 30 ", "10", 30, 10 } };
     for (Object[] c : cases) {
@@ -207,7 +207,7 @@ public class PortalDocumentsEndpointTest {
 
   @Test
   public void requestedStatusesAreTrimmedAndBlanksDropped() throws Exception {
-    // { ?status=, statuses handed to the query (null: no status filter) }
+    // Columns: ?status=, statuses handed to the query (null: no status filter).
     Object[][] cases = { { "CO, CL", Arrays.asList("CO", "CL") },
         { " CO ,, CL ,", Arrays.asList("CO", "CL") }, { " , ,", null }, { "  ", null } };
     for (Object[] c : cases) {
@@ -340,7 +340,7 @@ public class PortalDocumentsEndpointTest {
 
   @Test
   public void theIssuerIsTheDocumentsOrganizationUnlessItIsStar() throws Exception {
-    // { organization id, its name, issuer shown }
+    // Columns: organization id, its name, issuer shown.
     Object[][] cases = { { "ORG-9", "Acme Norte SL", "Acme Norte SL" }, { "0", "*", "Acme" },
         { "ORG-9", " ", "Acme" } };
     for (Object[] c : cases) {
@@ -363,7 +363,7 @@ public class PortalDocumentsEndpointTest {
     Order quotation = order("Q-1", "OB");
     query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.QUOTATION,
         "Q-1")).thenReturn(quotation);
-    // { why the decision is blocked (null: it is not), canDecide, blockedReason }
+    // Columns: why the decision is blocked (null: it is not), canDecide, blockedReason.
     Object[][] cases = { { null, true, null },
         { PortalDecisionService.Blocked.EXPIRED, false, "expired" },
         { PortalDecisionService.Blocked.NOT_PENDING, false, "not_pending" } };
@@ -503,7 +503,7 @@ public class PortalDocumentsEndpointTest {
 
   @Test
   public void theChartPeriodIsThreeSixOrTwelveMonthsAndTwelveOtherwise() throws Exception {
-    // { months=, bars }
+    // Columns: months=, bars.
     Object[][] cases = { { "3", 3 }, { "6", 6 }, { "12", 12 }, { "7", 12 }, { null, 12 },
         { "abc", 12 } };
     for (Object[] c : cases) {

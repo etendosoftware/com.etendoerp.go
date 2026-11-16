@@ -100,6 +100,8 @@ public final class PortalLink {
   }
 
   /**
+   * Whether the link's lifetime is over at the given instant (an unsent link never expires).
+   *
    * @param now the reference instant
    * @return {@code true} when the link was sent and its lifetime is over
    */

@@ -69,6 +69,9 @@ public final class AnonymousAttachmentStreamer {
   /**
    * The attachment marked as main for a record, by the header's {@code AD_Table.TableName}.
    *
+   * @param tableName the header's {@code AD_Table.TableName}
+   * @param recordId the record
+   * @param clientId the client the attachment must belong to
    * @return the attachment, or {@code null} when none is marked, the table is unknown, or the
    *     attachment does not belong to {@code clientId}
    */
@@ -104,8 +107,10 @@ public final class AnonymousAttachmentStreamer {
    * file cannot be read.
    *
    * @param attachment an attachment already resolved and client-checked by the caller
+   * @param response the response the file is written to
    * @param logContext what to name in the logs (e.g. {@code "spec=sales-invoice record=..."})
    * @return {@code true} when the file was written to the response
+   * @throws IOException when the response cannot be written
    */
   public static boolean stream(Attachment attachment, HttpServletResponse response,
       String logContext) throws IOException {

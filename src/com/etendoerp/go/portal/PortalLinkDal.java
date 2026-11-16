@@ -19,6 +19,8 @@ package com.etendoerp.go.portal;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.base.model.ModelProvider;
@@ -66,6 +68,9 @@ final class PortalLinkDal {
   static final String PROP_CREATION_DATE = "creationDate";
   static final String PROP_BPARTNER = "bpartner";
   static final String PROP_TOKEN_HASH = "tokenHash";
+  /** The alias and condition start of every link query. */
+  private static final String AS_L_WHERE = "as l where l.";
+  private static final String PARAM_ORIGIN = "origin";
   static final String PROP_TABLE = "table";
   static final String PROP_RECORD = "record";
   static final String PROP_DOCUMENT_KIND = "documentKind";
@@ -148,8 +153,8 @@ final class PortalLinkDal {
    */
   static BaseOBObject findByTokenHash(String tokenHash) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
-        "as l where l." + PROP_TOKEN_HASH + " = :tokenHash");
-    query.setNamedParameter("tokenHash", tokenHash);
+        AS_L_WHERE + PROP_TOKEN_HASH + " = :tokenHash");
+    query.setNamedParameter(PROP_TOKEN_HASH, tokenHash);
     return first(query);
   }
 
@@ -162,7 +167,7 @@ final class PortalLinkDal {
       return null;
     }
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
-        "as l where l." + PROP_ID + " = :linkId");
+        AS_L_WHERE + PROP_ID + " = :linkId");
     query.setNamedParameter("linkId", linkId);
     return first(query);
   }
@@ -221,11 +226,11 @@ final class PortalLinkDal {
    */
   static int countRenewalsOf(String parentLinkId, Date since) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
-        "as l where l." + PROP_PARENT_LINK + " = :parentLinkId"
+        AS_L_WHERE + PROP_PARENT_LINK + " = :parentLinkId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
             + " and l." + PROP_CREATION_DATE + " >= :since");
     query.setNamedParameter("parentLinkId", parentLinkId);
-    query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    query.setNamedParameter(PARAM_ORIGIN, PortalLink.ORIGIN_RENEWAL);
     query.setNamedParameter("since", since);
     disableTenantFilters(query);
     return query.count();
@@ -237,13 +242,13 @@ final class PortalLinkDal {
    */
   static int countRenewalsForBusinessPartner(String clientId, String bpartnerId, Date since) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
-        "as l where l." + PROP_CLIENT + ".id = :clientId"
+        AS_L_WHERE + PROP_CLIENT + ".id = :clientId"
             + " and l." + PROP_BPARTNER + ".id = :bpartnerId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
             + " and l." + PROP_CREATION_DATE + " >= :since");
     query.setNamedParameter("clientId", clientId);
     query.setNamedParameter("bpartnerId", bpartnerId);
-    query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    query.setNamedParameter(PARAM_ORIGIN, PortalLink.ORIGIN_RENEWAL);
     query.setNamedParameter("since", since);
     disableTenantFilters(query);
     return query.count();
@@ -258,11 +263,11 @@ final class PortalLinkDal {
    */
   static void deactivatePendingRenewalsOf(String parentLinkId) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
-        "as l where l." + PROP_PARENT_LINK + " = :parentLinkId"
+        AS_L_WHERE + PROP_PARENT_LINK + " = :parentLinkId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
             + " and l." + PROP_SENT_AT + " is null");
     query.setNamedParameter("parentLinkId", parentLinkId);
-    query.setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    query.setNamedParameter(PARAM_ORIGIN, PortalLink.ORIGIN_RENEWAL);
     disableTenantFilters(query);
     for (BaseOBObject row : query.list()) {
       row.set(PROP_ACTIVE, Boolean.FALSE);
@@ -342,19 +347,17 @@ final class PortalLinkDal {
       return null;
     }
     StringBuilder joined = new StringBuilder();
-    for (String address : addresses) {
-      String normalized = StringUtils.trimToNull(address);
-      if (normalized == null) {
-        continue;
-      }
-      int extra = (joined.length() == 0 ? 0 : RECIPIENT_JOIN.length()) + normalized.length();
+    List<String> normalized = addresses.stream().map(StringUtils::trimToNull)
+        .filter(Objects::nonNull).collect(Collectors.toList());
+    for (String address : normalized) {
+      int extra = (joined.length() == 0 ? 0 : RECIPIENT_JOIN.length()) + address.length();
       if (joined.length() + extra > maxLength) {
         break;
       }
       if (joined.length() > 0) {
         joined.append(RECIPIENT_JOIN);
       }
-      joined.append(normalized);
+      joined.append(address);
     }
     return joined.length() == 0 ? null : joined.toString();
   }

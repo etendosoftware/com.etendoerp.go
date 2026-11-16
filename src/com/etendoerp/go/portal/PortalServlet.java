@@ -126,9 +126,11 @@ public class PortalServlet extends HttpBaseServlet {
    * confirmation landing reads {@code GET /decisions/view} and confirms with
    * {@code POST /decisions/confirm}, the decision token in {@value #HEADER_DECISION_TOKEN}.
    */
-  private static final String PATH_QUOTATIONS = "/quotations/";
+  private static final String PATH_QUOTATIONS = "/quotations/"; // NOSONAR java:S1075 route
   private static final String DECISION_SUFFIX = "/decision";
   private static final String PATH_DECISION_VIEW = "/decisions/view";
+  /** The answer of a request the server could not complete (a 503). */
+  private static final String MSG_UNAVAILABLE = "The portal is temporarily unavailable";
   private static final String PATH_DECISION_CONFIRM = "/decisions/confirm";
   /**
    * The decision token's own header, like {@link #HEADER_PORTAL_TOKEN}: never in a URL the server
@@ -230,7 +232,7 @@ public class PortalServlet extends HttpBaseServlet {
       if (!response.isCommitted()) {
         response.reset();
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "The portal is temporarily unavailable");
+            MSG_UNAVAILABLE);
       }
     } finally {
       OBContext.restorePreviousMode();
@@ -266,7 +268,7 @@ public class PortalServlet extends HttpBaseServlet {
       if (!response.isCommitted()) {
         response.reset();
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "The portal is temporarily unavailable");
+            MSG_UNAVAILABLE);
       }
     } finally {
       OBContext.restorePreviousMode();
@@ -351,7 +353,7 @@ public class PortalServlet extends HttpBaseServlet {
     }
     if (outcome == PortalLinkService.RenewalOutcome.FAILED) {
       sendError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-          "The portal is temporarily unavailable");
+          MSG_UNAVAILABLE);
       return;
     }
     JSONObject body = new JSONObject();
@@ -516,7 +518,7 @@ public class PortalServlet extends HttpBaseServlet {
         return;
       default:
         sendError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-            "The portal is temporarily unavailable");
+            MSG_UNAVAILABLE);
     }
   }
 
@@ -681,17 +683,26 @@ public class PortalServlet extends HttpBaseServlet {
       sendJson(response, HttpServletResponse.SC_OK, body);
       return;
     }
-    PortalDocumentKind kind = PortalDocumentsEndpoint.kindOf(parts[0]);
+    streamPdf(response, validated, parts[0], parts[1]);
+  }
+
+  /**
+   * Streams the document's printable: the stored main attachment, rendered first when missing and
+   * again when stale. Anything out of scope or without a printable answers 404.
+   */
+  private void streamPdf(HttpServletResponse response, PortalSession validated, String type,
+      String id) throws IOException {
+    PortalDocumentKind kind = PortalDocumentsEndpoint.kindOf(type);
     BaseOBObject document = kind == null ? null
-        : PortalDocumentQuery.findInScope(validated, kind, parts[1]);
+        : PortalDocumentQuery.findInScope(validated, kind, id);
     Attachment attachment = document == null ? null
-        : PortalDocumentsEndpoint.mainAttachment(validated, kind, parts[1]);
+        : PortalDocumentsEndpoint.mainAttachment(validated, kind, id);
     if (document != null && attachment == null) {
       // No stored printable yet (never emailed nor printed): render it with the server-side render
       // the MCP uses and store it as the main attachment (ETP-6209). Any failure answers the same
       // 404, and the page shows the data sheet.
       attachment = PortalPrintable.renderAndFind(validated, kind, document);
-    } else if (attachment != null && PortalPrintable.isStale(kind, parts[1])) {
+    } else if (attachment != null && PortalPrintable.isStale(kind, id)) {
       // The stored printable predates the document (a confirmed decision changed the quotation's
       // status and notes, Part C): render it again; if that fails, the stored one is still served.
       Attachment fresh = PortalPrintable.renderAndFind(validated, kind, document);
@@ -704,8 +715,8 @@ public class PortalServlet extends HttpBaseServlet {
     // The email link's session-less path (ETP-6209 QA BUG-1); the event only counts a file that
     // was actually served (BUG-5).
     if (AnonymousAttachmentStreamer.stream(attachment, response,
-        "portal kind=" + kind.name() + " record=" + parts[1])) {
-      PortalUsageEvents.downloaded(validated, parts[1]);
+        "portal kind=" + kind.name() + " record=" + id)) {
+      PortalUsageEvents.downloaded(validated, id);
     }
   }
 

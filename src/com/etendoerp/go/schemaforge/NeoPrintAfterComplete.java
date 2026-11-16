@@ -296,6 +296,13 @@ public final class NeoPrintAfterComplete {
    * worker, the in-JVM join, the advisory lock and re-check, the write-access check (D23) and the
    * store as the main attachment.
    *
+   * @param entity the document's NEO entity
+   * @param recordId the document
+   * @param language the printable's language
+   * @param userId the user the render runs as
+   * @param roleId the role the render runs as
+   * @param clientId the document's client
+   * @param orgId the document's organization
    * @return the outcome, or {@code null} when nothing could be queued or the render did not finish
    *         in time
    */

@@ -53,6 +53,9 @@ import org.openbravo.dal.service.OBDal;
  */
 final class PortalDocumentQuery {
 
+  /** The main entity's alias and the start of its condition, in every list query. */
+  private static final String ALIAS_WHERE = " e where ";
+
   /** Visible {@code DocStatus} per kind (plan §B.1). Drafts and in-process states never show. */
   private static final Map<PortalDocumentKind, List<String>> VISIBLE_STATUSES =
       new EnumMap<>(PortalDocumentKind.class);
@@ -174,7 +177,7 @@ final class PortalDocumentQuery {
     }
 
     /** Only the given group, for the home's tiles. */
-    static Filter group(Group group, Date today) {
+    static Filter ofGroup(Group group, Date today) {
       return new Filter(null, null, null, null, group, today);
     }
 
@@ -214,7 +217,7 @@ final class PortalDocumentQuery {
   static List<BaseOBObject> list(PortalSession session, PortalDocumentKind kind, Filter filter,
       int offset, int limit) {
     Query<BaseOBObject> query = session().createQuery("select e from " + kind.getEntityName()
-        + " e where " + where(kind, filter) + " order by e." + kind.getDateProperty()
+        + ALIAS_WHERE + where(kind, filter) + " order by e." + kind.getDateProperty()
         + " desc, e.documentNo desc", BaseOBObject.class);
     bind(query, session, kind, filter);
     query.setFirstResult(Math.max(offset, 0));
@@ -235,7 +238,7 @@ final class PortalDocumentQuery {
     }
     Query<Object[]> query = session().createQuery("select e.currency.iSOCode, count(e),"
         + " sum(e.summedLineAmount), sum(e.grandTotalAmount) from " + kind.getEntityName()
-        + " e where " + where(kind, filter) + " group by e.currency.iSOCode", Object[].class);
+        + ALIAS_WHERE + where(kind, filter) + " group by e.currency.iSOCode", Object[].class);
     bind(query, session, kind, filter);
     return query.list();
   }
@@ -243,7 +246,7 @@ final class PortalDocumentQuery {
   /** Count of a kind's visible documents, optionally narrowed by the filter. */
   static long count(PortalSession session, PortalDocumentKind kind, Filter filter) {
     Query<Long> query = session().createQuery("select count(e) from " + kind.getEntityName()
-        + " e where " + where(kind, filter), Long.class);
+        + ALIAS_WHERE + where(kind, filter), Long.class);
     bind(query, session, kind, filter);
     Long result = query.uniqueResult();
     return result == null ? 0L : result;
@@ -430,14 +433,18 @@ final class PortalDocumentQuery {
   }
 
   private static void sortNewestFirst(List<BaseOBObject> documents) {
-    documents.sort((a, b) -> {
-      Date da = dateOf(a);
-      Date db = dateOf(b);
-      if (da == null || db == null) {
-        return da == null ? (db == null ? 0 : 1) : -1;
-      }
+    documents.sort((a, b) -> compareNewestFirst(dateOf(a), dateOf(b)));
+  }
+
+  /** Newest first; a document without a date sorts after every dated one. */
+  private static int compareNewestFirst(Date da, Date db) {
+    if (da != null && db != null) {
       return db.compareTo(da);
-    });
+    }
+    if (da == null && db == null) {
+      return 0;
+    }
+    return da == null ? 1 : -1;
   }
 
   /** The document date of any portal document (order, shipment or invoice date). */

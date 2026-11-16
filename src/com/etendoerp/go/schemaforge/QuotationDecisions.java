@@ -56,6 +56,9 @@ public final class QuotationDecisions {
   /**
    * Which quotations can be decided (PO answer to Q3, ETP-6209): only Under evaluation, the app's
    * reject rule; the portal adds "not expired". One predicate for the app's reject and the portal.
+   *
+   * @param quotation the quotation, may be {@code null}
+   * @return {@code true} when it is Under evaluation
    */
   public static boolean isDecidable(Order quotation) {
     return quotation != null && STATUS_UNDER_EVALUATION.equals(quotation.getDocumentStatus());

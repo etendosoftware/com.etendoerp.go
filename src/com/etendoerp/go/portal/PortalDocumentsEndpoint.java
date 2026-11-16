@@ -92,6 +92,13 @@ final class PortalDocumentsEndpoint {
   private static final String ID = "id";
   private static final String CURRENCY = "currency";
   private static final String COUNT = "count";
+  private static final String OVERDUE = "overdue";
+  private static final String AMOUNT = "amount";
+  private static final String TAX_BASE = "taxBase";
+  private static final String GRAND_TOTAL = "grandTotal";
+  private static final String DESCRIPTION = "description";
+  private static final String OUTSTANDING_AMOUNT = "outstandingAmount";
+  private static final String DUE_DATE = "dueDate";
 
   private PortalDocumentsEndpoint() {
   }
@@ -127,7 +134,7 @@ final class PortalDocumentsEndpoint {
       balance.put("outstanding", PortalDocumentQuery.amount(row[1]));
       balance.put("pendingCount", ((Number) row[2]).longValue());
       Object[] late = overdue.get(currency);
-      balance.put("overdue", late == null ? BigDecimal.ZERO : PortalDocumentQuery.amount(late[1]));
+      balance.put(OVERDUE, late == null ? BigDecimal.ZERO : PortalDocumentQuery.amount(late[1]));
       balance.put("overdueSince", late == null ? JSONObject.NULL : formatDate((Date) late[2]));
       balance.put("overdueCount", late == null ? 0L : ((Number) late[3]).longValue());
       balances.put(balance);
@@ -211,7 +218,7 @@ final class PortalDocumentsEndpoint {
       String key = String.format("%04d-%02d", month.getYear(), month.getMonthValue());
       JSONObject bar = new JSONObject();
       bar.put("month", key);
-      bar.put("amount", amounts.getOrDefault(key, BigDecimal.ZERO));
+      bar.put(AMOUNT, amounts.getOrDefault(key, BigDecimal.ZERO));
       bars.put(bar);
     }
     JSONObject chart = new JSONObject();
@@ -251,17 +258,17 @@ final class PortalDocumentsEndpoint {
         // The same set as the list's "Por responder" tab, so the tile and the tab agree.
         highlight.put("code", "awaitingAnswer");
         highlight.put(COUNT, PortalDocumentQuery.count(session, kind, PortalDocumentQuery.Filter
-            .group(PortalDocumentQuery.group(kind, "awaiting"), today)));
+            .ofGroup(PortalDocumentQuery.group(kind, "awaiting"), today)));
         return highlight;
       case INVOICE:
-        highlight.put("code", "overdue");
+        highlight.put("code", OVERDUE);
         highlight.put(COUNT, overdueInvoices);
         return highlight;
       case ORDER:
         // "En curso": completed and not yet fully delivered or fully invoiced (plan §B.4).
         highlight.put("code", "inProgress");
         highlight.put(COUNT, PortalDocumentQuery.count(session, kind, PortalDocumentQuery.Filter
-            .group(PortalDocumentQuery.group(kind, "inProgress"), today)));
+            .ofGroup(PortalDocumentQuery.group(kind, "inProgress"), today)));
         return highlight;
       case SHIPMENT:
         LocalDate firstOfMonth = LocalDate.now().withDayOfMonth(1);
@@ -277,9 +284,41 @@ final class PortalDocumentsEndpoint {
   // ─── List ────────────────────────────────────────────────────────────────
 
   /**
-   * One page of one kind. Unknown or missing {@code type} answers {@code null} (the caller's 404);
-   * every other malformed parameter is ignored rather than failing the page.
+   * The {@code status} parameter as a list: each value trimmed ({@code ?status=CO, CL}), blanks
+   * dropped; empty (no filter) when nothing is left.
    */
+  private static List<String> parseStatuses(String status) {
+    if (StringUtils.isBlank(status)) {
+      return Collections.emptyList();
+    }
+    return Arrays.stream(StringUtils.split(status, ','))
+        .map(StringUtils::trimToNull)
+        .filter(Objects::nonNull)
+        .collect(Collectors.toList());
+  }
+
+  /** The page's rows; a quotation turned into an order also names that order. */
+  private static JSONArray listRows(List<BaseOBObject> documents, Map<String, Object[]> schedules,
+      Map<String, String[]> orders) throws JSONException {
+    JSONArray rows = new JSONArray();
+    for (BaseOBObject document : documents) {
+      JSONObject row = row(document, schedules);
+      String[] order = orders.get(document.getId());
+      if (order != null) {
+        row.put("orderId", order[0]);
+        row.put("orderNo", order[1]);
+      }
+      rows.put(row);
+    }
+    return rows;
+  }
+
+  /**
+   * One page of one kind. Unknown or missing {@code type} answers {@code null} (the caller's 404);
+   * every other malformed parameter is ignored rather than failing the page. One argument per
+   * query parameter of the HTTP route, hence the long signature.
+   */
+  @SuppressWarnings("java:S107")
   static JSONObject list(PortalSession session, String type, String status, String dateFrom,
       String dateTo, String search, String limitParam, String offsetParam) throws JSONException {
     return list(session, type, null, status, dateFrom, dateTo, search, limitParam, offsetParam);
@@ -301,18 +340,10 @@ final class PortalDocumentsEndpoint {
     Date toInclusive = parseDate(dateTo);
     Date toExclusive = toInclusive == null ? null
         : toDate(toLocalDate(toInclusive).plusDays(1));
-    // Each value trimmed (`?status=CO, CL`); blanks dropped, and nothing left means no filter.
-    List<String> statuses = StringUtils.isBlank(status) ? null
-        : Arrays.stream(StringUtils.split(status, ','))
-            .map(StringUtils::trimToNull)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toList());
-    if (statuses != null && statuses.isEmpty()) {
-      statuses = null;
-    }
+    List<String> statuses = parseStatuses(status);
     PortalDocumentQuery.Group group = PortalDocumentQuery.group(kind, groupCode);
     PortalDocumentQuery.Filter filter = new PortalDocumentQuery.Filter(
-        group == null ? statuses : null, from, toExclusive, search, group, today());
+        group == null && !statuses.isEmpty() ? statuses : null, from, toExclusive, search, group, today());
     int limit = Math.min(Math.max(parseInt(limitParam, DEFAULT_LIMIT), 1), MAX_LIMIT);
     int offset = Math.max(parseInt(offsetParam, 0), 0);
 
@@ -323,16 +354,7 @@ final class PortalDocumentsEndpoint {
     Map<String, String[]> orders = kind == PortalDocumentKind.QUOTATION
         ? PortalDocumentQuery.ordersOfQuotations(session, ids(documents))
         : Collections.emptyMap();
-    JSONArray rows = new JSONArray();
-    for (BaseOBObject document : documents) {
-      JSONObject row = row(document, schedules);
-      String[] order = orders.get(document.getId());
-      if (order != null) {
-        row.put("orderId", order[0]);
-        row.put("orderNo", order[1]);
-      }
-      rows.put(row);
-    }
+    JSONArray rows = listRows(documents, schedules, orders);
     long totalCount = 0;
     JSONArray totals = new JSONArray();
     for (Object[] total : PortalDocumentQuery.totals(session, kind, filter)) {
@@ -341,8 +363,8 @@ final class PortalDocumentsEndpoint {
       JSONObject entry = new JSONObject();
       entry.put(CURRENCY, StringUtils.defaultString((String) total[0]));
       entry.put(COUNT, count);
-      entry.put("taxBase", total[2] == null ? JSONObject.NULL : total[2]);
-      entry.put("grandTotal", total[3] == null ? JSONObject.NULL : total[3]);
+      entry.put(TAX_BASE, total[2] == null ? JSONObject.NULL : total[2]);
+      entry.put(GRAND_TOTAL, total[3] == null ? JSONObject.NULL : total[3]);
       totals.put(entry);
     }
     JSONObject body = new JSONObject();
@@ -375,7 +397,7 @@ final class PortalDocumentsEndpoint {
         ? PortalDocumentQuery.invoiceSchedules(Collections.singletonList(id), today())
         : Collections.emptyMap();
     JSONObject body = row(document, schedules);
-    body.put("description", text(document.get("description")));
+    body.put(DESCRIPTION, text(document.get(DESCRIPTION)));
     body.put("paymentMethod", nameOf(document.get("paymentMethod")));
     body.put("paymentTerms", nameOf(document.get("paymentTerms")));
     if (document instanceof Order) {
@@ -464,28 +486,28 @@ final class PortalDocumentsEndpoint {
     row.put("documentNo", text(document.get("documentNo")));
     row.put("isCreditNote", PortalDocumentKind.isCreditNote(document));
     String reference = StringUtils.trimToNull((String) document.get("orderReference"));
-    row.put("reference", reference != null ? reference : text(document.get("description")));
+    row.put("reference", reference != null ? reference : text(document.get(DESCRIPTION)));
     row.put("date", formatDate(PortalDocumentQuery.dateOf(document)));
     row.put("documentStatus", text(document.get("documentStatus")));
     if (kind != null && kind.hasAmounts()) {
-      Currency currency = (Currency) document.get("currency");
+      Currency currency = (Currency) document.get(CURRENCY);
       row.put(CURRENCY, currency == null ? "" : StringUtils.defaultString(currency.getISOCode()));
-      row.put("taxBase", PortalDocumentQuery.amount(document.get("summedLineAmount")));
-      row.put("grandTotal", PortalDocumentQuery.amount(document.get("grandTotalAmount")));
+      row.put(TAX_BASE, PortalDocumentQuery.amount(document.get("summedLineAmount")));
+      row.put(GRAND_TOTAL, PortalDocumentQuery.amount(document.get("grandTotalAmount")));
     } else {
       row.put(CURRENCY, JSONObject.NULL);
-      row.put("taxBase", JSONObject.NULL);
-      row.put("grandTotal", JSONObject.NULL);
+      row.put(TAX_BASE, JSONObject.NULL);
+      row.put(GRAND_TOTAL, JSONObject.NULL);
     }
     if (kind == PortalDocumentKind.QUOTATION) {
       row.put("validUntil", formatDate(((Order) document).getValidUntil()));
     }
     if (document instanceof Invoice) {
       Object[] schedule = schedules.get(document.getId());
-      row.put("outstandingAmount",
+      row.put(OUTSTANDING_AMOUNT,
           PortalDocumentQuery.amount(((Invoice) document).getOutstandingAmount()));
-      row.put("dueDate", schedule == null ? JSONObject.NULL : formatDate((Date) schedule[0]));
-      row.put("overdue", schedule != null && ((Number) schedule[1]).longValue() > 0);
+      row.put(DUE_DATE, schedule == null ? JSONObject.NULL : formatDate((Date) schedule[0]));
+      row.put(OVERDUE, schedule != null && ((Number) schedule[1]).longValue() > 0);
     }
     return row;
   }
@@ -514,29 +536,35 @@ final class PortalDocumentsEndpoint {
         .createQuery(hql, BaseOBObject.class);
     query.setParameter(ID, id);
     for (BaseOBObject line : query.list()) {
-      JSONObject json = new JSONObject();
-      Product product = (Product) line.get("product");
-      json.put("product", product == null ? "" : StringUtils.defaultString(product.getName()));
-      json.put("productCode",
-          product == null ? "" : StringUtils.defaultString(product.getSearchKey()));
-      json.put("description", text(line.get("description")));
-      UOM uom = (UOM) line.get("uOM");
-      json.put("uom", uom == null ? "" : StringUtils.defaultIfBlank(uom.getSymbol(),
-          StringUtils.defaultString(uom.getName())));
-      if (kind == PortalDocumentKind.SHIPMENT) {
-        json.put("quantity", PortalDocumentQuery.amount(line.get("movementQuantity")));
-      } else {
-        json.put("quantity", PortalDocumentQuery.amount(line.get(
-            kind == PortalDocumentKind.INVOICE ? "invoicedQuantity" : "orderedQuantity")));
-        json.put("unitPrice", PortalDocumentQuery.amount(line.get("unitPrice")));
-        json.put("discount", kind == PortalDocumentKind.INVOICE ? JSONObject.NULL
-            : PortalDocumentQuery.amount(line.get("discount")));
-        json.put("tax", nameOf(line.get("tax")));
-        json.put("amount", PortalDocumentQuery.amount(line.get("lineNetAmount")));
-      }
-      lines.put(json);
+      lines.put(lineJson(kind, line));
     }
     return lines;
+  }
+
+  /** One line of the detail: product, description, unit, quantity and, with amounts, prices. */
+  private static JSONObject lineJson(PortalDocumentKind kind, BaseOBObject line)
+      throws JSONException {
+    JSONObject json = new JSONObject();
+    Product product = (Product) line.get("product");
+    json.put("product", product == null ? "" : StringUtils.defaultString(product.getName()));
+    json.put("productCode",
+        product == null ? "" : StringUtils.defaultString(product.getSearchKey()));
+    json.put(DESCRIPTION, text(line.get(DESCRIPTION)));
+    UOM uom = (UOM) line.get("uOM");
+    json.put("uom", uom == null ? "" : StringUtils.defaultIfBlank(uom.getSymbol(),
+        StringUtils.defaultString(uom.getName())));
+    if (kind == PortalDocumentKind.SHIPMENT) {
+      json.put("quantity", PortalDocumentQuery.amount(line.get("movementQuantity")));
+    } else {
+      json.put("quantity", PortalDocumentQuery.amount(line.get(
+          kind == PortalDocumentKind.INVOICE ? "invoicedQuantity" : "orderedQuantity")));
+      json.put("unitPrice", PortalDocumentQuery.amount(line.get("unitPrice")));
+      json.put("discount", kind == PortalDocumentKind.INVOICE ? JSONObject.NULL
+          : PortalDocumentQuery.amount(line.get("discount")));
+      json.put("tax", nameOf(line.get("tax")));
+      json.put(AMOUNT, PortalDocumentQuery.amount(line.get("lineNetAmount")));
+    }
+    return json;
   }
 
   private static JSONArray taxes(PortalDocumentKind kind, String id) throws JSONException {
@@ -570,10 +598,10 @@ final class PortalDocumentsEndpoint {
     query.setParameter(ID, invoiceId);
     for (BaseOBObject schedule : query.list()) {
       JSONObject json = new JSONObject();
-      json.put("dueDate", formatDate((Date) schedule.get("dueDate")));
-      json.put("amount", PortalDocumentQuery.amount(schedule.get("amount")));
+      json.put(DUE_DATE, formatDate((Date) schedule.get(DUE_DATE)));
+      json.put(AMOUNT, PortalDocumentQuery.amount(schedule.get(AMOUNT)));
       json.put("paidAmount", PortalDocumentQuery.amount(schedule.get("paidAmount")));
-      json.put("outstandingAmount", PortalDocumentQuery.amount(schedule.get("outstandingAmount")));
+      json.put(OUTSTANDING_AMOUNT, PortalDocumentQuery.amount(schedule.get(OUTSTANDING_AMOUNT)));
       installments.put(json);
     }
     return installments;

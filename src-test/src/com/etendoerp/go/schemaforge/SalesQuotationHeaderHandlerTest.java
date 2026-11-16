@@ -1124,7 +1124,7 @@ public class SalesQuotationHeaderHandlerTest {
   @Test
   public void testAfterHandle_evaluateDisplayDropsOnlyTheClassicRejectReasonLock()
       throws Exception {
-    // { read-only answer of the AD, read-only answer expected }
+    // Columns: read-only answer of the AD, read-only answer expected.
     String[][] cases = {
         { "{\"rejectReason\":true,\"documentNo\":true,\"orderDate\":false}",
             "{\"documentNo\":true,\"orderDate\":false}" },

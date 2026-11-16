@@ -91,6 +91,11 @@ public final class PortalLinkConfig {
         ENV_DECISION_COOLDOWN_MINUTES, DEFAULT_DECISION_COOLDOWN_MINUTES));
   }
 
+  /**
+   * The per-link pause between two renewal emails.
+   *
+   * @return the renewal cool-down (15 minutes unless configured)
+   */
   public static Duration renewalCooldown() {
     return Duration.ofMinutes(readPositive(PROP_RENEWAL_COOLDOWN_MINUTES,
         ENV_RENEWAL_COOLDOWN_MINUTES, DEFAULT_RENEWAL_COOLDOWN_MINUTES));

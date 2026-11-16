@@ -202,7 +202,7 @@ public class PortalLinkRenewalEmailContractTest {
 
   @Test
   public void copyKeyIsCreditNoteOnlyForARectificativeInvoice() {
-    // { document category, the localization flag's property exists, its value, expected key }
+    // Columns: document category, the localization flag's property exists, its value, expected key.
     Object[][] cases = {
         { "ARC", false, null, "CREDIT_NOTE" },
         { "ARI_RM", false, null, "CREDIT_NOTE" },

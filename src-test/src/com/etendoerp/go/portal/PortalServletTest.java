@@ -128,7 +128,7 @@ public class PortalServletTest {
 
   @Test
   public void tokenIsReadFromThePortalHeaderThenTheMePathThenABearerHeader() throws Exception {
-    // { X-Portal-Token, path, Authorization, token the service is asked about }
+    // Columns: X-Portal-Token, path, Authorization, token the service is asked about.
     String[][] cases = {
         { "portal-tok", "/me/path-tok", "Bearer go-session-jwt", "portal-tok" },
         // A signed-in GO user's own bearer JWT never stands in for the link's token.
@@ -363,7 +363,7 @@ public class PortalServletTest {
     validLink();
     BaseOBObject invoice = mock(BaseOBObject.class);
     Attachment attachment = mock(Attachment.class);
-    // { the tenant's main attachment (null: none, or another tenant's), streamed, counted }
+    // Columns: the tenant's main attachment (null: none, or another tenant's), streamed, counted.
     Object[][] cases = { { null, false, false }, { attachment, false, false },
         { attachment, true, true } };
     for (Object[] c : cases) {
@@ -403,7 +403,7 @@ public class PortalServletTest {
     BaseOBObject quotation = mock(BaseOBObject.class);
     Attachment stored = mock(Attachment.class);
     Attachment rendered = mock(Attachment.class);
-    // { stored main attachment, stored one is stale, what a render produces, file served }
+    // Columns: stored main attachment, stored one is stale, what a render produces, file served.
     Object[][] cases = {
         { stored, false, rendered, stored },
         { stored, true, rendered, rendered },
@@ -488,7 +488,7 @@ public class PortalServletTest {
   @Test
   public void aDecisionRequestAnswersOneStatusPerOutcome() throws Exception {
     validLink();
-    // { outcome, blocked reason, HTTP status, error code (null: the "sent" body) }
+    // Columns: outcome, blocked reason, HTTP status, error code (null: the "sent" body).
     Object[][] cases = {
         { PortalDecisionService.RequestOutcome.SENT, null, 200, null },
         { PortalDecisionService.RequestOutcome.NOT_FOUND, null, 404, "Not found" },
@@ -544,7 +544,7 @@ public class PortalServletTest {
   public void decisionViewAndConfirmReadTheDecisionHeaderAndAnswerItsState() throws Exception {
     PortalDecisionService.Decision decision = new PortalDecisionService.Decision();
     decision.linkId = "LINK-1";
-    decision.decision = "reject";
+    decision.action = "reject";
     decision.reasonCode = "OTHER";
     decision.reasonText = "Plazo";
     org.openbravo.model.common.order.Order quotation =
@@ -621,7 +621,7 @@ public class PortalServletTest {
   public void meNamesTheEntryDocumentOnlyWhenItIsStillInScope() throws Exception {
     validLink();
     BaseOBObject visible = mock(BaseOBObject.class);
-    // { the entry document in scope?, expected entryDocument id or null }
+    // Columns: the entry document in scope?, expected entryDocument id or null.
     for (boolean inScope : new boolean[] { true, false }) {
       try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class)) {
         documents.when(() -> PortalDocumentQuery.findInScope(any(),

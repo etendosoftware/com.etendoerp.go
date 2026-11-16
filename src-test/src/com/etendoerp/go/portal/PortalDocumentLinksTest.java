@@ -106,7 +106,7 @@ public class PortalDocumentLinksTest {
 
   @Test
   public void eachKindFollowsTheAppsLinksBoundToTheDocument() {
-    // { kind, a fragment of every candidate query it must run }
+    // Columns: kind, a fragment of every candidate query it must run.
     Object[][] cases = {
         { PortalDocumentKind.QUOTATION, Arrays.asList("o.quotation.id = :id",
             "from Invoice i where i.salesOrder.id = :id", "s.salesOrder.id = :id") },

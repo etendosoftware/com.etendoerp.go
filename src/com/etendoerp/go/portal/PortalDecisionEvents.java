@@ -17,36 +17,44 @@
 
 package com.etendoerp.go.portal;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /**
  * The KPI hook points of the portal's quotation decisions (ETP-6209 Part C).
  *
- * <p>Deliberately empty: the PO is redefining the portal KPIs, so no event name or semantics is
- * fixed here. Each method is called exactly where its moment happens, with what an event would
- * need, so wiring the events later is a change to this class only — the same shape as
+ * <p>No KPI event yet: the PO is redefining the portal KPIs, so no event name or semantics is
+ * fixed here; each hook only leaves a debug trace. Each method is called exactly where its
+ * moment happens, with what an event would need, so wiring the events later is a change to this class only — the same shape as
  * {@link PortalUsageEvents}, which carries the Part A/B events.</p>
  */
 final class PortalDecisionEvents {
+
+  private static final Logger log = LogManager.getLogger(PortalDecisionEvents.class);
 
   private PortalDecisionEvents() {
   }
 
   /** A decision was requested and its confirmation email left (after the send's commit). */
   static void requested(PortalSession session, String quotationId, String decision) {
-    // Hook point, see the class comment.
+    log.debug("Portal decision {} requested for quotation {} (client {})", decision, quotationId,
+        session == null ? null : session.getClientId());
   }
 
   /** A request was confirmed and applied to the quotation (after the confirmation's commit). */
   static void confirmed(String decisionId, String quotationId, String decision) {
-    // Hook point, see the class comment.
+    log.debug("Portal decision {} ({}) confirmed for quotation {}", decisionId, decision,
+        quotationId);
   }
 
   /** Other pending requests of the quotation were voided by a confirmation. */
   static void voided(String quotationId, int count) {
-    // Hook point, see the class comment.
+    log.debug("{} pending portal decision(s) of quotation {} voided", count, quotationId);
   }
 
   /** A confirmation was refused because the quotation was no longer pending or had expired. */
   static void notApplied(String decisionId, String quotationId, String reason) {
-    // Hook point, see the class comment.
+    log.debug("Portal decision {} not applied to quotation {}: {}", decisionId, quotationId,
+        reason);
   }
 }

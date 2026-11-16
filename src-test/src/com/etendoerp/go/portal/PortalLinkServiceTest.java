@@ -472,7 +472,7 @@ public class PortalLinkServiceTest {
 
   @Test
   public void renewDailyCeilingIsOffByDefaultAndHonouredWhenConfigured() {
-    // { configured maxPerDay, renewals already made for the Business Partner today, outcome }
+    // Columns: configured maxPerDay, renewals already made for the Business Partner today, outcome.
     Object[][] cases = {
         { null, 99, PortalLinkService.RenewalOutcome.SENT },
         { "0", 99, PortalLinkService.RenewalOutcome.SENT },
@@ -581,7 +581,7 @@ public class PortalLinkServiceTest {
     PortalLinkService brokenClock = new PortalLinkService(new PortalAccessChecks(() -> guard),
         expired -> TransactionalEmailService.STATUS_SENT, broken);
 
-    // { label, the call }
+    // Columns: label, the call.
     Object[][] calls = {
         { "findSentLink", (Runnable) () -> service().findSentLink(TOKEN) },
         { "validate", (Runnable) () -> service().validate(TOKEN) },

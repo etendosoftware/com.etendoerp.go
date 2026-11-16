@@ -156,7 +156,7 @@ public class PortalDecisionEmailContractsTest {
 
   @Test
   public void theConfirmationButtonNamesTheDecisionInTheLinksLanguage() throws Exception {
-    // { decision, language, button, subject }
+    // Columns: decision, language, button, subject.
     String[][] cases = {
         { "ACCEPT", "es_ES", "Confirmar aceptación", "Confirme su decisión sobre el presupuesto PR-7" },
         { "REJECT", "es_ES", "Confirmar rechazo", "Confirme su decisión sobre el presupuesto PR-7" },
@@ -238,7 +238,7 @@ public class PortalDecisionEmailContractsTest {
 
   @Test
   public void theNoticeSaysWhoDecidedWhatInTheDecisionsLanguage() throws Exception {
-    // { decision, language, subject, a fragment of the body }
+    // Columns: decision, language, subject, a fragment of the body.
     String[][] cases = {
         { "REJECT", "es_ES", "Cliente SL ha rechazado el presupuesto PR-7",
             "<strong>Cliente SL</strong> ha <strong>rechazado</strong> el presupuesto" },
