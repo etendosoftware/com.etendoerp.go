@@ -155,7 +155,11 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
     this.includeAmount = includeAmount;
     this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
-    this.specName = deriveSpecName(this.name);
+    // Inverts the frontend's `${windowName}-send` contract-name convention to recover the
+    // window (NEO spec) this contract serves; null when the name carries no suffix.
+    this.specName = this.name == null || !this.name.endsWith(CONTRACT_NAME_SUFFIX) ? null
+        : StringUtils.trimToNull(
+            this.name.substring(0, this.name.length() - CONTRACT_NAME_SUFFIX.length()));
   }
 
   /**
@@ -192,19 +196,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           configured, defaultValue);
       return defaultValue;
     }
-  }
-
-  /**
-   * Inverts the frontend's {@code `${windowName}-send`} contract-name convention to recover the
-   * window (NEO spec) a contract serves.
-   *
-   * @param contractName contract name, may be {@code null}
-   * @return spec name without the {@code -send} suffix, or {@code null} when there is none
-   */
-  private static String deriveSpecName(String contractName) {
-    return contractName == null || !contractName.endsWith(CONTRACT_NAME_SUFFIX) ? null
-        : StringUtils.trimToNull(
-            contractName.substring(0, contractName.length() - CONTRACT_NAME_SUFFIX.length()));
   }
 
   @Override
@@ -522,7 +513,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         : providerRequest.getRecipients();
     return EmailDeliveryPolicy.serverDerived(
         resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients,
-            messageEditsQuietly(command)),
+            EmailMessageEdits.fromBodyQuietly(command == null ? null : command.getBody())),
         java.util.Arrays.asList(
             EmailThrottleRule.perTenant(maxAttempts(PROP_MAX_PER_TENANT, ENV_MAX_PER_TENANT,
                 DEFAULT_MAX_PER_TENANT), THROTTLE_WINDOW_SECONDS),
@@ -790,19 +781,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     String key = name + ":" + normalizedTenant + ":" + recordId + ":send:"
         + EmailContractCommandSupport.VERSION + ":" + finalRecipients.recipientSetHash();
     return messageEdits.isPresent() ? key + ":" + messageEdits.get().contentHash() : key;
-  }
-
-  /**
-   * Re-reads {@code messageEdits} for delivery-policy purposes. {@link #resolve} already rejected
-   * malformed payloads with a 400, so a parse failure here cannot reach a real send and degrades to
-   * "no edits".
-   */
-  private Optional<EmailMessageEdits> messageEditsQuietly(EmailContractCommand command) {
-    try {
-      return EmailMessageEdits.fromBody(command == null ? null : command.getBody());
-    } catch (EmailMessageEdits.InvalidMessageEditsException e) {
-      return Optional.empty();
-    }
   }
 
   private Optional<EmailDocumentRecord> resolveDocument(EmailContractCommand command) {
