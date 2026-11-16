@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -359,20 +360,33 @@ public class InvoiceInboxDiscardIntegrationTest extends WeldBaseTest {
   }
 
   @Test
-  public void markReviewedOfAnIncompleteDocumentIs422AndTheRowIsUnchanged() throws Exception {
+  public void markReviewedOfAnIncompleteDocumentIs422AndTheRowMovesToError() throws Exception {
     String id = row("PENDING_REVIEW", ORG_ID);
+    String oldToken = tokenOf(id);
+    String before = text("SELECT concat_ws('|', adjusted, c_invoice_id, extracted_data,"
+        + " current_data, file_name)" + BY_ID, id);
 
     try (MockedStatic<NeoAccessHelper> access = grantWindowAccess()) {
       NeoResponse response = InvoiceInboxMarkReviewed.markReviewed(id,
-          new JSONObject().put("updated", tokenOf(id)));
+          new JSONObject().put("updated", oldToken));
 
       assertEquals(422, response.getHttpStatus());
       JSONObject error = response.getBody().getJSONObject("error");
       assertEquals("not_valid", error.getString("code"));
       assertTrue(error.getJSONArray("missing").toString().contains("vendor"));
+      assertEquals("ERROR", error.getString("documentStatus"));
+      assertTrue("the answer carries the new token", error.has("updated")
+          && !error.getString("updated").isEmpty());
+      assertNotEquals("the committed move changed the row's token", oldToken,
+          error.getString("updated"));
     }
-    assertEquals("PENDING_REVIEW", text("SELECT status" + BY_ID, id));
+    assertEquals("ERROR", text("SELECT status" + BY_ID, id));
+    String errorCode = text("SELECT error_code" + BY_ID, id);
+    assertTrue("the verdict's error code is stored", errorCode != null && !errorCode.isEmpty());
     assertEquals("N", text("SELECT reviewed" + BY_ID, id));
+    assertEquals("ADJUSTED, document and summary untouched", before,
+        text("SELECT concat_ws('|', adjusted, c_invoice_id, extracted_data, current_data,"
+            + " file_name)" + BY_ID, id));
   }
 
   @Test
