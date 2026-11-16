@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Optional;
+
 /**
  * Store for the readable per-document email send history.
  *
@@ -32,4 +34,18 @@ public interface EmailSendLogStore {
    * @param historyRecord history entry for a single send attempt
    */
   void recordSend(EmailSendHistoryRecord historyRecord);
+
+  /**
+   * Records one send history entry and answers the id of the row written.
+   *
+   * <p>A store that has no row id to report (the in-memory one) answers empty, which is also
+   * what the default does.
+   *
+   * @param historyRecord history entry for a single send attempt
+   * @return the id of the persisted row, or empty
+   */
+  default Optional<String> recordSendReturningId(EmailSendHistoryRecord historyRecord) {
+    recordSend(historyRecord);
+    return Optional.empty();
+  }
 }

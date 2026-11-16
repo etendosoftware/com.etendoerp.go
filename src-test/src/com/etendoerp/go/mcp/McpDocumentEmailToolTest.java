@@ -31,6 +31,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -60,7 +61,15 @@ import com.etendoerp.go.schemaforge.NeoDocumentPdf;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.portal.PortalDocumentKind;
+import com.etendoerp.go.portal.PortalLinkPolicy;
+import com.etendoerp.go.portal.PortalLinkService;
+import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContract;
+import com.etendoerp.go.schemaforge.email.EmailProviderAdapter;
+import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
+import com.etendoerp.go.schemaforge.email.EmailProviderResponse;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.email.EmailContractRegistry;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
@@ -1179,5 +1188,116 @@ class McpDocumentEmailToolTest {
       list.add(array.getString(i));
     }
     return list;
+  }
+
+  // ── ETP-6209: the customer portal link through the MCP ─────────────────────
+
+  @Nested
+  @DisplayName("customer portal link")
+  class PortalLinkParity {
+
+    private static final String INVOICE_SPEC = "sales-invoice";
+    private static final String PORTAL_URL = "https://app.example.test/portal/tok";
+
+    private final List<EmailProviderRequest> delivered = new ArrayList<>();
+
+    @Test
+    @DisplayName("a send through the MCP mints one link, makes it the button and confirms it")
+    void theMcpSendCarriesAndConfirmsThePortalLink() throws Exception {
+      PortalLinkService portalLinks = mock(PortalLinkService.class);
+      PortalLinkService.MintedLink minted = mock(PortalLinkService.MintedLink.class);
+      when(minted.getId()).thenReturn("LINK-1");
+      when(minted.getUrl()).thenReturn(PORTAL_URL);
+      when(minted.getValidity()).thenReturn(Duration.ofHours(48));
+      when(portalLinks.mintForSend(any(), any(), any(), any(), any(), any()))
+          .thenReturn(Optional.of(minted));
+      DefaultDocumentSendEmailContract contract = new DefaultDocumentSendEmailContract(
+          INVOICE_SPEC + "-send", "Sales Invoice", invoiceResolver()) {
+        @Override
+        protected boolean canWriteSpec() {
+          return true;
+        }
+
+        @Override
+        protected Optional<PortalDocumentKind> portalDocumentKind() {
+          return Optional.of(PortalDocumentKind.INVOICE);
+        }
+
+        @Override
+        protected PortalLinkService portalLinkService() {
+          return portalLinks;
+        }
+      };
+      sendThroughTheMcp(contract);
+
+      verify(portalLinks).mintForSend(eq(PortalDocumentKind.INVOICE), eq(RECORD), any(), any(),
+          eq("es_ES"), eq(INVOICE_SPEC + "-send"));
+      assertEquals(1, delivered.size());
+      String body = delivered.get(0).getData().getString("body");
+      assertTrue(body.contains(PORTAL_URL), body);
+      assertFalse(body.contains("https://x.test/d"), "the download button gives way: " + body);
+      verify(portalLinks).confirm(eq("LINK-1"), any(), eq(1));
+    }
+
+    @Test
+    @DisplayName("with the flag closed nothing is minted and the download button stays")
+    void withTheFlagClosedTheMcpSendMintsNothing() throws Exception {
+      try (MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+          MockedStatic<PortalLinkPolicy> policy = mockStatic(PortalLinkPolicy.class);
+          MockedStatic<?> portalDal = mockStatic(
+              Class.forName("com.etendoerp.go.portal.PortalLinkDal"))) {
+        access.when(() -> NeoAccessHelper.canWriteSpec(any())).thenReturn(true);
+        policy.when(PortalLinkPolicy::isLinkEnabled).thenReturn(false);
+
+        sendThroughTheMcp(new SalesInvoiceSendEmailContract(invoiceResolver()));
+
+        policy.verify(PortalLinkPolicy::isLinkEnabled);
+        portalDal.verifyNoInteractions();
+      }
+      String body = delivered.get(0).getData().getString("body");
+      assertTrue(body.contains("https://x.test/d"), body);
+      assertFalse(body.contains("/portal/"), body);
+      assertNull(delivered.get(0).getSendCorrelationId());
+    }
+
+    /** Runs the MCP tool against the real email service, over a registry of {@code contract}. */
+    private void sendThroughTheMcp(DefaultDocumentSendEmailContract contract) throws Exception {
+      EmailContractRegistry registry = new EmailContractRegistry() {
+        @Override
+        public Optional<EmailContract> find(String name) {
+          return contract.getName().equals(name) ? Optional.of(contract) : Optional.empty();
+        }
+
+        @Override
+        public Collection<EmailContract> contracts() {
+          return List.of(contract);
+        }
+      };
+      EmailProviderAdapter adapter = new EmailProviderAdapter() {
+        @Override
+        public boolean isConfigured() {
+          return true;
+        }
+
+        @Override
+        public EmailProviderResponse send(EmailProviderRequest request) {
+          delivered.add(request);
+          return new EmailProviderResponse(202, "{}");
+        }
+      };
+      TransactionalEmailService realService = new TransactionalEmailService(registry, adapter);
+      contractsMock.when(McpDocumentEmailContracts::registry).thenReturn(registry);
+      contractsMock.when(McpDocumentEmailContracts::service).thenReturn(realService);
+
+      JSONObject result = McpDocumentEmailTool.run(new JSONObject().put("spec", INVOICE_SPEC)
+          .put("id", RECORD).put("to", new JSONArray(Arrays.asList(BASE))));
+
+      assertTrue(result.optBoolean("sent"), result.toString());
+    }
+
+    private EmailDocumentRecordResolver invoiceResolver() {
+      return id -> Optional.of(new EmailDocumentRecord("Cliente SL", BASE, RECORD, "F-0001", null,
+          "https://x.test/d", "CLIENT1"));
+    }
   }
 }

@@ -112,7 +112,8 @@ class NeoPrintAfterCompleteTest {
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
       contextMock.when(OBContext::getOBContext).thenReturn(context);
 
-      NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD, null);
+      NeoPrintAfterComplete.Job job =
+          NeoPrintAfterComplete.jobFor(entity, RECORD, (String) null);
 
       assertNotNull(job);
       assertEquals("sales-invoice", job.specName);
@@ -134,12 +135,55 @@ class NeoPrintAfterCompleteTest {
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
       contextMock.when(OBContext::getOBContext).thenReturn(context);
 
-      assertNull(NeoPrintAfterComplete.jobFor(entity, " ", null));
-      assertNull(NeoPrintAfterComplete.jobFor(null, RECORD, null));
-      assertNull(NeoPrintAfterComplete.jobFor(mock(SFEntity.class), RECORD, null));
+      assertNull(NeoPrintAfterComplete.jobFor(entity, " ", (String) null));
+      assertNull(NeoPrintAfterComplete.jobFor(null, RECORD, (String) null));
+      assertNull(NeoPrintAfterComplete.jobFor(mock(SFEntity.class), RECORD, (String) null));
       when(context.getRole()).thenReturn(null);
-      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, null));
+      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, (String) null));
     }
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — a job for an explicit caller carries that identity, never the session's")
+  void jobForAnExplicitCallerCarriesItsIdentity() {
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
+      NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+          new NeoPrintAfterComplete.Caller("SENDER", "SENDER_ROLE", "TENANT", "DOC_ORG", "en_US"));
+
+      assertNotNull(job);
+      assertEquals("C_Invoice/" + RECORD, job.key());
+      assertEquals("SENDER", job.userId);
+      assertEquals("SENDER_ROLE", job.roleId);
+      assertEquals("TENANT", job.clientId);
+      assertEquals("DOC_ORG", job.orgId);
+      assertEquals("en_US", job.language);
+      contextMock.verifyNoInteractions();
+      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, (NeoPrintAfterComplete.Caller) null),
+          "no caller: no job");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — renderAndWaitAs queues as the given identity, and never with a part missing")
+  void renderAndWaitAsNeedsTheWholeIdentity() {
+    // A render already in flight for the document: anything queued joins it and answers STORED,
+    // so a null below means nothing was queued at all.
+    NeoPrintAfterComplete.IN_FLIGHT.put("C_Invoice/" + RECORD,
+        CompletableFuture.completedFuture(NeoPrintableRenderer.Outcome.STORED));
+
+    assertEquals(NeoPrintableRenderer.Outcome.STORED, NeoPrintAfterComplete.renderAndWaitAs(
+        entity, RECORD, "es_ES", "USER9", "ROLE9", "CLIENT9", "ORG9"));
+    String[][] incomplete = { { null, "ROLE9", "CLIENT9", "ORG9", "es_ES" },
+        { "USER9", " ", "CLIENT9", "ORG9", "es_ES" },
+        { "USER9", "ROLE9", "", "ORG9", "es_ES" },
+        { "USER9", "ROLE9", "CLIENT9", null, "es_ES" },
+        { "USER9", "ROLE9", "CLIENT9", "ORG9", " " } };
+    for (String[] c : incomplete) {
+      assertNull(NeoPrintAfterComplete.renderAndWaitAs(entity, RECORD, c[4], c[0], c[1], c[2],
+          c[3]), java.util.Arrays.toString(c));
+    }
+    assertNull(NeoPrintAfterComplete.renderAndWaitAs(mock(SFEntity.class), RECORD, "es_ES",
+        "USER9", "ROLE9", "CLIENT9", "ORG9"), "not a printable entity: nothing queued");
   }
 
   @Test

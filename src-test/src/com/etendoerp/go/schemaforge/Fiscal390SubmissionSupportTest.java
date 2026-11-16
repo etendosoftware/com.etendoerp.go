@@ -18,6 +18,8 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,18 +29,24 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
+import java.net.SocketTimeoutException;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -51,19 +59,25 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
+import org.hibernate.criterion.Criterion;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 
 import com.etendoerp.go.common.MalformedJsonException;
+import com.etendoerp.go.schemaforge.FiscalAeatValidationOutcome.Outcome;
+import com.etendoerp.go.schemaforge.FiscalAeatValidationOutcome.Path;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
@@ -72,8 +86,10 @@ import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
  * Unit tests for the Modelo 390 telematic filing ({@code POST /fiscal390/submit}, ETP-5716): the
  * guards, the request handed to the classic AEAT service (MODELO 390, PERIODO 0A, no NRC), the
  * persistence of an accepted filing (status, method, snapshot, {@code manualData.submission},
- * justificante attachment) and the "AEAT error keeps the draft untouched" rule. No network: the
- * classic {@link AEAT303SubmissionService} is a mock.
+ * justificante attachment) and the "AEAT error keeps the draft untouched" rule; the validation
+ * that precedes a real presentation, the attempt log rows every AEAT call leaves and the
+ * single-attachment replacement of {@link FiscalAeatSubmissionSupport}. No network: the classic
+ * {@link AEAT303SubmissionService} is a mock.
  *
  * @covers com.etendoerp.go.schemaforge.Fiscal390SubmissionSupport
  * @covers com.etendoerp.go.schemaforge.FiscalAeatSubmissionSupport
@@ -82,6 +98,12 @@ public class Fiscal390SubmissionSupportTest {
 
   private static final String DECL_ID = "D390";
   private static final String FILE = "<T3900>FILE</T3900>";
+  private static final String VALIDATION_ENDPOINT =
+      AEAT303SubmissionService.DEFAULT_VALIDATION_ENDPOINT;
+  private static final String PRODUCTION_ENDPOINT =
+      AEAT303SubmissionService.DEFAULT_PRODUCTION_ENDPOINT;
+  private static final FiscalAeatAttemptLog.Declaration ATTEMPTED =
+      new FiscalAeatAttemptLog.Declaration("390", 2026, "0A", DECL_ID, "org1");
 
   private NeoServlet servlet;
   private Fiscal390BoxesHandler handler;
@@ -92,6 +114,7 @@ public class Fiscal390SubmissionSupportTest {
   private OBDal obDal;
   private AttachImplementationManager attachManager;
   private FiscalDeclCrudHandler declHandler;
+  private FiscalAeatAttemptLog attemptLog;
 
   private OBContext obContextInstance;
   private MockedStatic<OBDal> obDalMock;
@@ -110,6 +133,8 @@ public class Fiscal390SubmissionSupportTest {
     doReturn(generateSupport).when(handler).generateSupport();
     declHandler = mock(FiscalDeclCrudHandler.class);
     doReturn(declHandler).when(handler).declHandler();
+    attemptLog = mock(FiscalAeatAttemptLog.class);
+    handler.attemptLog = attemptLog;
     when(generateSupport.generateContent(eq("org1"), eq(2026), anyMap()))
         .thenReturn(new Fiscal390GenerateSupport.Generated(FILE, null));
     doReturn(new JSONObject("{\"boxes\":{\"86\":\"10.00\"},\"summary\":{\"annualResult\":\"10.00\"}}"))
@@ -118,6 +143,8 @@ public class Fiscal390SubmissionSupportTest {
     support = spy(new Fiscal390SubmissionSupport(handler));
     service = mock(AEAT303SubmissionService.class);
     when(service.hasOrgCertificate(any())).thenReturn(true);
+    when(service.getValidationEndpoint()).thenReturn(VALIDATION_ENDPOINT);
+    when(service.getProductionEndpoint()).thenReturn(PRODUCTION_ENDPOINT);
     doReturn(service).when(support).newSubmissionService();
     doReturn(List.of()).when(support).blockingRuleIncidents(eq("org1"), eq(2026), any());
 
@@ -208,6 +235,52 @@ public class Fiscal390SubmissionSupportTest {
     r.setJustificanteNumber("3901234567890");
     r.setPdfContent(new byte[] { 1, 2, 3 });
     return r;
+  }
+
+  private static AEAT303SubmissionResult rejectedByTheValidator() {
+    AEAT303SubmissionResult r = new AEAT303SubmissionResult();
+    r.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    r.setTestMode(true);
+    r.addError("E39000101 - NIF del declarante no identificado");
+    r.addWarning("A001 - Aviso informativo");
+    r.setPdfContent(new byte[] { 9 });
+    return r;
+  }
+
+  private static AEAT303SubmissionResult acceptedByTheValidator() {
+    AEAT303SubmissionResult r = new AEAT303SubmissionResult();
+    r.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    r.setTestMode(true);
+    return r;
+  }
+
+  /** The validation that precedes a real presentation: the 5-argument call with the 390 file. */
+  private void validatorAnswers(AEAT303SubmissionResult result) {
+    when(service.submitValidation("390", FILE, "2026", "0A", "ES")).thenReturn(result);
+  }
+
+  /** Asserts that no validation was requested and no attempt row was written. */
+  private void assertTheAeatWasNeverCalled() {
+    verify(service, never()).submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString());
+    verify(service, never()).submitProduction(any());
+    verifyNoInteractions(attemptLog);
+  }
+
+  /** The rows the request left in the attempt log, in order; all for the same declaration. */
+  private List<FiscalAeatValidationOutcome> attemptRows(int expected, String... endpoints) {
+    ArgumentCaptor<FiscalAeatAttemptLog.Declaration> declaration =
+        ArgumentCaptor.forClass(FiscalAeatAttemptLog.Declaration.class);
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    ArgumentCaptor<String> endpoint = ArgumentCaptor.forClass(String.class);
+    verify(attemptLog, times(expected)).recordAttempt(declaration.capture(), outcome.capture(),
+        endpoint.capture());
+    for (FiscalAeatAttemptLog.Declaration d : declaration.getAllValues()) {
+      assertEquals(ATTEMPTED, d);
+    }
+    assertEquals(List.of(endpoints), endpoint.getAllValues());
+    return outcome.getAllValues();
   }
 
   private static Object field(Object target, String name) throws Exception {
@@ -321,6 +394,12 @@ public class Fiscal390SubmissionSupportTest {
     verify(resp).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
     assertEquals(Fiscal390SubmissionSupport.ERR_SUBMISSION_FAILED, json.getString("errorCode"));
     verify(decl, never()).setDeclarationStatus(anyString());
+    // The failed presentation is an attempt too: its row follows the validation's.
+    List<FiscalAeatValidationOutcome> rows = attemptRows(2, VALIDATION_ENDPOINT,
+        PRODUCTION_ENDPOINT);
+    assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    assertEquals(Outcome.NOT_VALIDATED, rows.get(1).outcome());
+    assertFalse(rows.get(1).testMode());
   }
 
   // ── guards ──────────────────────────────────────────────────────────
@@ -336,6 +415,7 @@ public class Fiscal390SubmissionSupportTest {
     verify(resp).setStatus(HttpServletResponse.SC_CONFLICT);
     assertEquals(Fiscal390SubmissionSupport.ERR_ALREADY_SUBMITTED, json.getString("errorCode"));
     verify(support, never()).newSubmissionService();
+    assertTheAeatWasNeverCalled();
   }
 
   @Test
@@ -352,7 +432,7 @@ public class Fiscal390SubmissionSupportTest {
     assertEquals(Fiscal390SubmissionSupport.ERR_BLOCKING_INCIDENTS, json.getString("errorCode"));
     assertEquals(Fiscal390IncidentRules.NO_MAIN_IAE,
         json.getJSONArray("incidents").getJSONObject(0).getString("code"));
-    verify(service, never()).submitProduction(any());
+    assertTheAeatWasNeverCalled();
   }
 
   /** Test mode (ServValiDos) never changes the declaration, so the blocking guard is skipped. */
@@ -380,6 +460,7 @@ public class Fiscal390SubmissionSupportTest {
 
     verify(resp).setStatus(HttpServletResponse.SC_BAD_REQUEST);
     assertEquals(Fiscal390SubmissionSupport.ERR_MISSING_PRESENTER, json.getString("errorCode"));
+    assertTheAeatWasNeverCalled();
   }
 
   @Test
@@ -392,7 +473,7 @@ public class Fiscal390SubmissionSupportTest {
 
     verify(resp).setStatus(HttpServletResponse.SC_CONFLICT);
     assertEquals(Fiscal390SubmissionSupport.ERR_NO_CERTIFICATE, json.getString("errorCode"));
-    verify(service, never()).submitProduction(any());
+    assertTheAeatWasNeverCalled();
   }
 
   /**
@@ -449,7 +530,7 @@ public class Fiscal390SubmissionSupportTest {
     JSONObject json = submit(PRODUCTION_BODY, response(out), out);
 
     assertEquals(Fiscal390SubmissionSupport.ERR_SNAPSHOT_FAILED, json.getString("errorCode"));
-    verify(service, never()).submitProduction(any());
+    assertTheAeatWasNeverCalled();
   }
 
   // ── test mode ───────────────────────────────────────────────────────
@@ -468,6 +549,13 @@ public class Fiscal390SubmissionSupportTest {
     verify(decl, never()).setDeclarationStatus(anyString());
     verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
     verify(declHandler).replaceAeatIncidentsNoCommit(eq(decl), any(), any());
+    // "Validar sin presentar" is ONE call to the validator and one manual_validation row.
+    verify(service, times(1)).submitValidation(anyString(), anyString(), anyString(),
+        anyString(), anyString());
+    List<FiscalAeatValidationOutcome> rows = attemptRows(1, VALIDATION_ENDPOINT);
+    assertEquals(Path.MANUAL_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertTrue(rows.get(0).testMode());
   }
 
   /**
@@ -492,6 +580,434 @@ public class Fiscal390SubmissionSupportTest {
     assertEquals("5", inputs.getValue().get("INGRESAR_01"));
     verify(obDal, never()).createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT),
         anyString());
+  }
+
+  // ── validation before a real presentation (ETP-5716) ────────────────
+
+  /**
+   * The validator rejects the file a real presentation is about to send: nothing is presented,
+   * the validator's errors become the declaration's AEAT incidents, the declaration stays a
+   * draft and the only attempt row is the validation's.
+   */
+  @Test
+  public void testProductionStopsWhenTheValidatorRejects() throws Exception {
+    AEAT303SubmissionResult rejected = rejectedByTheValidator();
+    validatorAnswers(rejected);
+    StringWriter out = new StringWriter();
+    HttpServletResponse resp = response(out);
+
+    JSONObject json = submit(PRODUCTION_BODY, resp, out);
+
+    verify(service, never()).submitProduction(any());
+    verify(declHandler).replaceAeatIncidentsNoCommit(decl,
+        List.of("E39000101 - NIF del declarante no identificado"),
+        List.of("A001 - Aviso informativo"));
+    verify(obDal).commitAndClose();
+    verify(decl, never()).setDeclarationStatus(anyString());
+    verify(decl, never()).setManualData(anyString());
+    verify(decl, never()).setSubmittedSnapshot(anyString());
+    verify(attachManager, never()).upload(any(), anyString(), anyString(), anyString(), any());
+
+    verify(resp).setStatus(HttpServletResponse.SC_OK);
+    assertEquals("ERROR", json.getString("status"));
+    assertEquals(FiscalAeatSubmissionSupport.STAGE_VALIDATION, json.getString("stage"));
+    assertFalse(json.getBoolean("testMode"));
+    assertEquals("E39000101 - NIF del declarante no identificado",
+        json.getJSONArray("errors").getString(0));
+    assertTrue(json.isNull("pdfBase64"));
+
+    List<FiscalAeatValidationOutcome> rows = attemptRows(1, VALIDATION_ENDPOINT);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.REJECTED, rows.get(0).outcome());
+  }
+
+  /**
+   * The validator accepts: the presentation goes ahead with the very file that was validated,
+   * and the request leaves two rows — the validation, then the presentation.
+   */
+  @Test
+  public void testProductionPresentsTheValidatedFile() throws Exception {
+    AEAT303SubmissionResult accepted = acceptedByTheValidator();
+    accepted.addWarning("A001 - Aviso informativo");
+    validatorAnswers(accepted);
+    when(service.submitProduction(any())).thenReturn(success(false));
+    StringWriter out = new StringWriter();
+
+    JSONObject json = submit(PRODUCTION_BODY, response(out), out);
+
+    ArgumentCaptor<String> validated = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<AEAT303SubmissionService.ProductionSubmissionRequest> presented =
+        ArgumentCaptor.forClass(AEAT303SubmissionService.ProductionSubmissionRequest.class);
+    InOrder order = inOrder(service);
+    order.verify(service).submitValidation(eq("390"), validated.capture(), eq("2026"), eq("0A"),
+        eq("ES"));
+    order.verify(service).submitProduction(presented.capture());
+    assertEquals(FILE, validated.getValue());
+    assertEquals(validated.getValue(), field(presented.getValue(), "fileContent"));
+
+    assertEquals("SUCCESS", json.getString("status"));
+    assertFalse(json.has("stage"));
+    verify(decl).setDeclarationStatus("submitted_ack");
+
+    List<FiscalAeatValidationOutcome> rows = attemptRows(2, VALIDATION_ENDPOINT,
+        PRODUCTION_ENDPOINT);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertTrue(rows.get(0).testMode());
+    assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    assertEquals(Outcome.ACCEPTED, rows.get(1).outcome());
+    assertFalse(rows.get(1).testMode());
+  }
+
+  /**
+   * The validator does not answer: what happens next is
+   * {@link FiscalAeatSubmissionSupport#PRESENT_WHEN_VALIDATOR_UNANSWERED} — present anyway, or
+   * stop with {@code VALIDATION_UNAVAILABLE}.
+   */
+  @Test
+  public void testProductionFollowsThePolicyWhenTheValidatorDoesNotAnswer() throws Exception {
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new OBException("timeout", new SocketTimeoutException()));
+    when(service.submitProduction(any())).thenReturn(success(false));
+    StringWriter out = new StringWriter();
+    HttpServletResponse resp = response(out);
+
+    JSONObject json = submit(PRODUCTION_BODY, resp, out);
+
+    verify(declHandler, FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED
+        ? times(1) : never()).replaceAeatIncidentsNoCommit(any(), any(), any());
+    if (FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED) {
+      verify(service).submitProduction(any());
+      assertEquals("SUCCESS", json.getString("status"));
+      List<FiscalAeatValidationOutcome> rows = attemptRows(2, VALIDATION_ENDPOINT,
+          PRODUCTION_ENDPOINT);
+      assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+      assertEquals(Outcome.CONNECTION_FAILURE, rows.get(0).outcome());
+      assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
+    } else {
+      verify(service, never()).submitProduction(any());
+      verify(resp).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
+      assertEquals(FiscalAeatSubmissionSupport.ERR_VALIDATION_UNAVAILABLE,
+          json.getString("errorCode"));
+      assertEquals(FiscalAeatSubmissionSupport.STAGE_VALIDATION, json.getString("stage"));
+      assertEquals(Outcome.CONNECTION_FAILURE,
+          attemptRows(1, VALIDATION_ENDPOINT).get(0).outcome());
+    }
+  }
+
+  /** A rejected presentation (after an accepted validation) is recorded as a rejected filing. */
+  @Test
+  public void testARejectedPresentationLeavesItsOwnRow() throws Exception {
+    validatorAnswers(acceptedByTheValidator());
+    AEAT303SubmissionResult r = new AEAT303SubmissionResult();
+    r.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    r.addError("E39000101 - NIF del declarante no identificado");
+    when(service.submitProduction(any())).thenReturn(r);
+    StringWriter out = new StringWriter();
+
+    JSONObject json = submit(PRODUCTION_BODY, response(out), out);
+
+    assertFalse(json.has("stage"));
+    List<FiscalAeatValidationOutcome> rows = attemptRows(2, VALIDATION_ENDPOINT,
+        PRODUCTION_ENDPOINT);
+    assertEquals(Outcome.REJECTED, rows.get(1).outcome());
+    assertEquals(List.of("E39000101"), rows.get(1).errorCodes());
+  }
+
+  // ── validateBeforeSubmission (shared by 303 and 390) ────────────────
+
+  private static final FiscalAeatSubmissionSupport.FileToPresent FILE_TO_PRESENT =
+      new FiscalAeatSubmissionSupport.FileToPresent("390", FILE, "2026", "0A", "ES");
+
+  private FiscalAeatSubmissionSupport.PreSubmissionValidation validateBeforeSubmission() {
+    return FiscalAeatSubmissionSupport.validateBeforeSubmission(service, attemptLog, ATTEMPTED,
+        FILE_TO_PRESENT);
+  }
+
+  /** A rejection stops the presentation; its answer says so: stage, not test mode, the errors. */
+  @Test
+  public void testValidateBeforeSubmissionStopsOnARejection() throws Exception {
+    AEAT303SubmissionResult rejected = rejectedByTheValidator();
+    validatorAnswers(rejected);
+
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation = validateBeforeSubmission();
+
+    assertFalse(validation.proceed());
+    assertSame(rejected, validation.rejected);
+    assertFalse(validation.unavailable);
+
+    JSONObject json = FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
+        new JSONObject().put("fiscalYear", "2026"));
+    assertEquals("validation", json.getString("stage"));
+    assertFalse("the user asked for a presentation, not for a test", json.getBoolean("testMode"));
+    assertEquals("ERROR", json.getString("status"));
+    assertEquals(1, json.getJSONArray("errors").length());
+    assertEquals("E39000101 - NIF del declarante no identificado",
+        json.getJSONArray("errors").getString(0));
+    assertEquals("A001 - Aviso informativo", json.getJSONArray("warnings").getString(0));
+    assertTrue("the validator's draft is not a justificante", json.isNull("pdfBase64"));
+    assertEquals("2026", json.getJSONObject("declarationData").getString("fiscalYear"));
+
+    List<FiscalAeatValidationOutcome> rows = attemptRows(1, VALIDATION_ENDPOINT);
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertEquals("pre_submission_validation", rows.get(0).path().key());
+    assertEquals(Outcome.REJECTED, rows.get(0).outcome());
+    assertEquals("390", rows.get(0).model());
+  }
+
+  /** An accepted file proceeds — AEAT warnings do not stop a presentation. */
+  @Test
+  public void testValidateBeforeSubmissionProceedsWhenAccepted() {
+    validatorAnswers(acceptedByTheValidator());
+    FiscalAeatSubmissionSupport.PreSubmissionValidation clean = validateBeforeSubmission();
+    assertTrue(clean.proceed());
+    assertNull(clean.rejected);
+
+    AEAT303SubmissionResult withWarnings = acceptedByTheValidator();
+    withWarnings.addWarning("A001 - Aviso informativo");
+    validatorAnswers(withWarnings);
+    FiscalAeatSubmissionSupport.PreSubmissionValidation warned = validateBeforeSubmission();
+    assertTrue(warned.proceed());
+    assertNull(warned.rejected);
+
+    List<FiscalAeatValidationOutcome> rows =
+        attemptRows(2, VALIDATION_ENDPOINT, VALIDATION_ENDPOINT);
+    assertEquals(Outcome.ACCEPTED, rows.get(0).outcome());
+    assertEquals(Outcome.ACCEPTED, rows.get(1).outcome());
+    assertEquals(List.of("A001"), rows.get(1).loggedWarningCodes());
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(1).path());
+  }
+
+  /** No answer (an exception, or no result at all) follows the policy constant; never throws. */
+  @Test
+  public void testValidateBeforeSubmissionFollowsThePolicyWithoutAnAnswer() {
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new OBException("timeout", new SocketTimeoutException()))
+        .thenReturn(null);
+
+    FiscalAeatSubmissionSupport.PreSubmissionValidation thrown = validateBeforeSubmission();
+    FiscalAeatSubmissionSupport.PreSubmissionValidation noResult = validateBeforeSubmission();
+
+    for (FiscalAeatSubmissionSupport.PreSubmissionValidation v : List.of(thrown, noResult)) {
+      assertEquals(FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED, v.proceed());
+      assertEquals(!FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED, v.unavailable);
+      assertNull(v.rejected);
+    }
+    List<FiscalAeatValidationOutcome> rows =
+        attemptRows(2, VALIDATION_ENDPOINT, VALIDATION_ENDPOINT);
+    assertEquals(Outcome.CONNECTION_FAILURE, rows.get(0).outcome());
+    assertEquals(Outcome.NOT_VALIDATED, rows.get(1).outcome());
+    assertEquals(Path.PRE_SUBMISSION_VALIDATION, rows.get(0).path());
+    assertTrue(rows.get(0).testMode());
+  }
+
+  /** The answer of a presentation stopped because the validator could not be reached. */
+  @Test
+  public void testValidationUnavailableJsonShape() throws Exception {
+    JSONObject json = FiscalAeatSubmissionSupport.validationUnavailableJson();
+
+    assertEquals("ERROR", json.getString("status"));
+    assertEquals("VALIDATION_UNAVAILABLE", json.getString("errorCode"));
+    assertEquals("validation", json.getString("stage"));
+    assertFalse(json.getBoolean("testMode"));
+    assertEquals(1, json.getJSONArray("errors").length());
+  }
+
+  /**
+   * The validation waits 10 s / 30 s at most, and the service gets its defaults back before the
+   * presentation that follows — whether the validator answered or the call threw.
+   */
+  @Test
+  public void testValidateBeforeSubmissionBoundsTheWaitAndRestoresTheTimeouts() {
+    assertEquals(10_000, FiscalAeatSubmissionSupport.VALIDATION_CONNECT_TIMEOUT_MILLIS);
+    assertEquals(30_000, FiscalAeatSubmissionSupport.VALIDATION_READ_TIMEOUT_MILLIS);
+    validatorAnswers(acceptedByTheValidator());
+
+    validateBeforeSubmission();
+
+    InOrder answered = inOrder(service);
+    answered.verify(service).withTimeouts(10_000, 30_000);
+    answered.verify(service).submitValidation("390", FILE, "2026", "0A", "ES");
+    answered.verify(service).withDefaultTimeouts();
+
+    AEAT303SubmissionService failing = mock(AEAT303SubmissionService.class);
+    when(failing.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new IllegalStateException("boom"));
+    FiscalAeatSubmissionSupport.validateBeforeSubmission(failing, attemptLog, ATTEMPTED,
+        FILE_TO_PRESENT);
+
+    InOrder thrown = inOrder(failing);
+    thrown.verify(failing).withTimeouts(10_000, 30_000);
+    thrown.verify(failing).submitValidation("390", FILE, "2026", "0A", "ES");
+    thrown.verify(failing).withDefaultTimeouts();
+  }
+
+  /** A service that cannot even take the timeouts is "no answer", and is still restored. */
+  @Test
+  public void testValidateBeforeSubmissionNeverThrows() {
+    AEAT303SubmissionService broken = mock(AEAT303SubmissionService.class);
+    when(broken.withTimeouts(10_000, 30_000)).thenThrow(new IllegalArgumentException("bad"));
+    when(broken.withDefaultTimeouts()).thenThrow(new IllegalStateException("cannot restore"));
+    when(broken.getValidationEndpoint()).thenThrow(new OBException("no context"));
+
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+        FiscalAeatSubmissionSupport.validateBeforeSubmission(broken, attemptLog, ATTEMPTED,
+            FILE_TO_PRESENT);
+
+    assertEquals(FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED,
+        validation.proceed());
+    verify(broken, never()).submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString());
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(attemptLog).recordAttempt(eq(ATTEMPTED), outcome.capture(), eq((String) null));
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
+  }
+
+  // ── replaceAttachedPdf ──────────────────────────────────────────────
+
+  private static final String VALIDATION_PDF = "VALIDACION-390-2026-0A.pdf";
+  private static final String LEGACY_VALIDATION_PDF = "VALIDACION-justificante-390-2026-0A.pdf";
+
+  @SuppressWarnings("unchecked")
+  private OBCriteria<Attachment> attachmentsCriteria(List<Attachment> found) {
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(criteria.list()).thenReturn(found);
+    when(obDal.createCriteria(Attachment.class)).thenReturn(criteria);
+    return criteria;
+  }
+
+  private void replaceValidationPdf() {
+    FiscalAeatSubmissionSupport.replaceAttachedPdf(decl, obDal.get(Organization.class, "org1"),
+        Fiscal390SubmissionSupport.validationFileName(2026, "0A"), new byte[] { 1, 2, 3 },
+        "aeat390goval", "390", Fiscal390SubmissionSupport.legacyValidationFileName(2026, "0A"));
+  }
+
+  /**
+   * Only the attachments of THIS declaration named like the validation PDF — its current name or
+   * the legacy one — are looked up and removed; then the new PDF is attached under the new name.
+   */
+  @Test
+  public void testReplaceAttachedPdfRemovesOnlyTheSupersededDocument() throws Exception {
+    assertEquals(VALIDATION_PDF, Fiscal390SubmissionSupport.validationFileName(2026, "0A"));
+    assertEquals(LEGACY_VALIDATION_PDF,
+        Fiscal390SubmissionSupport.legacyValidationFileName(2026, "0A"));
+    Attachment current = mock(Attachment.class);
+    Attachment legacy = mock(Attachment.class);
+    OBCriteria<Attachment> criteria = attachmentsCriteria(List.of(current, legacy));
+
+    replaceValidationPdf();
+
+    ArgumentCaptor<Criterion> restrictions = ArgumentCaptor.forClass(Criterion.class);
+    verify(criteria, times(3)).add(restrictions.capture());
+    List<String> where = new java.util.ArrayList<>();
+    for (Criterion c : restrictions.getAllValues()) {
+      where.add(c.toString());
+    }
+    assertEquals(List.of("table.id=T1", "record=" + DECL_ID,
+        "name in (" + LEGACY_VALIDATION_PDF + ", " + VALIDATION_PDF + ")"), where);
+    verify(criteria).setFilterOnReadableOrganization(false);
+
+    // The new PDF is stored FIRST; the superseded ones are removed only afterwards.
+    InOrder order = inOrder(attachManager);
+    ArgumentCaptor<File> file = ArgumentCaptor.forClass(File.class);
+    order.verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"),
+        file.capture());
+    order.verify(attachManager).delete(current);
+    order.verify(attachManager).delete(legacy);
+    assertEquals(VALIDATION_PDF, file.getValue().getName());
+    verify(attachManager, times(2)).delete(any());
+    verify(obDal, never()).commitAndClose();
+  }
+
+  /** The previous PDF cannot be removed (or looked up): the new one is attached all the same. */
+  @Test
+  public void testReplaceAttachedPdfStillAttachesWhenTheDeleteFails() throws Exception {
+    Attachment previous = mock(Attachment.class);
+    attachmentsCriteria(List.of(previous));
+    doThrow(new OBException("cannot delete")).when(attachManager).delete(previous);
+
+    replaceValidationPdf();
+
+    verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+
+    when(obDal.createCriteria(Attachment.class)).thenThrow(new OBException("no session"));
+    replaceValidationPdf();
+
+    verify(attachManager, times(2)).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+  }
+
+  /** The upload fails: the previous PDF stays, nothing is deleted. */
+  @Test
+  public void testReplaceAttachedPdfKeepsThePreviousOneWhenTheUploadFails() throws Exception {
+    Attachment previous = mock(Attachment.class);
+    attachmentsCriteria(List.of(previous));
+    doThrow(new OBException("disk full")).when(attachManager)
+        .upload(any(), any(), any(), any(), any());
+
+    replaceValidationPdf();
+
+    verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+    verify(attachManager, never()).delete(any());
+  }
+
+  /**
+   * The validator answers with neither a PDF nor a single error: not a verdict — the policy of
+   * "no answer" applies, never a rejection.
+   */
+  @Test
+  public void testValidateBeforeSubmissionAnswerWithoutPdfOrErrorsIsNoAnswer() {
+    AEAT303SubmissionResult empty = new AEAT303SubmissionResult();
+    empty.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    empty.setTestMode(true);
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenReturn(empty);
+
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation = validateBeforeSubmission();
+
+    assertEquals(FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED,
+        validation.proceed());
+    assertEquals(null, validation.rejected);
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(attemptLog).recordAttempt(eq(ATTEMPTED), outcome.capture(), any());
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
+  }
+
+  /**
+   * The AEAT call fails with a RuntimeException that is not an OBException (a response that
+   * cannot be parsed): the attempt is still recorded, and the exception goes on as before.
+   */
+  @Test
+  public void testAnUnparseableAeatAnswerIsRecordedAndRethrown() throws Exception {
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new IllegalStateException("not a JSON object"));
+    StringWriter out = new StringWriter();
+
+    try {
+      submit("{\"testMode\":true}", response(out), out);
+      fail("the RuntimeException must go on");
+    } catch (IllegalStateException expected) {
+      assertEquals("not a JSON object", expected.getMessage());
+    }
+
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(attemptLog).recordAttempt(any(), outcome.capture(), any());
+    assertEquals(Path.MANUAL_VALIDATION, outcome.getValue().path());
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
+    verify(declHandler, never()).replaceAeatIncidentsNoCommit(any(), any(), any());
+  }
+
+  /** Nothing to supersede: nothing is deleted. */
+  @Test
+  public void testReplaceAttachedPdfDeletesNothingWhenThereIsNoPreviousOne() throws Exception {
+    attachmentsCriteria(Collections.emptyList());
+
+    replaceValidationPdf();
+
+    verify(attachManager, never()).delete(any());
+    verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
   }
 
   // ── manualData.submission ───────────────────────────────────────────

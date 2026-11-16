@@ -137,13 +137,14 @@ public final class GoFeatureFlags {
    * backend targets the account email. This flag targets the account email — the key the backend
    * targets on — and has no frontend end at all.
    *
-   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
-   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
-   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
-   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
-   * entry is gated, "because hiding the route would imply the flag was protecting something, which
-   * it is not". What protects the endpoints is the token. Revocation in particular must keep working
-   * whatever this flag says: it is the only kill switch for a link already out.
+   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the
+   * {@code /sws/portal/*} endpoints and the {@code etgo_portal_link} table ship unconditionally —
+   * the same pattern {@code docs/feature-flags.md} already documents as correct for
+   * {@code /upgrade}, where the route is registered unconditionally and only the menu entry is
+   * gated, "because hiding the route would imply the flag was protecting something, which it is
+   * not". What protects the endpoints is the token. Since ETP-6209 it gates the link of every
+   * sales document email (quotation, order, shipment, invoice), each link lives 48 hours, and the
+   * renewal of an expired link is not gated: it only replaces a link this flag already let out.
    */
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
