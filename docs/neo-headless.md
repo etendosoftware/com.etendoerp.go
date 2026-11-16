@@ -2322,7 +2322,10 @@ is a warning, not an error.
 - Duplicate: linked vendor + document number against non-voided purchase invoices
   (`duplicate.state` `none|found|unknown`); other live inbox rows of the same vendor and number
   are listed in `duplicate.inbox[]`. `DUPLICATE_INVOICE_ID` is the first invoice found.
-- Total: the printed `total_amount`, else the sum of quantity x price x (1 + rate/100)
+- Total: the printed `total_amount` when it is a non-zero number of ANY sign (a purchase invoice can be a
+  credit document; zero or absent means none printed), kept exactly as read (never rounded to the
+  currency's scale, so a mismatch with the lines stays visible); else the computed lines total (ETP-6050
+  rules: discount, two roundings, tax mode, currency scale; only this one is rounded to the scale)
   (`totalSource` `printed|lines`). `total_amount` was added to the shared `purchase-invoice` OCR
   schema (`ocr-config.json`), so it also reaches the SPA's "Extract and complete" and the MCP tool.
 
@@ -2443,6 +2446,7 @@ the document reaches the browser.
     none).
   - `lines[i].product.details = {name, searchKey, category, uom}` when `state = linked`; every
     `lines[i].product.candidates[i]` gets `searchKey`, `category`, `uom` (names; empty when none).
+  - `lines[i].tax.name` is replaced at read time from `tax.id` (`OcrLookups.taxNames`: the request language, tenant-visible, no validity rule), and `lines[i].product.new.category` / `.uom` are added from `categoryId` / `uomId`; neither name is ever stored. `tax.rate` and `tax.matchedBy` (`manual` for a tax the user chose) are stored.
   - Names follow the session language, as the selectors do: product `name` (also each candidate's
     `name`, replaced when a translation exists), `category` and `uom` are read through
     `NeoTrl.translatedNames` (the `*_Trl` rows `ProductTrl`, `ProductCategoryTrl`, `UOMTrl`,
@@ -2483,17 +2487,17 @@ key, non-object, missing `index`/`id`: 400 `invalid_request`; no `updated`: 400 
 | `op` | Payload | Effect |
 |---|---|---|
 | `setHeader` | `documentNo`, `invoiceDate` (patch) | text cleaned like an extracted one (`OcrSanitizer.text`, at most 200 chars; over 20 is the validation `REFERENCE_TOO_LONG`, not a refusal); date `yyyy-MM-dd`, year 1900-2100, `null`/`""` clears; any other key is 400 |
-| `setLine` | `index`, any of `description`, `quantity`, `unitPrice` (within +/-1e9), `taxRate` (0-100 or null), `discount` (0-100, null = 0) | scales HALF_UP: quantity 4, unitPrice 4, taxRate 2, discount 4; out of range or not a number: 422 `invalid_value`; `null` is accepted for `quantity`/`unitPrice`/`taxRate` (stored null, the validator reports the line) |
+| `setLine` | `index`, any of `description`, `quantity`, `unitPrice` (within +/-1e9), `taxId`, `taxRate` (0-100 or null, legacy), `discount` (0-100, null = 0) | scales HALF_UP: quantity 4, unitPrice 6, taxRate 2, discount 4; out of range or not a number: 422 `invalid_value`; `null` is accepted for `quantity`/`unitPrice`/`taxRate` (stored null, the validator reports the line). **`taxId`** (string, or `null`; when it is a non-null id in the same operation as a `taxRate`, the id wins and the typed rate is not applied at all; pinning the server-resolved id makes the stored `taxRate` follow the tax's rate, and marks only if that rate actually changes) chooses the line's tax by id, as the purchase invoice line's tax selector does: it must pass `OcrLookups.taxById` (active, `ValidFrom` <= the document date or today, purchase or both, client or System, tenant-visible: the `C_Tax_IsSOTrx_Date` rule), else 422 `unknown_tax` `{index}`. The CHOSEN TAX WINS: `tax = {state: resolved, matchedBy: manual, id, rate}` and `taxRate` becomes its rate (the printed rate stays in `EXTRACTED_DATA`); the name is never stored. `null` drops a chosen tax and the server resolves one again (from the rate and the vendor's address). A chosen tax survives a vendor change, and a date change while it still passes the rule; typing a `taxRate` that changes drops it (the tax is resolved by rate again). Choosing the id already chosen writes nothing; choosing the id the server resolved only pins it (no mark). Choosing or changing a tax marks `ADJUSTED` like any line change |
 | `addLine` | none | `{index: max+1, description:"", quantity:1, unitPrice:0, product:none}`; `taxRate` = the previous (last) line's, else the vendor address' default tax and its rate; `pending_vendor` without address; over 100 lines: 422 `too_many_lines` |
 | `removeLine` | `index` | 422 `line_not_found` when absent |
 | `selectVendor` | `id` | must resolve through `OcrLookups.vendorById` (else 422 `unknown_vendor`); `vendor = linked, matchedBy manual`, address state/location read again, taxes rebuilt |
 | `newVendor` | `fields?` (`name, taxId, address, postalCode, city, countryName, email, phone`) | patch of `vendor.extracted`; `vendor = new`, `addressState UNKNOWN`, every line tax `pending_vendor`. Nothing is created: the contact is created on confirm (ETP-6051), which must apply the single-invoice OCR flow's seed |
 | `selectProduct` | `index`, `id` | `OcrLookups.productById` (else 422 `unknown_product`); `product = linked, matchedBy manual` |
-| `newProduct` | `index`, `name?`, `categoryId?`, `uomId?` | `product = new` with `new = {name, categoryId, category, uomId, uom}`; ids resolved by `OcrLookups.productCategoryById` / `uomById` (422 `unknown_category` / `unknown_uom`), names in the session language |
+| `newProduct` | `index`, `name?`, `categoryId?`, `uomId?` | `product = new` with `new = {name, categoryId, uomId}`: ONLY ids are stored, validated by `OcrLookups.productCategoryById` / `uomById` (422 `unknown_category` / `unknown_uom`); `null` clears. `review` and `apply` answers add `new.category` and `new.uom` (names) at read time from those ids, in the request language (`NeoTrl`, active and tenant-visible rows; no name when the id no longer resolves). A name stored by an earlier version is ignored and replaced |
 
 The line `index` is a stable id: never renumbered, a new line takes the highest index plus one (a
 document whose lines carry none gets its positions on the first edit); the validator codes are
-`line[<index>].tax|product`. `EXTRACTED_DATA` is never touched. After the operations the server
+`line[<index>].tax|product|quantity|unitPrice`. `EXTRACTED_DATA` is never touched. After the operations the server
 recomputes, in one transaction and in this order: taxes (lines whose rate changed, every line when the
 date or the vendor changed, the new line; once per distinct rate, through
 `InboxLineMatcher.taxState`, the one function the worker uses), duplicates when the number or the
@@ -2505,6 +2509,44 @@ the validation, the status (`READY` goes back to `PENDING_REVIEW` with `REVIEWED
 `ADJUSTED`, the document, the summary columns (`InvoiceInboxSummary.syncFrom`). A request whose
 operations change nothing writes nothing and `updated` does not move. `CURRENT_DATA` over 1 MB:
 413 `document_too_large`.
+
+**What the validator requires, and why (aligned with the purchase invoice).** A document is complete when:
+the vendor is linked (or new with a name and a tax id), the invoice date exists, the total EXISTS (any
+sign, zero included), there is at least one line, and every line has a resolved tax, a product
+(linked, or new with a name, a category and a unit: D8) and a numeric `quantity` and `unitPrice`
+(codes `line[i].quantity`, `line[i].unitPrice`) of ANY sign, zero included, for linked and new lines
+alike. The purchase invoice window enforces nothing more: `invoicedQuantity` is required with
+`min: false` and `listPrice` with no minimum (a negative one is a return or credit line, ETP-4567), the
+header total is read-only and computed from the lines with no sign check, and the only completion block
+is `InvoiceCompletionLineGuard` (a line whose net is 0 while `|quantity x price| >= 0.005`, which cannot
+happen with the inbox's own totals rule). The inbox therefore no longer asks for `quantity > 0`,
+`price >= 0` or `total > 0`; the input caps (+/-1e9, scale 4) stay as OCR/input defence. D8 stays: a
+product is created with a category and a unit.
+
+**Worker effect of the stricter validator (ETP-6050).** A worker-produced row with a null quantity or unit price on a LINKED line now lands in `ERROR` with `line[i].quantity` / `line[i].unitPrice` in `validation.missing` (before, only new-product lines were judged on them); intended by the purchase-invoice alignment, where both are required on every line.
+
+**Same amounts as the purchase invoice (ETP-6050).** Three rules, verified live against the purchase
+invoice, decide the cents:
+- **Tax rounding mode.** Etendo rounds the tax of a purchase invoice by `C_Tax.DocTaxAmount`: `D`
+  (Document based amount by rate, the default of every tax in the test DB) rounds ONCE per rate on the
+  sum of the line nets; `L` (Line based) rounds the tax of every line and sums them (ten lines of 0.25 at
+  10 % give 0.25 with `D` and 0.30 with `L`). The line's `tax` block carries `docTaxAmount` (`D`|`L`,
+  `D` when unknown), stamped from the tax id by `InboxTaxModes` in the worker, in `apply` and in the
+  `review` answer (`OcrLookups.taxDocAmountModes`); `InvoiceInboxTotals` follows it and a document may mix
+  both. Rows are by (rate, mode), ascending by rate, `D` before `L`.
+- **Currency scale.** Amounts are rounded to the decimals of the document currency
+  (`C_Currency.StdPrecision`, `NeoCurrencyPrecision.forCurrencyId`, the scale every GO document line
+  uses), not a fixed 2. The currency is the vendor's purchase price list currency, else the
+  organization's, else the client's (`OcrLookups.documentCurrency(vendorId, organizationId)`; the organization is the ROW's, tenant-checked, not the
+  session's; a vendor not linked uses it directly). It is stored as `header.currencyId` by the worker and by `apply` when the document
+  has none or the vendor changes (so a vendor change re-derives it and the amounts); read-only in the
+  panel. The `review` and `apply` answers carry `currency = {id, isoCode, symbol, scale}`; a row with no
+  stored currency derives it at read time, without writing. The exchange rate and the currency picker of
+  the invoice are untouched: this is only the scale of the inbox's own amounts.
+- **Input scales** (HALF_UP, stored): `quantity` 4, `unitPrice` 6 (the price scale of GO), `discount` 4,
+  `taxRate` 2; the price after the discount `unit6` stays at 6 decimals.
+The shared fixture `invoice-inbox-totals.json` carries optional `scale` per case and `tax.docTaxAmount`
+per line, and `docTaxAmount` on the expected tax rows of a line-based tax.
 
 **`ADJUSTED`** is sticky (only ever set) and decided in ONE place, `InvoiceInboxAdjustedPolicy`. An
 operation marks when it changes what is stored (compared at the stored scale, `10` equals `10.0000`,
@@ -2541,12 +2583,19 @@ is the follow-up that closes the gap (`flags-registry.json` `$gatingComment` mus
 
 `POST .../action/mark-reviewed` body `{updated}` (no other key): after the guards, `READY` answers 200
 unchanged (nothing written, for a caller holding the current token: a retry with the OLD token gets 409 `stale_document` first, because the token is checked before the status, and the re-read shows `READY`); a status other than `PENDING_REVIEW` is 409 `not_reviewable`; the
-verdict is RECOMPUTED and, if not valid, 422 `not_valid` with `error.missing`; otherwise
-`status = READY`, `REVIEWED = Y`, `updated` moves, `ADJUSTED` and the document are untouched.
+verdict is RECOMPUTED (the stored one is not trusted). The cases that can arrive: a valid `PENDING_REVIEW`
+row becomes `READY` with `REVIEWED = Y` (`updated` moves, `ADJUSTED` and the document untouched); an
+invalid `PENDING_REVIEW` row (read before a rule changed, e.g. D8, or whose stored status lags its
+document: a normally invalid row is already `ERROR`) answers 422 `not_valid` with `error.missing`, and
+its stored status is moved to `ERROR` with the verdict's code, as an edit would (the write is committed
+with the request, because an error `NeoResponse` is a returned value), so that answer also carries the
+NEW token in `error.updated` and `error.documentStatus = ERROR`; an `ERROR` row is 409
+`not_reviewable` (invalid by definition: edit it first); `READY` is 200 unchanged (see the stale token
+note above); `CONFIRMED`, `DISCARDED` and `FOREIGN_RECEIVER` are 409 `not_editable` from the guards.
 
 Error details are keys of the `error` object: `field` and `index` (`invalid_value`), `index`
-(`line_not_found`, `unknown_product`, `unknown_category`, `unknown_uom`), `max` (`too_many_lines`),
-`missing` (`not_valid`), `documentStatus` (`not_editable`, `not_reviewable`: `error.status` already
+(`line_not_found`, `unknown_product`, `unknown_category`, `unknown_uom`, `unknown_tax`), `max` (`too_many_lines`),
+`missing`, `updated` and `documentStatus` (`not_valid`), `documentStatus` (`not_editable`, `not_reviewable`: `error.status` already
 holds the HTTP code). The server texts are the English defaults of `InvoiceInboxMessages` (no
 `AD_MESSAGE` row, like discard and review); the SPA translates by `error.code`.
 
