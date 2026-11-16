@@ -233,6 +233,101 @@ public class PortalDocumentQueryTest {
     assertEquals(Arrays.asList(invoice, order, shipment, quotation, oldInvoice), recent);
   }
 
+  @Test
+  public void aStatusGroupBindsItsStatusesItsConditionAndTodayOnlyWhenItNeedsIt() {
+    Date today = new Date(86_400_000L);
+    // { kind, group, statuses bound, a fragment of its condition (null: none), binds :today }
+    Object[][] cases = {
+        { PortalDocumentKind.QUOTATION, "awaiting", Arrays.asList("UE", "CO"), null, false },
+        { PortalDocumentKind.QUOTATION, "accepted", Arrays.asList("ETGO_AC", "CA", "ETGO_CI"),
+            null, false },
+        { PortalDocumentKind.QUOTATION, "rejected", Arrays.asList("CJ"), null, false },
+        { PortalDocumentKind.ORDER, "inProgress", Arrays.asList("CO"), "from OrderLine l", false },
+        { PortalDocumentKind.ORDER, "voided", Arrays.asList("VO"), null, false },
+        { PortalDocumentKind.SHIPMENT, "delivered", Arrays.asList("CO", "CL"), null, false },
+        { PortalDocumentKind.INVOICE, "pending", Arrays.asList("CO", "CL"),
+            "e.outstandingAmount <> 0", false },
+        { PortalDocumentKind.INVOICE, "overdue", Arrays.asList("CO", "CL"),
+            "ps.dueDate < :today", true },
+        { PortalDocumentKind.INVOICE, "paid", Arrays.asList("CO", "CL"),
+            "e.outstandingAmount = 0", false },
+    };
+    for (Object[] c : cases) {
+      built.clear();
+      PortalDocumentKind kind = (PortalDocumentKind) c[0];
+      PortalDocumentQuery.Group group = PortalDocumentQuery.group(kind, (String) c[1]);
+
+      PortalDocumentQuery.count(SESSION, kind, PortalDocumentQuery.Filter.group(group, today));
+
+      Query query = built.keySet().iterator().next();
+      String hql = built.get(query);
+      String label = kind + "/" + c[1];
+      verify(query).setParameterList("statuses", (Collection) new LinkedHashSet<>((List) c[2]));
+      if (c[3] != null) {
+        assertTrue(label + ": " + hql, hql.contains((String) c[3]));
+      }
+      verify(query, (Boolean) c[4] ? org.mockito.Mockito.times(1) : never())
+          .setParameter("today", today);
+      // Every group stays within the kind's allow-list.
+      assertTrue(label, PortalDocumentQuery.visibleStatuses(kind).containsAll((List) c[2]));
+    }
+    assertEquals(Arrays.asList("awaiting", "accepted", "rejected"),
+        PortalDocumentQuery.groupCodes(PortalDocumentKind.QUOTATION));
+    assertNull("blank is \"all\"", PortalDocumentQuery.group(PortalDocumentKind.INVOICE, " "));
+    assertNull(PortalDocumentQuery.group(PortalDocumentKind.INVOICE, "awaiting"));
+  }
+
+  @Test
+  public void paidAndInvoicedByMonthReadCompletedAndClosedInvoicesSinceAGivenDay() {
+    Date from = new Date(1_000L);
+    for (Runnable call : Arrays.<Runnable>asList(
+        () -> PortalDocumentQuery.paidSince(SESSION, from),
+        () -> PortalDocumentQuery.invoicedByMonth(SESSION, from))) {
+      built.clear();
+
+      call.run();
+
+      Query query = built.keySet().iterator().next();
+      String hql = built.get(query);
+      assertTrue(hql, hql.contains("e.client.id = :clientId"));
+      assertTrue(hql, hql.contains("e.businessPartner.id = :bpartnerId"));
+      assertTrue(hql, hql.contains("e.invoiceDate >= :dateFrom"));
+      assertTrue(hql, hql.contains("group by"));
+      verify(query).setParameter("clientId", CLIENT_ID);
+      verify(query).setParameter("bpartnerId", BP_ID);
+      verify(query).setParameter("dateFrom", from);
+      verify(query).setParameterList("statuses",
+          (Collection) new LinkedHashSet<>(Arrays.asList("CO", "CL")));
+    }
+  }
+
+  @Test
+  public void searchAsksEveryKindAndKeepsTheNewestUpToTheLimit() {
+    BaseOBObject quotation = document(Order.ENTITY_NAME, Order.PROPERTY_ORDERDATE, 4);
+    BaseOBObject order = document(Order.ENTITY_NAME, Order.PROPERTY_ORDERDATE, 6);
+    BaseOBObject shipment = document(ShipmentInOut.ENTITY_NAME,
+        ShipmentInOut.PROPERTY_MOVEMENTDATE, 5);
+    BaseOBObject invoice = document(Invoice.ENTITY_NAME, Invoice.PROPERTY_INVOICEDATE, 9);
+    List<Query> pages = new ArrayList<>(Arrays.asList(page(quotation), page(order),
+        page(shipment), page(invoice)));
+    List<String> hqls = new ArrayList<>();
+    doAnswer(invocation -> {
+      hqls.add(invocation.getArgument(0));
+      return pages.remove(0);
+    }).when(session).createQuery(anyString(), any(Class.class));
+
+    List<BaseOBObject> found = PortalDocumentQuery.search(SESSION, "PV-0", 3);
+
+    assertEquals(Arrays.asList(invoice, order, shipment), found);
+    assertEquals(4, hqls.size());
+    for (String hql : hqls) {
+      assertTrue(hql, hql.contains("lower(e.documentNo) like :search"));
+    }
+
+    built.clear();
+    assertTrue(PortalDocumentQuery.search(SESSION, "  ", 3).isEmpty());
+  }
+
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   private static PortalDocumentQuery.Filter none() {

@@ -1097,6 +1097,27 @@ public class SalesQuotationHeaderHandlerTest {
     when(rs.next()).thenReturn(false);
   }
 
+  /**
+   * ETP-6209: a new quotation never gets a reject reason by default. The field is editable (the
+   * seller sets the tenant's internal reason on a rejected quotation), so the defaults would fill
+   * it with the first reason; the answer drops it and its identifier, and keeps every other value.
+   */
+  @Test
+  public void testAfterHandle_defaultsNeverCarryARejectReason() throws Exception {
+    JSONObject defaults = new JSONObject().put("rejectReason", "RR-1")
+        .put("rejectReason$_identifier", "Precio").put("currency", "EUR");
+    NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS).build();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+
+    NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+    JSONObject answered = result.getBody().getJSONObject("defaults");
+    assertFalse(answered.has("rejectReason"));
+    assertFalse(answered.has("rejectReason$_identifier"));
+    assertEquals("EUR", answered.getString("currency"));
+  }
+
   @Test
   public void testAfterHandle_processedQuotation_notAdjusted() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {

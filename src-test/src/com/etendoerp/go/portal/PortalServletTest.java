@@ -78,7 +78,7 @@ public class PortalServletTest {
   private static final String CLIENT_ID = "CLIENT-1";
   private static final String BP_ID = "BP-1";
   private static final String INVALID_BODY = "{\"error\":\"This link is no longer valid\"}";
-  private static final String[] DATA_PATHS = { "/home", "/documents",
+  private static final String[] DATA_PATHS = { "/home", "/search", "/documents",
       "/documents/INVOICE/INV-1", "/documents/INVOICE/INV-1/pdf" };
 
   private MockedStatic<OBContext> obContext;
@@ -87,6 +87,8 @@ public class PortalServletTest {
 
   private PortalServlet servlet;
   private PortalLinkService linkService;
+  private PortalDecisionService decisionService;
+  private MockedStatic<PortalPrintable> printable;
   private PortalRateLimiter meLimiter;
   private PortalRateLimiter renewLimiter;
   private PortalRateLimiter dataLimiter;
@@ -96,11 +98,16 @@ public class PortalServletTest {
     obContext = mockStatic(OBContext.class);
     logos = mockStatic(CompanyLogoResolver.class);
     events = mockStatic(PortalUsageEvents.class);
+    // No PDF is rendered unless a test says so, and no stored one is stale.
+    printable = mockStatic(PortalPrintable.class);
     try (MockedConstruction<PortalLinkService> services =
         mockConstruction(PortalLinkService.class);
+        MockedConstruction<PortalDecisionService> decisions =
+            mockConstruction(PortalDecisionService.class);
         MockedConstruction<PortalRateLimiter> limiters = allowingLimiters()) {
       servlet = new PortalServlet();
       linkService = services.constructed().get(0);
+      decisionService = decisions.constructed().get(0);
       // Field order in PortalServlet: the /me limiter first, then the /renew one, then the one
       // shared by the data reads (/home, /documents*).
       meLimiter = limiters.constructed().get(0);
@@ -113,6 +120,7 @@ public class PortalServletTest {
 
   @After
   public void tearDown() {
+    printable.close();
     events.close();
     logos.close();
     obContext.close();
@@ -148,7 +156,7 @@ public class PortalServletTest {
   public void anyMethodButGetOrPostRenewIsRejectedWith405() throws Exception {
     String[][] cases = { { "PUT", "/me" }, { "DELETE", "/me" }, { "PATCH", "/documents" },
         { "POST", "/me" }, { "POST", "/home" }, { "DELETE", "/documents/INVOICE/INV-1" },
-        { "HEAD", "/renew" } };
+        { "HEAD", "/renew" }, { "POST", "/quotations/Q-1" }, { "PUT", "/decisions/confirm" } };
     for (String[] c : cases) {
       Call call = new Call();
 
@@ -285,9 +293,10 @@ public class PortalServletTest {
         mockStatic(PortalDocumentsEndpoint.class)) {
       JSONObject page = new JSONObject().put("totalCount", 0);
       endpoint.when(() -> PortalDocumentsEndpoint.list(any(), any(), any(), any(), any(), any(),
-          any(), any())).thenReturn(page);
+          any(), any(), any())).thenReturn(page);
       HttpServletRequest request = request("GET", "/documents");
       when(request.getParameter("type")).thenReturn("invoice");
+      when(request.getParameter("group")).thenReturn("pending");
       // Nothing a caller sends can widen the scope: there is no parameter for it to come from.
       when(request.getParameter("clientId")).thenReturn("CLIENT-2");
       when(request.getParameter("businessPartnerId")).thenReturn("BP-2");
@@ -297,8 +306,8 @@ public class PortalServletTest {
 
       assertEquals(HttpServletResponse.SC_OK, call.status());
       ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
-      endpoint.verify(() -> PortalDocumentsEndpoint.list(scope.capture(), eq("invoice"), any(),
-          any(), any(), any(), any(), any()));
+      endpoint.verify(() -> PortalDocumentsEndpoint.list(scope.capture(), eq("invoice"),
+          eq("pending"), any(), any(), any(), any(), any(), any()));
       assertEquals(CLIENT_ID, scope.getValue().getClientId());
       assertEquals(BP_ID, scope.getValue().getBusinessPartnerId());
     }
@@ -388,6 +397,224 @@ public class PortalServletTest {
     }
   }
 
+  @Test
+  public void aPdfWithoutAStoredFileIsRenderedAndAStaleOneRenderedAgain() throws Exception {
+    validLink();
+    BaseOBObject quotation = mock(BaseOBObject.class);
+    Attachment stored = mock(Attachment.class);
+    Attachment rendered = mock(Attachment.class);
+    // { stored main attachment, stored one is stale, what a render produces, file served }
+    Object[][] cases = {
+        { stored, false, rendered, stored },
+        { stored, true, rendered, rendered },
+        { stored, true, null, stored },
+        { null, false, rendered, rendered },
+        { null, false, null, null },
+    };
+    for (Object[] c : cases) {
+      try (MockedStatic<PortalDocumentQuery> documents = mockStatic(PortalDocumentQuery.class);
+          MockedStatic<PortalDocumentsEndpoint> endpoint =
+              mockStatic(PortalDocumentsEndpoint.class);
+          MockedStatic<AnonymousAttachmentStreamer> streamer =
+              mockStatic(AnonymousAttachmentStreamer.class)) {
+        printable.reset();
+        endpoint.when(() -> PortalDocumentsEndpoint.kindOf(any())).thenCallRealMethod();
+        documents.when(() -> PortalDocumentQuery.findInScope(any(),
+            eq(PortalDocumentKind.QUOTATION), eq("Q-1"))).thenReturn(quotation);
+        endpoint.when(() -> PortalDocumentsEndpoint.mainAttachment(any(),
+            eq(PortalDocumentKind.QUOTATION), eq("Q-1"))).thenReturn((Attachment) c[0]);
+        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, "Q-1"))
+            .thenReturn((Boolean) c[1]);
+        printable.when(() -> PortalPrintable.renderAndFind(any(),
+            eq(PortalDocumentKind.QUOTATION), eq(quotation))).thenReturn((Attachment) c[2]);
+        streamer.when(() -> AnonymousAttachmentStreamer.stream(any(), any(), anyString()))
+            .thenReturn(true);
+        Call call = new Call();
+
+        servlet.service(request("GET", "/documents/QUOTATION/Q-1/pdf"), call.response);
+
+        String label = Arrays.toString(c);
+        if (c[3] == null) {
+          assertEquals(label, HttpServletResponse.SC_NOT_FOUND, call.status());
+          streamer.verifyNoInteractions();
+        } else {
+          streamer.verify(() -> AnonymousAttachmentStreamer.stream(eq((Attachment) c[3]),
+              eq(call.response), anyString()));
+        }
+        // A fresh stored file is served as it is: no render.
+        boolean renders = c[0] == null || (Boolean) c[1];
+        printable.verify(() -> PortalPrintable.renderAndFind(any(), any(), any()),
+            times(renders ? 1 : 0));
+      }
+    }
+  }
+
+  @Test
+  public void searchReadsEveryKindWithTheValidatedLinksScope() throws Exception {
+    validLink();
+    try (MockedStatic<PortalDocumentsEndpoint> endpoint =
+        mockStatic(PortalDocumentsEndpoint.class)) {
+      JSONObject found = new JSONObject().put("documents", new org.codehaus.jettison.json
+          .JSONArray());
+      endpoint.when(() -> PortalDocumentsEndpoint.search(any(), any())).thenReturn(found);
+      HttpServletRequest request = request("GET", "/search");
+      when(request.getParameter("q")).thenReturn("F-001");
+      Call call = new Call();
+
+      servlet.service(request, call.response);
+
+      assertEquals(HttpServletResponse.SC_OK, call.status());
+      ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
+      endpoint.verify(() -> PortalDocumentsEndpoint.search(scope.capture(), eq("F-001")));
+      assertEquals(CLIENT_ID, scope.getValue().getClientId());
+      assertEquals(BP_ID, scope.getValue().getBusinessPartnerId());
+    }
+  }
+
+  // ── Part C: quotation decisions ─────────────────────────────────────────────
+
+  @Test
+  public void textFieldReadsAbsentNullAndBlankAsNoValue() throws Exception {
+    JSONObject body = new JSONObject("{\"nul\": null, \"empty\": \"\", \"blank\": \"   \","
+        + " \"text\": \"  Precio alto \"}");
+
+    for (String key : Arrays.asList("absent", "nul", "empty", "blank")) {
+      assertEquals(key, null, PortalServlet.textField(body, key));
+    }
+    assertEquals("Precio alto", PortalServlet.textField(body, "text"));
+    assertEquals(null, PortalServlet.textField(null, "text"));
+  }
+
+  @Test
+  public void aDecisionRequestAnswersOneStatusPerOutcome() throws Exception {
+    validLink();
+    // { outcome, blocked reason, HTTP status, error code (null: the "sent" body) }
+    Object[][] cases = {
+        { PortalDecisionService.RequestOutcome.SENT, null, 200, null },
+        { PortalDecisionService.RequestOutcome.NOT_FOUND, null, 404, "Not found" },
+        { PortalDecisionService.RequestOutcome.BLOCKED, PortalDecisionService.Blocked.NOT_PENDING,
+            409, "not_pending" },
+        { PortalDecisionService.RequestOutcome.BLOCKED, PortalDecisionService.Blocked.EXPIRED,
+            409, "expired" },
+        { PortalDecisionService.RequestOutcome.ACCEPT_UNAVAILABLE, null, 409,
+            "accept_unavailable" },
+        { PortalDecisionService.RequestOutcome.INVALID_REASON, null, 422, "invalid_reason" },
+        { PortalDecisionService.RequestOutcome.COOLDOWN, null, 429, "cooldown" },
+        { PortalDecisionService.RequestOutcome.FAILED, null, 503,
+            "The portal is temporarily unavailable" },
+    };
+    for (Object[] c : cases) {
+      PortalDecisionService.RequestResult result = new PortalDecisionService.RequestResult(
+          (PortalDecisionService.RequestOutcome) c[0], (PortalDecisionService.Blocked) c[1],
+          "ju\u2022\u2022\u2022@example.com");
+      when(decisionService.request(any(), any(), any(), any(), any())).thenReturn(result);
+      Call call = new Call();
+
+      servlet.service(decisionRequest("{\"decision\": \"reject\", \"reasonCode\": \"OTHER\","
+          + " \"reasonText\": null}"), call.response);
+
+      assertEquals(c[0].toString(), (int) (Integer) c[2], call.status());
+      JSONObject body = new JSONObject(call.body.toString());
+      if (c[3] == null) {
+        assertEquals("sent", body.getString("state"));
+        assertEquals("ju\u2022\u2022\u2022@example.com", body.getString("maskedEmail"));
+      } else {
+        assertEquals(c[3], body.getString("error"));
+      }
+    }
+    // The quotation id comes from the path; a JSON null reason text reaches the service as null.
+    ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
+    verify(decisionService, times(cases.length)).request(scope.capture(), eq("Q-1"),
+        eq("reject"), eq("OTHER"), eq(null));
+    assertEquals(CLIENT_ID, scope.getValue().getClientId());
+  }
+
+  @Test
+  public void aDecisionRequestWithANotValidLinkIs401AndAsksNothing() throws Exception {
+    Call call = new Call();
+
+    servlet.service(decisionRequest("{\"decision\": \"accept\"}"), call.response);
+
+    assertEquals(HttpServletResponse.SC_UNAUTHORIZED, call.status());
+    assertEquals(INVALID_BODY, call.body.toString());
+    verifyNoInteractions(decisionService);
+  }
+
+  @Test
+  public void decisionViewAndConfirmReadTheDecisionHeaderAndAnswerItsState() throws Exception {
+    PortalDecisionService.Decision decision = new PortalDecisionService.Decision();
+    decision.linkId = "LINK-1";
+    decision.decision = "reject";
+    decision.reasonCode = "OTHER";
+    decision.reasonText = "Plazo";
+    org.openbravo.model.common.order.Order quotation =
+        mock(org.openbravo.model.common.order.Order.class);
+    when(quotation.getDocumentNo()).thenReturn("PR-0042");
+    when(linkService.findLink("LINK-1")).thenReturn(Optional.of(link(new Date(0L),
+        new Date(1L), true)));
+    when(decisionService.view("dec-tok")).thenReturn(new PortalDecisionService.View(
+        PortalDecisionService.State.PENDING, decision, quotation));
+    when(decisionService.confirm("dec-tok")).thenReturn(new PortalDecisionService.View(
+        PortalDecisionService.State.CONFIRMED, decision, quotation, true));
+
+    Call view = new Call();
+    servlet.service(decisionCall("GET", "/decisions/view", "dec-tok"), view.response);
+    Call confirm = new Call();
+    servlet.service(decisionCall("POST", "/decisions/confirm", "dec-tok"), confirm.response);
+
+    JSONObject viewed = new JSONObject(view.body.toString());
+    assertEquals("pending", viewed.getString("state"));
+    assertFalse(viewed.getBoolean("appliedNow"));
+    JSONObject confirmed = new JSONObject(confirm.body.toString());
+    assertEquals("confirmed", confirmed.getString("state"));
+    assertTrue(confirmed.getBoolean("appliedNow"));
+    assertEquals("reject", confirmed.getString("decision"));
+    assertEquals("OTHER", confirmed.getString("reasonCode"));
+    assertEquals("Plazo", confirmed.getString("reasonText"));
+    assertEquals("PR-0042", confirmed.getString("documentNo"));
+    assertEquals("Acme", confirmed.getString("tenantName"));
+    // The portal token plays no part: the decision token travels in its own header.
+    verify(linkService, never()).validate(any());
+  }
+
+  @Test
+  public void anUnknownDecisionTokenGetsTheInvalidLinkAnswer() throws Exception {
+    when(decisionService.view(any())).thenReturn(new PortalDecisionService.View(
+        PortalDecisionService.State.INVALID, null, null));
+    when(decisionService.confirm(any())).thenReturn(new PortalDecisionService.View(
+        PortalDecisionService.State.INVALID, null, null));
+
+    for (String[] route : new String[][] { { "GET", "/decisions/view" },
+        { "POST", "/decisions/confirm" } }) {
+      Call call = new Call();
+
+      servlet.service(decisionCall(route[0], route[1], "nope"), call.response);
+
+      assertEquals(route[1], HttpServletResponse.SC_UNAUTHORIZED, call.status());
+      assertEquals(INVALID_BODY, call.body.toString());
+    }
+  }
+
+  @Test
+  public void decisionRoutesAreRateLimitedByTheirOwnCounters() throws Exception {
+    validLink();
+    when(meLimiter.tryAcquire(anyString())).thenReturn(false);
+    when(renewLimiter.tryAcquire(anyString())).thenReturn(false);
+    when(dataLimiter.tryAcquire(anyString())).thenReturn(false);
+
+    Call view = new Call();
+    servlet.service(decisionCall("GET", "/decisions/view", "t"), view.response);
+    Call confirm = new Call();
+    servlet.service(decisionCall("POST", "/decisions/confirm", "t"), confirm.response);
+    Call ask = new Call();
+    servlet.service(decisionRequest("{}"), ask.response);
+
+    assertEquals(429, view.status());
+    assertEquals(429, confirm.status());
+    assertEquals(429, ask.status());
+    verifyNoInteractions(decisionService);
+  }
+
   // ── /me ─────────────────────────────────────────────────────────────────────
 
   @Test
@@ -473,6 +700,18 @@ public class PortalServletTest {
     return new PortalLink("LINK-1", CLIENT_ID, "Acme", "ORG-1", BP_ID, "Customer SL",
         PortalDocumentKind.INVOICE, "INV-1", PortalLink.ORIGIN_SEND, null, "LINK-1",
         "sales-invoice-send", "a@customer.test", null, "es_ES", sentAt, expiresAt, active, false);
+  }
+
+  private static HttpServletRequest decisionRequest(String json) throws IOException {
+    HttpServletRequest request = request("POST", "/quotations/Q-1/decision");
+    when(request.getReader()).thenReturn(new java.io.BufferedReader(new java.io.StringReader(json)));
+    return request;
+  }
+
+  private static HttpServletRequest decisionCall(String method, String path, String token) {
+    HttpServletRequest request = request(method, path);
+    when(request.getHeader(PortalServlet.HEADER_DECISION_TOKEN)).thenReturn(token);
+    return request;
   }
 
   private static HttpServletRequest request(String method, String path) {

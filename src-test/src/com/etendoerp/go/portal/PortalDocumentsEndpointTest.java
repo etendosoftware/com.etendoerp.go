@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -54,6 +55,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
@@ -61,9 +63,12 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+
+import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
 
 
 /**
@@ -88,6 +93,7 @@ public class PortalDocumentsEndpointTest {
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<PortalDocumentQuery> query;
   private MockedStatic<PortalDocumentLinks> links;
+  private MockedStatic<PortalPrintable> printables;
   private OBDal obDal;
   private Session session;
   /** Rows the detail's line, tax and instalment queries answer, by a fragment of their HQL. */
@@ -115,11 +121,18 @@ public class PortalDocumentsEndpointTest {
     query.when(() -> PortalDocumentQuery.amount(any())).thenCallRealMethod();
     query.when(() -> PortalDocumentQuery.dateOf(any())).thenCallRealMethod();
     query.when(() -> PortalDocumentQuery.visibleStatuses(any())).thenCallRealMethod();
+    query.when(() -> PortalDocumentQuery.groupCodes(any())).thenCallRealMethod();
+    query.when(() -> PortalDocumentQuery.group(any(), any())).thenCallRealMethod();
+    query.when(() -> PortalDocumentQuery.invoicesSince(any(), any(), any()))
+        .thenReturn(new long[] { 0L, 0L });
+    // No server-side render unless a test says so.
+    printables = mockStatic(PortalPrintable.class);
     links = mockStatic(PortalDocumentLinks.class);
   }
 
   @After
   public void tearDown() {
+    printables.close();
     links.close();
     query.close();
     obDalStatic.close();
@@ -306,6 +319,83 @@ public class PortalDocumentsEndpointTest {
     assertFalse("another tenant's attachment is no printable", body.getBoolean("hasPdf"));
   }
 
+  @Test
+  public void hasPdfAlsoWhenTheServerCanRenderTheMissingPrintable() throws Exception {
+    Invoice document = invoice("INV-1", null, null, null);
+    query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.INVOICE,
+        "INV-1")).thenReturn(document);
+    try (MockedStatic<AnonymousAttachmentStreamer> stored =
+        mockStatic(AnonymousAttachmentStreamer.class)) {
+      // No stored printable in either case.
+      for (boolean renderable : new boolean[] { true, false }) {
+        printables.when(() -> PortalPrintable.isRenderable(PortalDocumentKind.INVOICE))
+            .thenReturn(renderable);
+
+        JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "invoice", "INV-1");
+
+        assertEquals("renderable=" + renderable, renderable, body.getBoolean("hasPdf"));
+      }
+    }
+  }
+
+  @Test
+  public void theIssuerIsTheDocumentsOrganizationUnlessItIsStar() throws Exception {
+    // { organization id, its name, issuer shown }
+    Object[][] cases = { { "ORG-9", "Acme Norte SL", "Acme Norte SL" }, { "0", "*", "Acme" },
+        { "ORG-9", " ", "Acme" } };
+    for (Object[] c : cases) {
+      Organization organization = mock(Organization.class);
+      when(organization.getId()).thenReturn((String) c[0]);
+      when(organization.getName()).thenReturn((String) c[1]);
+      Invoice document = invoice("INV-1", null, null, null);
+      when(document.get("organization")).thenReturn(organization);
+      query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.INVOICE,
+          "INV-1")).thenReturn(document);
+
+      JSONObject body = PortalDocumentsEndpoint.detail(SESSION, "invoice", "INV-1");
+
+      assertEquals(Arrays.toString(c), c[2], body.getString("issuer"));
+    }
+  }
+
+  @Test
+  public void aQuotationDetailSaysWhetherTheCustomerCanDecideNow() throws Exception {
+    Order quotation = order("Q-1", "OB");
+    query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.QUOTATION,
+        "Q-1")).thenReturn(quotation);
+    // { why the decision is blocked (null: it is not), canDecide, blockedReason }
+    Object[][] cases = { { null, true, null },
+        { PortalDecisionService.Blocked.EXPIRED, false, "expired" },
+        { PortalDecisionService.Blocked.NOT_PENDING, false, "not_pending" } };
+    for (Object[] c : cases) {
+      try (MockedConstruction<PortalDecisionService> decisions = mockConstruction(
+          PortalDecisionService.class, (service, context) -> when(service.blockedReason(any(),
+              any())).thenReturn((PortalDecisionService.Blocked) c[0]))) {
+
+        JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
+            .getJSONObject("decision");
+
+        assertEquals(c[1], decision.getBoolean("canDecide"));
+        if (c[2] == null) {
+          assertTrue(decision.isNull("blockedReason"));
+        } else {
+          assertEquals(c[2], decision.getString("blockedReason"));
+        }
+        assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
+            decision.getBoolean("acceptAvailable"));
+        verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
+      }
+    }
+    // Only a quotation carries the block: an order's detail has none.
+    Order order = order("ORD-1", "SO");
+    query.when(() -> PortalDocumentQuery.findInScope(SESSION, PortalDocumentKind.ORDER,
+        "ORD-1")).thenReturn(order);
+    try (MockedStatic<AnonymousAttachmentStreamer> stored =
+        mockStatic(AnonymousAttachmentStreamer.class)) {
+      assertFalse(PortalDocumentsEndpoint.detail(SESSION, "order", "ORD-1").has("decision"));
+    }
+  }
+
   // ── home ────────────────────────────────────────────────────────────────────
 
   @Test
@@ -339,8 +429,11 @@ public class PortalDocumentsEndpointTest {
             new Object[] { "USD", BigDecimal.ONE, day(2026, 1, 1), 1L }));
     query.when(() -> PortalDocumentQuery.count(any(), any(), any())).thenAnswer(invocation -> {
       PortalDocumentQuery.Filter filter = invocation.getArgument(2);
-      if (filter.statuses != null) {
-        return 4L;
+      if (filter.group != null) {
+        // The tile counts exactly the list tab's group, so the tile and the tab agree.
+        return filter.group == PortalDocumentQuery.group(PortalDocumentKind.QUOTATION, "awaiting")
+            ? 4L : filter.group == PortalDocumentQuery.group(PortalDocumentKind.ORDER,
+                "inProgress") ? 5L : -1L;
       }
       return filter.dateFrom != null ? 6L : 10L;
     });
@@ -350,14 +443,8 @@ public class PortalDocumentsEndpointTest {
     assertEquals(10L, tiles.getJSONObject("QUOTATION").getLong("count"));
     assertHighlight(tiles, "QUOTATION", "awaitingAnswer", 4L);
     assertHighlight(tiles, "INVOICE", "overdue", 3L);
+    assertHighlight(tiles, "ORDER", "inProgress", 5L);
     assertHighlight(tiles, "SHIPMENT", "thisMonth", 6L);
-    assertTrue(tiles.getJSONObject("ORDER").isNull("highlight"));
-    // Quotations awaiting an answer are the UE ones only; shipments count from the 1st.
-    ArgumentCaptor<PortalDocumentQuery.Filter> quotation =
-        ArgumentCaptor.forClass(PortalDocumentQuery.Filter.class);
-    query.verify(() -> PortalDocumentQuery.count(eq(SESSION), eq(PortalDocumentKind.QUOTATION),
-        quotation.capture()), times(2));
-    assertEquals(Collections.singletonList("UE"), quotation.getAllValues().get(1).statuses);
     ArgumentCaptor<PortalDocumentQuery.Filter> shipment =
         ArgumentCaptor.forClass(PortalDocumentQuery.Filter.class);
     query.verify(() -> PortalDocumentQuery.count(eq(SESSION), eq(PortalDocumentKind.SHIPMENT),
@@ -365,6 +452,122 @@ public class PortalDocumentsEndpointTest {
     assertEquals(Date.from(LocalDate.now().withDayOfMonth(1)
         .atStartOfDay(ZoneId.systemDefault()).toInstant()),
         shipment.getAllValues().get(1).dateFrom);
+  }
+
+  @Test
+  public void homeAddsWhatWasPaidThisYearTheYearsInvoicesAndAMonthlyChart() throws Exception {
+    query.when(() -> PortalDocumentQuery.paidSince(eq(SESSION), any())).thenReturn(
+        Collections.singletonList(new Object[] { "EUR", new BigDecimal("500"), 3L }));
+    query.when(() -> PortalDocumentQuery.invoicesSince(eq(SESSION), any(), any()))
+        .thenReturn(new long[] { 10L, 2L });
+    LocalDate thisMonth = LocalDate.now().withDayOfMonth(1);
+    LocalDate lastMonth = thisMonth.minusMonths(1);
+    // EUR invoiced in two of the months, USD in one: the chart is in EUR.
+    query.when(() -> PortalDocumentQuery.invoicedByMonth(eq(SESSION), any())).thenReturn(
+        Arrays.asList(
+            new Object[] { thisMonth.getYear(), thisMonth.getMonthValue(), "EUR",
+                new BigDecimal("100") },
+            new Object[] { lastMonth.getYear(), lastMonth.getMonthValue(), "EUR",
+                new BigDecimal("40") },
+            new Object[] { thisMonth.getYear(), thisMonth.getMonthValue(), "USD",
+                new BigDecimal("999") }));
+
+    JSONObject home = PortalDocumentsEndpoint.home(SESSION, "3");
+
+    JSONObject paid = home.getJSONArray("paidThisYear").getJSONObject(0);
+    assertEquals("EUR", paid.getString("currency"));
+    assertEquals(0, new BigDecimal("500").compareTo(new BigDecimal(paid.getString("paid"))));
+    assertEquals(3L, paid.getLong("count"));
+    assertEquals(10L, home.getJSONObject("invoicesThisYear").getLong("total"));
+    assertEquals(8L, home.getJSONObject("invoicesThisYear").getLong("upToDate"));
+    JSONObject chart = home.getJSONObject("chart");
+    assertEquals(3, chart.getInt("months"));
+    assertEquals("EUR", chart.getString("currency"));
+    JSONArray bars = chart.getJSONArray("bars");
+    assertEquals(3, bars.length());
+    // Oldest first, the current month last; a month with nothing invoiced is a 0 bar.
+    assertEquals(String.format("%04d-%02d", thisMonth.getYear(), thisMonth.getMonthValue()),
+        bars.getJSONObject(2).getString("month"));
+    assertEquals(0, new BigDecimal("100").compareTo(
+        new BigDecimal(bars.getJSONObject(2).getString("amount"))));
+    assertEquals(0, new BigDecimal("40").compareTo(
+        new BigDecimal(bars.getJSONObject(1).getString("amount"))));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(bars.getJSONObject(0).getString("amount"))));
+    // The chart starts on the 1st of the oldest month shown.
+    ArgumentCaptor<Date> from = ArgumentCaptor.forClass(Date.class);
+    query.verify(() -> PortalDocumentQuery.invoicedByMonth(eq(SESSION), from.capture()));
+    assertEquals(Date.from(thisMonth.minusMonths(2).atStartOfDay(ZoneId.systemDefault())
+        .toInstant()), from.getValue());
+  }
+
+  @Test
+  public void theChartPeriodIsThreeSixOrTwelveMonthsAndTwelveOtherwise() throws Exception {
+    // { months=, bars }
+    Object[][] cases = { { "3", 3 }, { "6", 6 }, { "12", 12 }, { "7", 12 }, { null, 12 },
+        { "abc", 12 } };
+    for (Object[] c : cases) {
+      JSONObject chart = PortalDocumentsEndpoint.home(SESSION, (String) c[0])
+          .getJSONObject("chart");
+
+      assertEquals("months=" + c[0], c[1], chart.getInt("months"));
+      assertEquals(c[1], chart.getJSONArray("bars").length());
+      assertTrue("nothing invoiced: no currency", chart.isNull("currency"));
+    }
+  }
+
+  @Test
+  public void searchListsTheMatchesOfEveryKindAsRows() throws Exception {
+    Invoice invoice = invoice("INV-5", null, null, null);
+    Order order = order("ORD-5", "SO");
+    query.when(() -> PortalDocumentQuery.search(SESSION, "F-5", 8))
+        .thenReturn(Arrays.<BaseOBObject>asList(invoice, order));
+
+    JSONArray documents = PortalDocumentsEndpoint.search(SESSION, "F-5")
+        .getJSONArray("documents");
+
+    assertEquals(2, documents.length());
+    assertEquals("INVOICE", documents.getJSONObject(0).getString("kind"));
+    assertEquals("ORDER", documents.getJSONObject(1).getString("kind"));
+  }
+
+  @Test
+  public void aListGroupReplacesTheStatusFilterAndIsEchoed() throws Exception {
+    JSONObject body = PortalDocumentsEndpoint.list(SESSION, "invoice", "pending", "VO", null,
+        null, null, null, null);
+    PortalDocumentQuery.Filter filter = capturedFilter();
+    assertTrue(filter.group == PortalDocumentQuery.group(PortalDocumentKind.INVOICE,
+        "pending"));
+    assertNull("a group replaces ?status=", filter.statuses);
+    assertEquals("pending", body.getString("group"));
+    assertEquals(Arrays.asList("pending", "overdue", "paid"),
+        Arrays.asList(body.getJSONArray("groups").getString(0),
+            body.getJSONArray("groups").getString(1), body.getJSONArray("groups").getString(2)));
+
+    query.clearInvocations();
+    body = PortalDocumentsEndpoint.list(SESSION, "invoice", "nope", "VO", null, null, null, null,
+        null);
+    filter = capturedFilter();
+    assertNull("an unknown group is \"all\"", filter.group);
+    assertEquals(Collections.singletonList("VO"), filter.statuses);
+    assertTrue(body.isNull("group"));
+  }
+
+  @Test
+  public void aQuotationRowNamesTheOrderMadeFromIt() throws Exception {
+    Order quotation = order("Q-1", "OB");
+    query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.QUOTATION), any(),
+        anyInt(), anyInt())).thenReturn(Collections.<BaseOBObject>singletonList(quotation));
+    Map<String, String[]> orders = new HashMap<>();
+    orders.put("Q-1", new String[] { "ORD-9", "PV-0009" });
+    query.when(() -> PortalDocumentQuery.ordersOfQuotations(eq(SESSION), any()))
+        .thenReturn(orders);
+
+    JSONObject row = PortalDocumentsEndpoint.list(SESSION, "quotation", null, null, null, null,
+        null, null).getJSONArray("documents").getJSONObject(0);
+
+    assertEquals("ORD-9", row.getString("orderId"));
+    assertEquals("PV-0009", row.getString("orderNo"));
   }
 
   @Test
