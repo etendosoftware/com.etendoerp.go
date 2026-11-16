@@ -40,6 +40,9 @@ import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for transactional email framework value objects.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.EmailContractCommandSupport
+ * @covers com.etendoerp.go.schemaforge.email.EmailSendContext
  */
 public class EmailFrameworkValueObjectsTest {
 
@@ -275,6 +278,22 @@ public class EmailFrameworkValueObjectsTest {
           assertFalse(DocumentDownloadTokenService.validate(token + "tampered").isPresent());
           assertFalse(DocumentDownloadTokenService.validate(expired).isPresent());
         });
+  }
+
+  @Test
+  public void commandTextIsNullForAJsonNullAnAbsentOrABlankField() throws Exception {
+    // jettison renders JSONObject.NULL as the string "null": it must never reach an email as text.
+    JSONObject body = new JSONObject();
+    body.put("jsonNull", JSONObject.NULL);
+    body.put("blank", "   ");
+    body.put("value", "  Precio  ");
+    EmailContractCommand command = new EmailContractCommand("any-contract", body);
+
+    assertNull(EmailContractCommandSupport.text(command, "jsonNull"));
+    assertNull(EmailContractCommandSupport.text(command, "absent"));
+    assertNull(EmailContractCommandSupport.text(command, "blank"));
+    assertEquals("Precio", EmailContractCommandSupport.text(command, "value"));
+    assertNull(EmailContractCommandSupport.text(null, "value"));
   }
 
   @Test

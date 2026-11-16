@@ -192,18 +192,21 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `mcp-routines` | `etendo.go.flags.mcp-routines` | `ETGO_FLAG_MCP_ROUTINES` | absent ⇒ **`false`** (`etendo_routine` neither listed nor routed: the MCP as before ETP-6236; per account on a hosted arm only; placeholder TTL 2027-03-31) — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
-`bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
-Business Partner self-service portal. It is **targeted per sending account** and false for everyone
+`bp-portal-link` (ETP-5267, extended in ETP-6209) decides whether a sales document email —
+`sales-quotation-send`, `sales-order-send`, `goods-shipment-send` or `sales-invoice-send` (credit
+notes included) — carries a link to the customer portal. It is **targeted per sending account** and false for everyone
 until a targeting rule on the hosted control plane (Datadog, or ConfigCat while it remains a
 fallback) names that account's email, so day-to-day enablement happens in that dashboard and takes
 effect without a restart. Where no hosted arm is selected the flag degrades to the local
 per-environment boolean above, which has no per-account notion — so a shared environment needs a
 hosted arm set up before the link is switched on for anyone. It is
 **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
-browser reads it, and none must be added. It gates the link only: the portal route, the three
-`/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
-unconditionally, and revocation in particular must work whatever the flag says, since it is the only
-kill switch for a link already out.
+browser reads it, and none must be added. It gates the link only: the portal route, the
+`/sws/portal/*` endpoints and the `etgo_portal_link` table ship unconditionally. Since ETP-6209 each
+link lives 48 hours from its send and there is no manual revoke action any more; an expired link is
+renewed by email to the original recipients (`POST /sws/portal/renew`), and that renewal is **not**
+gated — it only replaces a link the flag already let out. Turning the flag off stops new links; a
+link already out stops working at the end of its own 48 hours. The portal itself: `customer-portal.md`.
 
 `structured-address-for-sepa` (ETP-5806, TTL 2026-11-15) decides whether the structured SEPA
 address fields (Street/Number/Building Name) are exposed and enforced, backend-only — the frontend

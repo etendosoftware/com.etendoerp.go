@@ -54,6 +54,11 @@ import org.openbravo.model.common.order.RejectReason;
  * <p>Tests follow the same {@code MockedStatic<OBDal> + MockedStatic<OBContext>} pattern
  * used by {@link CreateDraftInvoiceHandlerTest} so handlers can be exercised without
  * a live DB.
+ *
+ * <p>The status check and the writes go through {@link QuotationDecisions} (ETP-6209), which the
+ * customer portal shares; the handler's answers are unchanged.
+ *
+ * @covers com.etendoerp.go.schemaforge.RejectQuotationHandler
  */
 public class RejectQuotationHandlerTest {
 
@@ -336,25 +341,30 @@ public class RejectQuotationHandlerTest {
    * the endpoint, and the handler is the ultimate gatekeeper.
    */
   @Test
-  public void testQuotationInCJReturns400() throws JSONException {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Order quotation = mock(Order.class);
-      when(quotation.getDocumentStatus()).thenReturn("CJ");
-      when(dal.get(eq(Order.class), anyString())).thenReturn(quotation);
+  public void testQuotationInCJOrAcceptedReturns400() throws JSONException {
+    // CJ: already rejected. ETGO_AC: accepted by the customer from the portal (ETP-6209), which
+    // can no longer be rejected.
+    for (String status : new String[] { "CJ", "ETGO_AC" }) {
+      try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Order quotation = mock(Order.class);
+        when(quotation.getDocumentStatus()).thenReturn(status);
+        when(dal.get(eq(Order.class), anyString())).thenReturn(quotation);
 
-      NeoResponse r = new RejectQuotationHandler().handle(NeoContext.builder()
-          .specName(SPEC_SALES_QUOTATION).entityName(ENTITY_HEADER)
-          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_REJECT).recordId("q-CJ")
-          .requestBody(new JSONObject().put("rejectReason", "rr-1")).build());
-      assertNotNull(r);
-      assertEquals(400, r.getHttpStatus());
-      verify(quotation, never()).setDocumentStatus(anyString());
+        NeoResponse r = new RejectQuotationHandler().handle(NeoContext.builder()
+            .specName(SPEC_SALES_QUOTATION).entityName(ENTITY_HEADER)
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_REJECT).recordId("q-" + status)
+            .requestBody(new JSONObject().put("rejectReason", "rr-1")).build());
+        assertNotNull(r);
+        assertEquals(status, 400, r.getHttpStatus());
+        verify(quotation, never()).setDocumentStatus(anyString());
+        verify(quotation, never()).setRejectReason(any());
+      }
     }
   }
 

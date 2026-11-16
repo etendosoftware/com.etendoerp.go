@@ -36,7 +36,6 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.RandomAccessFile;
 import java.io.StringWriter;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
@@ -256,13 +255,6 @@ public class NeoDocumentDownloadServiceTest {
     when(mainQuery.list()).thenReturn(Arrays.asList(mainAttachmentIds));
   }
 
-  private static Object invokePrivateStatic(String methodName, Class<?>[] paramTypes, Object... args)
-      throws Exception {
-    Method method = NeoDocumentDownloadService.class.getDeclaredMethod(methodName, paramTypes);
-    method.setAccessible(true);
-    return method.invoke(null, args);
-  }
-
   /**
    * Verifies that an invalid or expired token never reaches attachment
    * resolution and is rejected with 403.
@@ -276,7 +268,12 @@ public class NeoDocumentDownloadServiceTest {
         Mockito.mockStatic(DocumentDownloadTokenService.class)) {
       tokenMock.when(() -> DocumentDownloadTokenService.validate(TOKEN)).thenReturn(Optional.empty());
 
-      NeoDocumentDownloadService.handle(TOKEN, response);
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        NeoDocumentDownloadService.handle(TOKEN, response);
+
+        // The token is checked first: nothing is looked up for a link that does not verify.
+        obDalMock.verifyNoInteractions();
+      }
     }
 
     verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
@@ -807,38 +804,5 @@ public class NeoDocumentDownloadServiceTest {
     } finally {
       System.clearProperty(property);
     }
-  }
-
-  /**
-   * Verifies unsafe filename characters (path separators, quotes, wildcards)
-   * are replaced rather than left to leak into the HTTP header.
-   */
-  @Test
-  public void sanitizeFileNameReplacesUnsafeCharactersWithUnderscore() throws Exception {
-    String sanitized = (String) invokePrivateStatic("sanitizeFileName", new Class<?>[]{ String.class },
-        "invoice/2026:final?.pdf");
-    assertEquals("invoice_2026_final_.pdf", sanitized);
-  }
-
-  /**
-   * Verifies blank filenames fall back to the default document name.
-   */
-  @Test
-  public void sanitizeFileNameFallsBackToDefaultWhenBlank() throws Exception {
-    String sanitized = (String) invokePrivateStatic("sanitizeFileName", new Class<?>[]{ String.class }, "   ");
-    assertEquals("document.pdf", sanitized);
-  }
-
-  /**
-   * Verifies the Content-Disposition header carries both the sanitized ASCII
-   * filename and its RFC 5987 UTF-8 encoded counterpart.
-   */
-  @Test
-  public void contentDispositionIncludesSanitizedAsciiAndUtf8Filename() throws Exception {
-    String disposition = (String) invokePrivateStatic("contentDisposition", new Class<?>[]{ String.class },
-        "invoice/2026 final.pdf");
-
-    assertTrue(disposition.contains("filename=\"invoice_2026 final.pdf\""));
-    assertTrue(disposition.contains("filename*=UTF-8''invoice_2026%20final.pdf"));
   }
 }

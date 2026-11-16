@@ -108,6 +108,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  /** The defaults endpoint's object of field values. */
+  private static final String KEY_DEFAULTS = "defaults";
+  /** The evaluate-display answer's map of field to read-only state. */
+  private static final String KEY_READ_ONLY = "readOnly";
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
   /** Reactivate, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -117,8 +122,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:RE} is unavailable on every quotation (ETP-6026). */
   static final String REASON_REACTIVATE_NOT_OFFERED = "The app does not offer Reactivate on a "
       + "quotation, so documentAction RE is refused on every quotation. A quotation Under "
-      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; to "
-      + "quote again after a voided or rejected one, create a new quotation.";
+      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; one "
+      + "Accepted by the customer from the portal (ETGO_AC) is converted with Convertquotation or "
+      + "createDraftInvoice; to quote again after a voided or rejected one, create a new "
+      + "quotation.";
   /** Void, a {@code documentAction} value the quotation window never offers (ETP-6026). */
   static final String DOC_ACTION_VOID = "VO";
   /** Close, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -134,7 +141,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:CL} is unavailable on every quotation (ETP-6026). */
   static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
       + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
-      + "accepted with Convertquotation or rejected with rejectQuotation.";
+      + "accepted with Convertquotation or rejected with rejectQuotation; one Accepted (ETGO_AC) "
+      + "is converted with Convertquotation or createDraftInvoice.";
   /** The 400 for any other value the window does not offer in the quotation's status (ETP-6026). */
   static final String MSG_ACTION_NOT_OFFERED = "ETGO_QuotationActionNotOffered";
   /**
@@ -183,6 +191,63 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * The order-header post-hook, plus two quotation-only adjustments on the reject reason
+   * (ETP-6209): no default on a new quotation, and no Classic lock in evaluate-display.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    NeoResponse result = super.afterHandle(context);
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return withoutRejectReasonDefault(context, result);
+    }
+    if (NeoEndpointType.EVALUATE_DISPLAY.equals(context.getEndpointType())) {
+      return withoutClassicRejectReasonLock(context, result);
+    }
+    return result;
+  }
+
+  /**
+   * A new quotation never gets a reject reason by default (ETP-6209). The field is editable since
+   * the seller sets the tenant's internal reason on a rejected quotation, and an editable
+   * table-reference field receives the defaults' first-option fallback: every new draft (app and
+   * MCP {@code etendo_defaults}) would carry the first reject reason, hidden by its display logic —
+   * the ETP-4006 regression. The reason is only ever set by the reject action or by the seller on
+   * a rejected quotation.
+   */
+  private static NeoResponse withoutRejectReasonDefault(NeoContext context, NeoResponse result) {
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    JSONObject defaults = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_DEFAULTS);
+    if (defaults == null || !defaults.has(Order.PROPERTY_REJECTREASON)) {
+      return result;
+    }
+    defaults.remove(Order.PROPERTY_REJECTREASON);
+    defaults.remove(Order.PROPERTY_REJECTREASON + IDENTIFIER_SUFFIX);
+    return NeoResponse.ok(effective.getBody());
+  }
+
+  /**
+   * The reject reason is editable on a rejected quotation in GO (ETP-6209): the seller sets the
+   * tenant's internal reason after a portal rejection. The window declares that rule itself
+   * ({@code decisions.json} {@code readOnlyLogic: @DocStatus@!'CJ'}). evaluate-display, however,
+   * answers the Classic column logic ({@code @DocStatus@='CJ'|@DocStatus@='CA'}: locked exactly once
+   * rejected), and the SPA ORs it with the window's, so the field stayed grey. The Classic row is
+   * shared and never edited; this quotation's answer drops that one key, so the window's own
+   * {@code readOnlyLogic} decides. Every other field keeps the AD answer.
+   */
+  private static NeoResponse withoutClassicRejectReasonLock(NeoContext context,
+      NeoResponse result) {
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    JSONObject readOnly = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_READ_ONLY);
+    if (readOnly == null || !readOnly.has(Order.PROPERTY_REJECTREASON)) {
+      return result;
+    }
+    readOnly.remove(Order.PROPERTY_REJECTREASON);
+    return NeoResponse.ok(effective.getBody());
+  }
 
   @Inject
   private ConvertQuotationIntoOrder convertQuotationProcess;
@@ -334,7 +399,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
     return "The app does not offer documentAction " + value + " on a quotation in this status: "
         + "it sends a draft to evaluation (CO) and rejects one Under evaluation (RJ, or "
-        + "rejectQuotation); acceptance is the Convertquotation action.";
+        + "rejectQuotation); acceptance is the Convertquotation action, also on a quotation the "
+        + "customer Accepted from the portal (ETGO_AC), which can no longer be rejected.";
   }
 
   /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */
