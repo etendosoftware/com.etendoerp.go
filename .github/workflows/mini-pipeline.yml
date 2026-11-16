@@ -25,20 +25,25 @@ name: Mini Pipeline
 # Bitbucket modules listed in jenkinsExtraModules.txt, which this module's code imports;
 # SONAR_TOKEN/SONAR_HOST_URL publish the analysis, and SONAR_READ_TOKEN (Browse permission on the
 # project: the analysis token gets 403) reads the coverage for the comparison.
+#
+# ETP-6300: develop only. What reaches main (the daily cut, a hotfix, the push to main) is validated
+# by the full pipeline pilot (full-pipeline-pilot.yml), whose "Pilot: Sonar + coverage" job does the
+# same analysis and coverage gate against main (ETP-6299); main's required checks name the pilot's
+# jobs instead of "Sonar Build". A main -> develop back-merge still runs here, its target being develop.
 
 on:
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
     types: [opened, reopened, synchronize, ready_for_review]
   push:
-    branches: [develop, main]
+    branches: [develop]
   workflow_dispatch:
 
 # The checkouts of other repos use ETENDOBOT_TOKEN; the workflow's own token only reads this one.
 permissions:
   contents: read
 
-# A new push to a PR replaces its running check. Each push to develop or main keeps its own run (its
+# A new push to a PR replaces its running check. Each push to develop keeps its own run (its
 # own sha group, never cancelled): its analysis is the base the next PRs are compared with.
 concurrency:
   group: mini-pipeline-${{ github.event.pull_request.number || github.sha }}
@@ -234,7 +239,7 @@ jobs:
     name: Sonar Build
     needs: go-test
     # PRs always run it (it fails when goTest did not succeed, see the last step); pushes analyze
-    # only with real coverage, so develop's and main's coverage on Sonar is never a partial one.
+    # only with real coverage, so develop's coverage on Sonar is never a partial one.
     if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.go-test.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
