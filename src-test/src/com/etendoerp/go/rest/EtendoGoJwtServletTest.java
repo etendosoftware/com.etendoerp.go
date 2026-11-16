@@ -86,6 +86,7 @@ import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
@@ -2544,6 +2545,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(List.of(quotable, unquotable));
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     // Built before the try: stubbing a fresh mock INSIDE a mockStatic `when(...)` lambda leaves
     // Mockito's stubbing unfinished and fails the test.
@@ -2568,6 +2570,8 @@ public class EtendoGoJwtServletTest {
     assertEquals("49.00", plan.getString("displayPrice"));
     assertEquals("EUR", plan.getString("currency"));
     assertEquals("month", plan.getString("billingInterval"));
+    // A new account (no paid purchase) is offered the monthly plan's free trial.
+    assertEquals(30, plan.getInt("freeTrialDays"));
   }
 
   /**
@@ -2590,6 +2594,10 @@ public class EtendoGoJwtServletTest {
     when(catalog.listPurchasablePlans()).thenReturn(List.of(plain, plan));
     when(catalog.listActiveQuotas(plan)).thenReturn(List.of(invoices, seats));
     servlet.planCatalogService = catalog;
+    // An account that already paid a purchase is offered no free trial on any plan.
+    CheckoutRequestStore purchases = mock(CheckoutRequestStore.class);
+    when(purchases.findForAccount(any(), any())).thenReturn(List.of(mock(CheckoutRequest.class)));
+    servlet.checkoutRequestStore = purchases;
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -2607,6 +2615,7 @@ public class EtendoGoJwtServletTest {
     assertFalse(start.getBoolean("includesApi"));
     assertTrue(start.isNull("highlight"));
     assertEquals(0, start.getJSONArray("quotas").length());
+    assertEquals(0, start.getInt("freeTrialDays"));
 
     JSONObject pro = plans.getJSONObject(1);
     assertTrue(pro.getBoolean("includesApi"));
@@ -2633,6 +2642,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(List.of(plan));
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -2660,6 +2670,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(Collections.emptyList());
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);

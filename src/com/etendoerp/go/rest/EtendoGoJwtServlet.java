@@ -939,9 +939,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * second, public auth path for it would be a new surface to get wrong.
    *
    * <p>Returns {@code 200} with {@code { "plans": [ { planKey, name, description, displayPrice,
-   * currency, billingInterval } ] }}. An empty plan catalog is an empty array and a {@code 200}: "there
-   * is nothing on sale" is an answer, not a failure, and the caller has to render the same
-   * "checkout unavailable" state for it either way.
+   * currency, billingInterval, freeTrialDays, ... } ] }}. An empty plan catalog is an empty array
+   * and a {@code 200}: "there is nothing on sale" is an answer, not a failure, and the caller has
+   * to render the same "checkout unavailable" state for it either way.
    *
    * <p><b>Legacy price fallback.</b> While {@link PlanCatalogService#isLegacyFallbackActive()}
    * holds — a legacy price is configured and no plan carries a provider price — the list is exactly
@@ -962,8 +962,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           plans.put(item);
         }
       } else {
+        // Paid, provisioning or provisioned purchases only: the once-per-account free trial.
+        boolean accountHasPaid = !checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail()).isEmpty();
         for (Plan plan : planCatalogService.listPurchasablePlans()) {
-          JSONObject item = buildPlanJson(plan);
+          JSONObject item = buildPlanJson(plan, accountHasPaid);
           if (item != null) {
             plans.put(item);
           }
@@ -1027,10 +1030,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * client cannot quote it, so offering it would produce a purchase whose price the buyer was
    * never shown. That is a plan catalog data defect, hence the warning.
    *
+   * <p>{@code freeTrialDays} is what checkout would grant this account on the plan (ETP-6082:
+   * monthly plans, once per account), so the page never announces a trial checkout refuses.
+   *
    * @param plan an active, sellable plan catalog row
+   * @param accountHasPaid whether the requesting account already paid a purchase
    * @return the JSON view, or null when the row cannot be quoted and must not be offered
    */
-  private JSONObject buildPlanJson(Plan plan) throws JSONException {
+  private JSONObject buildPlanJson(Plan plan, boolean accountHasPaid) throws JSONException {
     BigDecimal displayPrice = plan.getDisplayPrice();
     String currency = plan.getCurrencyCode();
     if (displayPrice == null || StringUtils.isBlank(currency)) {
@@ -1047,7 +1054,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put(FIELD_DISPLAY_PRICE, displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
     item.put(FIELD_BILLING_INTERVAL, StringUtils.defaultString(plan.getBillingInterval()));
-    item.put("secondMonthFree", CheckoutPromotionTerms.isEligiblePlan(plan));
+    item.put("freeTrialDays", CheckoutPromotionTerms.isEligible(plan, accountHasPaid)
+        ? CheckoutPromotionTerms.FREE_TRIAL_DAYS : 0);
     item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
     item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
     item.put(FIELD_QUOTAS, buildPlanQuotasJson(plan));

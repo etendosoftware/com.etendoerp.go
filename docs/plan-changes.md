@@ -104,7 +104,9 @@ forever. A monthly → annual change is the same call (see §1 for the billing d
 phase as it stands, then one billing cycle of the target plan from `current_period_end`
 (`duration[interval]` = the target's interval, `duration[interval_count]=1`; `iterations` was
 removed in API 2025-09-30.clover and is refused as `parameter_unknown`), with
-`proration_behavior=none` and `end_behavior=release`. The row records the intention in
+`proration_behavior=none` and `end_behavior=release`. On a subscription still in its free trial
+(ETP-6216) the current phase also carries `trial_end`: a phase sent without it has no trial, so
+Stripe would end the trial and charge the current plan at once. The row records the intention in
 `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE`; the subscription keeps its plan until the boundary.
 A second downgrade to another plan **updates the same schedule** (no second schedule); the same
 target again answers `alreadyPending` and asks the provider nothing.
