@@ -60,6 +60,9 @@ import org.openbravo.module.taxreportlauncher.TaxReportParameter;
  *   <li>{@code GET generate?year=&period=0A[&<AEAT390 input>=...]} — the AEAT TXT file, through
  *       the classic report class ({@link Fiscal390GenerateSupport}); rejected with 409 once the
  *       declaration is submitted;</li>
+ *   <li>{@code POST generate-validated?year=&period=0A&id=} — the same file, checked by the AEAT
+ *       validation service before the download ({@link Fiscal390FileValidationSupport}); the
+ *       validation never blocks the file;</li>
  *   <li>{@code GET sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]} — the
  *       invoice-tax lines behind the invoice-derived boxes, from the same box walk
  *       ({@link Fiscal390SourcesSupport});</li>
@@ -107,6 +110,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   private final Fiscal390SourcesSupport sourcesSupport;
   private final Fiscal390PreloadSupport preloadSupport;
   private final Fiscal390IncidentsSupport incidentsSupport;
+  private final Fiscal390FileValidationSupport fileValidationSupport;
 
   Fiscal390BoxesHandler(NeoServlet servlet) {
     super(servlet);
@@ -116,6 +120,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     this.sourcesSupport = new Fiscal390SourcesSupport(this);
     this.preloadSupport = new Fiscal390PreloadSupport(this);
     this.incidentsSupport = new Fiscal390IncidentsSupport(this);
+    this.fileValidationSupport = new Fiscal390FileValidationSupport(this);
   }
 
   @Override
@@ -124,10 +129,12 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
         || Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
         || Fiscal390SourcesSupport.SOURCES.equals(entityName)
         || Fiscal390PreloadSupport.PRELOAD.equals(entityName)
-        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName);
+        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName)
+        || Fiscal390FileValidationSupport.GENERATE_VALIDATED.equals(entityName);
   }
 
   /**
+   * {@code generate-validated} stores the AEAT answer in the declaration's incidents,
    * {@code submit} files the declaration with the AEAT and {@code validate} rewrites its rule
    * incidents: POST-only (see the 303 handler).
    */
@@ -143,7 +150,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
 
   private static boolean isWrite(String entityName) {
     return Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
-        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName);
+        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName)
+        || Fiscal390FileValidationSupport.GENERATE_VALIDATED.equals(entityName);
   }
 
   /** The annual summary is filed once per exercise: a later filing is a substitute (ETP-5716). */
@@ -175,6 +183,11 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   /** The incident rules: {@code validate} and the generate / submit guards. */
   Fiscal390IncidentsSupport incidentsSupport() {
     return incidentsSupport;
+  }
+
+  /** The generated file checked by the AEAT validator ({@code generate-validated}). */
+  Fiscal390FileValidationSupport fileValidationSupport() {
+    return fileValidationSupport;
   }
 
   /**
@@ -240,6 +253,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
       writeBoxes(orgId, year, period, request, response);
     } else if (GENERATE.equals(entityName)) {
       generateFile(orgId, year, period, request, response);
+    } else if (Fiscal390FileValidationSupport.GENERATE_VALIDATED.equals(entityName)) {
+      generateValidatedFile(orgId, year, period, request, response);
     } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
       sourcesSupport.handle(orgId, year, period, request, response);
     } else if (Fiscal390PreloadSupport.PRELOAD.equals(entityName)) {
@@ -273,6 +288,20 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
       return;
     }
     generateSupport().handleGenerate(orgId, year, inputs, response);
+  }
+
+  /**
+   * {@code generate-validated}: the guards of {@link #generateFile}, then the file together with
+   * the AEAT validator's answer about it.
+   */
+  private void generateValidatedFile(String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    guardNotAlreadySubmitted(orgId, year, period, MODEL);
+    Map<String, String> inputs = effectiveInputs(orgId, year, period, request);
+    if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
+      return;
+    }
+    fileValidationSupport().handle(orgId, year, period, inputs, request, response);
   }
 
   /**
