@@ -908,12 +908,13 @@ public class Fiscal390SubmissionSupportTest {
         "name in (" + LEGACY_VALIDATION_PDF + ", " + VALIDATION_PDF + ")"), where);
     verify(criteria).setFilterOnReadableOrganization(false);
 
+    // The new PDF is stored FIRST; the superseded ones are removed only afterwards.
     InOrder order = inOrder(attachManager);
-    order.verify(attachManager).delete(current);
-    order.verify(attachManager).delete(legacy);
     ArgumentCaptor<File> file = ArgumentCaptor.forClass(File.class);
     order.verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"),
         file.capture());
+    order.verify(attachManager).delete(current);
+    order.verify(attachManager).delete(legacy);
     assertEquals(VALIDATION_PDF, file.getValue().getName());
     verify(attachManager, times(2)).delete(any());
     verify(obDal, never()).commitAndClose();
@@ -934,6 +935,68 @@ public class Fiscal390SubmissionSupportTest {
     replaceValidationPdf();
 
     verify(attachManager, times(2)).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+  }
+
+  /** The upload fails: the previous PDF stays, nothing is deleted. */
+  @Test
+  public void testReplaceAttachedPdfKeepsThePreviousOneWhenTheUploadFails() throws Exception {
+    Attachment previous = mock(Attachment.class);
+    attachmentsCriteria(List.of(previous));
+    doThrow(new OBException("disk full")).when(attachManager)
+        .upload(any(), any(), any(), any(), any());
+
+    replaceValidationPdf();
+
+    verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+    verify(attachManager, never()).delete(any());
+  }
+
+  /**
+   * The validator answers with neither a PDF nor a single error: not a verdict — the policy of
+   * "no answer" applies, never a rejection.
+   */
+  @Test
+  public void testValidateBeforeSubmissionAnswerWithoutPdfOrErrorsIsNoAnswer() {
+    AEAT303SubmissionResult empty = new AEAT303SubmissionResult();
+    empty.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    empty.setTestMode(true);
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenReturn(empty);
+
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation = validateBeforeSubmission();
+
+    assertEquals(FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED,
+        validation.proceed());
+    assertEquals(null, validation.rejected);
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(attemptLog).record(eq(ATTEMPTED), outcome.capture(), any());
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
+  }
+
+  /**
+   * The AEAT call fails with a RuntimeException that is not an OBException (a response that
+   * cannot be parsed): the attempt is still recorded, and the exception goes on as before.
+   */
+  @Test
+  public void testAnUnparseableAeatAnswerIsRecordedAndRethrown() throws Exception {
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new IllegalStateException("not a JSON object"));
+    StringWriter out = new StringWriter();
+
+    try {
+      submit("{\"testMode\":true}", response(out), out);
+      fail("the RuntimeException must go on");
+    } catch (IllegalStateException expected) {
+      assertEquals("not a JSON object", expected.getMessage());
+    }
+
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(attemptLog).record(any(), outcome.capture(), any());
+    assertEquals(Path.MANUAL_VALIDATION, outcome.getValue().path());
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
+    verify(declHandler, never()).replaceAeatIncidentsNoCommit(any(), any(), any());
   }
 
   /** Nothing to supersede: nothing is deleted. */

@@ -37,12 +37,12 @@ the AEAT.
 | `Fiscal_Decl_UUID` | `VARCHAR(32)` | yes | `ETGO_Fiscal_Decl_ID` of the declaration — **no foreign key** |
 | `Attempt_Path` | `VARCHAR(200)` | no | `direct_submission`, `manual_validation`, `pre_submission_validation`, `download` |
 | `IsTestMode` | `CHAR(1)` | no | `Y` when the validation service was asked (nothing is filed), `N` for a presentation |
-| `Environment` | `VARCHAR(200)` | yes | `production` (the AEAT production endpoint: a real filing), `preproduction` (a presentation routed to another AEAT host: `ETSG_ForceTestMode` or an endpoint preference), `validation` (the AEAT validation service, ServValiDos), `override` (a host that is not the AEAT's: an endpoint preference pointing at a stub or proxy), `unknown` |
+| `Environment` | `VARCHAR(200)` | yes | `production` (the AEAT production endpoint: a real filing), `preproduction` (a presentation routed to another AEAT host: `ETSG_ForceTestMode` or an endpoint preference), `validation` (the AEAT validation service, ServValiDos), `override` (a host that is not the AEAT's: an endpoint preference pointing at a stub or proxy), `unknown` (no endpoint, or a malformed one). `production` is decided by host and path, not by the exact string |
 | `Aeat_Host` | `VARCHAR(200)` | yes | host of the endpoint the attempt went to |
-| `Outcome` | `VARCHAR(200)` | no | `accepted`, `rejected`, `connection_failure`, `not_validated` |
-| `Error_Count` | `NUMERIC` | no | number of distinct AEAT errors of the answer |
-| `Error_Codes` | `VARCHAR(2000)` | yes | the AEAT error codes, comma-separated, one per error; `UNCODED` for an error without a readable code |
-| `Warning_Count` | `NUMERIC` | no (default 0) | number of distinct AEAT warnings (`avisos`) of the answer |
+| `Outcome` | `VARCHAR(200)` | no | `accepted`, `rejected` (at least one AEAT error), `connection_failure`, `not_validated` (no usable answer, including one that is neither accepted nor carries an error) |
+| `Error_Count` | `NUMERIC` | no | number of distinct codes in `Error_Codes` (`UNCODED` counts once) |
+| `Error_Codes` | `VARCHAR(2000)` | yes | the distinct AEAT error codes, comma-separated; one `UNCODED` when any error has no readable code |
+| `Warning_Count` | `NUMERIC` | no (default 0) | number of distinct codes in `Warning_Codes` (`avisos`) |
 | `Warning_Codes` | `VARCHAR(2000)` | yes | the AEAT warning codes, same rules as `Error_Codes` |
 
 Indexes: `ETGO_FISCAL_AEAT_ATT_MODEL (Model, Fiscal_Year, Attempt_Path)`,
@@ -60,8 +60,14 @@ Indexes: `ETGO_FISCAL_AEAT_ATT_MODEL (Model, Fiscal_Year, Attempt_Path)`,
   failure answered 502, a failed best-effort commit, a rollback) still leaves it.
 - **Best-effort.** A failure to record is logged (`Could not record the AEAT attempt…`) and never
   breaks or blocks the attempt.
-- **Codes only.** The AEAT text can carry fiscal data and is never stored. A code is kept when
-  it is alphanumeric and at most 20 characters; anything else becomes `UNCODED`.
+- **Codes only.** The AEAT text can carry fiscal data and is never stored. A code is read from
+  the RAW entry and kept only when it has the AEAT shape — up to four capital letters, two to
+  seven digits, then ` - ` (`35068`, `E00`, `A001`, `PAR016`, `E010124`, `E0100803`). Anything
+  else — an identity number such as `B12345678`, `12345678Z` or `X1234567L`, a word, an entry
+  without code — becomes `UNCODED`. Codes are distinct: a repeated code is stored once and
+  `UNCODED` once, and the counts are the number of distinct codes.
+- **Retry.** The insert is retried without the warning columns only for SQLState `42703`
+  (undefined column: a table that predates them); a failed insert is rolled back.
 - **Warnings** come from the validator's `avisos`. The classic parser reads them on an accepted
   answer only, so a rejected attempt always has `Warning_Count = 0`. A database whose table
   predates the two warning columns still gets the row, without them (the insert is retried).

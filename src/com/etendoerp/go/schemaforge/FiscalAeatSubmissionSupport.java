@@ -168,8 +168,9 @@ final class FiscalAeatSubmissionSupport {
    *
    * <ul>
    *   <li>accepted (warnings allowed) → proceed;</li>
-   *   <li>rejected → stop, with the validator's result (its errors);</li>
-   *   <li>no answer → {@link #PRESENT_WHEN_VALIDATOR_UNANSWERED}.</li>
+   *   <li>rejected (at least one error) → stop, with the validator's result;</li>
+   *   <li>no answer — or an answer that is neither accepted nor carries an error →
+   *       {@link #PRESENT_WHEN_VALIDATOR_UNANSWERED}.</li>
    * </ul>
    */
   static PreSubmissionValidation validateBeforeSubmission(AEAT303SubmissionService service,
@@ -197,8 +198,13 @@ final class FiscalAeatSubmissionSupport {
       restoreTimeouts(service);
     }
     attemptLog.record(declaration, outcome, endpoint);
-    if (result != null) {
-      return new PreSubmissionValidation(result.isSuccessful() ? null : result, false);
+    // Only a verdict decides: an answer that is neither accepted nor carries a single error is
+    // "no answer", never a rejection.
+    if (outcome.outcome() == FiscalAeatValidationOutcome.Outcome.REJECTED) {
+      return new PreSubmissionValidation(result, false);
+    }
+    if (outcome.outcome() == FiscalAeatValidationOutcome.Outcome.ACCEPTED) {
+      return new PreSubmissionValidation(null, false);
     }
     return new PreSubmissionValidation(null, !PRESENT_WHEN_VALIDATOR_UNANSWERED);
   }
@@ -256,8 +262,9 @@ final class FiscalAeatSubmissionSupport {
    *
    * @param tempPrefix prefix of the owner-only temporary directory the PDF is staged in
    * @param modelLabel model number used in the log lines only (e.g. {@code "303"})
+   * @return true when the PDF was stored as an attachment
    */
-  static void attachPdf(FiscalDecl decl, Organization org, String fileName, byte[] pdfContent,
+  static boolean attachPdf(FiscalDecl decl, Organization org, String fileName, byte[] pdfContent,
       String tempPrefix, String modelLabel) {
     String tabId;
     try {
@@ -271,7 +278,7 @@ final class FiscalAeatSubmissionSupport {
       AbstractFiscalHandler.log.warn("No AD_Tab configured for " + FiscalDecl.TABLE_NAME + " attachments yet — the "
           + "AEAT " + modelLabel + " justificante PDF for declaration " + decl.getId() + " was not persisted as "
           + "an attachment (it is still returned inline in the API response).");
-      return;
+      return false;
     }
 
     Path tempDir = null;
@@ -285,9 +292,11 @@ final class FiscalAeatSubmissionSupport {
       Files.write(pdfPath, pdfContent);
       NeoAttachmentsHelper.getAttachManager()
           .upload(new HashMap<>(), tabId, decl.getId(), org.getId(), pdfPath.toFile());
+      return true;
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not attach the AEAT " + modelLabel + " justificante PDF to declaration "
           + decl.getId(), e);
+      return false;
     } finally {
       cleanupTempDir(tempDir);
     }
@@ -296,7 +305,8 @@ final class FiscalAeatSubmissionSupport {
   /**
    * Same as {@link #attachPdf}, but the declaration keeps ONE attachment of that name: every
    * attachment of the declaration called exactly {@code fileName} (or one of
-   * {@code supersededNames}, earlier names of the same document) is removed first. For a
+   * {@code supersededNames}, earlier names of the same document) is removed once the new one is
+   * stored — a failed upload leaves the previous one in place. For a
    * document each new AEAT answer supersedes (the validation draft of a generated file). Only
    * that name is touched — never another attachment of the declaration. Best-effort and without
    * commit, like {@link #attachPdf}.
@@ -305,6 +315,9 @@ final class FiscalAeatSubmissionSupport {
       byte[] pdfContent, String tempPrefix, String modelLabel, String... supersededNames) {
     List<String> names = new ArrayList<>(Arrays.asList(supersededNames));
     names.add(fileName);
+    // The previous ones are read BEFORE the upload (so the new file is not among them) and
+    // removed only AFTER it is stored: a failed upload leaves the previous PDF in place.
+    List<Attachment> previous = new ArrayList<>();
     try {
       String tableId = NeoAttachmentsHelper.resolveTableId(FiscalDecl.TABLE_NAME);
       OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
@@ -312,14 +325,22 @@ final class FiscalAeatSubmissionSupport {
       criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, decl.getId()));
       criteria.add(Restrictions.in(Attachment.PROPERTY_NAME, names));
       criteria.setFilterOnReadableOrganization(false);
-      for (Attachment previous : criteria.list()) {
-        NeoAttachmentsHelper.getAttachManager().delete(previous);
-      }
+      previous.addAll(criteria.list());
     } catch (Exception e) {
-      AbstractFiscalHandler.log.error("Could not remove the previous " + fileName
-          + " attachment of declaration " + decl.getId(), e);
+      AbstractFiscalHandler.log.error("Could not read the previous " + fileName
+          + " attachments of declaration " + decl.getId(), e);
     }
-    attachPdf(decl, org, fileName, pdfContent, tempPrefix, modelLabel);
+    if (!attachPdf(decl, org, fileName, pdfContent, tempPrefix, modelLabel)) {
+      return;
+    }
+    for (Attachment old : previous) {
+      try {
+        NeoAttachmentsHelper.getAttachManager().delete(old);
+      } catch (Exception e) {
+        AbstractFiscalHandler.log.error("Could not remove the previous " + fileName
+            + " attachment of declaration " + decl.getId(), e);
+      }
+    }
   }
 
   private static void cleanupTempDir(Path tempDir) {

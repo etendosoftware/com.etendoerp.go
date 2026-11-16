@@ -296,14 +296,11 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
    */
   private void generateValidatedFile(String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    long startedAt = System.currentTimeMillis();
     guardNotAlreadySubmitted(orgId, year, period, MODEL);
     Map<String, String> inputs = effectiveInputs(orgId, year, period, request);
     if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
       return;
     }
-    log.info("Modelo 390 generate-validated (" + year + "): guards (303 preload + blocking rules) "
-        + (System.currentTimeMillis() - startedAt) + " ms");
     fileValidationSupport().handle(orgId, year, period, inputs, request, response);
   }
 

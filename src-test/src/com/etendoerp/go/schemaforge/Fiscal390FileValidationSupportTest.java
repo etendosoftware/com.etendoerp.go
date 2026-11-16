@@ -292,8 +292,9 @@ public class Fiscal390FileValidationSupportTest {
     verify(obDal).commitAndClose();
     FiscalAeatValidationOutcome attempt = recordedAttempt();
     assertEquals(Outcome.REJECTED, attempt.outcome());
-    assertEquals(List.of("E39000101", FiscalAeatValidationOutcome.UNCODED),
-        attempt.loggedErrorCodes());
+    // E39000101 is a letter and eight digits — the shape of a CIF — so the attempt log does not
+    // keep it; it shares the one UNCODED with the entry that has no code.
+    assertEquals(List.of(FiscalAeatValidationOutcome.UNCODED), attempt.loggedErrorCodes());
     assertEquals(List.of("A001"), attempt.loggedWarningCodes());
   }
 
@@ -319,6 +320,23 @@ public class Fiscal390FileValidationSupportTest {
   }
 
   /** Any other failure (an answer that is not the validator's): not validated, incidents kept. */
+  /**
+   * The validator answers with neither a PDF nor a single error: not a verdict. The file is
+   * returned as "not validated" and the incidents are left as they were — never "rejected".
+   */
+  @Test
+  public void anAnswerWithoutPdfAndWithoutErrorsIsNotValidated() throws Exception {
+    validatorAnswers(answer(false));
+
+    JSONObject json = generateValidated();
+
+    assertFileIsInTheAnswer(json);
+    assertEquals("not_validated", json.getJSONObject("validation").getString("outcome"));
+    verify(declHandler, never()).replaceAeatIncidentsNoCommit(any(), any(), any());
+    assertEquals(Outcome.NOT_VALIDATED, recordedAttempt().outcome());
+    verify(service).withDefaultTimeouts();
+  }
+
   @Test
   public void anyOtherFailureIsNotValidatedAndLeavesTheIncidentsUntouched() throws Exception {
     validatorFails(new OBException("Unexpected AEAT answer"));

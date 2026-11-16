@@ -23,6 +23,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
@@ -86,8 +87,15 @@ final class FiscalAeatValidationOutcome {
    * error stays countable, and its text (which can carry fiscal data) is never stored.
    */
   static final String UNCODED = "UNCODED";
-  /** An AEAT error code: short and alphanumeric. Anything else is not stored as a code. */
-  private static final Pattern LOGGABLE_CODE = Pattern.compile("^[A-Za-z0-9]{1,20}$");
+  /**
+   * The code of a RAW AEAT entry ({@code "<code> - <text>"}): up to four capital letters followed
+   * by two to seven digits, then the spaced hyphen — {@code 35068}, {@code 7113}, {@code E00},
+   * {@code A001}, {@code AV001}, {@code PAR016}, {@code E010124}, {@code E0100803}. The shape is
+   * deliberately too narrow for an identity number (a CIF is a letter and 8 characters, a DNI 8
+   * digits and a letter, a NIE ends in a letter) or a word ("Garcia-Lopez"): anything else is
+   * logged as {@link #UNCODED}.
+   */
+  private static final Pattern LOGGABLE_CODE = Pattern.compile("^([A-Z]{0,4}\\d{2,7})\\s+-\\s");
 
   private final String model;
   private final Path path;
@@ -108,12 +116,25 @@ final class FiscalAeatValidationOutcome {
     this.warnings = Collections.unmodifiableList(new ArrayList<>(warnings));
   }
 
-  /** The outcome of an attempt the AEAT answered: accepted, or rejected with its errors. */
+  /**
+   * The outcome of an attempt the AEAT answered: accepted, rejected with its errors, or
+   * {@link Outcome#NOT_VALIDATED} when the answer is neither (not accepted and no error).
+   */
   static FiscalAeatValidationOutcome answered(String model, Path path,
       AEAT303SubmissionResult result) {
-    return new FiscalAeatValidationOutcome(model, path, result.isTestMode(),
-        result.isSuccessful() ? Outcome.ACCEPTED : Outcome.REJECTED, result.getErrors(),
-        result.getWarnings(), result.isSuccessful() ? result.getPdfContent() : null);
+    Outcome outcome;
+    if (result.isSuccessful()) {
+      outcome = Outcome.ACCEPTED;
+    } else if (result.getErrors().isEmpty()) {
+      // Neither accepted nor a single error: not a verdict (e.g. an empty envelope). Never read
+      // as a rejection.
+      outcome = Outcome.NOT_VALIDATED;
+    } else {
+      outcome = Outcome.REJECTED;
+    }
+    return new FiscalAeatValidationOutcome(model, path, result.isTestMode(), outcome,
+        result.getErrors(), result.getWarnings(),
+        result.isSuccessful() ? result.getPdfContent() : null);
   }
 
   /**
@@ -187,8 +208,8 @@ final class FiscalAeatValidationOutcome {
   }
 
   /**
-   * The AEAT errors for the attempt log: one entry per distinct error, its code when it has a
-   * readable one, {@link #UNCODED} otherwise. Never any AEAT text.
+   * The AEAT errors for the attempt log: the distinct codes, in order, with one {@link #UNCODED}
+   * for every error without a readable code. Never any AEAT text.
    */
   List<String> loggedErrorCodes() {
     return loggedCodes(errors);
@@ -202,13 +223,14 @@ final class FiscalAeatValidationOutcome {
     return loggedCodes(warnings);
   }
 
+  /** Distinct codes, in order; every entry without a readable code shares one {@link #UNCODED}. */
   private static List<String> loggedCodes(List<String> rawEntries) {
-    List<String> codes = new ArrayList<>();
-    for (String raw : new LinkedHashSet<>(rawEntries)) {
-      String code = FiscalDeclCrudHandler.splitAeatError(raw)[0];
-      codes.add(LOGGABLE_CODE.matcher(code).matches() ? code : UNCODED);
+    Set<String> codes = new LinkedHashSet<>();
+    for (String raw : rawEntries) {
+      Matcher m = LOGGABLE_CODE.matcher(StringUtils.trimToEmpty(raw));
+      codes.add(m.find() ? m.group(1) : UNCODED);
     }
-    return codes;
+    return new ArrayList<>(codes);
   }
 
   /**

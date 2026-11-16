@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -39,6 +40,7 @@ import java.util.List;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -344,7 +346,7 @@ public class FiscalAeatAttemptLogTest {
   @Test
   public void anSqlFailureIsRetriedOnceWithoutTheWarningColumns() throws Exception {
     PreparedStatement first = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
-    when(first.executeUpdate()).thenThrow(new SQLException("column warning_count does not exist"));
+    when(first.executeUpdate()).thenThrow(new SQLException("column warning_count does not exist", "42703"));
     PreparedStatement retry = queueConnection(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS);
     FiscalAeatValidationOutcome outcome = answered(Path.MANUAL_VALIDATION, true, true,
         new String[0], new String[] { "A001 - Aviso" });
@@ -359,17 +361,57 @@ public class FiscalAeatAttemptLogTest {
     verify(retry, never()).setInt(eq(16), anyInt());
     verify(retry, never()).setString(eq(17), any());
     verify(retry).executeUpdate();
-    verify(log.queued.get(0)).close();
+    // The failed connection is rolled back before it goes back to the pool.
+    InOrder failed = inOrder(log.queued.get(0));
+    failed.verify(log.queued.get(0)).rollback();
+    failed.verify(log.queued.get(0)).close();
     verify(log.queued.get(1)).close();
     assertFalse(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS.contains("warning_"));
     assertTrue(FiscalAeatAttemptLog.INSERT_SQL.contains("warning_count, warning_codes"));
+  }
+
+  /**
+   * Only "undefined column" (SQLState 42703) is retried: any other failure is rolled back,
+   * swallowed, and no second connection is opened.
+   */
+  @Test
+  public void anyOtherSqlFailureIsNotRetried() throws Exception {
+    PreparedStatement first = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
+    when(first.executeUpdate()).thenThrow(new SQLException("deadlock detected", "40P01"));
+    queueConnection(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS);
+
+    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+
+    assertEquals(1, log.opened);
+    verify(log.queued.get(0)).rollback();
+    verify(log.queued.get(0)).close();
+
+    PreparedStatement noState = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
+    log.queued.remove(1);
+    when(noState.executeUpdate()).thenThrow(new SQLException("no state"));
+    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    assertEquals(2, log.opened);
+  }
+
+  /** A malformed endpoint says nothing about where the attempt went; production is host + path. */
+  @Test
+  public void environmentOfAMalformedEndpointAndOfProductionSpelledDifferently() {
+    FiscalAeatValidationOutcome filing = accepted(Path.DIRECT_SUBMISSION, false);
+    assertEquals(FiscalAeatAttemptLog.ENV_UNKNOWN,
+        FiscalAeatAttemptLog.environmentOf(filing, "::not a url"));
+    assertEquals(FiscalAeatAttemptLog.ENV_UNKNOWN,
+        FiscalAeatAttemptLog.environmentOf(accepted(Path.DOWNLOAD, true), "no-scheme-no-host"));
+    assertEquals(FiscalAeatAttemptLog.ENV_PRODUCTION, FiscalAeatAttemptLog.environmentOf(filing,
+        "HTTPS://WWW1.AGENCIATRIBUTARIA.GOB.ES/wlpl/PFTW-PICW/PresBasicaDos/"));
+    assertEquals(FiscalAeatAttemptLog.ENV_PREPRODUCTION, FiscalAeatAttemptLog.environmentOf(filing,
+        "https://www1.agenciatributaria.gob.es/wlpl/PFTW-PICW/Otro"));
   }
 
   /** The retry fails too: nothing reaches the caller and there is no third attempt. */
   @Test
   public void aFailingRetryIsSwallowed() throws Exception {
     PreparedStatement first = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
-    when(first.executeUpdate()).thenThrow(new SQLException("first"));
+    when(first.executeUpdate()).thenThrow(new SQLException("first", "42703"));
     PreparedStatement retry = queueConnection(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS);
     when(retry.executeUpdate()).thenThrow(new SQLException("second"));
 

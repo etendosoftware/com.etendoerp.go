@@ -409,10 +409,15 @@ class Fiscal303SubmissionSupport {
             .language(idi)
             .build());
       }
-    } catch (OBException e) {
-      AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
+    } catch (RuntimeException e) {
+      // Any failure around the AEAT call is an attempt (e.g. AEAT303ResponseParseException, a
+      // RuntimeException that is not an OBException): recorded, then handled as before.
       owner.attemptLog().record(attempted,
           FiscalAeatValidationOutcome.unanswered(MODEL_303, path, testMode, e), endpoint);
+      if (!(e instanceof OBException)) {
+        throw e;
+      }
+      AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
               NeoMessageTranslator.safeParseTranslation(e.getMessage())));

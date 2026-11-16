@@ -45,8 +45,6 @@ import com.etendoerp.go.schemaforge.FiscalAeatValidationOutcome.Path;
  */
 public class FiscalAeatValidationOutcomeTest {
 
-  private static final String CODE_20 = "A1234567890123456789";
-  private static final String CODE_21 = CODE_20 + "0";
 
   private static AEAT303SubmissionResult result(boolean accepted, boolean testMode) {
     AEAT303SubmissionResult r = new AEAT303SubmissionResult();
@@ -85,51 +83,70 @@ public class FiscalAeatValidationOutcomeTest {
 
   // ── loggedErrorCodes / loggedWarningCodes ───────────────────────────
 
-  /** Only short alphanumeric codes are stored; anything else is counted as UNCODED. */
+  /** The real AEAT code shapes are kept; they are read from the RAW entry. */
   @Test
-  public void loggedErrorCodesKeepOnlyCodes() {
-    FiscalAeatValidationOutcome outcome = rejectedWith("E0100803 - Razon social",
-        "NIF 12345678Z no identificado", "B12345678/ACME - texto con datos fiscales",
-        CODE_20 + " - at the limit", CODE_21 + " - one char too long");
+  public void loggedErrorCodesKeepTheAeatCodeShapes() {
+    FiscalAeatValidationOutcome outcome = rejectedWith("35068 - Resultado a ingresar",
+        "7113 - x", "E00 - Fichero de prueba", "A001 - x", "AV001 - x", "PAR016 - x",
+        "E010124 - Para periodo mensual", "E0100803 - Razon social");
 
-    assertEquals(Arrays.asList("E0100803", FiscalAeatValidationOutcome.UNCODED,
-        FiscalAeatValidationOutcome.UNCODED, CODE_20, FiscalAeatValidationOutcome.UNCODED),
-        outcome.loggedErrorCodes());
-  }
-
-  /** The same AEAT error twice is one entry; no AEAT text ever reaches the logged view. */
-  @Test
-  public void loggedErrorCodesCollapseRepeatedErrors() {
-    FiscalAeatValidationOutcome outcome = rejectedWith("E0100803 - Razon social",
-        "E0100803 - Razon social", "sin codigo", "sin codigo");
-
-    assertEquals(Arrays.asList("E0100803", FiscalAeatValidationOutcome.UNCODED),
-        outcome.loggedErrorCodes());
+    assertEquals(Arrays.asList("35068", "7113", "E00", "A001", "AV001", "PAR016", "E010124",
+        "E0100803"), outcome.loggedErrorCodes());
   }
 
   /**
-   * "One entry per distinct error": two different errors stay two entries even when they share a
-   * code (or have none), so the count of the attempt log is the count of AEAT errors.
+   * Privacy: an identity number or a name standing where a code would be is never stored — a
+   * CIF, a DNI, a NIE, a hyphenated surname. Each becomes UNCODED (and they share one).
    */
   @Test
-  public void loggedErrorCodesCountDistinctErrorsNotDistinctCodes() {
-    FiscalAeatValidationOutcome outcome = rejectedWith("E0100803 - Razon social",
-        "E0100803 - Otra causa", "sin codigo", "tampoco tiene codigo");
+  public void loggedErrorCodesNeverKeepAnIdentityNumberOrAName() {
+    assertEquals(Arrays.asList(FiscalAeatValidationOutcome.UNCODED),
+        rejectedWith("B12345678-Empresa SL no censada").loggedErrorCodes());
+    assertEquals(Arrays.asList(FiscalAeatValidationOutcome.UNCODED),
+        rejectedWith("B12345678 - Empresa SL no censada").loggedErrorCodes());
+    assertEquals(Arrays.asList(FiscalAeatValidationOutcome.UNCODED),
+        rejectedWith("Garcia-Lopez Juan").loggedErrorCodes());
+    assertEquals(Arrays.asList(FiscalAeatValidationOutcome.UNCODED),
+        rejectedWith("12345678Z - NIF no identificado", "X1234567L - NIE no identificado",
+            "P1234567A - x", "12345678 - ocho digitos", "E39000101 - letra y ocho digitos",
+            "NIF 12345678Z no identificado", "B12345678/ACME - texto con datos fiscales",
+            "par016 - minusculas", "PAR016- sin espacio", "ABCDE01 - cinco letras")
+                .loggedErrorCodes());
+  }
 
-    assertEquals(Arrays.asList("E0100803", "E0100803", FiscalAeatValidationOutcome.UNCODED,
-        FiscalAeatValidationOutcome.UNCODED), outcome.loggedErrorCodes());
+  /** Distinct CODES: a repeated code is stored once, and every uncoded error shares one UNCODED. */
+  @Test
+  public void loggedErrorCodesAreDistinctByCode() {
+    FiscalAeatValidationOutcome outcome = rejectedWith("E0100803 - Razon social",
+        "E0100803 - Otra causa", "sin codigo", "tampoco tiene codigo", "35068 - x",
+        "E0100803 - Razon social");
+
+    assertEquals(Arrays.asList("E0100803", FiscalAeatValidationOutcome.UNCODED, "35068"),
+        outcome.loggedErrorCodes());
   }
 
   @Test
   public void loggedWarningCodesFollowTheSameRules() {
     FiscalAeatValidationOutcome outcome = acceptedWithWarnings("A001 - Aviso informativo",
-        "A001 - Aviso informativo", "aviso sin codigo", "A.02/x - codigo no alfanumerico",
-        CODE_21 + " - too long");
+        "A001 - Otro aviso", "aviso sin codigo", "A.02/x - codigo no alfanumerico",
+        "B12345678 - aviso con un CIF");
 
-    assertEquals(Arrays.asList("A001", FiscalAeatValidationOutcome.UNCODED,
-        FiscalAeatValidationOutcome.UNCODED, FiscalAeatValidationOutcome.UNCODED),
+    assertEquals(Arrays.asList("A001", FiscalAeatValidationOutcome.UNCODED),
         outcome.loggedWarningCodes());
     assertTrue(outcome.loggedErrorCodes().isEmpty());
+  }
+
+  /**
+   * An answer that is neither accepted nor carries a single error is not a verdict: it is
+   * {@code not_validated}, never {@code rejected}.
+   */
+  @Test
+  public void anAnswerWithoutPdfAndWithoutErrorsIsNotValidated() {
+    FiscalAeatValidationOutcome outcome = rejectedWith();
+
+    assertEquals(Outcome.NOT_VALIDATED, outcome.outcome());
+    assertFalse(outcome.answered());
+    assertEquals(Outcome.REJECTED, rejectedWith("E00 - x").outcome());
   }
 
   // ── Path ────────────────────────────────────────────────────────────

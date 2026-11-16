@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -2640,6 +2641,32 @@ public class Fiscal303SubmitHandlerTest {
     assertEquals(Path.DIRECT_SUBMISSION, rows.get(1).path());
     assertEquals(Outcome.ACCEPTED, rows.get(1).outcome());
     assertFalse(rows.get(1).testMode());
+  }
+
+  /**
+   * The AEAT call fails with a RuntimeException that is not an OBException (a response that
+   * cannot be parsed): the attempt is still recorded ({@code not_validated}) and the exception
+   * goes on as before — it leaves handleSubmit, so the request writes none of the 502
+   * {@code SUBMISSION_FAILED} JSON an OBException gets.
+   */
+  @Test
+  public void testHandleSubmit_unparseableAeatAnswer_isRecordedAndRethrown() throws Exception {
+    SubmitRun run = new SubmitRun();
+    try {
+      submit("{\"testMode\":true}", run, (service, ctx) -> when(service.submitValidation(anyString(),
+          anyString(), anyString(), anyString())).thenThrow(
+              new IllegalStateException("not a JSON object")));
+      fail("no JSON answer is expected: the RuntimeException must leave handleSubmit");
+    } catch (org.codehaus.jettison.json.JSONException expected) {
+      // the body is empty: the exception went on instead of being answered as SUBMISSION_FAILED
+    }
+    verify(run.response, never()).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
+
+    ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
+        ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
+    verify(run.attemptLog).record(any(), outcome.capture(), any());
+    assertEquals(Path.MANUAL_VALIDATION, outcome.getValue().path());
+    assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
   }
 
   /**

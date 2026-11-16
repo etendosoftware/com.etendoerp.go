@@ -69,6 +69,9 @@ class FiscalAeatAttemptLog {
   /** {@code Environment}: the endpoint could not be resolved. */
   static final String ENV_UNKNOWN = "unknown";
 
+  /** PostgreSQL SQLState of "undefined column": the only failure the insert is retried for. */
+  static final String SQLSTATE_UNDEFINED_COLUMN = "42703";
+
   private static final int LEN_TEXT = 200;
   private static final int LEN_DECL = 32;
   private static final int LEN_ERROR_CODES = 2000;
@@ -107,6 +110,9 @@ class FiscalAeatAttemptLog {
       try {
         insert(INSERT_SQL, true, clientId, userId, declaration, outcome, endpoint);
       } catch (SQLException e) {
+        if (!SQLSTATE_UNDEFINED_COLUMN.equals(e.getSQLState())) {
+          throw e;
+        }
         AbstractFiscalHandler.log.warn("AEAT attempt log: retrying without the warning columns ("
             + e.getMessage() + ")");
         insert(INSERT_SQL_NO_WARNINGS, false, clientId, userId, declaration, outcome, endpoint);
@@ -145,10 +151,26 @@ class FiscalAeatAttemptLog {
         ps.setInt(++i, warningCodes.size());
         ps.setString(++i, joinCodes(warningCodes));
       }
-      ps.executeUpdate();
-      if (!connection.getAutoCommit()) {
-        connection.commit();
+      try {
+        ps.executeUpdate();
+        if (!connection.getAutoCommit()) {
+          connection.commit();
+        }
+      } catch (SQLException e) {
+        rollbackQuietly(connection);
+        throw e;
       }
+    }
+  }
+
+  /** A failed insert must not go back to the pool inside an aborted transaction. */
+  private static void rollbackQuietly(Connection connection) {
+    try {
+      if (!connection.getAutoCommit()) {
+        connection.rollback();
+      }
+    } catch (SQLException e) {
+      AbstractFiscalHandler.log.warn("AEAT attempt log: rollback failed: " + e.getMessage());
     }
   }
 
@@ -177,14 +199,31 @@ class FiscalAeatAttemptLog {
     if (StringUtils.isBlank(endpoint)) {
       return outcome.testMode() ? ENV_VALIDATION : ENV_UNKNOWN;
     }
-    if (!isAeatHost(hostOf(endpoint))) {
+    String host = hostOf(endpoint);
+    if (host == null) {
+      return ENV_UNKNOWN; // a malformed endpoint: nothing can be said about where it went
+    }
+    if (!isAeatHost(host)) {
       return ENV_OVERRIDE;
     }
     if (outcome.testMode()) {
       return ENV_VALIDATION;
     }
-    return AEAT303SubmissionService.DEFAULT_PRODUCTION_ENDPOINT.equals(endpoint.trim())
+    return sameHostAndPath(AEAT303SubmissionService.DEFAULT_PRODUCTION_ENDPOINT, endpoint)
         ? ENV_PRODUCTION : ENV_PREPRODUCTION;
+  }
+
+  /** Same host (any case) and path (a trailing slash aside); scheme, port and query ignored. */
+  static boolean sameHostAndPath(String a, String b) {
+    try {
+      URI ua = URI.create(a.trim());
+      URI ub = URI.create(b.trim());
+      return ua.getHost() != null && ua.getHost().equalsIgnoreCase(ub.getHost())
+          && StringUtils.removeEnd(StringUtils.defaultString(ua.getPath()), "/")
+              .equals(StringUtils.removeEnd(StringUtils.defaultString(ub.getPath()), "/"));
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
   }
 
   /** True for a host of the AEAT ({@code *.aeat.es}, {@code *.agenciatributaria.gob.es}). */

@@ -102,7 +102,7 @@ class Fiscal390FileValidationSupport {
         new FiscalAeatAttemptLog.Declaration(Fiscal390BoxesHandler.MODEL, year, period, declId,
             orgId),
         outcome, endpoint);
-    // Where the time of a "Generar fichero 390" goes (the guards are timed by the handler).
+    // Where the time of a "Generar fichero 390" goes .
     AbstractFiscalHandler.log.info("Modelo 390 generate-validated (decl=" + declId + "): file "
         + (generatedAt - startedAt) + " ms, AEAT validation (" + outcome.outcome().key() + ") "
         + (validatedAt - generatedAt) + " ms, recording "
@@ -137,6 +137,16 @@ class Fiscal390FileValidationSupport {
           + " validated by the AEAT; it is downloaded unvalidated", e);
       return FiscalAeatValidationOutcome.unanswered(Fiscal390BoxesHandler.MODEL,
           FiscalAeatValidationOutcome.Path.DOWNLOAD, true, e);
+    } finally {
+      restoreTimeouts(service);
+    }
+  }
+
+  private static void restoreTimeouts(AEAT303SubmissionService service) {
+    try {
+      service.withDefaultTimeouts();
+    } catch (Exception e) {
+      AbstractFiscalHandler.log.warn("Could not restore the AEAT service timeouts", e);
     }
   }
 

@@ -266,7 +266,9 @@ report name, which carries the layout year. Response headers `X-Fiscal-Tax-Repor
 ## `POST /fiscal390/generate-validated` — the file, validated by the AEAT before download
 
 What "Generar fichero 390" calls (ETP-5716). Same guards and same file as `GET generate`
-(`409` submitted, `409 BLOCKING_INCIDENTS`, `422 INCOMPLETE_FISCAL_YEAR`), plus `id` — the
+(`409` submitted, `409 BLOCKING_INCIDENTS` — which is also how an incomplete fiscal year is
+answered, as the blocking incident `INCOMPLETE_FISCAL_YEAR` of the guard; a `422` only if the
+generation itself still fails on the calendar), plus `id` — the
 declaration (`400` missing, `404` not a 390 of this client/org/exercise). The generated file is
 sent to the AEAT validation service (`AEAT303SubmissionService.submitValidation`, MODELO 390 —
 the one `submit` uses in test mode; no certificate) and returned **whatever the validator says**:
@@ -285,11 +287,12 @@ the one `submit` uses in test mode; no certificate) and returned **whatever the 
 | `accepted` | the AEAT answered, no error | the AEAT incidents (`AEAT-<code>`) are cleared; its warnings (`avisos`) are stored as warning incidents |
 | `rejected` | the AEAT answered with errors | replaced by this answer's errors (block) and warnings (warn) |
 | `connection_failure` | an `IOException` reaching the validator (timeout, refused, unknown host) | untouched |
-| `not_validated` | any other failure (e.g. an answer that is not the validator's JSON) | untouched |
+| `not_validated` | any other failure (e.g. an answer that is not the validator's JSON, or one that is neither accepted nor carries an error) | untouched |
 
 **Validation PDF.** An `accepted` answer carries the validator's draft PDF. It is attached to
 the declaration as `VALIDACION-390-<year>-0A.pdf`, as proof that the file was validated — it is not a filing
-receipt. Each accepted validation replaces the previous `VALIDACION-` attachment
+receipt. Each accepted validation replaces the previous `VALIDACION-` attachment (the new one
+is stored first; a failed upload leaves the previous one)
 (`FiscalAeatSubmissionSupport.replaceAttachedPdf`, exact name match — plus the earlier name
 `VALIDACION-justificante-390-<year>-0A.pdf`, so both never coexist; the `TEST-` attachment and
 the real justificante are never touched). Any other outcome, or an accepted answer without PDF,
@@ -321,8 +324,8 @@ service's default timeouts are restored for the presentation):
 | Validator | What happens |
 |---|---|
 | no errors (warnings allowed) | the presentation goes ahead, as before |
-| errors | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
-| no answer | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
+| errors (at least one) | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
+| no answer, or an answer with neither a PDF nor an error | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
 
 It writes its own attempt row (path `pre_submission_validation`); the presentation that follows
 writes its `direct_submission` row. No PDF is attached for this validation. `testMode = true` is
