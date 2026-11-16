@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.ocr;
 
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DISCOUNT;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOC_TAX_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX;
@@ -26,6 +27,8 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -67,14 +70,51 @@ public final class InvoiceInboxTotals {
   private InvoiceInboxTotals() {
   }
 
-  /** The totals of the lines: net base, tax and their sum, all at the amount scale. */
+  /** One tax row: the lines of one rate and one rounding mode, their base and their tax. */
+  public static final class TaxRow {
+    private final BigDecimal rate;
+    private final boolean lineBased;
+    private final BigDecimal base;
+    private final BigDecimal amount;
+
+    TaxRow(BigDecimal rate, boolean lineBased, BigDecimal base, BigDecimal amount) {
+      this.rate = rate;
+      this.lineBased = lineBased;
+      this.base = base;
+      this.amount = amount;
+    }
+
+    /** Returns the rate in percent. */
+    public BigDecimal rate() {
+      return rate;
+    }
+
+    /** Returns whether the tax is rounded per line ({@code L}) instead of on the sum ({@code D}). */
+    public boolean lineBased() {
+      return lineBased;
+    }
+
+    /** Returns the sum of the nets of the row. */
+    public BigDecimal base() {
+      return base;
+    }
+
+    /** Returns the tax of the row. */
+    public BigDecimal amount() {
+      return amount;
+    }
+  }
+
+  /** The totals of the lines: net base, tax rows and their sum, all at the currency scale. */
   public static final class Totals {
     private final BigDecimal base;
     private final BigDecimal tax;
+    private final List<TaxRow> rows;
 
-    Totals(BigDecimal base, BigDecimal tax) {
+    Totals(BigDecimal base, BigDecimal tax, List<TaxRow> rows) {
       this.base = base;
       this.tax = tax;
+      this.rows = rows;
     }
 
     /** Returns the sum of the line nets. */
@@ -82,7 +122,7 @@ public final class InvoiceInboxTotals {
       return base;
     }
 
-    /** Returns the sum of the tax of each rate. */
+    /** Returns the sum of the tax of each row. */
     public BigDecimal tax() {
       return tax;
     }
@@ -90,6 +130,11 @@ public final class InvoiceInboxTotals {
     /** Returns the base plus the tax. */
     public BigDecimal total() {
       return base.add(tax);
+    }
+
+    /** Returns the tax rows, by rate ascending, the sum-rounded row before the line-rounded one. */
+    public List<TaxRow> rows() {
+      return rows;
     }
   }
 
@@ -116,18 +161,45 @@ public final class InvoiceInboxTotals {
    */
   public static BigDecimal lineNet(BigDecimal quantity, BigDecimal unitPrice,
       BigDecimal discount) {
-    return quantity.multiply(unit6(unitPrice, discount)).setScale(AMOUNT_SCALE,
-        RoundingMode.HALF_UP);
+    return lineNet(quantity, unitPrice, discount, AMOUNT_SCALE);
   }
 
   /**
-   * The totals of a document's lines.
+   * The net amount of a line at a currency's scale, second rounding.
+   *
+   * @param quantity  the quantity
+   * @param unitPrice the price before the discount
+   * @param discount  the percent 0-100, {@code null} or out of range for none
+   * @param scale     the decimals of the document currency ({@code C_Currency.StdPrecision})
+   * @return {@code round(quantity x unit6, scale)}
+   */
+  public static BigDecimal lineNet(BigDecimal quantity, BigDecimal unitPrice,
+      BigDecimal discount, int scale) {
+    return quantity.multiply(unit6(unitPrice, discount)).setScale(scale, RoundingMode.HALF_UP);
+  }
+
+  /**
+   * The totals of a document's lines at two decimals.
    *
    * @param lines the {@code lines} array of the document, may be {@code null}
    * @return the totals, or {@code null} when no line carries both quantity and price
    */
   public static Totals totals(JSONArray lines) {
-    Map<BigDecimal, BigDecimal> baseByRate = new TreeMap<>();
+    return totals(lines, AMOUNT_SCALE);
+  }
+
+  /**
+   * The totals of a document's lines at the scale of the document currency. The tax follows the
+   * rounding mode of each line's tax ({@code tax.docTaxAmount}, as Etendo's {@code C_Tax}): {@code D}
+   * (the default, also when absent) rounds once per rate on the sum of the nets, {@code L} rounds
+   * the tax of every line and sums them. A document may mix both.
+   *
+   * @param lines the {@code lines} array of the document, may be {@code null}
+   * @param scale the decimals of the document currency
+   * @return the totals, or {@code null} when no line carries both quantity and price
+   */
+  public static Totals totals(JSONArray lines, int scale) {
+    Map<RowKey, BigDecimal[]> rows = new TreeMap<>();
     BigDecimal base = BigDecimal.ZERO;
     boolean any = false;
     for (int i = 0; lines != null && i < lines.length(); i++) {
@@ -138,23 +210,58 @@ public final class InvoiceInboxTotals {
         continue;
       }
       any = true;
-      BigDecimal net = lineNet(quantity, price, OcrJson.decimal(line, K_DISCOUNT));
+      BigDecimal net = lineNet(quantity, price, OcrJson.decimal(line, K_DISCOUNT), scale);
       base = base.add(net);
       BigDecimal rate = effectiveRate(line);
       if (rate != null) {
-        baseByRate.merge(rate.stripTrailingZeros(), net, BigDecimal::add);
+        boolean lineBased = isLineBased(line);
+        BigDecimal[] row = rows.computeIfAbsent(new RowKey(rate.stripTrailingZeros(), lineBased),
+            k -> new BigDecimal[] { rate.stripTrailingZeros(), BigDecimal.ZERO, BigDecimal.ZERO });
+        row[1] = row[1].add(net);
+        if (lineBased) {
+          row[2] = row[2].add(taxOf(net, rate, scale));
+        }
       }
     }
     if (!any) {
       return null;
     }
     BigDecimal tax = BigDecimal.ZERO;
-    for (Map.Entry<BigDecimal, BigDecimal> entry : baseByRate.entrySet()) {
-      tax = tax.add(entry.getValue().multiply(entry.getKey()).movePointLeft(2)
-          .setScale(AMOUNT_SCALE, RoundingMode.HALF_UP));
+    List<TaxRow> out = new ArrayList<>();
+    for (Map.Entry<RowKey, BigDecimal[]> entry : rows.entrySet()) {
+      BigDecimal[] row = entry.getValue();
+      boolean lineBased = entry.getKey().lineBased();
+      BigDecimal amount = lineBased ? row[2] : taxOf(row[1], row[0], scale);
+      tax = tax.add(amount);
+      out.add(new TaxRow(row[0], lineBased, row[1].setScale(scale, RoundingMode.HALF_UP),
+          amount.setScale(scale, RoundingMode.HALF_UP)));
     }
-    return new Totals(base.setScale(AMOUNT_SCALE, RoundingMode.HALF_UP),
-        tax.setScale(AMOUNT_SCALE, RoundingMode.HALF_UP));
+    return new Totals(base.setScale(scale, RoundingMode.HALF_UP),
+        tax.setScale(scale, RoundingMode.HALF_UP), out);
+  }
+
+  /**
+   * The key of a tax row: numeric ascending by rate (negative withholding rates included), the
+   * {@code D} row before the {@code L} row of the same rate. The rate is normalized
+   * ({@code stripTrailingZeros}) so 10 and 10.00 are one row.
+   */
+  private record RowKey(BigDecimal rate, boolean lineBased) implements Comparable<RowKey> {
+    @Override
+    public int compareTo(RowKey other) {
+      int byRate = rate.compareTo(other.rate);
+      return byRate != 0 ? byRate : Boolean.compare(lineBased, other.lineBased);
+    }
+  }
+
+  private static BigDecimal taxOf(BigDecimal base, BigDecimal rate, int scale) {
+    return base.multiply(rate).movePointLeft(2).setScale(scale, RoundingMode.HALF_UP);
+  }
+
+  /** Whether the line's tax is rounded per line: {@code tax.docTaxAmount = L}; anything else is {@code D}. */
+  static boolean isLineBased(JSONObject line) {
+    JSONObject tax = line == null ? null : line.optJSONObject(K_TAX);
+    Object mode = tax == null ? null : tax.opt(K_DOC_TAX_AMOUNT);
+    return "L".equals(mode);
   }
 
   /**

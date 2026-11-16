@@ -23,6 +23,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_NONE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_UNKNOWN;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ADDRESS_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CHECK;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CURRENCY_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DUPLICATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
@@ -53,6 +54,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -202,17 +204,30 @@ public final class InboxMatcher {
     }
   }
 
-  private static void putHeaderScalars(JSONObject header, JSONObject extraction, JSONArray lines)
+  private void putHeaderScalars(JSONObject header, JSONObject extraction, JSONArray lines)
       throws JSONException {
     BigDecimal printed = OcrJson.decimal(extraction, "total_amount");
-    boolean usePrinted = printed != null && printed.signum() > 0;
-    BigDecimal total = usePrinted ? printed : totalOfLines(lines);
+    // A printed total is any non-zero number, whatever its sign: a purchase invoice can be a credit
+    // document. Zero or absent means the document printed none.
+    boolean usePrinted = printed != null && printed.signum() != 0;
+    InboxTaxModes.stamp(lines, lookups);
+    JSONObject vendor = header.optJSONObject(K_VENDOR);
+    String vendorId = vendor != null && S_LINKED.equals(vendor.optString(K_STATE))
+        ? vendor.optString(K_ID) : null;
+    Optional<OcrLookups.DocCurrency> currency = lookups.documentCurrency(vendorId);
+    int scale = currency.map(OcrLookups.DocCurrency::scale).orElse(TWO_DECIMALS);
+    if (currency.isPresent()) {
+      header.put(K_CURRENCY_ID, currency.get().id());
+    }
+    BigDecimal total = usePrinted ? printed : totalOfLines(lines, scale);
     String date = isoDate(extraction);
     header.put(K_DOCUMENT_NO, OcrJson.str(extraction, "document_no"))
         .put(K_INVOICE_DATE, date == null ? JSONObject.NULL : date)
         .put(K_INVOICE_DATE_RAW, OcrJson.str(extraction, "invoice_date"))
+        // The PRINTED total is kept exactly as read (a mismatch with the lines is shown, not hidden by
+        // rounding); only the computed one is rounded to the currency's scale.
         .put(K_TOTAL_AMOUNT, InboxLineMatcher.number(total == null ? null
-            : total.setScale(TWO_DECIMALS, RoundingMode.HALF_UP)))
+            : usePrinted ? total : total.setScale(scale, RoundingMode.HALF_UP)))
         .put(K_TOTAL_SOURCE, usePrinted ? TOTAL_PRINTED : TOTAL_LINES);
     if (!header.has(K_DUPLICATE)) {
       header.put(K_DUPLICATE, new JSONObject().put(K_STATE, D_NONE)
@@ -224,8 +239,8 @@ public final class InboxMatcher {
    * The total of the lines with the rule of GO's own invoice line ({@link InvoiceInboxTotals}: the
    * discount, the two roundings, tax per rate); {@code null} when no line carries quantity and price.
    */
-  private static BigDecimal totalOfLines(JSONArray lines) {
-    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(lines);
+  private static BigDecimal totalOfLines(JSONArray lines, int scale) {
+    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(lines, scale);
     return totals == null ? null : totals.total();
   }
 }

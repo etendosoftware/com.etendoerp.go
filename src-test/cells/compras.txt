@@ -6,7 +6,7 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (41)
+# --- con mocks (42)
 com.etendoerp.go.schemaforge.AgingPayableReportHandlerTest
 com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerTest
 com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerTest
@@ -40,6 +40,7 @@ com.etendoerp.go.schemaforge.ReturnToVendorShipmentLineHandlerTest
 com.etendoerp.go.schemaforge.ocr.CopilotOcrServiceClientTest
 com.etendoerp.go.schemaforge.ocr.InboxLineMatcherTest
 com.etendoerp.go.schemaforge.ocr.InboxMatcherTest
+com.etendoerp.go.schemaforge.ocr.InboxTaxModesTest
 com.etendoerp.go.schemaforge.ocr.InboxVendorMatcherTest
 com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotalsTest
 com.etendoerp.go.schemaforge.ocr.OcrConfigTest
