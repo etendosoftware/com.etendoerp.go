@@ -197,7 +197,7 @@ final class FiscalAeatSubmissionSupport {
     } finally {
       restoreTimeouts(service);
     }
-    attemptLog.record(declaration, outcome, endpoint);
+    attemptLog.recordAttempt(declaration, outcome, endpoint);
     // Only a verdict decides: an answer that is neither accepted nor carries a single error is
     // "no answer", never a rejection.
     if (outcome.outcome() == FiscalAeatValidationOutcome.Outcome.REJECTED) {
@@ -215,6 +215,39 @@ final class FiscalAeatSubmissionSupport {
     } catch (Exception e) {
       AbstractFiscalHandler.log.warn("Could not restore the AEAT service timeouts", e);
     }
+  }
+
+  /** One call to the AEAT service (a validation or a presentation). */
+  @FunctionalInterface
+  interface AeatCall {
+    /**
+     * Calls the AEAT.
+     *
+     * @return the AEAT answer
+     */
+    AEAT303SubmissionResult call();
+  }
+
+  /**
+   * Makes one call to the AEAT and leaves its attempt row, whatever happens: the answer is
+   * recorded ({@code accepted} / {@code rejected} / {@code not_validated}) and returned; a
+   * RuntimeException (an {@link org.openbravo.base.exception.OBException}, or e.g. an answer that
+   * cannot be parsed) is recorded as unanswered and rethrown unchanged for the caller to handle.
+   */
+  static AEAT303SubmissionResult callRecordingAttempt(FiscalAeatAttemptLog attemptLog,
+      FiscalAeatAttemptLog.Declaration attempted, FiscalAeatValidationOutcome.Path path,
+      boolean testMode, String endpoint, AeatCall call) {
+    AEAT303SubmissionResult result;
+    try {
+      result = call.call();
+    } catch (RuntimeException e) {
+      attemptLog.recordAttempt(attempted,
+          FiscalAeatValidationOutcome.unanswered(attempted.model(), path, testMode, e), endpoint);
+      throw e;
+    }
+    attemptLog.recordAttempt(attempted,
+        FiscalAeatValidationOutcome.answered(attempted.model(), path, result), endpoint);
+    return result;
   }
 
   /** The answer of a presentation stopped because the validator could not be reached. */

@@ -134,7 +134,7 @@ public class Fiscal390SubmissionSupportTest {
     declHandler = mock(FiscalDeclCrudHandler.class);
     doReturn(declHandler).when(handler).declHandler();
     attemptLog = mock(FiscalAeatAttemptLog.class);
-    doReturn(attemptLog).when(handler).attemptLog();
+    handler.attemptLog = attemptLog;
     when(generateSupport.generateContent(eq("org1"), eq(2026), anyMap()))
         .thenReturn(new Fiscal390GenerateSupport.Generated(FILE, null));
     doReturn(new JSONObject("{\"boxes\":{\"86\":\"10.00\"},\"summary\":{\"annualResult\":\"10.00\"}}"))
@@ -274,7 +274,7 @@ public class Fiscal390SubmissionSupportTest {
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
     ArgumentCaptor<String> endpoint = ArgumentCaptor.forClass(String.class);
-    verify(attemptLog, times(expected)).record(declaration.capture(), outcome.capture(),
+    verify(attemptLog, times(expected)).recordAttempt(declaration.capture(), outcome.capture(),
         endpoint.capture());
     for (FiscalAeatAttemptLog.Declaration d : declaration.getAllValues()) {
       assertEquals(ATTEMPTED, d);
@@ -860,7 +860,7 @@ public class Fiscal390SubmissionSupportTest {
         anyString());
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-    verify(attemptLog).record(eq(ATTEMPTED), outcome.capture(), eq((String) null));
+    verify(attemptLog).recordAttempt(eq(ATTEMPTED), outcome.capture(), eq((String) null));
     assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
   }
 
@@ -970,7 +970,7 @@ public class Fiscal390SubmissionSupportTest {
     assertEquals(null, validation.rejected);
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-    verify(attemptLog).record(eq(ATTEMPTED), outcome.capture(), any());
+    verify(attemptLog).recordAttempt(eq(ATTEMPTED), outcome.capture(), any());
     assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
   }
 
@@ -993,7 +993,7 @@ public class Fiscal390SubmissionSupportTest {
 
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-    verify(attemptLog).record(any(), outcome.capture(), any());
+    verify(attemptLog).recordAttempt(any(), outcome.capture(), any());
     assertEquals(Path.MANUAL_VALIDATION, outcome.getValue().path());
     assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
     verify(declHandler, never()).replaceAeatIncidentsNoCommit(any(), any(), any());

@@ -2462,7 +2462,7 @@ public class Fiscal303SubmitHandlerTest {
           ArgumentCaptor.forClass(FiscalAeatAttemptLog.Declaration.class);
       ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
           ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-      verify(attemptLog, times(expected)).record(declaration.capture(), outcome.capture(), any());
+      verify(attemptLog, times(expected)).recordAttempt(declaration.capture(), outcome.capture(), any());
       for (FiscalAeatAttemptLog.Declaration d : declaration.getAllValues()) {
         assertEquals(new FiscalAeatAttemptLog.Declaration("303", 2026, "T2", "decl-1", "org1"), d);
       }
@@ -2504,12 +2504,8 @@ public class Fiscal303SubmitHandlerTest {
         }
         return new JSONObject(SNAPSHOT_JSON);
       }
-
-      @Override
-      FiscalAeatAttemptLog attemptLog() {
-        return run.attemptLog;
-      }
     };
+    h.attemptLog = run.attemptLog;
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
@@ -2664,7 +2660,7 @@ public class Fiscal303SubmitHandlerTest {
 
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-    verify(run.attemptLog).record(any(), outcome.capture(), any());
+    verify(run.attemptLog).recordAttempt(any(), outcome.capture(), any());
     assertEquals(Path.MANUAL_VALIDATION, outcome.getValue().path());
     assertEquals(Outcome.NOT_VALIDATED, outcome.getValue().outcome());
   }

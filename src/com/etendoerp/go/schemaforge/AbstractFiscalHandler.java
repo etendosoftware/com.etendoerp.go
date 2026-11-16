@@ -86,15 +86,12 @@ abstract class AbstractFiscalHandler {
     return declHandler;
   }
 
-  private final FiscalAeatAttemptLog attemptLog = new FiscalAeatAttemptLog();
-
   /**
    * The append-only log of the attempts against the AEAT (ETP-5716), shared by the models that
-   * call it. Overridable in tests.
+   * call it. A field rather than an accessor (this class is at its method budget); package-private
+   * and not final so tests can put a mock in its place.
    */
-  FiscalAeatAttemptLog attemptLog() {
-    return attemptLog;
-  }
+  FiscalAeatAttemptLog attemptLog = new FiscalAeatAttemptLog();
 
   /**
    * Thrown by {@link #guardNotAlreadySubmitted} — every {@code dispatch()} override that calls it

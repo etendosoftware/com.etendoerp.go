@@ -102,25 +102,36 @@ class FiscalAeatAttemptLog {
    * @param outcome     the attempt: path, test mode, outcome and AEAT error codes
    * @param endpoint    the AEAT endpoint the attempt went to ({@link #endpointOf}); may be null
    */
-  void record(Declaration declaration, FiscalAeatValidationOutcome outcome, String endpoint) {
+  void recordAttempt(Declaration declaration, FiscalAeatValidationOutcome outcome,
+      String endpoint) {
     try {
       OBContext ctx = OBContext.getOBContext();
       String userId = ctx.getUser().getId();
       String clientId = ctx.getCurrentClient().getId();
-      try {
-        insert(INSERT_SQL, true, clientId, userId, declaration, outcome, endpoint);
-      } catch (SQLException e) {
-        if (!SQLSTATE_UNDEFINED_COLUMN.equals(e.getSQLState())) {
-          throw e;
-        }
-        AbstractFiscalHandler.log.warn("AEAT attempt log: retrying without the warning columns ("
-            + e.getMessage() + ")");
-        insert(INSERT_SQL_NO_WARNINGS, false, clientId, userId, declaration, outcome, endpoint);
-      }
+      insertWithLegacyFallback(clientId, userId, declaration, outcome, endpoint);
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not record the AEAT attempt of declaration "
           + declaration.declId() + " (model " + declaration.model() + ", " + declaration.year()
           + ")", e);
+    }
+  }
+
+  /**
+   * Inserts the row; on a table that predates the warning columns (SQLState
+   * {@value #SQLSTATE_UNDEFINED_COLUMN}) inserts it once more without them. Any other failure is
+   * thrown to {@link #recordAttempt}, which logs it.
+   */
+  private void insertWithLegacyFallback(String clientId, String userId, Declaration declaration,
+      FiscalAeatValidationOutcome outcome, String endpoint) throws SQLException {
+    try {
+      insert(INSERT_SQL, true, clientId, userId, declaration, outcome, endpoint);
+    } catch (SQLException e) {
+      if (!SQLSTATE_UNDEFINED_COLUMN.equals(e.getSQLState())) {
+        throw e;
+      }
+      AbstractFiscalHandler.log.warn("AEAT attempt log: retrying without the warning columns ("
+          + e.getMessage() + ")");
+      insert(INSERT_SQL_NO_WARNINGS, false, clientId, userId, declaration, outcome, endpoint);
     }
   }
 

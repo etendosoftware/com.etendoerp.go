@@ -174,25 +174,16 @@ class Fiscal390SubmissionSupport {
     FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
     // A real presentation is validated first, with the very file it is about to send: the
     // validator's errors stop it (nothing presented, the declaration stays a draft).
-    if (!testMode) {
-      FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
-          FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog(),
-              attempted, new FiscalAeatSubmissionSupport.FileToPresent(
-                  AEAT303SubmissionRequestBuilder.MODELO_390, fileContent, fiscalYear, period,
-                  idi));
-      if (!validation.proceed()) {
-        answerStoppedByValidation(validation, decl, declId, year, period, response);
-        return;
-      }
+    if (!testMode && stoppedByValidation(service, attempted, new FiscalAeatSubmissionSupport
+        .FileToPresent(AEAT303SubmissionRequestBuilder.MODELO_390, fileContent, fiscalYear,
+            period, idi), decl, response)) {
+      return;
     }
     String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
-    AEAT303SubmissionResult result;
-    try {
-      if (testMode) {
-        result = service.submitValidation(AEAT303SubmissionRequestBuilder.MODELO_390,
-            fileContent, fiscalYear, period, idi);
-      } else {
-        result = service.submitProduction(
+    FiscalAeatSubmissionSupport.AeatCall call = testMode
+        ? () -> service.submitValidation(AEAT303SubmissionRequestBuilder.MODELO_390, fileContent,
+            fiscalYear, period, idi)
+        : () -> service.submitProduction(
             AEAT303SubmissionService.ProductionSubmissionRequest.builder()
                 .modelo(AEAT303SubmissionRequestBuilder.MODELO_390)
                 .org(org)
@@ -204,15 +195,13 @@ class Fiscal390SubmissionSupport {
                 .nrc("")
                 .language(idi)
                 .build());
-      }
-    } catch (RuntimeException e) {
+    AEAT303SubmissionResult result;
+    try {
       // Any failure around the AEAT call is an attempt (e.g. AEAT303ResponseParseException, a
       // RuntimeException that is not an OBException): recorded, then handled as before.
-      owner.attemptLog().record(attempted, FiscalAeatValidationOutcome.unanswered(
-          Fiscal390BoxesHandler.MODEL, path, testMode, e), endpoint);
-      if (!(e instanceof OBException)) {
-        throw e;
-      }
+      result = FiscalAeatSubmissionSupport.callRecordingAttempt(owner.attemptLog, attempted,
+          path, testMode, endpoint, call);
+    } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 390 submission failed (decl=" + declId + ")", e);
       FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           FiscalAeatSubmissionSupport.failureJson(testMode, ERR_SUBMISSION_FAILED,
@@ -220,8 +209,6 @@ class Fiscal390SubmissionSupport {
       return;
     }
 
-    owner.attemptLog().record(attempted, FiscalAeatValidationOutcome.answered(
-        Fiscal390BoxesHandler.MODEL, path, result), endpoint);
     persistAeatIncidentsBestEffort(decl, result);
     if (result.isSuccessful()) {
       recordAcceptedSubmission(decl, org, year, period, result, snapshot, testMode);
@@ -231,6 +218,25 @@ class Fiscal390SubmissionSupport {
     FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
         FiscalAeatSubmissionSupport.resultJson(result,
             declarationDataJson(decl, year, period, snapshot)));
+  }
+
+  /**
+   * Runs the validation that precedes a real presentation and, when it stops the presentation,
+   * answers the request ({@link #answerStoppedByValidation}). Returns {@code true} when the
+   * presentation must not go ahead.
+   */
+  private boolean stoppedByValidation(AEAT303SubmissionService service,
+      FiscalAeatAttemptLog.Declaration attempted, FiscalAeatSubmissionSupport.FileToPresent file,
+      FiscalDecl decl, HttpServletResponse response) throws Exception {
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+        FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog, attempted,
+            file);
+    if (validation.proceed()) {
+      return false;
+    }
+    answerStoppedByValidation(validation, decl, attempted.declId(), attempted.year(),
+        attempted.period(), response);
+    return true;
   }
 
   /**

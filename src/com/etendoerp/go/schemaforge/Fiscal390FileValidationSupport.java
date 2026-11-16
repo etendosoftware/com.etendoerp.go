@@ -168,7 +168,7 @@ class Fiscal390FileValidationSupport {
    */
   void recordOutcome(FiscalDecl decl, FiscalAeatAttemptLog.Declaration declaration,
       FiscalAeatValidationOutcome outcome, String endpoint) {
-    owner.attemptLog().record(declaration, outcome, endpoint);
+    owner.attemptLog.recordAttempt(declaration, outcome, endpoint);
     if (!outcome.answered()) {
       return;
     }

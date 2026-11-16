@@ -309,13 +309,8 @@ class Fiscal303SubmissionSupport {
     String filename = "303_" + period + "_" + year;
     String fileContent;
     try {
-      HashMap<String, Object> generated =
-          generateElectronicFile(orgId, year, period, tipo, filename, request);
-      Object fileObj = generated.get("file");
-      if (fileObj == null) {
-        throw new OBException("generateElectronicFile returned no file content");
-      }
-      fileContent = fileObj.toString();
+      fileContent = fileContentOf(
+          generateElectronicFile(orgId, year, period, tipo, filename, request));
     } catch (IllegalArgumentException e) {
       // ETP-5187 — resolveDeclType rejects a missing/blank/unrecognized declaration type
       // instead of silently defaulting it to "N"; a clean 400 here, not the generic 500 below,
@@ -372,60 +367,38 @@ class Fiscal303SubmissionSupport {
     FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
     // A real presentation is validated first, with the very file it is about to send: the
     // validator's errors stop it (nothing presented, the declaration stays a draft).
-    if (!testMode) {
-      FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
-          FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog(),
-              attempted, new FiscalAeatSubmissionSupport.FileToPresent(
-                  AEAT303SubmissionRequestBuilder.MODELO_303, fileContent, data.getFiscalYear(),
-                  data.getPeriod(), idi));
-      if (!validation.proceed()) {
-        if (validation.rejected == null) {
-          writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
-              FiscalAeatSubmissionSupport.validationUnavailableJson());
-          return;
-        }
-        persistIncidentsBestEffort(decl, declId, validation.rejected);
-        commitSubmissionBestEffort(declId);
-        writeJson(response, HttpServletResponse.SC_OK,
-            FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
-                owner.declarationDataJson(data)));
-        return;
-      }
+    if (!testMode && stoppedByValidation(service, attempted, new FiscalAeatSubmissionSupport
+        .FileToPresent(AEAT303SubmissionRequestBuilder.MODELO_303, fileContent,
+            data.getFiscalYear(), data.getPeriod(), idi), decl, data, response)) {
+      return;
     }
     String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
+    FiscalAeatSubmissionSupport.AeatCall call = testMode
+        ? () -> service.submitValidation(fileContent, data.getFiscalYear(), data.getPeriod(), idi)
+        : () -> service.submitProduction(
+            AEAT303SubmissionService.ProductionSubmissionRequest.builder()
+                .org(org)
+                .fileContent(fileContent)
+                .fiscalYear(data.getFiscalYear())
+                .period(data.getPeriod())
+                .presenterNif(presenterNif)
+                .presenterName(presenterName)
+                .nrc(nrcToSubmit)
+                .language(idi)
+                .build());
     AEAT303SubmissionResult result;
     try {
-      if (testMode) {
-        result = service.submitValidation(fileContent, data.getFiscalYear(), data.getPeriod(), idi);
-      } else {
-        result = service.submitProduction(AEAT303SubmissionService.ProductionSubmissionRequest.builder()
-            .org(org)
-            .fileContent(fileContent)
-            .fiscalYear(data.getFiscalYear())
-            .period(data.getPeriod())
-            .presenterNif(presenterNif)
-            .presenterName(presenterName)
-            .nrc(nrcToSubmit)
-            .language(idi)
-            .build());
-      }
-    } catch (RuntimeException e) {
       // Any failure around the AEAT call is an attempt (e.g. AEAT303ResponseParseException, a
       // RuntimeException that is not an OBException): recorded, then handled as before.
-      owner.attemptLog().record(attempted,
-          FiscalAeatValidationOutcome.unanswered(MODEL_303, path, testMode, e), endpoint);
-      if (!(e instanceof OBException)) {
-        throw e;
-      }
+      result = FiscalAeatSubmissionSupport.callRecordingAttempt(owner.attemptLog, attempted,
+          path, testMode, endpoint, call);
+    } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
               NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
-
-    owner.attemptLog().record(attempted,
-        FiscalAeatValidationOutcome.answered(MODEL_303, path, result), endpoint);
 
     persistIncidentsBestEffort(decl, declId, result);
 
@@ -434,6 +407,44 @@ class Fiscal303SubmissionSupport {
     commitSubmissionBestEffort(declId);
 
     writeJson(response, HttpServletResponse.SC_OK, owner.buildSubmissionResultJson(result, data));
+  }
+
+  /** The content of a generated 303 file; fails when the report returned none. */
+  private static String fileContentOf(Map<String, Object> generated) {
+    Object fileObj = generated.get("file");
+    if (fileObj == null) {
+      throw new OBException("generateElectronicFile returned no file content");
+    }
+    return fileObj.toString();
+  }
+
+  /**
+   * Runs the validation that precedes a real presentation and, when it stops the presentation,
+   * answers the request: the validator's errors (stored as the declaration's AEAT incidents, a
+   * 200 marked {@code stage: validation}) or, only when the policy says so, the unavailable
+   * validator (502). Returns {@code true} when the presentation must not go ahead.
+   */
+  private boolean stoppedByValidation(AEAT303SubmissionService service,
+      FiscalAeatAttemptLog.Declaration attempted, FiscalAeatSubmissionSupport.FileToPresent file,
+      FiscalDecl decl, AEAT303DeclarationData data, HttpServletResponse response)
+      throws Exception {
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+        FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog, attempted,
+            file);
+    if (validation.proceed()) {
+      return false;
+    }
+    if (validation.rejected == null) {
+      writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
+          FiscalAeatSubmissionSupport.validationUnavailableJson());
+      return true;
+    }
+    persistIncidentsBestEffort(decl, attempted.declId(), validation.rejected);
+    commitSubmissionBestEffort(attempted.declId());
+    writeJson(response, HttpServletResponse.SC_OK,
+        FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
+            owner.declarationDataJson(data)));
+    return true;
   }
 
   /**

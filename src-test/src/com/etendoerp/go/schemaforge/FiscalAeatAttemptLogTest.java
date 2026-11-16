@@ -146,7 +146,7 @@ public class FiscalAeatAttemptLogTest {
         new String[] { "E0100803 - Razon social B12345678", "NIF no identificado" },
         new String[] { "A001 - Aviso informativo" });
 
-    log.record(DECLARATION, outcome, VALIDATION);
+    log.recordAttempt(DECLARATION, outcome, VALIDATION);
 
     verify(ps).setString(1, "client1");
     verify(ps).setString(2, "org1");
@@ -187,7 +187,7 @@ public class FiscalAeatAttemptLogTest {
       Connection connection = log.queued.get(log.queued.size() - 1);
       when(connection.getAutoCommit()).thenReturn(true);
 
-      log.record(DECLARATION, accepted((Path) c[0], (Boolean) c[1]), (String) c[2]);
+      log.recordAttempt(DECLARATION, accepted((Path) c[0], (Boolean) c[1]), (String) c[2]);
 
       String label = c[3].toString();
       verify(ps).setString(9, label);
@@ -211,7 +211,7 @@ public class FiscalAeatAttemptLogTest {
     FiscalAeatValidationOutcome outcome = FiscalAeatValidationOutcome.unanswered("390",
         Path.DIRECT_SUBMISSION, false, new OBException("x", new SocketTimeoutException()));
 
-    log.record(DECLARATION, outcome, null);
+    log.recordAttempt(DECLARATION, outcome, null);
 
     verify(ps).setString(9, "direct_submission");
     verify(ps).setString(10, "N");
@@ -351,7 +351,7 @@ public class FiscalAeatAttemptLogTest {
     FiscalAeatValidationOutcome outcome = answered(Path.MANUAL_VALIDATION, true, true,
         new String[0], new String[] { "A001 - Aviso" });
 
-    log.record(DECLARATION, outcome, VALIDATION);
+    log.recordAttempt(DECLARATION, outcome, VALIDATION);
 
     assertEquals(2, log.opened);
     verify(retry).setString(9, "manual_validation");
@@ -380,7 +380,7 @@ public class FiscalAeatAttemptLogTest {
     when(first.executeUpdate()).thenThrow(new SQLException("deadlock detected", "40P01"));
     queueConnection(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS);
 
-    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    log.recordAttempt(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
 
     assertEquals(1, log.opened);
     verify(log.queued.get(0)).rollback();
@@ -389,7 +389,7 @@ public class FiscalAeatAttemptLogTest {
     PreparedStatement noState = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
     log.queued.remove(1);
     when(noState.executeUpdate()).thenThrow(new SQLException("no state"));
-    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    log.recordAttempt(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
     assertEquals(2, log.opened);
   }
 
@@ -415,7 +415,7 @@ public class FiscalAeatAttemptLogTest {
     PreparedStatement retry = queueConnection(FiscalAeatAttemptLog.INSERT_SQL_NO_WARNINGS);
     when(retry.executeUpdate()).thenThrow(new SQLException("second"));
 
-    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    log.recordAttempt(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
 
     verify(first).executeUpdate();
     verify(retry).executeUpdate();
@@ -427,7 +427,7 @@ public class FiscalAeatAttemptLogTest {
   public void recordNeverThrowsWhenNoConnectionCanBeOpened() {
     log.openFailure = new IllegalStateException("no pool");
 
-    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    log.recordAttempt(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
 
     assertEquals(0, log.opened);
   }
@@ -437,7 +437,7 @@ public class FiscalAeatAttemptLogTest {
     PreparedStatement ps = queueConnection(FiscalAeatAttemptLog.INSERT_SQL);
     obContextMock.when(OBContext::getOBContext).thenReturn(null);
 
-    log.record(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
+    log.recordAttempt(DECLARATION, accepted(Path.DOWNLOAD, true), VALIDATION);
 
     assertEquals(0, log.opened);
     verify(ps, never()).executeUpdate();

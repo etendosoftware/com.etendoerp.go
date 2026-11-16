@@ -115,7 +115,7 @@ public class Fiscal390FileValidationSupportTest {
     declHandler = mock(FiscalDeclCrudHandler.class);
     doReturn(declHandler).when(handler).declHandler();
     attemptLog = mock(FiscalAeatAttemptLog.class);
-    doReturn(attemptLog).when(handler).attemptLog();
+    handler.attemptLog = attemptLog;
     doReturn(new Fiscal390SubmissionSupport(handler)).when(handler).submissionSupport();
     inputs = new LinkedHashMap<>();
     inputs.put("INGRESAR_01", "5");
@@ -215,7 +215,7 @@ public class Fiscal390FileValidationSupportTest {
         ArgumentCaptor.forClass(FiscalAeatAttemptLog.Declaration.class);
     ArgumentCaptor<FiscalAeatValidationOutcome> outcome =
         ArgumentCaptor.forClass(FiscalAeatValidationOutcome.class);
-    verify(attemptLog).record(declaration.capture(), outcome.capture(), eq(ENDPOINT));
+    verify(attemptLog).recordAttempt(declaration.capture(), outcome.capture(), eq(ENDPOINT));
     assertEquals(new FiscalAeatAttemptLog.Declaration("390", 2026, "0A", DECL_ID, "org1"),
         declaration.getValue());
     assertEquals(Path.DOWNLOAD, outcome.getValue().path());
