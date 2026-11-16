@@ -46,6 +46,8 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+
 /**
  * Asynchronous batch jobs (ETP-5677): submit a batch, get a {@code jobId} straight away, poll its
  * status, cancel it. The one implementation behind both channels — REST
@@ -474,7 +476,10 @@ public final class BatchJobService {
           outcome = BatchJobState.CANCELLED;
           break;
         }
-        results.put(runRow(r, ops, rows.get(r), runner));
+        JSONObject row = runRow(r, ops, rows.get(r), runner);
+        // ETP-6230: a period refusal of an async row never reaches the REST/MCP observers.
+        AccountingKpiTelemetry.observeBatchRow(row, owner.clientId());
+        results.put(row);
         if (!store.flush(jobId, results.length(), results.toString())) {
           return;
         }

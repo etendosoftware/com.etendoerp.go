@@ -43,6 +43,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.BatchJobService.JobException;
 import com.etendoerp.go.schemaforge.BatchJobService.Owner;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 
 /**
  * @covers com.etendoerp.go.schemaforge.BatchJobService
@@ -303,6 +304,35 @@ public class BatchJobServiceTest {
     assertEquals("p1", failed.getJSONArray("ids").getString(0));
     assertTrue(rowResults.getJSONObject(2).getBoolean("committed"));
     assertTrue(job.getString("hint").contains("committed:false"));
+  }
+
+  /** ETP-6230: every worker row is handed to the KPI observer with the job owner's tenant. */
+  @Test
+  public void everyWorkerRowIsHandedToTheRefusalObserverWithTheOwnersClient() throws Exception {
+    BatchJobService.RowRunner runner = rowOps -> {
+      String id = rowOps.getJSONObject(0).getString("id");
+      if ("p0".equals(id)) {
+        return committing(new ArrayList<>()).run(rowOps);
+      }
+      return rejected(id).put("error", new JSONObject().put("status", 409)
+          .put("messageKeys", new JSONArray().put("PeriodNotAvailable")));
+    };
+    String id = submit(ALICE, rows(2), runner);
+
+    try (MockedStatic<AccountingKpiTelemetry> kpi = Mockito.mockStatic(AccountingKpiTelemetry.class)) {
+      executor.runAll();
+
+      org.mockito.ArgumentCaptor<JSONObject> rowCaptor =
+          org.mockito.ArgumentCaptor.forClass(JSONObject.class);
+      kpi.verify(() -> AccountingKpiTelemetry.observeBatchRow(rowCaptor.capture(),
+          Mockito.eq("C1")), Mockito.times(2));
+      assertTrue(rowCaptor.getAllValues().get(0).getBoolean("committed"));
+      JSONObject refused = rowCaptor.getAllValues().get(1);
+      assertFalse(refused.getBoolean("committed"));
+      assertEquals("PeriodNotAvailable",
+          refused.getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    }
+    assertEquals(2, status(ALICE, id).getJSONArray("rows").length());
   }
 
   @Test
