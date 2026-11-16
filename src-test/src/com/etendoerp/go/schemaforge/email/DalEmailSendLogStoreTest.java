@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -40,6 +41,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -69,6 +71,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * package-private constructor — and deliberately asserts the OPPOSITE privacy property: where the
  * anti-abuse ledger must never persist a raw address, this table must persist recipients, subject
  * and the operator's own message in clear, or the history panel has nothing to show.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.email.DalEmailSendLogStore
  */
 public class DalEmailSendLogStoreTest {
 
@@ -314,6 +318,60 @@ public class DalEmailSendLogStoreTest {
     } catch (NullPointerException error) {
       assertEquals("Email send log record supplier cannot be null", error.getMessage());
     }
+  }
+
+  // ── ETP-6209: the row id and System-context sends ───────────────────────────
+
+  @Test
+  public void recordSendReturningIdAnswersTheIdTheSavedRowWasGiven() throws Exception {
+    doAnswer(invocation -> {
+      ((BaseOBObject) invocation.getArgument(0)).set("id", "LOG-1");
+      return null;
+    }).when(obDal).save(any());
+
+    assertEquals(Optional.of("LOG-1"), new DalEmailSendLogStore(MapRecord::new)
+        .recordSendReturningId(fullHistoryRecord(TransactionalEmailService.STATUS_SENT, null)));
+  }
+
+  @Test
+  public void recordSendReturningIdIsEmptyWhenTheRowGotNoId() throws Exception {
+    assertEquals(Optional.empty(), new DalEmailSendLogStore(MapRecord::new)
+        .recordSendReturningId(fullHistoryRecord(TransactionalEmailService.STATUS_SENT, null)));
+  }
+
+  @Test
+  public void aSystemContextSendIsFiledUnderTheCommandsTenantAtOrganizationStar()
+      throws Exception {
+    // The portal link renewal runs as System; its row must land where the document's window,
+    // and so the tenant, can read it.
+    when(currentClient.getId()).thenReturn("0");
+    Client tenant = mock(Client.class);
+    Organization star = mock(Organization.class);
+    when(obDal.get(Client.class, "tenant-1")).thenReturn(tenant);
+    when(obDal.get(Organization.class, "0")).thenReturn(star);
+
+    new DalEmailSendLogStore(MapRecord::new).recordSend(
+        fullHistoryRecord(TransactionalEmailService.STATUS_SENT, null));
+
+    BaseOBObject saved = savedRecord();
+    assertSame(tenant, saved.get("client"));
+    assertSame(star, saved.get("organization"));
+  }
+
+  @Test
+  public void aSystemContextSendWithoutATenantStaysUnderTheSession() throws Exception {
+    when(currentClient.getId()).thenReturn("0");
+    JSONObject commandBody = new JSONObject();
+    commandBody.put(EmailContractCommandSupport.FIELD_RECORD_ID, RECORD_ID);
+
+    new DalEmailSendLogStore(MapRecord::new).recordSend(
+        historyRecord(EmailRecipientSet.singleTo(CUSTOMER_ADDRESS), new JSONObject(),
+            commandBody, TransactionalEmailService.STATUS_SENT, null, SPEC_NAME));
+
+    BaseOBObject saved = savedRecord();
+    assertSame(currentClient, saved.get("client"));
+    assertSame(currentOrganization, saved.get("organization"));
+    verify(obDal, never()).get(eq(Client.class), anyString());
   }
 
   private BaseOBObject savedRecord() {

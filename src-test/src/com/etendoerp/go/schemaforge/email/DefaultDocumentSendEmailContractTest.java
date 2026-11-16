@@ -21,12 +21,19 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
@@ -38,12 +45,18 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.portal.PortalDocumentKind;
+import com.etendoerp.go.portal.PortalLinkService;
+
 /**
  * Unit tests for {@link DefaultDocumentSendEmailContract#resolve}, covering ETP-4717's reopened
  * regression: "si se agrega un mensaje se pierde el link del adjunto" — an operator-authored
  * message must not drop the document download link from the rendered body. Exercised through the
  * public {@link DefaultDocumentSendEmailContract#resolve} entry point since {@code resolveBody}/
- * {@code buildTemplateData} are private.
+ * {@code buildTemplateData} are private. Also covers the customer portal link that a contract
+ * declaring a {@code portalDocumentKind()} mints pending and confirms on delivery (ETP-6209).
+ *
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
  */
 public class DefaultDocumentSendEmailContractTest {
 
@@ -457,5 +470,99 @@ public class DefaultDocumentSendEmailContractTest {
       assertFalse(body.contains("Puedes responder a este correo"));
       assertTrue(body.contains("Equipo de Etendo"));
     }
+  }
+
+  // ── ETP-6209: the customer portal link ──────────────────────────────────────
+
+  @Test
+  public void aPortalContractMintsOnePendingLinkAndMakesItTheEmailsButton() throws Exception {
+    PortalLinkService portalLinks = mock(PortalLinkService.class);
+    PortalLinkService.MintedLink minted = mock(PortalLinkService.MintedLink.class);
+    when(minted.getId()).thenReturn("LINK-1");
+    when(minted.getUrl()).thenReturn("https://app.example.test/portal/tok");
+    when(minted.getValidity()).thenReturn(Duration.ofHours(48));
+    when(portalLinks.mintForSend(any(), any(), any(), any(), any(), any()))
+        .thenReturn(Optional.of(minted));
+    List<String> to = Arrays.asList(RECIPIENT_EMAIL, "billing@example.com");
+    List<String> cc = Collections.singletonList("boss@example.com");
+
+    EmailContractResolution resolution = portalContract(portalLinks).resolve(
+        new EmailContractCommand(CONTRACT_NAME,
+            new JSONObject().put("recordId", RECORD_ID).put("language", "es_ES")),
+        EmailRecipientResolution.serverResolved(EmailRecipientSet.of(to, cc)));
+
+    verify(portalLinks).mintForSend(PortalDocumentKind.INVOICE, RECORD_ID, to, cc, "es_ES",
+        CONTRACT_NAME);
+    EmailProviderRequest request = resolution.getProviderRequest();
+    assertEquals("the send carries the link id onDelivered confirms", "LINK-1",
+        request.getSendCorrelationId());
+    String body = request.getData().getString("body");
+    // The portal link is the email's one button, and it replaces the download one.
+    assertTrue(body, body.contains("https://app.example.test/portal/tok"));
+    assertTrue(body, body.contains("Ver documento en el portal"));
+    assertFalse("no download button next to the portal one: " + body,
+        body.contains("Descargar documento"));
+    assertFalse("the download link is not offered: " + body, body.contains(DOWNLOAD_LINK));
+    // The intro is a plain sentence; the only link is the button.
+    assertTrue(body, body.contains("<strong>portal de cliente</strong>. El enlace es válido"
+        + " durante 48 horas."));
+    // The layout's "copy this link" fallback under the button is a link too; the intro is not.
+    int intro = body.indexOf("<strong>portal de cliente</strong>");
+    String introParagraph = body.substring(body.lastIndexOf("<p", intro),
+        body.indexOf("</p>", intro));
+    assertFalse("no inline anchor in the intro: " + introParagraph,
+        introParagraph.contains("<a "));
+    // Pending until the email is delivered.
+    verify(portalLinks, never()).confirm(any(), any(), anyInt());
+  }
+
+  @Test
+  public void onDeliveredConfirmsOnlyTheLinkOfAPortalContractsOwnSend() {
+    EmailRecipientSet recipients = EmailRecipientSet.of(
+        Arrays.asList(RECIPIENT_EMAIL, "billing@example.com"),
+        Collections.singletonList("boss@example.com"));
+
+    PortalLinkService portalLinks = mock(PortalLinkService.class);
+    portalContract(portalLinks).onDelivered(deliveredSend(recipients, "LINK-1"), "LOG-1");
+    verify(portalLinks).confirm("LINK-1", "LOG-1", 3);
+
+    // A send that carried no link has nothing to confirm.
+    PortalLinkService noLink = mock(PortalLinkService.class);
+    portalContract(noLink).onDelivered(deliveredSend(recipients, null), "LOG-2");
+    verifyNoInteractions(noLink);
+
+    // A contract that declares no portal kind never confirms anything.
+    PortalLinkService undeclared = mock(PortalLinkService.class);
+    new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", recordId -> Optional.empty()) {
+      @Override
+      protected PortalLinkService portalLinkService() {
+        return undeclared;
+      }
+    }.onDelivered(deliveredSend(recipients, "LINK-3"), "LOG-3");
+    verifyNoInteractions(undeclared);
+  }
+
+  private static DefaultDocumentSendEmailContract portalContract(PortalLinkService portalLinks) {
+    EmailDocumentRecordResolver resolver = recordId -> Optional.of(
+        new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
+            DOWNLOAD_LINK, "client-1"));
+    return new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", resolver) {
+      @Override
+      protected Optional<PortalDocumentKind> portalDocumentKind() {
+        return Optional.of(PortalDocumentKind.INVOICE);
+      }
+
+      @Override
+      protected PortalLinkService portalLinkService() {
+        return portalLinks;
+      }
+    };
+  }
+
+  private static EmailSendContext deliveredSend(EmailRecipientSet recipients, String linkId) {
+    EmailProviderRequest request = new EmailProviderRequest(recipients, "custom",
+        new JSONObject(), null).withSendCorrelationId(linkId);
+    return new EmailSendContext(new EmailContractCommand(CONTRACT_NAME, new JSONObject()),
+        EmailRecipientResolution.serverResolved(recipients), request);
   }
 }
