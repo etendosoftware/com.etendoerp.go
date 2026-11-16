@@ -79,6 +79,20 @@ class RuleTest(unittest.TestCase):
                       {'COVERAGE_TOLERANCE': '6', 'COVERAGE_MINIMUM': '50'})
         self.assertEqual(code, 0)
 
+    def test_an_80_minimum_from_the_environment_fails_a_coverage_the_default_would_pass(self):
+        code, out = run(['--base-branch', 'develop', '--pull-request', '12'],
+                        FakeSonar({'pr:12': 75.0, 'branch:develop': 75.0}),
+                        {'COVERAGE_MINIMUM': '80', 'COVERAGE_TOLERANCE': '1'})
+        self.assertEqual(code, 1)
+        self.assertIn('COVERAGE BELOW MINIMUM: 75.00% < 80.00%', out)
+
+    def test_unset_organization_variables_arrive_empty_and_keep_the_defaults(self):
+        code, out = run(['--base-branch', 'develop', '--pull-request', '12'],
+                        FakeSonar({'pr:12': 75.0, 'branch:develop': 75.0}),
+                        {'COVERAGE_MINIMUM': '', 'COVERAGE_TOLERANCE': ''})
+        self.assertEqual(code, 0)
+        self.assertIn('Rule: at least 70.00%, and no more than 1.00pp below the base.', out)
+
     def test_without_a_selector_reads_the_project_main_branch_as_run_sonar_did(self):
         sonar = FakeSonar({'main': 80.0, 'branch:develop': 80.0})
         run(['--base-branch', 'develop'], sonar)
