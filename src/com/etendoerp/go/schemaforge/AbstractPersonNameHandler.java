@@ -143,9 +143,10 @@ public abstract class AbstractPersonNameHandler implements NeoHandler {
   }
 
   /**
-   * Concatenates the non-blank parts separated by a single space.
+   * Concatenates the non-blank parts separated by a single space. Package-visible so a subclass's
+   * own rules can derive the same value without a second implementation.
    */
-  private static String buildFullName(String firstname, String lastname) {
+  static String buildFullName(String firstname, String lastname) {
     String combined = (firstname + " " + lastname).trim();
     return combined.replaceAll("\\s{2,}", " ");
   }

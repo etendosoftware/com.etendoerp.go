@@ -9059,6 +9059,55 @@ after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_so
 `change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
 `account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
+**Contact identity: person or company.** Since ETP-6175, `contacts/businessPartner` writes are
+judged by `ContactIdentityRules` (an entity util called only from `BusinessPartnerHandler.handle()`, after the
+tax-id and format checks and before the contact-type rules), so the rule is the same on REST single,
+REST batch and MCP. Not behind a flag. Blank (`""`, JSON `null`, whitespace) counts as absent
+everywhere: the Contacts form clears the other type's fields with `""` when the type toggles, and
+sends `etgoIsperson` in the same request as the name fields.
+
+| Type (`etgoIsperson`) | Required | Refused when non-blank | `name` |
+|---|---|---|---|
+| person (`Y` / `true`) | `etgoFirstname` and `etgoLastname` (`MISSING_REQUIRED_FIELDS`, `fields` lists the missing ones, `messageKeys:["ETGO_BPartnerPersonNamesRequired"]`) | `name` (`FIELD_NOT_ALLOWED`, `field:"name"`, `ETGO_BPartnerPersonNameNotAllowed`) — unless it equals the derivation of first + last, which is redundant, not a conflict (the contacts CSV import sends it, and so does the MCP create pre-pass) | always written as `first + " " + last` |
+| company (`N` / `false`, and an omitted type on create: the AD default) | `name` (`MISSING_REQUIRED_FIELDS`, `ETGO_BPartnerCompanyNameRequired`) | `etgoFirstname`, `etgoLastname` (`FIELD_NOT_ALLOWED`, `field` names it, `ETGO_BPartnerCompanyPersonNamesNotAllowed`, whose text tells the caller to send `etgoIsperson=true` — `is_person: true` in the public API — to create a person) | as sent; on an update, stored first/last names the body omits are cleared |
+
+On **create** every rule applies. On **update** (PATCH/PUT) nothing is judged unless the body carries
+`etgoIsperson`, `name`, `etgoFirstname` or `etgoLastname`; when it does, the persisted row supplies
+every key the body omits, and a requirement is enforced only for what the request touches — the part
+it sends, or every part of the target type when it switches the type. A legacy person with a null last
+name can still have its first name corrected, and an unrelated PATCH never trips on it. A person whose
+two parts are both empty keeps its stored name (the blank `name` the form may send is dropped). Both
+refusals carry `error.fields` (the shape the SPA already reads to mark fields) and `error.messageKeys`;
+the text is in the request language (`NeoMessageText`, catalog `neo_hints_<lang>.properties`).
+
+The type is never guessed: a **create that sends `etgoFirstname`/`etgoLastname` without
+`etgoIsperson` is a company and is refused** with `FIELD_NOT_ALLOWED` (strict, decided for ETP-6175).
+Because a caller cannot fix that from the field name alone, the message itself is the instruction
+(first and last name are for a person; send `etgoIsperson=true` with both names). That text is what
+reaches an agent on every MCP path: `etendo_create`/`etendo_update` return the pre-hook's response
+through `McpHookExecutor.servedRecordResult` → `neoResponseToMcpResult` →
+`McpToolRouterSupport.toMcpHandlerError`, which
+flattens `error.message` into `detail` and lifts `code`, `field`, `fields` and `messageKeys` to the top
+level (`error` becomes `validation_error`); `etendo_batch` reports the failing operation's
+`error.message` (`McpSupportInternals.extractDalMessage`), and lifts `MISSING_REQUIRED_FIELDS` into
+`missingFields` (`extractMissingFields`). No separate `hint` key is added: the batch path forwards
+only the message, so a hint would not reach the agent there. The MCP
+create pre-pass (`resolveServerCreateFields`) derives `name` only for a person body, so a company
+without `name` is reported by the mandatory pre-check, not given a name made of a first/last pair. A
+company update clears first/last names still stored for any part the body omits (writes `""`), so
+an API caller that only sends `etgoIsperson:false` gets the same row as the app, which sends `""`
+itself; it also cleans a company left with parts by an earlier switch, once the request touches an
+identity key.
+`ContactNameSyncHandler` (DAL observer, updates only) still rebuilds `name` when a person's first or
+last name changes, so a Classic edit stays consistent; on NEO writes it recomputes the value the pre-hook
+already wrote.
+
+**Tax id on create.** Before ETP-6175, `BusinessPartnerHandler.validateTaxId` dispatched on the
+request's `oBTIKTaxIDKey` only; a create that omitted it skipped the check, because the AD default
+(`'1'`, NIF) is injected by the mandatory-defaults pass after the pre-hook — so an invalid NIF was
+stored through the API. A create without a key is now validated as NIF,
+on every channel. Updates are unchanged (body key, else the persisted one).
+
 **KPI telemetry (ETP-5908), goods shipment.** `GoodsShipmentHeaderHandler` emits
 `backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
 after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
