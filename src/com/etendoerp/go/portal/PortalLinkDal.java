@@ -225,12 +225,25 @@ final class PortalLinkDal {
    * whose email did not leave, see {@link #deactivatePendingRenewalsOf}) do not count.
    */
   static int countRenewalsOf(String parentLinkId, Date since) {
+    return countChildrenOf(parentLinkId, PortalLink.ORIGIN_RENEWAL, since);
+  }
+
+  /**
+   * Counts the links of one origin a link produced since an instant, by creation, pending rows
+   * included and inactive rows not (see {@link #countRenewalsOf}).
+   *
+   * @param parentLinkId the link they were minted from
+   * @param origin their {@code LINK_ORIGIN}
+   * @param since the start of the window
+   * @return how many
+   */
+  static int countChildrenOf(String parentLinkId, String origin, Date since) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY,
         AS_L_WHERE + PROP_PARENT_LINK + " = :parentLinkId"
             + " and l." + PROP_LINK_ORIGIN + " = :origin"
             + " and l." + PROP_CREATION_DATE + " >= :since");
     query.setNamedParameter("parentLinkId", parentLinkId);
-    query.setNamedParameter(PARAM_ORIGIN, PortalLink.ORIGIN_RENEWAL);
+    query.setNamedParameter(PARAM_ORIGIN, origin);
     query.setNamedParameter("since", since);
     disableTenantFilters(query);
     return query.count();

@@ -38,6 +38,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.Query;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
@@ -398,8 +399,9 @@ final class PortalDocumentsEndpoint {
         : Collections.emptyMap();
     JSONObject body = row(document, schedules);
     body.put(DESCRIPTION, text(document.get(DESCRIPTION)));
-    body.put("paymentMethod", nameOf(document.get("paymentMethod")));
-    body.put("paymentTerms", nameOf(document.get("paymentTerms")));
+    // A shipment has no payment method or terms: reading a property its entity lacks throws.
+    body.put("paymentMethod", nameOf(optionalProperty(document, "paymentMethod")));
+    body.put("paymentTerms", nameOf(optionalProperty(document, "paymentTerms")));
     if (document instanceof Order) {
       body.put("scheduledDeliveryDate", formatDate(((Order) document).getScheduledDeliveryDate()));
     }
@@ -431,6 +433,19 @@ final class PortalDocumentsEndpoint {
       body.put("decision", decisionOf(session, (Order) document));
     }
     return body;
+  }
+
+  /**
+   * A property of the document, or {@code null} when its entity does not have it (an order and an
+   * invoice carry payment data, a shipment does not). {@code BaseOBObject#get} throws on an unknown
+   * property instead of answering {@code null}.
+   */
+  private static Object optionalProperty(BaseOBObject document, String property) {
+    Entity entity = document.getEntity();
+    if (entity != null && !entity.hasProperty(property)) {
+      return null;
+    }
+    return document.get(property);
   }
 
   /**
