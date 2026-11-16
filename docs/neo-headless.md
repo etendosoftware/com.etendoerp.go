@@ -2406,8 +2406,11 @@ writer wins, so a concurrent confirm (ETP-6051, which must claim the row with it
 `ADJUSTED`, the invoice link, the attachment and the extraction alone. The worker (ETP-6048) writes
 only `WHERE status = 'PROCESSING'`, so it can not race a discard. The texts are the English defaults
 of `InvoiceInboxMessages` (no `AD_MESSAGE` rows: the SPA translates by `error.code`). **Hidden from
-MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 405 `actionHidden`
-("its customization keeps it for people only"); declared in §4.12.9.
+MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers HTTP 405 with
+`error: method_not_allowed` (`McpConstants.ERROR_METHOD_NOT_ALLOWED`; built by
+`McpRoutingException.actionHidden`, which is the factory's name, not a wire code) and the message
+"Action 'discard' of 'header' (invoice-inbox) is not available through MCP: its customization keeps it
+for people only. Nothing was run."; declared in §4.12.9.
 
 **Review (ETP-6050).** `GET /sws/neo/invoice-inbox/header/{id}/action/review` answers everything the
 review panel needs to open one document in a single call. Served by `InvoiceInboxHeaderHandler`
@@ -6737,7 +6740,8 @@ paragraphs above now holds for the onboarding endpoint too, not only for the 3 e
 (ETP-6049, ETP-6050).** The action
 `POST /sws/neo/invoice-inbox/header/{id}/action/discard` works from the SPA and plain REST, and is
 hidden from MCP (`InvoiceInboxHeaderHandler.agentExcludedActions()` = `discard`: `etendo_action`
-answers 405 `actionHidden`). It is irreversible and ships for people first; it will be declared with
+answers HTTP 405 `method_not_allowed`, "its customization keeps it for people only. Nothing was run.",
+raised by `McpRoutingException.actionHidden`). It is irreversible and ships for people first; it will be declared with
 an `actionContract` next to the confirm action (ETP-6051) so agents get both at once. Exposing it
 earlier is removing that one override. `GET .../action/review` (ETP-6050) is hidden the same way
 (`agentExcludedActions()` = `discard`, `review`, `apply`, `mark-reviewed`): `review` is the review
