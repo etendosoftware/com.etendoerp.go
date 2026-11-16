@@ -27,8 +27,9 @@ since ETP-6081, and mails the same one-time login link in its welcome, right aft
   one site for every target). Unset, they are not a link. The variable is baked at build time:
   changing it takes a new SPA build.
 
-Code: `com.etendoerp.go.signup` (`SignupApiServlet`, `SignupRequest`, `SignupOptions`,
-`SignupApiKeys`) on top of `com.etendoerp.go.rest.SignupAccountService` (account lifecycle,
+Code: `com.etendoerp.go.signup` (`SignupApiServlet`, `SignupRequest`, `SignupAdminRequests`,
+`SignupOptions`, `SignupApiKeys`), `com.etendoerp.go.accounts` (`DemoExpiryService`,
+`AccountGroupService`, ETP-6223) and `com.etendoerp.go.payment.AccountDemoExpiry` on top of `com.etendoerp.go.rest.SignupAccountService` (account lifecycle,
 background worker, login link) and `AccountRegistrationService` (rules shared with `/register`).
 The login link is consumed by `POST /sws/go/session/link` in `EtendoGoJwtServlet`, and the app
 page that receives it is the `login-link` step of `@etendosoftware/etendo-go-core`'s onboarding.
@@ -138,11 +139,111 @@ Unknown fields are ignored. `202 Accepted`:
 ## `GET /accounts/{id}`
 
 ```json
-{ "accountId": "…", "email": "ana@empresa.es", "status": "ready" }
+{ "accountId": "…", "email": "ana@empresa.es", "status": "ready",
+  "demoExpiresAt": "2026-12-01", "groups": ["beta"] }
 ```
 
 `status` is `provisioning`, `ready` or `failed`; a failed one also carries `error` (the reason, in
 English). Only accounts created through this API are visible: any other id is `404`.
+
+Since ETP-6223, two more fields, always present (callers that ignore unknown fields are not
+affected):
+
+- `demoExpiresAt` — the day the account's demo expires (`YYYY-MM-DD`, see
+  [Demo expiry](#patch-accountsid-demo-expiry)): the edited date, or the end of the standard trial.
+  `null` until the environment is `ready`, and for an environment that is no longer a running demo.
+- `groups` — the keys of the [groups](#groups) the account belongs to; `[]` for none.
+
+## `PATCH /accounts/{id}`: demo expiry
+
+Moves the day the account's demo expires (ETP-6223). Unlike the calls above it reaches **any**
+account, also one registered in the app: its main use is on accounts that already exist.
+
+```json
+{ "demoExpiresAt": "2026-12-01" }
+```
+
+- `demoExpiresAt` is a calendar date, `YYYY-MM-DD`. The trial ends at the **start of that day, in
+  UTC** (`2026-12-01T00:00:00Z`). A date in the past ends the demo now.
+- `null` clears the edited date: the demo goes back to its standard trial
+  (`etendo.go.demo.trial.days`, 14 by default, from its start).
+- It applies to every demo the account owns (environments whose owner user is the account). An
+  account with none — not created yet, or already replaced by a productive environment — is
+  `409 ACCOUNT_HAS_NO_DEMO`.
+- The access check, the trial bar (`GET /sws/go/environments`), the trial reminders and the expiry
+  notice (`DemoTrialNotice*`), and HubSpot all read the new date. A trial whose end was edited is
+  de-duplicated on its end too, so moving the date re-arms its reminders.
+- A demo frozen with `ETGO_DemoTrialFrozenDays` stays frozen: the freeze wins over the date.
+
+Answers `200` with the day the demo now expires, read back as the access check reads it:
+
+```json
+{ "accountId": "…", "demoExpiresAt": "2026-12-01" }
+```
+
+The date is `ETGO_ACCOUNT.DEMO_EXPIRES_AT`, editable in Classic in the **Etendo GO Accounts**
+window (*Demo Expires At*); both see the same value. Classic applies the same rule as the API
+(`AccountDemoExpiryHandler`): setting a date on an account that owns no running demo is refused
+with *This account has no running demo…*. Clearing the date is always allowed there, so a date left
+on an account whose demo became productive can be removed. That window only edits accounts: it
+does not create or delete them (tab pattern *Edit Only*).
+
+## Groups
+
+Groups of accounts, starting with **Beta** (key `beta`, shipped with the module). A group is only
+a label: it enables no feature and changes no limit. Like `PATCH /accounts/{id}`, membership
+reaches any account. Classic manages the same rows in the **Account Groups** window (a *Group* tab
+with an *Accounts* child tab) and shows each account's groups in **Etendo GO Accounts** →
+*Groups*.
+
+A group key has lowercase letters, digits, `-` and `_`, starts with a letter or a digit, and is at
+most 60 characters. It never changes: it is what callers (and, later, Datadog) refer to.
+
+Classic enforces the same rules on the group's *Search Key* (`AccountGroupKeyHandler`, one rule in
+`AccountGroupService.isValidKey`): an invalid key is refused, the key of an existing group cannot be
+edited, and a group shipped with a module (`AD_MODULE_ID` set, such as `beta`) cannot be deleted —
+deactivate it instead.
+
+### `POST /groups`
+
+```json
+{ "key": "beta", "name": "Beta", "description": "Beta users" }
+```
+
+`key` and `name` (≤ 120) are required, `description` (≤ 255) is optional. `201`:
+
+```json
+{ "key": "beta", "name": "Beta", "description": "Beta users", "active": true }
+```
+
+A key in use is `409 GROUP_ALREADY_EXISTS`.
+
+### `GET /groups`
+
+Every group, active or not, by key: `200 { "groups": [ { "key", "name", "description", "active" } ] }`.
+
+### `GET /groups/{key}/accounts`
+
+The members, by email:
+
+```json
+{ "key": "beta", "accounts": [
+  { "accountId": "…", "email": "ana@empresa.es", "name": "Ana García", "addedAt": "2026-11-12T09:30:00Z" }
+] }
+```
+
+### `PUT /groups/{key}/accounts/{accountId}` and `DELETE …`
+
+Add an account to the group, or take it out. Both are idempotent and answer `200`:
+
+```json
+{ "key": "beta", "accountId": "…", "member": true, "changed": false }
+```
+
+`changed` tells whether the call did something (`false`: it already was, or already was not, a
+member). An unknown group is `404 GROUP_NOT_FOUND`, an unknown or inactive account
+`404 ACCOUNT_NOT_FOUND`. A membership deactivated in Classic counts as none, and `PUT` reactivates
+it.
 
 ## `POST /accounts/{id}/login-link`
 
@@ -188,14 +289,19 @@ are the contract: never rename one.
 | 400 | `INVALID_TAX_ID_CHECK_DIGIT` | `taxId` | check digit mismatch |
 | 400 | `INVALID_HUBSPOT_DEAL_ID` | `hubspotDealId` | not the id of a HubSpot deal (digits only, ≤ 30) |
 | 400 | `RESERVED_COMPANY_NAME` | `companyName` | the name of a client still being provisioned |
+| 400 | `INVALID_DATE` | `demoExpiresAt` | not a `YYYY-MM-DD` calendar date |
+| 400 | `INVALID_GROUP_KEY` | `key` | not a valid group key |
 | 401 | `INVALID_API_KEY` | — | missing or unknown `X-Api-Key` |
-| 404 | `ACCOUNT_NOT_FOUND` | — | no account created through this API has that id |
+| 404 | `ACCOUNT_NOT_FOUND` | — | no account created through this API has that id (`PATCH` and group membership: no active account has it) |
+| 404 | `GROUP_NOT_FOUND` | — | no group has that key |
 | 404 | `NOT_FOUND` | — | unknown path |
 | 405 | `METHOD_NOT_ALLOWED` | — | wrong method for the path |
 | 409 | `EMAIL_ALREADY_REGISTERED` | `email` | the address already has an account |
 | 409 | `EMAIL_PENDING_VERIFICATION` | `email` | the address has an app account still waiting for its confirmation |
 | 409 | `ENVIRONMENT_NOT_READY` | — | login link before the environment is ready |
 | 409 | `RETRY_NOT_ALLOWED` | — | retry of a creation that did not fail |
+| 409 | `ACCOUNT_HAS_NO_DEMO` | — | demo expiry of an account that owns no running demo |
+| 409 | `GROUP_ALREADY_EXISTS` | `key` | a group with that key exists |
 | 503 | `LOGIN_LINK_UNAVAILABLE` | — | the server has no `etendo.go.app.baseUrl` |
 | 500 | `SIGNUP_SERVER_ERROR` | — | anything else; retry later |
 
@@ -228,6 +334,11 @@ The columns on `ETGO_ACCOUNT` (ETP-5847):
 | `SIGNUP_SEND_EMAILS` | whether the ready mail goes out by itself |
 | `SIGNUP_SOURCE` | the caller's `source` JSON |
 | `TERMS_ACCEPTED_AT` | when the terms were accepted |
+| `DEMO_EXPIRES_AT` | ETP-6223: the day the account's demos expire; empty = standard trial |
+
+Groups (ETP-6223): `ETGO_GROUP` (`VALUE` = the key, unique; `NAME`; `DESCRIPTION`; `ISACTIVE`;
+`AD_MODULE_ID` set only on the groups the module ships, such as Beta) and `ETGO_ACCOUNT_GROUP`
+(one row per account and group, unique per pair, deleted with either side).
 
 The company data travels as the account's `ONBOARDING_DRAFT` until the environment exists, so a
 retry finds it. The onboarding clears the draft on success.

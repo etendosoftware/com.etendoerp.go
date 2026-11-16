@@ -88,6 +88,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code ImportOrderLinesIntoInOutHandlerTest} is about another delegate and another source).
  *
  * @covers com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DirectLinkPending
  */
 public class ImportInvoiceLinesIntoInOutHandlerTest {
 
@@ -120,6 +122,11 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     String lastCurrency;
     Boolean lastSales;
     Boolean holdingsSales;
+    /** What the invoice's follow-up ({@code InvoicePendingResolver}) leaves on each line. */
+    final Map<String, BigDecimal> followUp = new java.util.HashMap<>();
+    Boolean followUpSales;
+    /** The invoice ids of each follow-up read, one entry per call. */
+    final List<List<String>> followUpCalls = new ArrayList<>();
 
     @Override
     protected void enterAdminMode() {
@@ -173,6 +180,21 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
         }
       }
       return held;
+    }
+
+    /** Every asked invoice carries the {@link #followUp} lines (only its own are ever read). */
+    @Override
+    protected Map<String, PendingResolver.Source> loadFollowUpSources(
+        Collection<String> invoiceIds, boolean sales) {
+      followUpSales = sales;
+      followUpCalls.add(new ArrayList<>(invoiceIds));
+      List<PendingResolver.SourceLine> lines = new ArrayList<>();
+      followUp.forEach((lineId, qty) -> lines.add(new PendingResolver.SourceLine(lineId, qty)));
+      Map<String, PendingResolver.Source> sources = new java.util.HashMap<>();
+      for (String id : invoiceIds) {
+        sources.put(id, PendingResolver.Source.available(id, lines));
+      }
+      return sources;
     }
   }
 
@@ -261,50 +283,58 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   // ── pending per line, by direction ────────────────────────────────────────
 
   /**
-   * Goods shipment: a line with an order line pends invoiced - delivered - every draft (the
-   * target's own included), never below 0; one without pends its quantity, 0 once linked. The
-   * draft note names only the OTHER drafts. The total-discount and inactive lines are never listed.
+   * Goods shipment (ETP-6002 CP-22, review M2): a line pends exactly what the invoice's own
+   * «Create shipment» follow-up leaves on it ({@code loadFollowUpSources}, i.e.
+   * {@code InvoicePendingResolver}), never the order-line rule: CP-22's quotation line delivered 0
+   * of 5 but already shipped through the invoice-line link pends 0 here because the follow-up
+   * says so, where the old rule offered 5 again. A listed line the follow-up does not carry is at
+   * 0. The draft note still names the OTHER drafts holding the order line; the total-discount and
+   * inactive lines are never listed.
    */
   @Test
-  public void availableInvoiceLines_shipment_deductsDeliveredAndEveryDraft() throws Exception {
+  public void availableInvoiceLines_shipment_pendsAsTheInvoiceFollowUp() throws Exception {
     Probe probe = probe(true);
-    OrderLine sold = orderLine("olA", 10, product("p1", "Agua", true), "10", "3", "8");
-    OrderLine full = orderLine("olB", 20, product("p2", "Pan", true), "5", "5", "5");
-    InvoiceLine withOrder = line("il1", 10, sold.getProduct(), "8", sold, false);
-    InvoiceLine plain = line("il2", 20, product("p3", "Sal", false), "4", null, false);
-    InvoiceLine linkedPlain = line("il3", 30, product("p4", "Té", false), "2", null, true);
-    InvoiceLine overHeld = line("il4", 40, full.getProduct(), "5", full, false);
+    OrderLine quotation = orderLine("q1", 10, product("p1", "Agua", true), "5", "0", "5");
+    OrderLine drafted = orderLine("o2", 20, product("p2", "Pan", true), "5", "0", "5");
     InvoiceLine discount = line("il0", 5, discountProduct(), "-1", null, false);
-    InvoiceLine inactive = line("il9", 50, product("p9", "Viejo", false), "7", null, false);
+    InvoiceLine inactive = line("il9", 90, product("p9", "Viejo", false), "7", null, false);
     when(inactive.isActive()).thenReturn(false);
-    invoice(probe, "inv1", true, overHeld, plain, discount, withOrder, inactive, linkedPlain);
-    probe.holdings.add(new DraftHolding("olA", "other", "DS-2", bd("2")));
-    probe.holdings.add(new DraftHolding("olA", "t1", "DS-1", bd("1")));
-    probe.holdings.add(new DraftHolding("olB", "third", "DS-3", bd("1")));
+    invoice(probe, "inv1", true, discount, inactive,
+        line("il1", 10, quotation.getProduct(), "5", quotation, true),
+        line("il2", 20, drafted.getProduct(), "5", drafted, true),
+        line("il3", 30, product("p3", "Sal", false), "4", null, false));
+    probe.followUp.put("il2", bd("1"));
+    probe.followUp.put("il3", bd("4"));
+    probe.holdings.add(new DraftHolding("o2", "t1", "DS-1", bd("3")));
+    probe.holdings.add(new DraftHolding("o2", "other", "DS-2", bd("1")));
 
     JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
 
-    assertEquals("line order, no discount nor inactive line",
-        List.of("il1", "il2", "il3", "il4"), ids(all));
+    assertEquals("line order, no discount nor inactive line", List.of("il1", "il2", "il3"),
+        ids(all));
     Object[][] expected = {
-        { "8 - 3 delivered - 2 other draft - 1 this draft", "2", "olA", false, List.of("DS-2") },
-        { "no order line, not linked: its quantity", "4", null, false, List.of() },
-        { "no order line, already linked", "0", null, true, List.of() },
-        { "5 - 5 delivered - 1 draft clamps at 0", "0", "olB", false, List.of("DS-3") },
+        { "CP-22 / CP-14: shipped through the invoice-line link, not carried by the follow-up",
+            "0", List.of() },
+        { "the follow-up's pending, whatever the order line delivered", "1", List.of("DS-2") },
+        { "no order line", "4", List.of() },
     };
     for (int i = 0; i < expected.length; i++) {
       JSONObject row = all.getJSONObject(i);
       String label = (String) expected[i][0];
       assertEquals(label, 0, bd((String) expected[i][1]).compareTo(pendingOf(row)));
-      assertEquals(label, expected[i][2] == null ? JSONObject.NULL : expected[i][2],
-          row.get("orderLine"));
-      assertEquals(label, expected[i][3], row.getBoolean("linked"));
-      assertEquals(label, expected[i][4], strings(row.getJSONArray("inDraftDocuments")));
+      assertEquals(label, expected[i][2], strings(row.getJSONArray("inDraftDocuments")));
     }
-    assertEquals("signed invoiced quantity", "8", all.getJSONObject(0).get("invoicedQuantity")
+    assertEquals("the order line is still named", "q1", all.getJSONObject(0).get("orderLine"));
+    assertTrue("linked still reports the column", all.getJSONObject(0).getBoolean("linked"));
+    assertTrue("a shipment's line carries its unit price, for the popup's row total (CP-27)",
+        all.getJSONObject(0).has("unitPrice"));
+    assertEquals("signed invoiced quantity", "5", all.getJSONObject(0).get("invoicedQuantity")
         .toString());
-    assertTrue("shipment drafts are read on the sales side", probe.holdingsSales);
-    assertEquals("without includeCovered only what pends", List.of("il1", "il2"),
+    assertTrue("the follow-up and the drafts are read on the sales side",
+        probe.followUpSales && probe.holdingsSales);
+    assertEquals("one follow-up read for the invoice", List.of(List.of("inv1")),
+        probe.followUpCalls);
+    assertEquals("without includeCovered only what pends", List.of("il2", "il3"),
         ids(rows(run(probe, LINES, linesOf("inv1", false), SHIPMENT))));
   }
 
@@ -343,6 +373,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("the target's own draft is not named", List.of("DR-2"),
         strings(all.getJSONObject(0).getJSONArray("inDraftDocuments")));
     assertFalse("receipt drafts are read on the purchase side", probe.holdingsSales);
+    assertNull("the receipt keeps its rule: the follow-up is not read", probe.followUpSales);
+    assertFalse("nor a unit price", all.getJSONObject(0).has("unitPrice"));
   }
 
   /**
@@ -366,7 +398,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     when(invoice.getSalesOrder()).thenReturn(header);
     probe.holdings.add(new DraftHolding("olY", "other", "DS-2", bd("1")));
 
-    JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
+    // Under the order-line rule (the default policy): since ETP-6002 the goods shipment's own
+    // policy takes the follow-up's pending instead, but the order line it names is resolved alike.
+    JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), null));
 
     assertEquals("olY", all.getJSONObject(0).getString("orderLine"));
     assertEquals("5 - 1 delivered (olY) - 1 draft (olY)", 0,
@@ -396,6 +430,29 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("the same source under the receipt policy is refused",
         DocumentLineImport.ERROR_SOURCE_NOT_STANDARD,
         errorCode(run(probe, LINES, linesOf("inv1", true), RECEIPT)));
+  }
+
+  /**
+   * Review M3: the follow-up's verdict becomes invoice line id to pending — every carried line
+   * with its quantity; nothing for a missing verdict or one that carries no line (nothing
+   * pending, or not eligible: {@code Source.fromLines} drops the lines then).
+   */
+  @Test
+  public void pendingByLine_translatesTheFollowUpVerdict() {
+    PendingResolver.Source carried = PendingResolver.Source.available("inv1", List.of(
+        new PendingResolver.SourceLine("il1", bd("2")),
+        new PendingResolver.SourceLine("il2", bd("0.5"))));
+    Map<String, BigDecimal> pending = DirectLinkPending.pendingByLine(carried);
+    assertEquals(2, pending.size());
+    assertEquals(0, bd("2").compareTo(pending.get("il1")));
+    assertEquals(0, bd("0.5").compareTo(pending.get("il2")));
+
+    assertTrue(DirectLinkPending.pendingByLine(null).isEmpty());
+    assertTrue(DirectLinkPending.pendingByLine(PendingResolver.Source.fromLines(
+        "inv1", null, List.of())).isEmpty());
+    assertTrue(DirectLinkPending.pendingByLine(PendingResolver.Source.fromLines(
+        "inv1", FollowUpException.Reason.NOT_COMPLETED,
+        List.of(new PendingResolver.SourceLine("il1", bd("2"))))).isEmpty());
   }
 
   // ── refusals ──────────────────────────────────────────────────────────────
@@ -470,7 +527,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   /**
    * Listed: what the policy offers with a line pending (pendingLines counts them) and the
    * invoice's order id; with includeCovered also an invoice whose lines are all covered, at 0 —
-   * never one without any listed line. detail adds creationDate (ISO instant, UTC, or null).
+   * never one without any listed line. detail adds creationDate (ISO instant, UTC, or null) and,
+   * on a goods shipment (ETP-6002 CP-27), the pending amount: unit price x pending over the lines
+   * still pending, at the currency's precision — what the popup's row shows instead of 0,00.
    */
   @Test
   public void availableInvoices_listsByPolicy_includeCoveredAndDetail() throws Exception {
@@ -480,10 +539,19 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     Invoice rect = invoice(probe, "rect", true, line("ir", 10, product("p1", "A", false), "3",
         null, false));
     when(rect.getTransactionDocument()).thenReturn(rectificative);
-    Invoice open = invoice(probe, "open", true,
-        line("io1", 10, product("p1", "A", false), "3", null, false),
-        line("io2", 20, product("p2", "B", false), "2", null, false),
-        line("io3", 30, product("p3", "C", false), "1", null, true));
+    InvoiceLine pendingA = line("io1", 10, product("p1", "A", false), "3", null, false);
+    InvoiceLine pendingB = line("io2", 20, product("p2", "B", false), "2", null, false);
+    InvoiceLine shipped = line("io3", 30, product("p3", "C", false), "1", null, true);
+    when(pendingA.getUnitPrice()).thenReturn(bd("2.5"));
+    when(pendingB.getUnitPrice()).thenReturn(bd("1.255"));
+    when(shipped.getUnitPrice()).thenReturn(bd("100"));
+    Invoice open = invoice(probe, "open", true, pendingA, pendingB, shipped);
+    // A Currency mock answers 0 for its Long standard precision (Mockito's default for a numeric
+    // wrapper), which would round the amount to units; a euro has 2.
+    Currency euro = open.getCurrency();
+    when(euro.getStandardPrecision()).thenReturn(2L);
+    probe.followUp.put("io1", bd("3"));
+    probe.followUp.put("io2", bd("2"));
     Order header = mock(Order.class);
     when(header.getId()).thenReturn("o1");
     doReturn(new ArrayList<>()).when(header).getOrderLineList();
@@ -496,9 +564,14 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     JSONArray plain = rows(run(probe, INVOICES, null, SHIPMENT));
     assertEquals(List.of("open"), ids(plain));
+    assertEquals("ONE follow-up read for every offered invoice of the page (review M1); the "
+        + "rectificative is not offered, so not read", List.of(List.of("open", "covered",
+            "onlyDiscount")), probe.followUpCalls);
+    assertNull("no draft query: the listing shows no draft note", probe.holdingsSales);
     assertEquals(2, plain.getJSONObject(0).getInt("pendingLines"));
     assertEquals("o1", plain.getJSONObject(0).getString("order"));
     assertFalse("no detail, no creationDate", plain.getJSONObject(0).has("creationDate"));
+    assertFalse("no detail, no amount", plain.getJSONObject(0).has("amount"));
     assertEquals("scanned with the target's partner, direction and currency",
         Arrays.asList(PARTNER, true, CURRENCY),
         Arrays.asList(probe.lastPartner, probe.lastSales, probe.lastCurrency));
@@ -511,6 +584,10 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("2026-11-05T09:12:33Z", all.getJSONObject(0).getString("creationDate"));
     assertTrue("missing creation date is null", all.getJSONObject(1).has("creationDate")
         && all.getJSONObject(1).isNull("creationDate"));
+    assertEquals("3 x 2.5 + 2 x 1.255, the shipped line left out, at 2 decimals", "10.01",
+        all.getJSONObject(0).get("amount").toString());
+    assertEquals("nothing pending, nothing to ship", 0,
+        BigDecimal.ZERO.compareTo(new BigDecimal(all.getJSONObject(1).get("amount").toString())));
   }
 
   /**
@@ -523,6 +600,7 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     for (String id : new String[] { "a", "b", "c" }) {
       probe.candidates.add(invoice(probe, id, true,
           line("l" + id, 10, product("p1", "A", false), "1", null, false)));
+      probe.followUp.put("l" + id, bd("1"));
     }
 
     JSONObject first = page(run(probe, INVOICES, "{\"limit\":2}", SHIPMENT));
@@ -697,6 +775,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     assertEquals("server: the other draft holds all of inv1", List.of(),
         ids(rows(run(probe, INVOICES, "{\"pendingBasis\":\"server\"}", RECEIPT))));
+    assertFalse("the receipt rows keep no amount, even with detail (ETP-6002 is sales only)",
+        rows(run(probe, INVOICES, "{\"includeCovered\":true,\"detail\":true}", RECEIPT))
+            .getJSONObject(0).has("amount"));
     assertFalse("the server rule reads the drafts", probe.holdingsSales);
   }
 

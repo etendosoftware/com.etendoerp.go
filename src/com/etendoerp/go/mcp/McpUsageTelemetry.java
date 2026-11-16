@@ -458,6 +458,8 @@ final class McpUsageTelemetry {
         return "search";
       case McpConstants.TOOL_NEO_WHOAMI:
         return "whoami";
+      case McpConstants.TOOL_NEO_ROUTINE:
+        return "routine";
       case "docs":
         return "docs";
       default:

@@ -19,6 +19,7 @@ com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandlerTest
 com.etendoerp.go.schemaforge.InvoiceInboxIntakeTest
 com.etendoerp.go.schemaforge.InvoiceInboxMessagesTest
 com.etendoerp.go.schemaforge.InvoiceInboxProcessorTest
+com.etendoerp.go.schemaforge.InvoiceInboxReviewTest
 com.etendoerp.go.schemaforge.InvoiceInboxStatusPolicyTest
 com.etendoerp.go.schemaforge.InvoiceInboxSummaryTest
 com.etendoerp.go.schemaforge.InvoiceInboxUploadEndpointTest

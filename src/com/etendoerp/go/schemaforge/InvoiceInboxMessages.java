@@ -26,8 +26,8 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * ETP-6047 — the texts the invoice inbox upload (and, ETP-6049, the discard action) answer with. Each one is an {@code AD_MESSAGE}
  * (key below) translated through {@link OBMessageUtils#messageBD(String)}, with the English text
  * of the AD row as the fallback so an answer is never a bare key when the row is not installed yet.
- * The ETP-6049 discard keys have no AD row on purpose: they resolve to the English default here
- * and the SPA translates by {@code error.code}.
+ * The ETP-6049 discard keys and the ETP-6050 review key have no AD row on purpose: they resolve to
+ * the English default here and the SPA translates by {@code error.code}.
  * {@code @name@} placeholders are replaced from the given values.
  */
 final class InvoiceInboxMessages {
@@ -45,6 +45,7 @@ final class InvoiceInboxMessages {
   static final String NOT_FOUND = "ETGO_InvoiceInboxNotFound";
   static final String NOT_DISCARDABLE = "ETGO_InvoiceInboxNotDiscardable";
   static final String DISCARD_ORG_NOT_ALLOWED = "ETGO_InvoiceInboxDiscardOrgNotAllowed";
+  static final String PROCESSING = "ETGO_InvoiceInboxProcessing";
 
   private static final Map<String, String> DEFAULTS = Map.ofEntries(
       Map.entry(DISABLED, "The invoice inbox is not enabled for this user."),
@@ -66,7 +67,8 @@ final class InvoiceInboxMessages {
       Map.entry(NOT_DISCARDABLE, "The document cannot be discarded in status @status@. Only "
           + "documents pending review, with errors or ready to confirm can be discarded."),
       Map.entry(DISCARD_ORG_NOT_ALLOWED,
-          "The document belongs to an organization you cannot write to."));
+          "The document belongs to an organization you cannot write to."),
+      Map.entry(PROCESSING, "The document is still being read and cannot be opened yet."));
 
   private InvoiceInboxMessages() {
   }

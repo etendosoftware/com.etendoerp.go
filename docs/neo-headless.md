@@ -2359,7 +2359,8 @@ document is untrusted data):
 is pure (no DB); `InvoiceInboxStatusPolicy.apply(row, result)` only moves `PENDING_REVIEW` <->
 `ERROR(MISSING_FIELDS|REFERENCE_TOO_LONG|FOREIGN_RECEIVER)` and leaves every other state alone;
 `InvoiceInboxSummary.syncFrom(document, row)` copies the header into the summary columns
-(`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). Edits
+(`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). The
+read side (`review`, below) recomputes the verdict on every read. Edits
 must be bound with `@NeoExtension(spec = "invoice-inbox", ...)`, never `Java_Qualifier`.
 
 **Discard (ETP-6049).** `POST /sws/neo/invoice-inbox/header/{id}/action/discard` (no body needed)
@@ -2390,6 +2391,76 @@ only `WHERE status = 'PROCESSING'`, so it can not race a discard. The texts are 
 of `InvoiceInboxMessages` (no `AD_MESSAGE` rows: the SPA translates by `error.code`). **Hidden from
 MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 405 `actionHidden`
 ("its customization keeps it for people only"); declared in §4.12.9.
+
+**Review (ETP-6050).** `GET /sws/neo/invoice-inbox/header/{id}/action/review` answers everything the
+review panel needs to open one document in a single call. Served by `InvoiceInboxHeaderHandler`
+(ACTION surface, delegating to `InvoiceInboxReview`), read-only: nothing is written. Same order as
+discard: window access -> `NeoActionRecordGuard` (another tenant's id: 404) -> the handler pre-hook,
+which answers `403 feature_disabled` first when the flag is off -> the action. The spec stays
+read-only (`currentData` / `extractedData` are still `discarded`), so this action is the only way
+the document reaches the browser.
+
+| Case | HTTP | Body |
+|---|---|---|
+| any state but `PROCESSING` | 200 | the review answer below |
+| `PROCESSING` | 409 | `error.code=processing` (it cannot be opened yet) |
+| unknown id, or another client's | 404 | `error.code=not_found` (the guard's text when it judged first) |
+| flag off | 403 | `error.code=feature_disabled` |
+| `POST .../action/review` | 405 | (the review only reads) |
+
+```json
+{ "id": "...", "status": "PENDING_REVIEW|ERROR|READY|CONFIRMED|DISCARDED",
+  "errorCode": null, "reviewed": false, "adjusted": false,
+  "updated": "<as NEO serializes it>", "editable": true,
+  "fileName": "", "sender": "", "source": "UPLOAD", "created": "<as NEO serializes it>",
+  "invoice": null,
+  "attachment": { "id": "", "name": "", "mimeType": "application/pdf" },
+  "currency": { "id": "", "isoCode": "EUR", "symbol": "€" },
+  "document": { "version": 1, "header": {}, "lines": [], "notices": [], "validation": {} } }
+```
+
+- `updated` and `created` are rendered with `NeoDateFormat.toAuditToken` (the audit token NEO's own
+  GET emits: `yyyy-MM-dd'T'HH:mm:ss.SSS` plus the colon offset, milliseconds included), so `updated`
+  is the optimistic-lock token of the later write actions. `DataToJsonConverter` is not used: it
+  drops the milliseconds.
+- `editable` = status in `PENDING_REVIEW`, `ERROR`, `READY` **and** `errorCode != FOREIGN_RECEIVER`
+  (a foreign receiver is discard-only). `CONFIRMED` and `DISCARDED` are never editable.
+- `invoice` = `{id, documentNo, identifier}` of `C_INVOICE_ID` when it is set (`CONFIRMED`), else
+  `null`. `documentNo` is the plain document number the UI shows; `identifier` is the DAL one
+  (number - date - total).
+- `attachment` = the row's main attachment (`NeoAttachmentsHelper.findMainAttachment` on
+  `ETGO_Incoming_Document`, tenant-checked), `null` when none. `mimeType` is the stored data type
+  when it is a MIME type, else derived from the file extension. The file itself is downloaded with
+  the existing `GET /sws/neo/attachments/file/{attachmentId}`.
+- `currency` = the row's organization currency (the client's when the organization has none): shown
+  read-only, the OCR extracts no currency. There is no due date anywhere (ETP-6050 decision 1).
+- `document` = the stored `CURRENT_DATA`, with `validation` **recomputed** by
+  `InvoiceInboxValidator.validate` on every read (never persisted, so a row stored before a rule
+  changed does not show a stale verdict), plus read-time enrichment (never persisted: it would go
+  stale, and the worker's contract keeps ids and names only):
+  - `header.vendor.details = {name, taxId, city}` when `state = linked`; every
+    `header.vendor.candidates[i]` gets `city` (city of the vendor's first active address; empty when
+    none).
+  - `lines[i].product.details = {name, searchKey, category, uom}` when `state = linked`; every
+    `lines[i].product.candidates[i]` gets `searchKey`, `category`, `uom` (names; empty when none).
+  - Names follow the session language, as the selectors do: product `name` (also each candidate's
+    `name`, replaced when a translation exists), `category` and `uom` are read through
+    `NeoTrl.translatedNames` (the `*_Trl` rows `ProductTrl`, `ProductCategoryTrl`, `UOMTrl`,
+    language `NeoLanguage.currentCode()`), falling back to the base name. Business partners have no
+    translation table, so vendor names stay as stored.
+  - Computed by `OcrLookups.vendorDetails(ids)` / `productDetails(ids)` (default methods,
+    implemented by `PurchaseInvoiceOcrLookups`): one query per kind for the whole document, plus one
+    for the cities. An id that does not resolve for the session (other tenant, not readable) simply
+    gets no enrichment. `OcrLookups.productById(id)` (same visibility rule as `vendorById`) is
+    added for the write actions. All are total: a failed lookup leaves the document unenriched.
+  - A row with **no** `CURRENT_DATA` (`UNREADABLE`, `SERVICE_FAILURE`: the worker only fails them),
+    or one that does not parse, is answered with an empty skeleton `{version:1, header:{vendor:
+    {state:"none", candidates:[], extracted:{}}, documentNo:"", invoiceDate:null, totalAmount:0,
+    totalSource:"lines", duplicate:{state:"unknown", invoices:[], inbox:[]},
+    receiver:{check:"absent"}}, lines:[], notices:[]}` plus its validation. It is not persisted.
+- Texts of the document come from an external extraction and are untrusted data: they are copied,
+  never interpreted. The lookups are bound by the row's `TARGET_TYPE` the way the worker binds them.
+- **Hidden from MCP**: `agentExcludedActions()` returns `discard` and `review` (§4.12.9).
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
@@ -6501,12 +6572,16 @@ handlers do, so `buildingNumber` no longer blocks the request here either — `s
 `country` are unaffected. With both layers fixed, the "no longer a UI-vs-API divergence" claim two
 paragraphs above now holds for the onboarding endpoint too, not only for the 3 entity handlers.
 
-**Declared divergence: `discard` of the invoice inbox is REST-only (ETP-6049).** The action
+**Declared divergence: `discard` and `review` of the invoice inbox are REST-only (ETP-6049,
+ETP-6050).** The action
 `POST /sws/neo/invoice-inbox/header/{id}/action/discard` works from the SPA and plain REST, and is
 hidden from MCP (`InvoiceInboxHeaderHandler.agentExcludedActions()` = `discard`: `etendo_action`
 answers 405 `actionHidden`). It is irreversible and ships for people first; it will be declared with
 an `actionContract` next to the confirm action (ETP-6051) so agents get both at once. Exposing it
-earlier is removing that one override.
+earlier is removing that one override. `GET .../action/review` (ETP-6050) is hidden the same way
+(`agentExcludedActions()` = `discard`, `review`): it is the review panel's own read, up to 1 MB of
+document plus enrichment, which would only cost an agent context; agents read the row with
+`etendo_get` (no `currentData`).
 
 > **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
 > (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
@@ -8404,7 +8479,12 @@ Only the action SPLITS. "Create invoice from order" and the single CRUD create e
 
 **Known limitation (pre-existing, shared with purchase — not changed by ETP-6002).** The pending the rule reads is `computePendingQtyPerLineOrThrow(…, true)`, whose `draft_all` arm counts the quantity of every DRAFT invoice line on the same ORDER line against each movement line of that order line in the same document. While another invoice of that order line is still a draft, a sibling movement line that is really pending can read 0: draft A linked to shipment line S1 makes S2 (same order line, same shipment) look taken for invoice B, so B's quantity is not bound to S2 and its line stays linked to the order line only. It only happens while the other invoice is a draft; once A is completed only its real links (`M_InOutLine_ID`, `M_MatchSI`) count. Fixing it means scoping `draft_all` to unlinked draft lines, which changes the purchase receipt cap too — left for the purchase pass.
 
-**IMP-3 (quotation ↔ shipment).** `GoodsShipmentHeaderHandler#enrichLinkedOrder` now flags each `linkedOrders` entry with `isQuotation` (`DocSubTypeSO = 'OB'` of `C_DocTypeTarget_ID`), so a shipment made from an invoice that came straight from a quotation shows a quotation chip instead of "Pedido". `SalesQuotationHeaderHandler` (detail GET) injects `linkedShipments` (`QuotationShipmentLinks`): shipments whose header `C_Order_ID` or whose lines' `C_OrderLine_ID` point at the quotation — direct links only, nothing deduced through invoices; declared in `responseEnrichedFields`. Touching both header handlers migrated them (touch rule, §5.3.a): `GoodsShipmentHeaderHandler` is `@NeoExtension(spec = "goods-shipment", entity = "goodsShipment")` and `SalesQuotationHeaderHandler` `@NeoExtension(spec = "sales-quotation", entity = "quotation")`; their `@Named`, the rows' `Java_Qualifier` (sourcedata `ETGO_SF_ENTITY.xml`) and the `javaQualifier` in both `decisions.json` were removed, `EXTENSION_CEILING` went 92 → 90 and both left `legacyHandlers` in the guardrail allowlist. A database that has not run `update.database` still carries the old qualifier on both rows: harmless, the annotation is resolved first and no bean carries that name any more.
+**IMP-3 (quotation ↔ shipment) — superseded by QA CP-14.** A quotation and a shipment are never related: quotation → invoice → shipment does not make the quotation and the shipment direct, and the quotation must not end up delivered (QA criterion, ETP-6002 CP-14). So:
+- `GoodsShipmentHeaderHandler#enrichLinkedOrder` leaves out every order whose `C_DocTypeTarget_ID` has `DocSubTypeSO = 'OB'`, and its entries carry no `isQuotation` (the first IMP-3 version listed the quotation with that flag);
+- `SalesQuotationHeaderHandler` injects no `linkedShipments` any more (`QuotationShipmentLinks` was removed);
+- a shipment line no longer carries a quotation line: `GoodsShipmentLineHandler#handle` drops a quotation `salesOrderLine` from any CRUD write (REST single, `/batch`, MCP — the window's «Añadir desde Factura» popup still sends it), and the sales invoice's `createShipment` follow-up maps with `InvoiceInOutMapping.mapDeliverableOrders` (no quotation order line, never the quotation as the shipment's `C_Order_ID`). So completing the shipment does not raise the quotation's `QtyDelivered`. The quotation test is `SalesQuotations.isQuotation` (`DocSubTypeSO`), called by those customizations only; the purchase receipt keeps `InvoiceInOutMapping.map`, unchanged.
+Existing data is not corrected: a shipment whose lines already carry a quotation line stops listing it (the filter is on the read), but the quotation's `QtyDelivered` already raised by such a shipment stays as it is. The invoice ↔ quotation relation (`isQuotation` on the invoice's `linkedOrders`) is direct and unchanged.
+Touching both header handlers migrated them (touch rule, §5.3.a): `GoodsShipmentHeaderHandler` is `@NeoExtension(spec = "goods-shipment", entity = "goodsShipment")` and `SalesQuotationHeaderHandler` `@NeoExtension(spec = "sales-quotation", entity = "quotation")`; their `@Named`, the rows' `Java_Qualifier` (sourcedata `ETGO_SF_ENTITY.xml`) and the `javaQualifier` in both `decisions.json` were removed, `EXTENSION_CEILING` went 92 → 90 and both left `legacyHandlers` in the guardrail allowlist. A database that has not run `update.database` still carries the old qualifier on both rows: harmless, the annotation is resolved first and no bean carries that name any more.
 
 **Consequence, by design:** a sales invoice line created from an order before this change with no `M_InOutLine_ID` and no `M_MatchSI` row stops showing its shipment (local DB: 1 line, 1 invoice — `I/32`, QA Testing; no data-fix).
 
@@ -8978,6 +9058,10 @@ once the write is committed (`NeoBatchScope.runAfterCommit`: at once for a singl
 after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_source` /
 `change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
 `account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
+
+**KPI telemetry (ETP-5908), goods shipment.** `GoodsShipmentHeaderHandler` emits
+`backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
+after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
 
 ## 6. Parent-Child Tab Filtering
 
@@ -12489,7 +12573,7 @@ hand links to the user and reach nobody else, so they stay closed-world.
 | `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, `etendo_whoami`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
 | `etendo_delete`, `etendo_delete_attachment` | false | true | true |
-| `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+| `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_routine` (its steps may update and complete documents), `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
 
 Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
 and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
@@ -13696,15 +13780,80 @@ not the total-discount line, line order; `{id, lineNo, product, product$_identif
 invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
-- **goods shipment**: `max(0, invoiced − delivered(order line) − drafts)` for a line with an order line (drafts: every
-  DRAFT shipment on that order line, the target included); for one without, its quantity, or 0 when `linked` (already
-  pointing at a movement line);
+- **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
+  invoice's own «Crear albarán» follow-up** (`createShipment`, `InvoicePendingResolver.loadSources`, read through
+  `ImportInvoiceLinesIntoInOutHandler#loadFollowUpSources`; `availableInvoices` reads the whole scanned page in ONE
+  statement and skips the draft-holdings query, which only feeds the `inDraftDocuments` note of the lines), so the popup, `availableInvoiceLines` on MCP and
+  `createShipment` never disagree on the same invoice. Per invoice line: `QtyInvoiced − moved`, where `moved` is the
+  quantity of the movement lines linked to THAT invoice line (`C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`; active,
+  not voided, not a return; a DRAFT one counts, the target's own included) — never another invoice's shipments of the
+  same order line; then, for a line with its own `C_OrderLine_ID`, capped by `QtyOrdered − QtyDelivered − DRAFT
+  movement lines on it`, shared out over the invoice's lines in line order. A line the follow-up does not carry (no
+  product, nothing pending) is at 0. A shipment line created with `invoiceLineId` counts whether or not it carries the
+  order line, so the window's popup (which copies `salesOrderLine`; a quotation line is dropped by
+  `GoodsShipmentLineHandler`, CP-14) and an MCP create with only `invoiceLineId` give the same pending. `linked` still
+  reports the column only (display); `orderLine` (own, or the header order's line of the same product) and
+  `inDraftDocuments` are display only. Known, shared with the follow-up since ETP-5576: one movement line linked to
+  two invoice lines counts in full for each (can only under-state, never offer twice), and the order cap reads
+  `QtyOrdered`, so a shipment made by hand on the order line (no invoice link) of a partly invoiced order does not
+  lower the pending of the invoiced part. (A first CP-22 version capped by the invoices put on the order line and split
+  a shared movement line; review M2 replaced it with this one rule, which also removed its need to tell
+  rectificatives apart — review M1.)
 - **goods receipt** (product decision: the popup's rule is kept, delivered is NOT deducted): 0 when `linked`, otherwise
   `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
 
 Only lines with something pending unless `includeCovered`. The line keys are always present (new actions, nothing to
-keep compatible); `availableInvoices` takes `detail` only for `creationDate`. The popup shows no row total for them (no
-price), so there is no `amount`.
+keep compatible). On the goods receipt `availableInvoices` takes `detail` only for `creationDate`; on the goods
+shipment (ETP-6002 CP-27) `detail` also adds `amount` — unit price (`C_InvoiceLine.PriceActual`) × `pendingQuantity`
+summed over the lines with a positive pending, at the invoice currency's standard precision — the same figure
+`availableOrders` gives an order, and what the shipment's «Añadir desde Factura» row shows (it used to show 0,00);
+its `availableInvoiceLines` rows add `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
+once they are loaded. The goods receipt's rows carry neither.
+
+**Invoice-line link of a goods-shipment line (ETP-6002 CP-22).** `invoiceLineId` on a `goods-shipment/goodsShipmentLine`
+create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDirectives`): MCP no longer reports it in
+`unknownFields`, and `etendo_schema(view:"create")` publishes it. After the create the line is linked with
+`InvoiceLineLinker.linkInvoiceLineToInOutLine(…, SALES)`: the first shipment of the invoice line in its column (the
+match row is written by `M_INOUT_POST` on completion), a later partial one in `M_MatchSI` at once (before, a second
+partial shipment was not linked at all). Same on REST single, `/batch` and MCP. **QA BUG-1 (MCP parity):** a create
+that carries `invoiceLineId` and no `salesOrderLine` takes the invoice line's `C_OrderLine_ID` in the pre-hook
+(`GoodsShipmentLineHandler#deriveOrderLineFromInvoiceLine`), never a quotation's (`SalesQuotations`, CP-14), only for
+an invoice line of the caller's client (`TenantOwnership.loadOwned`); a `salesOrderLine` the caller sent is kept. The
+window always sent it; MCP agents are never offered it (system field, not in `view:"create"`), so their lines carried no
+order line: the order stayed undelivered and `availableOrderLines` offered the units again. The `invoiceLineId`
+directive and the `availableInvoiceLines` flow text say so. It does not double-count the invoice's pending: the
+follow-up rule takes `min(invoiced − moved by the link, QtyOrdered − QtyDelivered − drafts)`, never their sum. The goods-receipt line keeps the
+column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Binding: `GoodsShipmentLineHandler` moved from
+`@Named("goodsShipmentLineHandler")` + the row's `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-shipment", entity =
+"goodsShipmentLine")` (touch-means-migrate, §5.3.a): qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING`
+75 → 74 on the branch (71 once merged with develop, where ETP-6179 and later migrations lowered it further), the class removed from `legacyHandlers`.
+
+**Draft-time match rows (ETP-6002 review M4).** The `M_MatchSI` row a later partial shipment gets at draft time
+froze the line quantity of that moment. `GoodsShipmentHeaderHandler#handle` (the `documentAction` POST, before the
+native completion) calls `InvoiceLineLinker.refreshDraftMatchQuantities(shipment, SALES)`, which sets `qty =
+MovementQty` on the unposted rows of that DRAFT shipment's lines, so `M_INOUT_POST` (`QtyInvoiced`,
+`IsCompletelyInvoiced`) and `ETGO_GET_DELIVERY_STATUS` read the final quantity. A failure propagates and the
+completion is refused: on PostgreSQL a failed statement aborts the transaction, so carrying on would only fail later
+with a misleading "current transaction is aborted". Life cycle, verified on the schema: deleting the
+draft line or the draft shipment cascade-deletes the row (`m_matchsi_m_inoutline` `ON DELETE CASCADE`; the column is
+`ON DELETE SET NULL`); `M_MATCHSI_TRG` only refuses deleting a POSTED row, which a draft one never is; voiding a
+draft or a completed shipment leaves the rows on a `VO` movement, which every reader skips (`io.docstatus <> 'VO'` in
+the pending readers, `CO`/`CL` only in the delivery status), and the Classic reversal writes the opposite rows on the
+`VO` reversal; `M_INOUT_POST` has no reactivation for shipments. A later shipment of an invoice line whose column
+points at a voided line is linked through `M_MatchSI` (the column is set only when empty), so it is counted. The
+purchase side (`M_MatchInv`, follow-up linker) is unchanged.
+
+**Price list of the create-invoice modal (ETP-6002, CP-14 follow-up).** `GoodsShipmentHeaderHandler#enrichResolvedPriceList`
+gained a tier between the linked order and the business partner: the price list of the first directly linked invoice
+(`linkedInvoices[0]`, whose entries now carry `priceListId` / `priceList$_identifier`). A shipment made from an invoice
+that came straight from a quotation has no linked order since CP-14, and preselects that invoice's price list instead
+of falling to the partner's.
+
+**`listInvoices` on sales orders and quotations (ETP-6002).** Each row adds `isRectificative`
+(`SalesInvoiceHeaderHandler.isRectificativeDocType`, passed by `CreateDraftInvoiceHandler#handleList` to
+`OrderInvoiceListSupport.listInvoices`); rows and order are unchanged. The SPA's related documents of a sales order and
+a quotation leave those rows out (QA criterion: a Pedido / Presupuesto never shows a factura rectificativa). The
+purchase order's `listInvoices` passes no rule and its rows carry no such key.
 
 **`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
 above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about
@@ -15341,3 +15490,102 @@ template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reache
 
 Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
 `McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.
+
+#### 4.12.44 Several calls in one, and saved routines: `etendo_routine` (ETP-6236, etendo-ai#51)
+
+A flow whose steps the agent already knows — create a customer, its address and an invoice for it, then
+complete the invoice — used to cost one call per step, each one paying the round trip and the context of the
+answer. `etendo_routine` runs those calls in **one** call, in order, each step able to use what an earlier step
+returned, and saves a flow as a **routine** the same user runs again with new values. Behind the
+per-account flag `mcp-routines` (off by default; `docs/feature-flags-and-tenant-upgrade.md`): with it
+off the tool is neither listed nor routed (`tool_disabled`). Design and decisions:
+`docs/proposals/mcp-routines.md` in schema_forge.
+
+| `mode` | Arguments | What it does |
+|---|---|---|
+| `exec` | `steps` | Runs the steps now; answers an `executionId`. |
+| `save` | `name`, `description`, `params`?, `steps` **or** `fromExecution` | Stores a routine at version 1. |
+| `run` | `name`, `params`?, `version`? | Runs a saved routine (its current version by default). |
+| `list` | — | The caller's routines: name, description, declared parameters, current version. |
+| `describe` | `name`, `version`? | One routine with its steps, parameters and version numbers. |
+| `update` | `name`, `steps`, `params`?, `description`? | Stores a complete new version and makes it current. |
+| `delete` | `name` | Deletes the routine and all its versions (executions stay). |
+| `execution` | `executionId` | A past `exec`/`run` with every step's full result or error. |
+| `help` | — | The full format with four complete examples (`McpRoutineHelp`): inline `exec`, `save` with `fromExecution`, `save` written directly, `run`. |
+
+An argument the mode does not take is refused (`validation_error` naming it). Every refusal's `hint` points to `{mode:"help"}`.
+
+The tool description stays short (it is sent on every turn) and carries one example — save a
+customer-with-address routine with two parameters, then run it — plus "call `{mode:'help'}` before
+writing your first routine". `help` is paid for once, in the turn that asks; its examples are real
+calls, which `McpRoutineToolTest` runs through the same validation (exec → save `fromExecution` →
+run, and a direct save).
+
+**Steps** (`McpRoutineSteps`)
+
+- **It owns no business logic.** Each step is `{id, tool, args, returnResult?}` and runs through
+  `McpToolRouter.route` exactly as the separate call would: unknown-argument guard, scope check, spec access,
+  handler, error envelope. A step may call `etendo_list`, `etendo_get`, `etendo_selectors`, `etendo_defaults`,
+  `etendo_create`, `etendo_update` or `etendo_action`; delete, email, uploads and another routine stay separate
+  calls.
+- **Read tier** for the routine itself: every step asks its own scope, so a create step of a read-only session is
+  refused as that step's `forbidden` error. Annotated as modifying.
+- **References.** A string value `"$ref:<id>"` anywhere in `args` is replaced with the earlier step's record id
+  (`data.id` of its result); `"$ref:<id>.<path>"` with any value of its result, keys and `[n]`/`.n` positions,
+  e.g. `"$ref:agua.data[0].id"`. `"$param.<name>"` is a parameter of a saved routine; an optional one that was
+  not sent drops the key that held it. The whole string must be the reference; the value keeps its JSON type.
+- **Not atomic.** Each step commits when it succeeds (`commitAndClose`, the per-document discipline of
+  `etendo_action_batch`, whose transaction helpers it shares). The first failing step is rolled back and stops the
+  routine.
+- **Refused before anything runs** (422 `validation_error`, `detail` ends with "Nothing was run."): empty
+  `steps` or more than 20, a step without a valid unique `id`, a tool outside the list, `args` that is not an
+  object, an unknown step key, a reference to a step that does not run earlier, a `$param.` that is not declared
+  (inline steps declare none), and on `run` a missing required, mistyped or unknown parameter.
+
+Success of `exec`/`run`:
+
+```json
+{"ok": true, "executionId": "…", "name": "new-customer", "version": 1,
+ "steps": [{"id": "bp", "tool": "etendo_create", "ok": true, "recordId": "…"},
+           {"id": "addr", "tool": "etendo_create", "ok": true, "recordId": "…"}],
+ "results": {"addr": {"data": {"id": "…"}}}}
+```
+
+`name`/`version` only on `run`. `results` carries the full result of the steps marked `returnResult:true`; when
+none is marked, only the last step's. Failure (an MCP error result; `status`/`error` are the failed step's own):
+
+```json
+{"ok": false, "executionId": "…", "status": 422, "error": "validation_error",
+ "detail": "Step 'addr' (etendo_create, position 1) failed and was rolled back; 1 earlier step(s) are done and stay done, 1 did not run.",
+ "failedAt": {"id": "addr", "index": 1, "tool": "etendo_create"},
+ "stepError": {"…": "the step's own error envelope"},
+ "completed": [{"id": "bp", "tool": "etendo_create", "ok": true, "recordId": "…"}],
+ "pending": ["inv"],
+ "hint": "Fix what stepError names and send the failed step and the pending ones again. …"}
+```
+
+A reference whose path is not in the earlier result fails that step the same way, with the completed steps kept.
+
+**Saved routines** (`McpRoutineTool`, `McpRoutineParams`)
+
+- **Personal.** A routine belongs to one user of one client; every lookup (`list`, `run`, `describe`, `update`,
+  `delete`, `execution`, `fromExecution`) is scoped to the caller, and another user's name answers `not_found`.
+  Running one never grants more than the caller's role: each step still goes through `route()`.
+- **Names**: lowercase letters, digits, `-`, `_` (at most 60), unique per user. `description` is required on save.
+- **Parameters**: `params` declares `{<name>: {type, required, description}}`, `type` one of `string`, `number`,
+  `boolean`, `id`. Every declared parameter must be used as `$param.<name>` and every used one declared.
+- **Versions**: `update` sends a complete new version (steps and parameters) and makes it current; older versions
+  stay and `run`/`describe` take `version`.
+- **`fromExecution`**: `save` takes the steps of the caller's own successful `exec`; each parameter adds
+  `from: ["<stepId>.<path>", …]` (e.g. `bp.args.fields.name`), the values of that execution it replaces with
+  `$param.<name>`. A path that is not a value of those steps is refused, naming it.
+- **`list`** adds a hint telling the agent to remember its routines, prefer them and list them again from time to
+  time; the tool description tells it to call `list` at the start of a task.
+
+**Storage** (`McpRoutineStore`, `McpRoutineJdbcStore`): `ETGO_MCP_ROUTINE` (name, description, owner, current
+version), `ETGO_MCP_ROUTINE_VERSION` (parameters and steps per version, cascade-deleted with the routine) and
+`ETGO_MCP_ROUTINE_EXEC` (mode, status, routine and version, the steps as sent and every step's result). Like
+`ETGO_BATCH_JOB` they are plain tables written over JDBC on their own pooled connection — no AD dictionary entry,
+no DAL entity — so saving a routine or recording an execution never joins or rolls back with the steps' business
+transaction. A failure to record an execution is logged and the answer carries no `executionId`; the steps' outcome
+is unchanged. Executions are kept indefinitely for now.

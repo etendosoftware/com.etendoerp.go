@@ -37,6 +37,7 @@ import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
 import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -262,7 +263,10 @@ class NeoPseudoSpecDispatcher {
           "Batch endpoint only supports POST");
       return true;
     }
+    // ETP-6230: batch = one source for the KPI events; enqueue only.
+    AccountingKpiTelemetry.markRestBatch();
     batchService.handle(request, response);
+    AccountingKpiTelemetry.restWriteSucceeded(response.getStatus());
     return true;
   }
 

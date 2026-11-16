@@ -271,6 +271,41 @@ public class InvoiceLineLinkerTest {
   }
 
   /**
+   * ETP-6002 review M4: before a movement is completed, the match rows written at draft time for
+   * its lines (a later partial movement) are brought to the line's current quantity — only rows of
+   * a DRAFT movement, never a posted one, and only where the quantity changed, in the direction's
+   * match table.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void refreshDraftMatchQuantitiesUpdatesOnlyUnpostedRowsOfThatDraftMovement() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      NativeQuery query = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.executeUpdate()).thenReturn(2);
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      assertEquals(2, InvoiceLineLinker.refreshDraftMatchQuantities("io-1",
+          InOutInvoiceLinks.MatchTable.SALES));
+
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      verify(session).createNativeQuery(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue(sql, sql.startsWith("UPDATE m_matchsi mt SET qty = iol.movementqty"));
+      assertTrue(sql, sql.contains("iol.m_inout_id = :inOutId")
+          && sql.contains("io.docstatus = 'DR'") && sql.contains("mt.posted = 'N'")
+          && sql.contains("mt.qty <> iol.movementqty"));
+      verify(query).setParameter("inOutId", "io-1");
+    }
+  }
+
+  /**
    * The plan covers only the plain order-line entries: an entry the selection already binds to a
    * shipment line ({@code shipmentInOutLine}) is neither read nor allocated again.
    */
