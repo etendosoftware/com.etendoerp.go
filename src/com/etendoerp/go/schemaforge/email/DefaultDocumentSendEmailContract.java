@@ -768,7 +768,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (StringUtils.isAnyBlank(documentRecordId, document.getClientId(), downloadTokenKey)) {
       return Optional.empty();
     }
-    return DocumentDownloadTokenService.createDownloadLink(name, StringUtils.removeEnd(name, "-send"), documentRecordId,
+    return DocumentDownloadTokenService.createDownloadLink(name, StringUtils.removeEnd(name, CONTRACT_NAME_SUFFIX), documentRecordId,
         document.getClientId(), downloadTokenKey);
   }
 
