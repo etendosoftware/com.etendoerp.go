@@ -19,6 +19,7 @@ package com.etendoerp.go.portal;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -26,10 +27,12 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -38,6 +41,7 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -77,6 +81,9 @@ public class PortalServletTest {
 
   private static final String CLIENT_ID = "CLIENT-1";
   private static final String BP_ID = "BP-1";
+  private static final String DECISION_TOKEN = "dec-tok";
+  private static final String LINK_ID = "LINK-1";
+  private static final String QUOTATION_ID = "Q-1";
   private static final String INVALID_BODY = "{\"error\":\"This link is no longer valid\"}";
   private static final String[] DATA_PATHS = { "/home", "/search", "/documents",
       "/documents/INVOICE/INV-1", "/documents/INVOICE/INV-1/pdf" };
@@ -84,6 +91,7 @@ public class PortalServletTest {
   private MockedStatic<OBContext> obContext;
   private MockedStatic<CompanyLogoResolver> logos;
   private MockedStatic<PortalUsageEvents> events;
+  private MockedStatic<PortalKpiTelemetry> kpi;
 
   private PortalServlet servlet;
   private PortalLinkService linkService;
@@ -98,6 +106,7 @@ public class PortalServletTest {
     obContext = mockStatic(OBContext.class);
     logos = mockStatic(CompanyLogoResolver.class);
     events = mockStatic(PortalUsageEvents.class);
+    kpi = mockStatic(PortalKpiTelemetry.class);
     // No PDF is rendered unless a test says so, and no stored one is stale.
     printable = mockStatic(PortalPrintable.class);
     try (MockedConstruction<PortalLinkService> services =
@@ -121,6 +130,7 @@ public class PortalServletTest {
   @After
   public void tearDown() {
     printable.close();
+    kpi.close();
     events.close();
     logos.close();
     obContext.close();
@@ -373,6 +383,7 @@ public class PortalServletTest {
           MockedStatic<AnonymousAttachmentStreamer> streamer =
               mockStatic(AnonymousAttachmentStreamer.class)) {
         events.clearInvocations();
+        kpi.clearInvocations();
         endpoint.when(() -> PortalDocumentsEndpoint.kindOf(any())).thenCallRealMethod();
         documents.when(() -> PortalDocumentQuery.findInScope(any(),
             eq(PortalDocumentKind.INVOICE), eq("INV-1"))).thenReturn(invoice);
@@ -393,6 +404,9 @@ public class PortalServletTest {
         }
         events.verify(() -> PortalUsageEvents.downloaded(any(), eq("INV-1")),
             times((Boolean) c[2] ? 1 : 0));
+        // The first-download KPI is offered the same served files, with the validated scope.
+        kpi.verify(() -> PortalKpiTelemetry.documentDownloaded(any(PortalSession.class),
+            eq(PortalDocumentKind.INVOICE), eq("INV-1")), times((Boolean) c[2] ? 1 : 0));
       }
     }
   }
@@ -420,10 +434,10 @@ public class PortalServletTest {
         printable.reset();
         endpoint.when(() -> PortalDocumentsEndpoint.kindOf(any())).thenCallRealMethod();
         documents.when(() -> PortalDocumentQuery.findInScope(any(),
-            eq(PortalDocumentKind.QUOTATION), eq("Q-1"))).thenReturn(quotation);
+            eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn(quotation);
         endpoint.when(() -> PortalDocumentsEndpoint.mainAttachment(any(),
-            eq(PortalDocumentKind.QUOTATION), eq("Q-1"))).thenReturn((Attachment) c[0]);
-        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, "Q-1"))
+            eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn((Attachment) c[0]);
+        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, QUOTATION_ID))
             .thenReturn((Boolean) c[1]);
         printable.when(() -> PortalPrintable.renderAndFind(any(),
             eq(PortalDocumentKind.QUOTATION), eq(quotation))).thenReturn((Attachment) c[2]);
@@ -524,7 +538,7 @@ public class PortalServletTest {
     }
     // The quotation id comes from the path; a JSON null reason text reaches the service as null.
     ArgumentCaptor<PortalSession> scope = ArgumentCaptor.forClass(PortalSession.class);
-    verify(decisionService, times(cases.length)).request(scope.capture(), eq("Q-1"),
+    verify(decisionService, times(cases.length)).request(scope.capture(), eq(QUOTATION_ID),
         eq("reject"), eq("OTHER"), eq(null));
     assertEquals(CLIENT_ID, scope.getValue().getClientId());
   }
@@ -543,14 +557,14 @@ public class PortalServletTest {
   @Test
   public void decisionViewAndConfirmReadTheDecisionHeaderAndAnswerItsState() throws Exception {
     PortalDecisionService.Decision decision = new PortalDecisionService.Decision();
-    decision.linkId = "LINK-1";
+    decision.linkId = LINK_ID;
     decision.action = "reject";
     decision.reasonCode = "OTHER";
     decision.reasonText = "Plazo";
     org.openbravo.model.common.order.Order quotation =
         mock(org.openbravo.model.common.order.Order.class);
     when(quotation.getDocumentNo()).thenReturn("PR-0042");
-    when(linkService.findLink("LINK-1")).thenReturn(Optional.of(link(new Date(0L),
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(link(new Date(0L),
         new Date(1L), true)));
     when(decisionService.view("dec-tok")).thenReturn(new PortalDecisionService.View(
         PortalDecisionService.State.PENDING, decision, quotation));
@@ -575,6 +589,45 @@ public class PortalServletTest {
     assertEquals("Acme", confirmed.getString("tenantName"));
     // The portal token plays no part: the decision token travels in its own header.
     verify(linkService, never()).validate(any());
+  }
+
+  @Test
+  public void onlyAConfirmThatLetsTheCustomerInCarriesThePortalToken() throws Exception {
+    PortalDecisionEntry entry = mintingEntry("raw-portal-token");
+    PortalDecisionService.Decision decision = quotationDecision();
+    PortalDecisionService.View confirmed = new PortalDecisionService.View(
+        PortalDecisionService.State.CONFIRMED, decision, null, true);
+    when(decisionService.view(DECISION_TOKEN)).thenReturn(confirmed);
+    // Columns: what confirm answers, whether the answer leads into the portal.
+    Object[][] cases = {
+        { confirmed, true },
+        { PortalDecisionService.View.closedForCustomer(decision, null), false },
+    };
+    for (Object[] c : cases) {
+      when(decisionService.confirm(DECISION_TOKEN)).thenReturn((PortalDecisionService.View) c[0]);
+      Call confirm = new Call();
+
+      servlet.service(decisionCall("POST", "/decisions/confirm", DECISION_TOKEN),
+          confirm.response);
+
+      JSONObject body = new JSONObject(confirm.body.toString());
+      if ((Boolean) c[1]) {
+        assertEquals("raw-portal-token", body.getString(PortalDecisionEntry.FIELD_PORTAL_TOKEN));
+        assertEquals(QUOTATION_ID, body.getString(PortalDecisionEntry.FIELD_QUOTATION_ID));
+      } else {
+        assertFalse(body.has(PortalDecisionEntry.FIELD_PORTAL_TOKEN));
+        assertFalse(body.has(PortalDecisionEntry.FIELD_QUOTATION_ID));
+      }
+    }
+    verify(entry, times(1)).mint(LINK_ID, QUOTATION_ID);
+
+    // The view (a GET, whose URL a server may log) never carries a token, nor mints one.
+    Call view = new Call();
+    servlet.service(decisionCall("GET", "/decisions/view", DECISION_TOKEN), view.response);
+    JSONObject viewed = new JSONObject(view.body.toString());
+    assertNull(viewed.optString(PortalDecisionEntry.FIELD_PORTAL_TOKEN, null));
+    assertFalse(viewed.has(PortalDecisionEntry.FIELD_QUOTATION_ID));
+    verify(entry, times(1)).mint(anyString(), anyString());
   }
 
   @Test
@@ -684,6 +737,24 @@ public class PortalServletTest {
 
   // ── fixtures ────────────────────────────────────────────────────────────────
 
+  /** Replaces the servlet's decision entry with one whose mint answers {@code token}. */
+  private PortalDecisionEntry mintingEntry(String token) throws Exception {
+    PortalDecisionEntry entry = spy(new PortalDecisionEntry(linkService));
+    doReturn(token).when(entry).mint(anyString(), anyString());
+    Field field = PortalServlet.class.getDeclaredField("decisionEntry");
+    field.setAccessible(true);
+    field.set(servlet, entry);
+    return entry;
+  }
+
+  private static PortalDecisionService.Decision quotationDecision() {
+    PortalDecisionService.Decision decision = new PortalDecisionService.Decision();
+    decision.linkId = LINK_ID;
+    decision.quotationId = QUOTATION_ID;
+    decision.action = "ACCEPT";
+    return decision;
+  }
+
   private static MockedConstruction<PortalRateLimiter> allowingLimiters() {
     return mockConstruction(PortalRateLimiter.class,
         (limiter, context) -> when(limiter.tryAcquire(any())).thenReturn(true));
@@ -697,8 +768,8 @@ public class PortalServletTest {
   }
 
   private static PortalLink link(Date sentAt, Date expiresAt, boolean active) {
-    return new PortalLink("LINK-1", CLIENT_ID, "Acme", "ORG-1", BP_ID, "Customer SL",
-        PortalDocumentKind.INVOICE, "INV-1", PortalLink.ORIGIN_SEND, null, "LINK-1",
+    return new PortalLink(LINK_ID, CLIENT_ID, "Acme", "ORG-1", BP_ID, "Customer SL",
+        PortalDocumentKind.INVOICE, "INV-1", PortalLink.ORIGIN_SEND, null, LINK_ID,
         "sales-invoice-send", "a@customer.test", null, "es_ES", sentAt, expiresAt, active, false);
   }
 

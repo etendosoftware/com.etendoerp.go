@@ -40,6 +40,9 @@ Current constants:
 - `backend_bank_bounce_pair_decided` (ETP-5581)
 - `backend_bank_bounce_pair_restored` (ETP-5581)
 - `backend_bank_bounce_suggestions_applied` (ETP-5581)
+- `backend_portal_document_sent` (ETP-6209)
+- `backend_portal_document_downloaded` (ETP-6209)
+- `backend_quotation_decided` (ETP-6209)
 
 ### Added to every event by the Mixpanel sink (ETP-5581)
 
@@ -358,6 +361,49 @@ document number or user data is sent.
 
 **Not implemented:** the common properties agreed on 2026-11-02 (`tenant_type`, `ad_user_id`,
 `ad_client_id`, `etgo_account_id`) are not sent by this event; they are blocked on ETP-6228.
+
+## Customer Portal KPIs (ETP-6209)
+
+`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the three events behind the PO's customer
+portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*). Every event carries only
+allowlisted keys; no new key was added to the allowlist.
+
+| Event | Properties | Fires |
+|---|---|---|
+| `backend_portal_document_sent` | `account_id`, `type` | once per document: the first time a portal link of an email **send** (`LINK_ORIGIN = SEND`) is confirmed delivered and no other sent `SEND` link of the same record exists. Renewals, decision links and re-sends of the same document never fire |
+| `backend_portal_document_downloaded` | `account_id`, `type` | once per document: the first successful portal `/pdf` stream of a document that was sent with a portal link. "First" is the atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link — only the request whose `UPDATE … WHERE first_downloaded IS NULL` set it emits, so concurrent downloads emit once. A document never sent with a link emits nothing: it is outside the KPI's denominator |
+| `backend_quotation_decided` | `account_id`, `decision` (`accepted`, `rejected`), `source` (`portal`, `app`) | `portal`: a portal decision applied by its confirmation (`appliedNow`). `app`: a rejection (`RejectQuotationHandler#reject`, so also MCP and `DocAction = RJ`), or a conversion into an order (`Convertquotation`) or an invoice (`createDraftInvoice` on a quotation) — **not** when the quotation was `ETGO_AC`, i.e. already accepted from the portal and counted then |
+
+`type` is the portal document kind in lower case: `invoice`, `quotation`, `order`, `shipment`. A
+credit note is an `invoice`: the portal kinds do not tell them apart, and the PO's invoice metric
+counts every document of the invoice kind. App downloads are out of scope.
+
+**Only after commit, once, never in the way.** The portal sites run after their own commit. An
+app decision registers its event on the write's transaction (a Hibernate synchronization: sent on
+`STATUS_COMMITTED`, never on a rollback), or on the batch's commit inside `/sws/neo/batch` and
+`etendo_batch` (`NeoBatchScope.runAfterCommit`). Sending runs on one bounded background thread
+(`portal-kpi-telemetry`, queue 1000, drop when full), once, no retry; the Mixpanel sink adds
+`$insert_id` and `environment`. The download stamp runs after the PDF was streamed, so it never
+delays the file; any failure is logged and swallowed. The usage events `portal.*` (`ETGO_USAGE_EVENT`)
+are unchanged.
+
+**Mixpanel recipes** (filter `environment = production`):
+
+- **Primary — invoices downloaded from the portal:** unique-per-event count of
+  `backend_portal_document_downloaded` where `type = invoice` ÷ count of
+  `backend_portal_document_sent` where `type = invoice`, same period (target ≥ 30 % at 3 months).
+  Monthly absolute: the numerator by month. Both events fire once per document, so plain event
+  counts are document counts.
+- **Secondary — quotations answered from the portal:** count of `backend_quotation_decided` where
+  `source = portal`, broken down by `decision`, ÷ count of `backend_portal_document_sent` where
+  `type = quotation` (target ≥ 20 %). Manual decisions (`source = app`) are excluded from the
+  metric and kept for comparison.
+- Per tenant: break down by `account_id`. The events carry no record id, so a document sent in one
+  month and downloaded or answered in the next falls in different periods; read the ratio over
+  windows long enough (a quarter) for that lag to wash out.
+
+**Not implemented:** the common properties agreed on 2026-11-02 (`tenant_type`, `ad_user_id`,
+`ad_client_id`, `etgo_account_id`), blocked on ETP-6228, as for the other KPI blocks.
 
 ## Bank Bounce-Pair KPIs (ETP-5581)
 

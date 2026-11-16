@@ -96,6 +96,7 @@ public class PortalLinkServiceTest {
 
   private MockedStatic<PortalLinkDal> dal;
   private MockedStatic<PortalUsageEvents> events;
+  private MockedStatic<PortalKpiTelemetry> kpi;
   private MockedStatic<OBContext> obContext;
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<ConfigPropertyReader> config;
@@ -113,6 +114,7 @@ public class PortalLinkServiceTest {
   public void setUp() {
     dal = mockStatic(PortalLinkDal.class);
     events = mockStatic(PortalUsageEvents.class);
+    kpi = mockStatic(PortalKpiTelemetry.class);
     obContext = mockStatic(OBContext.class);
     config = mockStatic(ConfigPropertyReader.class);
 
@@ -137,6 +139,7 @@ public class PortalLinkServiceTest {
     obDalStatic.close();
     config.close();
     obContext.close();
+    kpi.close();
     events.close();
     dal.close();
   }
@@ -328,6 +331,8 @@ public class PortalLinkServiceTest {
     verify(obDal, never()).rollbackAndClose();
     // The KPI event carries the send it belongs to and how many addresses received it.
     events.verify(() -> PortalUsageEvents.sent(confirmed, "LOG-1", 3));
+    // The sent KPI is offered the confirmed link, after the commit; it decides whether it counts.
+    kpi.verify(() -> PortalKpiTelemetry.linkSent(confirmed));
   }
 
   @Test
@@ -340,6 +345,7 @@ public class PortalLinkServiceTest {
 
     dal.verify(() -> PortalLinkDal.confirm(any(), any(), any(), any()), never());
     verify(sessionHandler, never()).commitAndStart();
+    kpi.verifyNoInteractions();
   }
 
   @Test
