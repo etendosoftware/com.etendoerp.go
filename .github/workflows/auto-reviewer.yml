@@ -6,7 +6,7 @@ on:
 
 jobs:
   make-review:
-    if:  github.head_ref != 'main'
+    if: github.head_ref != 'main' && !startsWith(github.head_ref, 'mergeblock/')
     runs-on: ubuntu-latest
     env:
       PULL_REQUEST: ${{ github.event.pull_request.number }}
