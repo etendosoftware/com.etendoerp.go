@@ -3831,6 +3831,9 @@ public class EtendoGoJwtServletCoverageTest {
         mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     doAnswer(invocation -> steps.add("activateSchedule"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -4859,6 +4862,9 @@ public class EtendoGoJwtServletCoverageTest {
     // writes an AD_Preference; a mock keeps the staged run DB-free.
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     return new PaidOnboardingStage(response, request, store);
   }
 
@@ -4929,6 +4935,9 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");

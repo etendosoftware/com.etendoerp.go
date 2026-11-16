@@ -143,6 +143,10 @@ public class FinancialAccountHandlerCountryTest {
     doNothing().when(handler).enterAdminMode();
     doNothing().when(handler).exitAdminMode();
     doNothing().when(handler).doRollbackAndClose();
+    // ETP-6148: a Bank create reads the sepa-remittances flag, which a developer may have on
+    // locally (etendo.go.flags.sepa-remittances); pin it off so these tests never provision.
+    handler.remittanceSupport = org.mockito.Mockito.spy(new FinancialAccountRemittanceSupport());
+    org.mockito.Mockito.doReturn(false).when(handler.remittanceSupport).isFlagEnabled();
     return handler;
   }
 

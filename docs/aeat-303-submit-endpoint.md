@@ -413,3 +413,22 @@ note.
 
 Frontend consumer: `../../../schema_forge/tools/app-shell/src/windows/custom/fiscal-models/models/303/AeatSubmitFlow.jsx`,
 documented in `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md`.
+
+## Validation before a real presentation (ETP-5716)
+
+With `testMode = false`, once every guard
+has passed and the file is generated, the server first sends that same file to the validation
+service (`FiscalAeatSubmissionSupport.validateBeforeSubmission`, 10 s connect + 30 s read; the
+service's default timeouts are restored for the presentation):
+
+| Validator | What happens |
+|---|---|
+| no errors (warnings allowed) | the presentation goes ahead, as before |
+| errors (at least one) | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
+| no answer, or an answer with neither a PDF nor an error | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
+
+It writes its own attempt row (path `pre_submission_validation`); the presentation that follows
+writes its `direct_submission` row. No PDF is attached for this validation. `testMode = true` is
+unchanged.
+
+Shared with `/fiscal390/submit`; attempt rows: `aeat-attempt-log.md`.

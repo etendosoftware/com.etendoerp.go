@@ -36,6 +36,7 @@ import org.openbravo.client.kernel.event.EntityUpdateEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 /**
@@ -57,6 +58,12 @@ import org.openbravo.model.ad.system.Client;
  * rewriting its client. Organization scoping within the tenant stays with NEO's guards. The one
  * exception is explicit: code that knowingly writes System rows for the tenant runs that write in
  * {@link #allowingSystemRows}, which admits client {@code 0} — never another tenant.
+ *
+ * <p><b>Tenant preferences.</b> Core's {@code Preferences.setPreferenceValue} always inserts a
+ * preference as a System row (client {@code 0}) made visible at a client, so every NEO preference
+ * save (favorites, grid views, filters...) writes client {@code 0}. Such a row belongs to the tenant
+ * it is visible at: a System preference is judged by its {@code visibleAtClient}, both before and
+ * after an update. One visible at no client (global) or at another tenant is still refused.
  *
  * <p><b>Why a thread flag and a flush.</b> The observer is active only between {@link #call}'s entry
  * and exit, on that thread, so background processes, imports and every non-NEO servlet are
@@ -154,11 +161,7 @@ public class NeoTenantWriteGuard extends EntityPersistenceEventObserver {
     if (!isActive()) {
       return;
     }
-    Property clientProperty = event.getTargetInstance()
-        .getEntity()
-        .getProperty(CLIENT_PROPERTY, false);
-    Object previous = clientProperty != null ? event.getPreviousState(clientProperty) : null;
-    check(event, previous instanceof Client ? ((Client) previous).getId() : null);
+    check(event, previousClientIdOf(event));
   }
 
   /**
@@ -199,9 +202,35 @@ public class NeoTenantWriteGuard extends EntityPersistenceEventObserver {
     }
     if (target instanceof ClientEnabled) {
       Client client = ((ClientEnabled) target).getClient();
-      return client != null ? client.getId() : null;
+      String clientId = client != null ? client.getId() : null;
+      if (target instanceof Preference && SYSTEM_CLIENT_ID.equals(clientId)) {
+        return preferenceOwnerId(((Preference) target).getVisibleAtClient());
+      }
+      return clientId;
     }
     return null;
+  }
+
+  /** The client the row belonged to before the update, judged like {@link #clientIdOf}. */
+  private static String previousClientIdOf(EntityUpdateEvent event) {
+    BaseOBObject target = event.getTargetInstance();
+    Entity entity = target.getEntity();
+    Object previous = previousState(event, entity, CLIENT_PROPERTY);
+    String previousClientId = previous instanceof Client ? ((Client) previous).getId() : null;
+    if (target instanceof Preference && SYSTEM_CLIENT_ID.equals(previousClientId)) {
+      return preferenceOwnerId(previousState(event, entity, Preference.PROPERTY_VISIBLEATCLIENT));
+    }
+    return previousClientId;
+  }
+
+  private static Object previousState(EntityUpdateEvent event, Entity entity, String name) {
+    Property property = entity.getProperty(name, false);
+    return property != null ? event.getPreviousState(property) : null;
+  }
+
+  /** A System preference belongs to the client it is visible at; with none, to System itself. */
+  private static String preferenceOwnerId(Object visibleAtClient) {
+    return visibleAtClient instanceof Client ? ((Client) visibleAtClient).getId() : SYSTEM_CLIENT_ID;
   }
 
   /** Fails closed: a known row client with no current client to match is foreign. */

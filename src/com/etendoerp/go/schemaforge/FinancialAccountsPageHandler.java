@@ -28,8 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -118,8 +116,12 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  * tree through {@link OrganizationStructureProvider}. Pending counters for
  * {@code suggestionsReady} and {@code byRule} return {@code 0} in T1 because the
  * matching-rule tables (ETBR_*) are introduced by ETP-4099.
+ *
+ * <p>Bound by {@code @NeoExtension} since ETP-6148 (was {@code @Named("financial-accounts-page")}
+ * through {@code ETGO_SF_ENTITY.Java_Qualifier}). A report spec: {@code NeoRequestRouter} dispatches
+ * it with {@code entityName = specName}, so the entity is named like the spec.
  */
-@Named("financial-accounts-page")
+@NeoExtension(spec = "financial-accounts-page", entity = "financial-accounts-page")
 public class FinancialAccountsPageHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountsPageHandler.class);

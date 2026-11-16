@@ -19,15 +19,17 @@ public final class SubscriptionEventOutcome {
   private final boolean closesSubscription;
   private final Instant endedAt;
   private final CancelAtPeriodEnd cancelAtPeriodEnd;
+  private final String providerPriceId;
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason) {
-    this(status, dueAt, reason, null, null, false, null, CancelAtPeriodEnd.NOT_REPORTED);
+    this(status, dueAt, reason, null, null, false, null, CancelAtPeriodEnd.NOT_REPORTED, null);
   }
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason, Instant periodStart, Instant periodEnd,
-      boolean closesSubscription, Instant endedAt, CancelAtPeriodEnd cancelAtPeriodEnd) {
+      boolean closesSubscription, Instant endedAt, CancelAtPeriodEnd cancelAtPeriodEnd,
+      String providerPriceId) {
     this.status = status;
     this.dueAt = dueAt;
     this.reason = reason;
@@ -36,6 +38,7 @@ public final class SubscriptionEventOutcome {
     this.closesSubscription = closesSubscription;
     this.endedAt = endedAt;
     this.cancelAtPeriodEnd = cancelAtPeriodEnd;
+    this.providerPriceId = providerPriceId;
   }
 
   /** The event maps to a state transition. */
@@ -63,7 +66,7 @@ public final class SubscriptionEventOutcome {
       return this;
     }
     return new SubscriptionEventOutcome(status, dueAt, reason, start, end, closesSubscription,
-        endedAt, cancelAtPeriodEnd);
+        endedAt, cancelAtPeriodEnd, providerPriceId);
   }
 
   /**
@@ -79,7 +82,7 @@ public final class SubscriptionEventOutcome {
       return this;
     }
     return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd, true, ended,
-        cancelAtPeriodEnd);
+        cancelAtPeriodEnd, providerPriceId);
   }
 
   /**
@@ -96,7 +99,25 @@ public final class SubscriptionEventOutcome {
       return this;
     }
     return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd,
-        closesSubscription, endedAt, cancel);
+        closesSubscription, endedAt, cancel, providerPriceId);
+  }
+
+  /**
+   * ETP-5053 — the same transition, also carrying the Stripe price the subscription item is on.
+   * The lifecycle write compares it with the row's {@code PROVIDER_PRICE_ID}: a price that moved
+   * to another plan's price is an applied plan change, and the row is rolled over to a successor
+   * on that plan before the transition is written. An ignored outcome stays ignored, and a blank
+   * price is "not reported", which compares nothing.
+   *
+   * @param priceId the {@code price_...} of the first subscription item, may be null
+   * @return an outcome carrying the price, or this one
+   */
+  public SubscriptionEventOutcome withProviderPrice(String priceId) {
+    if (isIgnored() || priceId == null || priceId.isBlank()) {
+      return this;
+    }
+    return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd,
+        closesSubscription, endedAt, cancelAtPeriodEnd, priceId.trim());
   }
 
   public boolean isApplied() {
@@ -164,5 +185,14 @@ public final class SubscriptionEventOutcome {
    */
   public CancelAtPeriodEnd cancelAtPeriodEnd() {
     return cancelAtPeriodEnd;
+  }
+
+  /**
+   * ETP-5053 — the Stripe price the subscription item is on, as the event reports it.
+   *
+   * @return the price id, or null when the event does not report one
+   */
+  public String providerPriceId() {
+    return providerPriceId;
   }
 }

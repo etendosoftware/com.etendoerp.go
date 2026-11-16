@@ -21,6 +21,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -100,9 +101,15 @@ public class NeoPseudoSpecDispatcherTest {
 
   @Test
   public void handleReturnsFalseForUnknownSpec() throws Exception {
-    boolean handled = dispatcher.handle(pathInfo("unknown"), "GET", request, response);
-
-    assertFalse(handled);
+    // "portalaccess" was the MVP's revoke webhook (ETP-5267); the link model replaced it
+    // (ETP-6209), so it now gets the same answer as any spec that never existed.
+    for (String spec : new String[] { "unknown", "portalaccess" }) {
+      for (String method : new String[] { "GET", "POST", "DELETE" }) {
+        assertFalse(spec + " " + method,
+            dispatcher.handle(pathInfo(spec), method, request, response));
+      }
+    }
+    verifyNoInteractions(goWebhookBridge);
   }
 
   // -------------------------------------------------------------------------

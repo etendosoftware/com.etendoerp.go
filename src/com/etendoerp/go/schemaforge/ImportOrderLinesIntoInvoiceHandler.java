@@ -114,7 +114,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String KEY_AMOUNT = "amount";
   static final String KEY_UNIT_PRICE = "unitPrice";
   static final String KEY_DISCOUNT = "discount";
-  /** Classic {@code availableOrderLines}: THIS invoice already has a line of the order line. */
+  /**
+   * {@code availableOrderLines}: the OTHER draft invoices holding part of the line,
+   * {@code [{id, documentNo}]}, present only when there is one (ETP-5828 QA UI-4).
+   */
+  static final String KEY_IN_DRAFT_INVOICES = "inDraftInvoices";
+  /** {@code availableOrderLines} with {@code detail}: THIS invoice has a line of the order line. */
   static final String KEY_IMPORTED_HERE = "importedHere";
   /** The three order actions of a normal invoice (a rectificative takes none, ETP-5876). */
   static final Set<String> ACTIONS =
@@ -174,8 +179,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "already applied), discount that line discount as a %, amount unitPrice x "
             + "pendingQuantity (what the import popup shows), and pendingQuantity is "
             + "ordered minus invoiced minus what any draft invoice (this one included) already "
-            + "holds, and the id is the sourceLineId importOrderLines takes. includeCovered also "
-            + "lists the lines with nothing left at pendingQuantity 0; detail adds "
+            + "holds, and the id is the sourceLineId importOrderLines takes. When other draft "
+            + "invoices hold part of the line, inDraftInvoices lists them ([{id, documentNo, "
+            + "quantity}], this invoice left out; quantity is what that draft holds of the "
+            + "line): tell the user which draft holds what is missing. "
+            + "includeCovered also lists the lines with nothing left at pendingQuantity 0; "
+            + "detail adds "
             + OrderImportListing.LINE_DETAIL_KEYS + " and importedHere (this invoice has an "
             + "active line linked to the order line). Step 2." + flow,
         OrderImportListing.availableLinesParams())
@@ -258,29 +267,16 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return ACTIONS;
   }
 
-  /**
-   * The two listings that take {@code pendingBasis: "classic"} where the header's policy offers it
-   * (ETP-6099 follow-up: the purchase invoice,
-   * {@link RectificativeImportPolicy#offersClassicPending}).
-   */
-  static final Set<String> CLASSIC_PENDING_ACTIONS =
-      Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES);
-
-  @Override
-  protected boolean classicPendingOffered(NeoContext context, String action) {
-    return CLASSIC_PENDING_ACTIONS.contains(action)
-        && RectificativeImportPolicy.from(context).offersClassicPending();
-  }
-
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     JSONObject body = context.getRequestBody();
-    boolean classic = classicPending(context);
+    // ETP-5828 (QA MCP-2): the order actions no longer offer the classic pending basis. The
+    // purchase popup lists and imports with the server rule, drafts deducted, exactly as the
+    // sales popup and the MCP do, and asking for the classic basis here is refused with the
+    // generic 400 of an action that does not offer it.
     if (ACTION_AVAILABLE_ORDERS.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
-      OrderInvoiceListing listing = new OrderInvoiceListing(this);
-      return classic ? listing.classicAvailableOrders(invoice, body)
-          : listing.availableOrders(invoice, body);
+      return new OrderInvoiceListing(this).availableOrders(invoice, body);
     }
     if (ACTION_AVAILABLE_LINES.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
@@ -288,9 +284,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       // ETP-6099: includeCovered and detail on both directions (the purchase popup lists here too).
       boolean includeCovered = ImportListing.includeCovered(body);
       boolean detail = ImportListing.detail(body);
-      OrderInvoiceListing listing = new OrderInvoiceListing(this);
-      return classic ? listing.classicAvailableOrderLines(invoice, order, includeCovered, detail)
-          : listing.availableOrderLines(invoice, order, includeCovered, detail);
+      return new OrderInvoiceListing(this).availableOrderLines(invoice, order, includeCovered,
+          detail);
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body);
   }
@@ -604,6 +599,22 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   /**
+   * Seam: per order line, the OTHER draft invoices of the direction that hold it, only those of
+   * the session's client and the role's readable organizations (their document number is shown).
+   */
+  protected Map<String, List<OrderInvoicePending.DraftInvoiceRef>> draftInvoicesHolding(
+      Collection<String> orderLineIds, boolean sales, String exceptInvoiceId) {
+    return OrderInvoicePending.draftHolders(orderLineIds, sales, exceptInvoiceId,
+        sessionClientId(), readableOrganizations());
+  }
+
+  /** Seam: the organizations the session's role can read. */
+  protected List<String> readableOrganizations() {
+    return java.util.Arrays.asList(
+        org.openbravo.dal.core.OBContext.getOBContext().getReadableOrganizations());
+  }
+
+  /**
    * The COMPLETED receipt / shipment lines of an order line, oldest first (movement date, then
    * id): the lines an invoice quantity is distributed over before any remainder.
    */
@@ -645,36 +656,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       remaining.put((String) row[0], (BigDecimal) row[1]);
     }
     return remaining;
-  }
-
-  /**
-   * The candidates of the classic {@code availableOrders} (ETP-6099 follow-up): the completed,
-   * active orders of the partner and direction in the session's client, in the invoice's currency
-   * when it has one, newest created first (the old popup's {@code _sortBy=creationDate desc}),
-   * from {@code offset}; the {@code invoiceStatus} filter is applied per row.
-   */
-  protected List<Order> findClassicCandidateOrders(String partnerId, boolean sales,
-      String currencyId, int offset, int scan) {
-    StringBuilder hql = new StringBuilder("from Order o where o.documentStatus = 'CO' "
-        + "and o.salesTransaction = :sot and o.businessPartner.id = :bp and o.active = true "
-        + "and o.client.id = :client");
-    if (currencyId != null) {
-      hql.append(" and o.currency.id = :cur");
-    }
-    hql.append(" order by o.creationDate desc, o.documentNo desc, o.id desc");
-    org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
-        .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
-        .setParameter("bp", partnerId).setParameter("client", sessionClientId())
-        .setFirstResult(offset).setMaxResults(scan);
-    if (currencyId != null) {
-      query.setParameter("cur", currencyId);
-    }
-    return new ArrayList<>(query.list());
-  }
-
-  /** Seam: the order's {@code invoiceStatus} computed column (the % invoiced the window shows). */
-  protected Long invoiceStatusOf(Order order) {
-    return order.getInvoiceStatus();
   }
 
   /** Seam: the order lines the active lines of this invoice are linked to. */

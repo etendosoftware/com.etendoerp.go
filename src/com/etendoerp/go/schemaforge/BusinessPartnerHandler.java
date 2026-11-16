@@ -41,6 +41,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -113,6 +114,14 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * those windows (falling back to field name, exactly as here, when it is absent). This branch
  * checks the field name and falls through ({@code null}) for every other selector field this
  * entity exposes, so no other column or window is affected.
+ *
+ * <p>On POST/PATCH/PUT, {@code handle()} also applies the customer's SEPA mandate rules (ETP-6148,
+ * see {@link ContactSepaMandateDefaults}): behind the {@code sepa-remittances} flag, a customer
+ * created with a blank mandate stores its tax ID as identifier and today as signature date, and
+ * any later save of a customer fills each mandate field that is empty in the database and not sent;
+ * a value the caller sends always wins and a stored one is never overwritten. With the flag off the
+ * two mandate keys are dropped from the body (never persisted, never rejected). DEFAULTS prefill
+ * the signature date ({@code afterHandle}).
  *
  * <p>Bound to the contacts spec's businessPartner entity by {@link NeoExtension} (ETP-6206; it was
  * {@code JAVA_QUALIFIER = 'businessPartnerHandler'} before). Every hook it answers ({@code handle},
@@ -387,6 +396,9 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       if (contactTypeError != null) {
         return contactTypeError;
       }
+      // After the contact-type rules: a type re-inherited from the category decides whether the
+      // contact is a customer, and so whether its SEPA mandate is defaulted (ETP-6148).
+      ContactSepaMandateDefaults.apply(ctx, body);
 
       deriveName(ctx, body);
 
@@ -688,6 +700,9 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
+    if (ctx.getEndpointType() == NeoEndpointType.DEFAULTS) {
+      return prefillSepaMandateDefaults(ctx);
+    }
     String method = ctx.getHttpMethod();
     if ("GET".equals(method)) {
       // A list GET can ask for its child records (ETP-4997); a single-record GET gets the
@@ -729,6 +744,27 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return modified ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in afterHandle()", e);
+      return null;
+    }
+  }
+
+  /**
+   * ETP-6148 — DEFAULTS of a new contact: prefills the SEPA mandate signature date
+   * ({@link ContactSepaMandateDefaults#applyDefaults}) behind {@code sepa-remittances}. Best effort:
+   * a failure keeps the generic defaults.
+   */
+  private static NeoResponse prefillSepaMandateDefaults(NeoContext ctx) {
+    NeoResponse previous = ctx.getPreviousResult();
+    JSONObject defaults = previous != null && previous.getBody() != null
+        ? previous.getBody().optJSONObject("defaults") : null;
+    if (defaults == null) {
+      return null;
+    }
+    try {
+      return ContactSepaMandateDefaults.applyDefaults(defaults, SepaRemittancesFlag.isEnabled(),
+          java.time.LocalDate.now()) ? NeoResponse.ok(previous.getBody()) : null;
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: could not prefill the SEPA mandate defaults", e);
       return null;
     }
   }

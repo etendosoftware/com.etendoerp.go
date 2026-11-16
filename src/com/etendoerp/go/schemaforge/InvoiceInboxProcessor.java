@@ -105,7 +105,8 @@ public final class InvoiceInboxProcessor {
   private static final String SYSTEM_USER = "100";
   private static final String SYSTEM_ID = "0";
   private static final String SPEC_PURCHASE_INVOICE = "purchase-invoice";
-  private static final Map<String, String> SPEC_BY_TARGET = Map.of(
+  /** The spec each target type is processed as; the review (ETP-6050) binds its lookups the same. */
+  static final Map<String, String> SPEC_BY_TARGET = Map.of(
       InvoiceInboxIntake.TARGET_PURCHASE_INVOICE, SPEC_PURCHASE_INVOICE);
   private static final Logger log = LogManager.getLogger(InvoiceInboxProcessor.class);
 
