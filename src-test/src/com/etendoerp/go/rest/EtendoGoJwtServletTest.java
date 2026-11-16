@@ -446,6 +446,24 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
+  public void writesTheTermsDocumentAsAWordFile() throws Exception {
+    // ETP-6244: /terms/document answers the .docx bytes as the whole body.
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    javax.servlet.ServletOutputStream out = mock(javax.servlet.ServletOutputStream.class);
+    when(response.getOutputStream()).thenReturn(out);
+    byte[] docx = { 'P', 'K', 3, 4 };
+
+    EtendoGoJwtServlet.writeTermsDocument(response, docx);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response).setContentType(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    verify(response).setHeader("Cache-Control", "no-cache");
+    verify(response).setContentLength(4);
+    verify(out).write(docx);
+  }
+
+  @Test
   public void registerWithoutAConfigurableLinkFallsBackToThePlainWelcome() throws Exception {
     // ETP-4798 fail-open: with no app base URL there is no link to mail, so no verification token
     // is stored and the account is left ungated rather than stranded waiting for a mail that
