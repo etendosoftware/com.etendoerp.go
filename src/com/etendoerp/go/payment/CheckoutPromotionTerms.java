@@ -6,10 +6,24 @@ import java.util.Map;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
-/** Immutable commercial terms recorded before the first provider call, never inferred on reopen. */
+/**
+ * Immutable commercial terms recorded before the first provider call, never inferred on reopen.
+ *
+ * <p>An eligible monthly purchase gets {@value #FREE_TRIAL_DAYS} free days: Stripe collects the
+ * card, charges nothing at checkout and bills the first installment when the trial ends
+ * ({@value #TRIAL_VERSION}). Purchases recorded under {@value #VERSION} (ETP-6216: first month paid,
+ * second calendar month free) keep those terms; {@link MonthlySecondMonthPromotionService} still
+ * honours them.
+ */
 public class CheckoutPromotionTerms {
   public static final String INTENT_TYPE = "promotion.intent";
+  /** ETP-6216 terms, no longer offered: kept so already recorded purchases stay readable. */
   public static final String VERSION = "monthly-second-month-v1";
+  /** The current monthly offer: a free trial before the first installment. */
+  public static final String TRIAL_VERSION = "monthly-free-trial-v1";
+  /** Length of the free trial, fixed in days (not a calendar month). */
+  public static final int FREE_TRIAL_DAYS = 30;
+  static final String FREE_TRIAL_DAYS_FIELD = "freeTrialDays";
   private static final String REQUEST_ID_FIELD = "requestId";
   BillingEventStore events = new BillingEventStore();
 
@@ -18,11 +32,35 @@ public class CheckoutPromotionTerms {
    *
    * @param plan catalog plan to assess, or {@code null} when none was resolved
    * @return whether the plan is a non-legacy monthly plan with a positive display price
+   * @see #isEligible(com.etendoerp.go.schemaforge.data.Plan, boolean) the account side of it
    */
   public static boolean isEligiblePlan(com.etendoerp.go.schemaforge.data.Plan plan) {
     return plan != null && !PlanCatalogService.LEGACY_PLAN_KEY.equals(plan.getSearchKey())
         && "month".equals(plan.getBillingInterval()) && plan.getDisplayPrice() != null
         && plan.getDisplayPrice().signum() > 0;
+  }
+
+  /**
+   * The free trial is offered once per account: on a monthly plan, to an account that has never
+   * paid a purchase. A second environment of the same account pays from the first month.
+   *
+   * @param plan catalog plan to assess, or {@code null} when none was resolved
+   * @param accountHasPaid whether the account already has a paid purchase
+   * @return whether the purchase would get the free trial
+   */
+  public static boolean isEligible(com.etendoerp.go.schemaforge.data.Plan plan,
+      boolean accountHasPaid) {
+    return !accountHasPaid && isEligiblePlan(plan);
+  }
+
+  /**
+   * The free trial length of recorded terms.
+   *
+   * @param terms persisted commercial terms, or {@code null} for a historical purchase
+   * @return the trial days to request from the provider, {@code 0} when the terms carry none
+   */
+  public static int freeTrialDays(JSONObject terms) {
+    return terms == null ? 0 : Math.max(0, terms.optInt(FREE_TRIAL_DAYS_FIELD, 0));
   }
 
   /**
@@ -79,15 +117,15 @@ public class CheckoutPromotionTerms {
 
   static JSONObject describe(String request, String price, long amount, String currency,
       String interval, boolean eligible) {
-    boolean free = eligible && "month".equals(interval) && amount > 0;
-    int firstPaymentCoverageMonths = "year".equals(interval) ? 12 : 1;
-    if (free) firstPaymentCoverageMonths = 2;
+    boolean trial = eligible && "month".equals(interval) && amount > 0;
     try {
-      return new JSONObject().put("version", free ? VERSION : "standard-v1")
+      return new JSONObject().put("version", trial ? TRIAL_VERSION : "standard-v1")
           .put(REQUEST_ID_FIELD, request).put("priceId", price).put("initialAmountMinor", amount)
           .put("currency", currency).put("billingInterval", interval)
-          .put("secondMonthFree", free).put("recurringFromMonth", free ? 3 : 0)
-          .put("firstPaymentCoverageMonths", firstPaymentCoverageMonths)
+          .put(FREE_TRIAL_DAYS_FIELD, trial ? FREE_TRIAL_DAYS : 0)
+          .put("amountDueTodayMinor", trial ? 0 : amount)
+          .put("secondMonthFree", false)
+          .put("firstPaymentCoverageMonths", "year".equals(interval) ? 12 : 1)
           .put("yearlyDiscountAlreadyInPrice", "year".equals(interval));
     } catch (JSONException e) { throw new IllegalStateException("Cannot build promotion terms", e); }
   }
@@ -106,8 +144,16 @@ public class CheckoutPromotionTerms {
       fields.put(prefix + "[promotion_version]", terms.optString("version"));
       fields.put(prefix + "[promotion_request_id]", terms.optString(REQUEST_ID_FIELD));
     }
-    if (terms.optBoolean("secondMonthFree")) {
-      fields.put("custom_text[submit][message]", terms.optString("language").startsWith("es")
+    int trialDays = freeTrialDays(terms);
+    boolean spanish = terms.optString("language").startsWith("es");
+    if (trialDays > 0) {
+      fields.put("custom_text[submit][message]", spanish
+          ? "Hoy no se cobra nada: los primeros " + trialDays + " días son gratis. "
+              + "Después se cobra la mensualidad, salvo que te des de baja antes."
+          : "Nothing is charged today: the first " + trialDays + " days are free. "
+              + "The monthly installment is charged afterwards unless you cancel before.");
+    } else if (terms.optBoolean("secondMonthFree")) {
+      fields.put("custom_text[submit][message]", spanish
           ? "Pagas la primera mensualidad hoy. El segundo mes calendario es gratis. "
               + "El cobro mensual habitual se reanuda desde el tercer mes."
           : "Pay the first monthly installment today. The second calendar month is free. "
