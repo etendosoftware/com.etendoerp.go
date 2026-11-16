@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<data>
+<!--F52480E91B0A498C965DD6ECDF49172B--><AD_VAL_RULE>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <AD_VAL_RULE_ID><![CDATA[F52480E91B0A498C965DD6ECDF49172B]]></AD_VAL_RULE_ID>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <NAME><![CDATA[ETGO Allowed Plan Change Targets]]></NAME>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <DESCRIPTION><![CDATA[The plans the Allowed Plan Changes tab offers from the subscription's plan, or from its pending plan while a change is scheduled; with a change scheduled, also the current plan (keeping it cancels the change)]]></DESCRIPTION>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <TYPE><![CDATA[HQL_JS]]></TYPE>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <CODE><![CDATA[var sub = String(OB.getParameters().get('inpetgoSubscriptionId')).replace(/'/g, '');
+"(exists (select 1 from ETGO_PLAN_CHANGE pc, ETGO_SUBSCRIPTION s where s.id = '" + sub + "'"
+  + " and pc.active = true and pc.targetPlan.id = e.id"
+  + " and pc.plan.id = coalesce(s.pendingPlan.id, s.plan.id))"
+  + " or exists (select 1 from ETGO_SUBSCRIPTION s where s.id = '" + sub + "'"
+  + " and s.pendingPlan is not null and s.plan.id = e.id))"]]></CODE>
+<!--F52480E91B0A498C965DD6ECDF49172B-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--F52480E91B0A498C965DD6ECDF49172B--></AD_VAL_RULE>
+
+</data>
