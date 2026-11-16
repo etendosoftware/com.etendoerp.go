@@ -42,8 +42,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * way the SPA's preview / send stores it (ETP-6013). The sixth producer of a document's PDF (see
  * {@code docs/document-printables.md}): the only one that runs without a browser, so a document
  * completed or asked for through the MCP has a PDF the MCP can return
- * ({@code etendo_get_document_pdf}) and email ({@code etendo_send_document_email}). MCP only: the GO
- * app never calls it.
+ * ({@code etendo_get_document_pdf}) and email ({@code etendo_send_document_email}). The GO app never
+ * calls it; besides the MCP, the customer portal reaches it (ETP-6209) when a document it shows has
+ * no stored PDF yet, through {@code NeoPrintAfterComplete#renderAndWaitAs}.
  *
  * <h2>What it produces</h2>
  * <p>The template is the one the deployed frontend publishes ({@link NeoPrintableTemplates}), the

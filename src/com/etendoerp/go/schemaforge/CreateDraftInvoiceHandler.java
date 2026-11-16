@@ -153,7 +153,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "draft step despite the name), returning 201 with {id, documentNo, documentStatus}. "
           + "No parameters: a quotation cannot be invoiced partially (any body key is refused). "
           + "Precondition: the quotation is Under Evaluation (status UE, reached with "
-          + "documentAction CO) or completed (status CO), otherwise 400 naming its number and "
+          + "documentAction CO), completed (status CO) or accepted by the customer from the "
+          + "portal (status ETGO_AC), otherwise 400 naming its number and "
           + "status (a draft, rejected, already-invoiced or order-converted quotation is "
           + "refused). Once the invoice is "
           + "completed the quotation moves to status ETGO_CI (\"Closed - Invoice Created\") and "
@@ -569,9 +570,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
-   * Seam for tests: refuses a quotation that is neither Under Evaluation ({@code UE}) nor
-   * {@code CO}: the two statuses the SPA offers the action from (QuotationTopbarActions opens
-   * QuotationConfirmModal for {@code CO} or {@code UE}; {@code CO} can only be a legacy quotation).
+   * Seam for tests: refuses a quotation that is not convertible: Under Evaluation ({@code UE}), {@code CO} (only a
+   * legacy quotation) or Accepted from the customer portal ({@code ETGO_AC}, ETP-6209) — the
+   * statuses the SPA offers the action from (QuotationTopbarActions opens QuotationConfirmModal).
    */
   protected void requireQuotationInvoiceable(String quotationId) {
     Order quotation = OBDal.getInstance().get(Order.class, quotationId);
@@ -580,8 +581,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     }
     DocumentStatusGuard.requireAnyStatus(quotation.getDocumentNo(), quotation.getDocumentStatus(),
         "La cotización %s no se puede facturar en su estado actual (estado %s): solo se factura "
-            + "una cotización en evaluación (UE) o completada (CO)",
-        DocumentStatusGuard.STATUS_UNDER_EVALUATION, DocumentStatusGuard.STATUS_COMPLETED);
+            + "una cotización en evaluación (UE), completada (CO) o aceptada (ETGO_AC)",
+        QuotationDecisions.STATUS_UNDER_EVALUATION, QuotationDecisions.STATUS_COMPLETED,
+        QuotationDecisions.STATUS_ACCEPTED);
   }
 
   /** Seam for tests: refuses a source order that is not completed (see {@link #handleCreate}). */

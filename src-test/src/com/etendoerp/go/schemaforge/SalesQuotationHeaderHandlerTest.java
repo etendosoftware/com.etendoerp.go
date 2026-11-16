@@ -1095,6 +1095,65 @@ public class SalesQuotationHeaderHandlerTest {
     when(rs.next()).thenReturn(false);
   }
 
+  /**
+   * ETP-6209: a new quotation never gets a reject reason by default. The field is editable (the
+   * seller sets the tenant's internal reason on a rejected quotation), so the defaults would fill
+   * it with the first reason; the answer drops it and its identifier, and keeps every other value.
+   */
+  @Test
+  public void testAfterHandle_defaultsNeverCarryARejectReason() throws Exception {
+    JSONObject defaults = new JSONObject().put("rejectReason", "RR-1")
+        .put("rejectReason$_identifier", "Precio").put("currency", "EUR");
+    NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS).build();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+
+    NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+    JSONObject answered = result.getBody().getJSONObject("defaults");
+    assertFalse(answered.has("rejectReason"));
+    assertFalse(answered.has("rejectReason$_identifier"));
+    assertEquals("EUR", answered.getString("currency"));
+  }
+
+  /**
+   * ETP-6209: evaluate-display answers the Classic lock of the reject reason (read-only once
+   * rejected); the quotation drops that one key so the window's own readOnlyLogic decides. Every
+   * other read-only answer and the visibility are kept; with no such key nothing changes.
+   */
+  @Test
+  public void testAfterHandle_evaluateDisplayDropsOnlyTheClassicRejectReasonLock()
+      throws Exception {
+    // Columns: read-only answer of the AD, read-only answer expected.
+    String[][] cases = {
+        { "{\"rejectReason\":true,\"documentNo\":true,\"orderDate\":false}",
+            "{\"documentNo\":true,\"orderDate\":false}" },
+        { "{\"documentNo\":true}", "{\"documentNo\":true}" },
+    };
+    for (String[] c : cases) {
+      JSONObject body = new JSONObject().put("readOnly", new JSONObject(c[0]))
+          .put("visibility", new JSONObject("{\"rejectReason\":true,\"documentNo\":true}"));
+      NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.EVALUATE_DISPLAY).build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      JSONObject answered = (result != null ? result : ctx.getPreviousResult()).getBody();
+      JSONObject expected = new JSONObject(c[1]);
+      JSONObject readOnly = answered.getJSONObject("readOnly");
+      assertEquals(c[0], expected.length(), readOnly.length());
+      java.util.Iterator<?> keys = expected.keys();
+      while (keys.hasNext()) {
+        String key = (String) keys.next();
+        assertEquals(c[0] + " " + key, expected.getBoolean(key), readOnly.getBoolean(key));
+      }
+      JSONObject visibility = answered.getJSONObject("visibility");
+      assertEquals("visibility is untouched", 2, visibility.length());
+      assertTrue(visibility.getBoolean("rejectReason"));
+    }
+  }
+
   @Test
   public void testAfterHandle_processedQuotation_notAdjusted() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {

@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_PORTAL_DECISION">
+    <table name="ETGO_PORTAL_DECISION" primaryKey="ETGO_PORTAL_DECISION_KEY">
+      <column name="ETGO_PORTAL_DECISION_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="C_ORDER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_PORTAL_LINK_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="DECISION" primaryKey="false" required="true" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="REASON_CODE" primaryKey="false" required="false" type="VARCHAR" size="30" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="REASON_TEXT" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TOKEN_HASH" primaryKey="false" required="true" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="RECIPIENT_EMAIL" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EMAIL_LANGUAGE" primaryKey="false" required="true" type="VARCHAR" size="10" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="20" autoIncrement="false">
+        <default><![CDATA[PENDING]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="SENT_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CONFIRMED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CLOSED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_PORTAL_DECISION_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_PORTAL_DECISION_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="C_ORDER" name="ETGO_PORTAL_DECISION_ORDER_FK" onDelete="cascade">
+        <reference local="C_ORDER_ID" foreign="C_ORDER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PORTAL_LINK" name="ETGO_PORTAL_DECISION_LINK_FK">
+        <reference local="ETGO_PORTAL_LINK_ID" foreign="ETGO_PORTAL_LINK_ID"/>
+      </foreign-key>
+      <index name="ETGO_PORTAL_DECISION_ORDER" unique="false">
+        <index-column name="C_ORDER_ID"/>
+      </index>
+      <unique name="ETGO_PORTAL_DECISION_TOKEN_UQ">
+        <unique-column name="TOKEN_HASH"/>
+      </unique>
+      <check name="ETGO_PORTAL_DEC_ACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_PORTAL_DEC_DECISION_CHK"><![CDATA[DECISION IN ('ACCEPT', 'REJECT')]]></check>
+      <check name="ETGO_PORTAL_DEC_STATUS_CHK"><![CDATA[STATUS IN ('PENDING', 'CONFIRMED', 'VOIDED', 'NOT_APPLIED')]]></check>
+      <check name="ETGO_PORTAL_DEC_REASON_CHK"><![CDATA[REASON_CODE IS NULL OR REASON_CODE IN ('PRICE', 'DELIVERY', 'PAYMENT_TERMS', 'OTHER_SUPPLIER', 'NOT_NEEDED', 'OTHER')]]></check>
+    </table>
+  </database>

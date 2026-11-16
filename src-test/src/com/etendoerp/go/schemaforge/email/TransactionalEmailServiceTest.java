@@ -42,6 +42,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * Unit tests for {@link TransactionalEmailService}.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.TransactionalEmailService
  */
 public class TransactionalEmailServiceTest {
 
@@ -913,6 +915,89 @@ public class TransactionalEmailServiceTest {
     assertFalse(adapter.wasSendCalled());
   }
 
+  // ── ETP-6209: EmailContract#onDelivered ─────────────────────────────────────
+
+  @Test
+  public void onDeliveredRunsAfterTheHistoryAndAuditRowsAndGetsTheHistoryRowId()
+      throws Exception {
+    List<String> calls = new ArrayList<>();
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    TransactionalEmailService service = serviceWithHistory(new DeliveryContract(calls, false),
+        adapter, new RecordingSafetyStore(calls), new RecordingSendLogStore(calls, "LOG-1"));
+
+    NeoResponse response = service.send("delivery-send", new JSONObject());
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(Arrays.asList("history", "audit:" + TransactionalEmailService.STATUS_SENT,
+        "delivered:LOG-1"), calls);
+  }
+
+  @Test
+  public void aThrowingOnDeliveredChangesNeitherTheSentAnswerNorTheRecordedRows()
+      throws Exception {
+    List<String> calls = new ArrayList<>();
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    RecordingSafetyStore safetyStore = new RecordingSafetyStore(calls);
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new DeliveryContract(calls, true),
+        adapter, safetyStore, sendLogStore);
+
+    NeoResponse response = service.send("delivery-send", new JSONObject());
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT, responseData(response).getString("status"));
+    assertEquals(1, safetyStore.getAuditRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        safetyStore.getAuditRecords().get(0).getStatus());
+    assertEquals(1, sendLogStore.getHistoryRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        sendLogStore.getHistoryRecords().get(0).getStatus());
+  }
+
+  @Test
+  public void onDeliveredNeverRunsForAnEmailThatDidNotLeave() throws Exception {
+    // The portal link a document email carries is confirmed only from onDelivered, so each of
+    // these outcomes leaves it pending. Throttled and duplicate need a first, successful send.
+    String recordKey = "history:ABC123:v1";
+    Object[][] cases = {
+        { TransactionalEmailService.STATUS_THROTTLED, 1 },
+        { TransactionalEmailService.STATUS_DUPLICATE, 1 },
+        { TransactionalEmailService.STATUS_SUPPRESSED, 0 },
+        { TransactionalEmailService.STATUS_PROVIDER_FAILED, 0 },
+    };
+    for (Object[] c : cases) {
+      String outcome = (String) c[0];
+      List<String> calls = new ArrayList<>();
+      FakeProviderAdapter adapter = new FakeProviderAdapter(true, new EmailProviderResponse(
+          TransactionalEmailService.STATUS_PROVIDER_FAILED.equals(outcome) ? 500 : 202, "{}"))
+          .withMultiRecipientCapabilities();
+      InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+      if (TransactionalEmailService.STATUS_SUPPRESSED.equals(outcome)) {
+        safetyStore.suppressAddress("pm@example.com");
+      }
+      DeliveryContract contract = new DeliveryContract(calls, false)
+          .throttled(TransactionalEmailService.STATUS_THROTTLED.equals(outcome));
+      TransactionalEmailService service = serviceWithHistory(contract, adapter, safetyStore,
+          new InMemoryEmailSendLogStore());
+      JSONObject command = new JSONObject();
+      command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+      if (TransactionalEmailService.STATUS_DUPLICATE.equals(outcome)) {
+        command.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, recordKey);
+      }
+
+      NeoResponse last = null;
+      for (int attempt = 0; attempt <= (Integer) c[1]; attempt++) {
+        last = service.send("delivery-send", new JSONObject(command.toString()));
+      }
+
+      assertEquals(outcome, responseData(last).getString("status"));
+      assertEquals(outcome + ": only the sends that left are delivered", (int) (Integer) c[1],
+          calls.stream().filter(call -> call.startsWith("delivered:")).count());
+    }
+  }
+
   private static JSONObject responseData(NeoResponse response) throws JSONException {
     assertNotNull("Response body should not be null", response.getBody());
     return response.getBody().getJSONObject("response").getJSONObject("data");
@@ -1361,6 +1446,81 @@ public class TransactionalEmailServiceTest {
     EmailObservabilityEvent single() {
       assertEquals(1, events.size());
       return events.get(0);
+    }
+  }
+
+  /** A history-logging contract that records when it is told an email left. */
+  private static class DeliveryContract extends HistoryDocumentContract {
+    private final List<String> calls;
+    private final boolean failOnDelivered;
+    private boolean throttled;
+
+    DeliveryContract(List<String> calls, boolean failOnDelivered) {
+      this.calls = calls;
+      this.failOnDelivered = failOnDelivered;
+    }
+
+    DeliveryContract throttled(boolean perRecordOncePerMinute) {
+      this.throttled = perRecordOncePerMinute;
+      return this;
+    }
+
+    @Override
+    public String getName() {
+      return "delivery-send";
+    }
+
+    @Override
+    public EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
+        EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
+      return throttled
+          ? EmailDeliveryPolicy.of(null, Arrays.asList(EmailThrottleRule.perRecord(1, 60)))
+          : super.deliveryPolicy(command, recipient, providerRequest);
+    }
+
+    @Override
+    public void onDelivered(EmailSendContext context, String sendLogId) {
+      calls.add("delivered:" + sendLogId);
+      if (failOnDelivered) {
+        throw new IllegalStateException("portal link could not be confirmed");
+      }
+    }
+  }
+
+  /** Records the order in which audit rows are written. */
+  private static class RecordingSafetyStore extends InMemoryEmailSafetyStore {
+    private final List<String> calls;
+
+    RecordingSafetyStore(List<String> calls) {
+      this.calls = calls;
+    }
+
+    @Override
+    public synchronized void recordAudit(EmailAuditRecord auditRecord) {
+      calls.add("audit:" + auditRecord.getStatus());
+      super.recordAudit(auditRecord);
+    }
+  }
+
+  /** A history store that, like the DAL one, answers the id of the row it wrote. */
+  private static class RecordingSendLogStore implements EmailSendLogStore {
+    private final List<String> calls;
+    private final String rowId;
+
+    RecordingSendLogStore(List<String> calls, String rowId) {
+      this.calls = calls;
+      this.rowId = rowId;
+    }
+
+    @Override
+    public void recordSend(EmailSendHistoryRecord historyRecord) {
+      recordSendReturningId(historyRecord);
+    }
+
+    @Override
+    public Optional<String> recordSendReturningId(EmailSendHistoryRecord historyRecord) {
+      calls.add("history");
+      return Optional.of(rowId);
     }
   }
 }
