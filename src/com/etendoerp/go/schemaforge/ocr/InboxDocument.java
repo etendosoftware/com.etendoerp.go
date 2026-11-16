@@ -71,6 +71,10 @@ public final class InboxDocument {
   public static final String K_RATE = "rate";
   /** Line key (ETP-6050): the discount of the line, percent 0-100; absent means 0. */
   public static final String K_DISCOUNT = "discount";
+  /** Tax key (ETP-6050): {@code D} (tax on the sum per rate) or {@code L} (tax per line), as {@code C_Tax.DocTaxAmount}. */
+  public static final String K_DOC_TAX_AMOUNT = "docTaxAmount";
+  /** Header key (ETP-6050): the id of the document currency. */
+  public static final String K_CURRENCY_ID = "currencyId";
   /** Product key (ETP-6050): the data of the product to create, {@code state = new}. */
   public static final String K_NEW = "new";
   public static final String K_CATEGORY_ID = "categoryId";

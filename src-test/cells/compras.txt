@@ -50,7 +50,7 @@ com.etendoerp.go.schemaforge.ocr.OcrSanitizerTest
 com.etendoerp.go.schemaforge.ocr.ReceiverTaxIdCheckTest
 com.etendoerp.go.schemaforge.ocr.TaxIdNormalizerTest
 
-# --- integración (BD) (10)
+# --- integración (BD) (11)
 com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest
 com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest
 com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest
@@ -60,4 +60,5 @@ com.etendoerp.go.schemaforge.InvoiceInboxDiscardIntegrationTest
 com.etendoerp.go.schemaforge.InvoiceInboxIntakeIntegrationTest
 com.etendoerp.go.schemaforge.InvoiceInboxProcessorInboxDuplicatesIntegrationTest
 com.etendoerp.go.schemaforge.InvoiceInboxWorkStoreIntegrationTest
+com.etendoerp.go.schemaforge.PurchaseInvoiceOcrLookupsTaxCurrencyIntegrationTest
 com.etendoerp.go.schemaforge.PurchaseInvoiceOcrLookupsVendorTaxIdIntegrationTest

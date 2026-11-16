@@ -43,9 +43,12 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
@@ -94,6 +97,8 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   private static final String KEY_NAME = "name";
   private static final String KEY_DATA = "data";
   private static final String VOIDED = "VO";
+  /** The translation entity of a tax: {@code C_Tax_Trl}, not the {@code <Base>Trl} convention. */
+  private static final String TAX_TRL = "FinancialMgmtTaxTrl";
 
   /** What the invoice form hands the vendor selectors. */
   private static Map<String, String> vendorContext() {
@@ -208,6 +213,163 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       log.warn("OCR {} lookup by id failed: {}", entityName, e.getClass().getSimpleName());
       return Optional.empty();
     }
+  }
+
+  /**
+   * The rule of the invoice line's {@code C_Tax_ID} validation ({@code C_Tax_IsSOTrx_Date}) for a
+   * purchase: valid from the document date, purchase or both, client or System. The DAL query adds
+   * the role's readable clients and organizations.
+   */
+  @Override
+  public Optional<Tax> taxById(String id, String invoiceDate) {
+    try {
+      if (StringUtils.isBlank(id)) {
+        return Optional.empty();
+      }
+      OBQuery<TaxRate> query = OBDal.getInstance().createQuery(TaxRate.class,
+          "as t where t.id = :id and t.active = true and t.validFromDate <= :date"
+              + " and t.salesPurchaseType in ('P', 'B') and t.client.id in (:clients)");
+      query.setNamedParameter("id", id);
+      query.setNamedParameter("date", dateOf(invoiceDate));
+      query.setNamedParameter("clients",
+          List.of(OBContext.getOBContext().getCurrentClient().getId(), "0"));
+      query.setMaxResult(1);
+      TaxRate tax = query.uniqueResult();
+      if (tax == null || !TenantOwnership.isVisibleToCurrentTenant(tax)) {
+        return Optional.empty();
+      }
+      String name = NeoTrl.translatedNames("FinancialMgmtTaxRate", TAX_TRL, List.of(id),
+          NeoLanguage.currentCode()).getOrDefault(id, StringUtils.defaultString(tax.getName()));
+      return Optional.of(new Tax(tax.getId(), name, tax.getRate()));
+    } catch (RuntimeException e) {
+      log.warn("OCR tax lookup by id failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  @Override
+  public Map<String, String> taxDocAmountModes(Collection<String> taxIds) {
+    Collection<String> ids = distinctIds(taxIds);
+    Map<String, String> out = new HashMap<>();
+    if (ids.isEmpty()) {
+      return out;
+    }
+    try {
+      OBQuery<TaxRate> query = OBDal.getInstance().createQuery(TaxRate.class,
+          "as t where t.id in (:ids)");
+      query.setNamedParameter("ids", ids);
+      // Display and rounding mode of a tax already on the document: no validity rule, and an
+      // inactive tax keeps its name. The tenant fence below stays.
+      query.setFilterOnActive(false);
+      for (TaxRate tax : query.list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(tax)) {
+          out.put(tax.getId(), "L".equals(tax.getDocTaxAmount()) ? "L" : "D");
+        }
+      }
+    } catch (RuntimeException e) {
+      log.warn("OCR tax rounding mode lookup failed: {}", e.getClass().getSimpleName());
+    }
+    return out;
+  }
+
+  /**
+   * The currency of a purchase invoice for this vendor: the vendor's purchase price list currency
+   * (what the invoice header takes from the business partner), else the organization's, else the
+   * client's. The scale is {@link NeoCurrencyPrecision}, the one every document line of GO rounds to.
+   */
+  @Override
+  public Optional<DocCurrency> documentCurrency(String vendorId) {
+    return documentCurrency(vendorId, null);
+  }
+
+  /**
+   * As {@link #documentCurrency(String)}; the organization fallback is the one of the document
+   * ({@code organizationId}, tenant-checked), the session's when it is {@code null} or not visible.
+   */
+  @Override
+  public Optional<DocCurrency> documentCurrency(String vendorId, String organizationId) {
+    try {
+      Currency currency = null;
+      BusinessPartner vendor = StringUtils.isBlank(vendorId) ? null
+          : OBDal.getInstance().get(BusinessPartner.class, vendorId);
+      if (vendor != null && TenantOwnership.isVisibleToCurrentTenant(vendor)
+          && vendor.getPurchasePricelist() != null) {
+        currency = vendor.getPurchasePricelist().getCurrency();
+      }
+      if (currency == null) {
+        OBContext context = OBContext.getOBContext();
+        Organization organization = documentOrganization(organizationId, context);
+        currency = organization == null ? null : organization.getCurrency();
+        if (currency == null && context.getCurrentClient() != null) {
+          currency = context.getCurrentClient().getCurrency();
+        }
+      }
+      return Optional.ofNullable(currency).map(PurchaseInvoiceOcrLookups::describe);
+    } catch (RuntimeException e) {
+      log.warn("OCR document currency lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  /** The document's organization when given and visible to the tenant, else the session's. */
+  private static Organization documentOrganization(String organizationId, OBContext context) {
+    if (!StringUtils.isBlank(organizationId)) {
+      Organization organization = OBDal.getInstance().get(Organization.class, organizationId);
+      if (organization != null && TenantOwnership.isVisibleToCurrentTenant(organization)) {
+        return organization;
+      }
+    }
+    return context.getCurrentOrganization();
+  }
+
+  /**
+   * A currency by id, with its scale. Currencies are shared reference data with no tenant of their
+   * own, so there is no tenant fence here; the id only ever comes from the server-stored
+   * {@code header.currencyId}, never from a request.
+   */
+  @Override
+  public Optional<DocCurrency> currencyById(String currencyId) {
+    try {
+      Currency currency = StringUtils.isBlank(currencyId) ? null
+          : OBDal.getInstance().get(Currency.class, currencyId);
+      return Optional.ofNullable(currency).map(PurchaseInvoiceOcrLookups::describe);
+    } catch (RuntimeException e) {
+      log.warn("OCR currency lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  private static DocCurrency describe(Currency currency) {
+    return new DocCurrency(currency.getId(), currency.getISOCode(), currency.getSymbol(),
+        NeoCurrencyPrecision.forCurrencyId(currency.getId()).getAsInt());
+  }
+
+  @Override
+  public Map<String, String> taxNames(Collection<String> taxIds) {
+    Collection<String> ids = distinctIds(taxIds);
+    Map<String, String> out = new HashMap<>();
+    if (ids.isEmpty()) {
+      return out;
+    }
+    try {
+      OBQuery<TaxRate> query = OBDal.getInstance().createQuery(TaxRate.class,
+          "as t where t.id in (:ids)");
+      query.setNamedParameter("ids", ids);
+      // Display and rounding mode of a tax already on the document: no validity rule, and an
+      // inactive tax keeps its name. The tenant fence below stays.
+      query.setFilterOnActive(false);
+      Map<String, String> translated = NeoTrl.translatedNames("FinancialMgmtTaxRate", TAX_TRL, ids,
+          NeoLanguage.currentCode());
+      for (TaxRate tax : query.list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(tax)) {
+          out.put(tax.getId(), translated.getOrDefault(tax.getId(),
+              StringUtils.defaultString(tax.getName())));
+        }
+      }
+    } catch (RuntimeException e) {
+      log.warn("OCR tax names lookup failed: {}", e.getClass().getSimpleName());
+    }
+    return out;
   }
 
   @Override
