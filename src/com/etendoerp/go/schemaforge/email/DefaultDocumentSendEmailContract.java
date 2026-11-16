@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge.email;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -38,7 +37,6 @@ import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
-import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -125,7 +123,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   private static final String SPEC_ACCESS_DENIED = "Access denied to spec for current role";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
-
 
   /** Suffix every document-send contract name carries, mirroring the frontend's own rule. */
   private static final String CONTRACT_NAME_SUFFIX = "-send";
@@ -491,20 +488,17 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           resolveAdditionalParagraphHtml(command, document.get(), language);
       // ETP-6209 — the customer portal link, for a contract that declared a portal document kind.
       // Minted pending: it becomes usable only in onDelivered, i.e. only if this email leaves.
-      Optional<PortalLinkService.MintedLink> portalLink = mintPortalLink(document.get(),
-          recipients, language);
-      Optional<String> portalParagraph = portalLink.map(link -> renderPortalParagraph(link,
-          language));
+      Optional<PortalLinkService.MintedLink> portalLink = DocumentSendPortalLink.mint(
+          portalLinkService(), portalDocumentKind(), document.get().getRecordId(), recipients,
+          language, name);
       // ETP-6209 Part B — with a portal link the portal is the email's one call to action and the
       // download button goes: the portal shows the same printable. Branches only on whether a link
       // was minted, never on which contract this is; with no link the email is unchanged.
-      String ctaLabel = EmailMessages.get(portalLink.isPresent() ? "document.portal.cta"
-          : "document.cta", language);
-      String ctaUrl = portalLink.map(PortalLinkService.MintedLink::getUrl)
-          .orElse(downloadLink.get());
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), new CallToAction(ctaLabel, ctaUrl),
-              language, messageEdits, replyTo, join(extraParagraphHtml, portalParagraph)),
+          buildTemplateData(document.get(), downloadLink.get(),
+              DocumentSendPortalLink.callToAction(portalLink, downloadLink.get(), language),
+              language, messageEdits, replyTo,
+              DocumentSendPortalLink.withParagraph(extraParagraphHtml, portalLink, language)),
           replyTo).withSendCorrelationId(portalLink.map(PortalLinkService.MintedLink::getId)
               .orElse(null)));
     } catch (JSONException e) {
@@ -519,7 +513,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         EmailContractCommandSupport.FIELD_RECORD_ID);
     Optional<EmailDocumentRecord> document = resolveDocument(command);
     String tenantId = document.map(EmailDocumentRecord::getClientId).orElse(null);
-    String documentRecordId = resolveEffectiveRecordId(document.orElse(null), recordId);
+    String documentRecordId = EmailContractCommandSupport.firstNonBlank(
+        document.map(EmailDocumentRecord::getRecordId).orElse(null), recordId);
     EmailRecipientSet finalRecipients = recipient.getRecipientSet() != null
         ? recipient.getRecipientSet()
         : providerRequest.getRecipients();
@@ -616,53 +611,10 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         recipients == null ? 0 : recipients.totalCount());
   }
 
-  private Optional<PortalLinkService.MintedLink> mintPortalLink(EmailDocumentRecord document,
-      EmailRecipientSet recipients, String language) {
-    Optional<PortalDocumentKind> kind = portalDocumentKind();
-    if (!kind.isPresent()) {
-      return Optional.empty();
-    }
-    return portalLinkService().mintForSend(kind.get(), document.getRecordId(),
-        recipients.getTo(), recipients.getCc(), language, name);
-  }
-
-  /**
-   * Renders the portal sentence: where the document can be seen and for how long the link works.
-   * The link itself is the email's call-to-action button (ETP-6209 Part B), so the sentence carries
-   * no anchor. The copy is escaped before {@code applyBold} — the order
-   * {@code EmailEscape#applyBold} documents as mandatory — and the validity interpolates the
-   * configured lifetime, never a literal (a number in the copy always comes from the record).
-   */
-  private static String renderPortalParagraph(PortalLinkService.MintedLink link,
-      String language) {
-    Instant now = Instant.now();
-    long hours = ValidityWindow.hoursUntil(now, now.plus(link.getValidity()));
-    return EmailEscape.applyBold(EmailEscape.escapeHtml(
-        EmailMessages.get("document.portal.intro", language, hours)));
-  }
-
-  /** The email's one button: the document download, or the portal when a link was minted. */
-  private static final class CallToAction {
-    private final String label;
-    private final String url;
-
-    private CallToAction(String label, String url) {
-      this.label = label;
-      this.url = url;
-    }
-  }
-
-  private static Optional<String> join(Optional<String> first, Optional<String> second) {
-    if (!first.isPresent()) {
-      return second;
-    }
-    return second.isPresent() ? Optional.of(first.get() + "<br><br>" + second.get()) : first;
-  }
-
   // Private composition step; grouping these into a holder would only move the list elsewhere.
   @SuppressWarnings("java:S107")
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      CallToAction cta, String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
+      DocumentSendPortalLink.CallToAction cta, String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml)
       throws JSONException {
     JSONObject data = new JSONObject();
@@ -693,7 +645,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    * reopened). The button is the download link, or the customer portal when the email carries a
    * portal link (ETP-6209 Part B).</p>
    */
-  private EmailContent buildContent(EmailDocumentRecord document, CallToAction cta,
+  private EmailContent buildContent(EmailDocumentRecord document, DocumentSendPortalLink.CallToAction cta,
       String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml) {
     EmailContent.Builder content = EmailContent.builder();
@@ -721,7 +673,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     // reads with the sentence above it rather than after the facts table.
     extraParagraphHtml.ifPresent(content::paragraphHtml);
     appendDetails(content, document, language);
-    content.cta(cta.label, cta.url)
+    content.cta(cta.getLabel(), cta.getUrl())
         .linkFallbackText(EmailMessages.get("link.fallback", language));
     // A document email is the one place where answering reaches a person, so it closes by saying
     // so instead of with the generic team signature. Only when there is genuinely an address to
@@ -807,7 +759,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
     String recordId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID);
-    String documentRecordId = resolveEffectiveRecordId(document, recordId);
+    String documentRecordId = EmailContractCommandSupport.firstNonBlank(
+        document == null ? null : document.getRecordId(), recordId);
     // The download-link token key stays stable per record so re-sends with edited recipients do
     // not mint new tokens; it must not depend on the recipient-set hash.
     String downloadTokenKey = EmailContractCommandSupport.idempotencyKey(name,
@@ -815,7 +768,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (StringUtils.isAnyBlank(documentRecordId, document.getClientId(), downloadTokenKey)) {
       return Optional.empty();
     }
-    return DocumentDownloadTokenService.createDownloadLink(name, inferSpecName(), documentRecordId,
+    return DocumentDownloadTokenService.createDownloadLink(name, StringUtils.removeEnd(name, "-send"), documentRecordId,
         document.getClientId(), downloadTokenKey);
   }
 
@@ -848,15 +801,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     } catch (EmailMessageEdits.InvalidMessageEditsException e) {
       return Optional.empty();
     }
-  }
-
-  private String resolveEffectiveRecordId(EmailDocumentRecord document, String fallbackRecordId) {
-    return EmailContractCommandSupport.firstNonBlank(
-        document == null ? null : document.getRecordId(), fallbackRecordId);
-  }
-
-  private String inferSpecName() {
-    return StringUtils.removeEnd(name, "-send");
   }
 
   private Optional<EmailDocumentRecord> resolveDocument(EmailContractCommand command) {

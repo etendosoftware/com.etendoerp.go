@@ -129,6 +129,8 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String PATH_QUOTATIONS = "/quotations/"; // NOSONAR java:S1075 route
   private static final String DECISION_SUFFIX = "/decision";
   private static final String PATH_DECISION_VIEW = "/decisions/view";
+  /** The answer of a rate-limited request (a 429). */
+  private static final String MSG_TOO_MANY_REQUESTS = "Too many requests";
   /** The answer of a request the server could not complete (a 503). */
   private static final String MSG_UNAVAILABLE = "The portal is temporarily unavailable";
   private static final String PATH_DECISION_CONFIRM = "/decisions/confirm";
@@ -294,7 +296,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!meRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     PortalLinkService.Validation validation = linkService.validate(resolveToken(request));
@@ -343,7 +345,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleRenew(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!renewRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     PortalLinkService.RenewalOutcome outcome = linkService.renew(resolveToken(request));
@@ -454,7 +456,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleHome(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
@@ -482,7 +484,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleDecisionRequest(HttpServletRequest request, HttpServletResponse response,
       String quotationId) throws IOException, JSONException {
     if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
@@ -536,7 +538,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleDecisionView(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!meRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     sendDecision(response, decisionService.view(request.getHeader(HEADER_DECISION_TOKEN)));
@@ -552,7 +554,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleDecisionConfirm(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!renewRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     sendDecision(response, decisionService.confirm(request.getHeader(HEADER_DECISION_TOKEN)));
@@ -616,7 +618,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleSearch(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
@@ -632,7 +634,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleDocuments(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
     if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
@@ -659,7 +661,7 @@ public class PortalServlet extends HttpBaseServlet {
   private void handleDocument(HttpServletRequest request, HttpServletResponse response,
       String rest) throws IOException, JSONException {
     if (!dataRateLimiter.tryAcquire(request.getRemoteAddr())) {
-      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
     Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
