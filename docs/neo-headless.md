@@ -1686,7 +1686,8 @@ asynchronous mode answers at once and keeps the outcome where the client can rea
 `POST /sws/neo/batch` and `etendo_batch` stay one atomic transaction. The default differs by channel:
 **REST is synchronous unless the body says `"async": true`; MCP is asynchronous unless the arguments say
 `async:false`**, so an agent sending volume never waits on one request. An async job accepts at most
-5000 operations and 2 active jobs per user (4 per tenant); above that, send `async:false` or split.
+5000 operations, 4 active jobs per user, 6 per tenant and 12 in the whole installation; above that,
+send `async:false` or split.
 
 | | REST | MCP |
 |---|---|---|
@@ -1728,13 +1729,26 @@ is a conditional update, so a worker cannot overwrite `INTERRUPTED`/`CANCELLED`.
 after every row: after an `INTERRUPTED` job the listed rows are final and the rows not listed may or may
 not exist (look them up before resending). Finished jobs are purged after 24 h (by `FINISHED`; there is no `EXPIRES` column). The worker and heartbeat threads are stopped when `NeoServlet` is destroyed.
 
-**Limits and access.** At most 2 active jobs per user and 4 per client (soft limits: the count and the insert are not one atomic step, so simultaneous submits can overshoot them); over the limit, or with a full
-queue (2 workers, 50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. At most
-5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
+**Limits and access.** At most 4 active jobs per user, 6 per client and 12 across every tenant (ETP-5676:
+4 per user matches the import client's four parallel submits; at 2, half of them came back as 429 and
+the import ran at half speed). They are soft limits: the count and the insert are not one atomic step,
+so simultaneous submits can overshoot them. Over a limit, or with a full queue (12 workers per node,
+50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. The total is counted on
+the shared `ETGO_BATCH_JOB` table, so it holds whatever the number of nodes; each node keeps as many
+workers as the total because a job runs on the node that accepted it.
+At most 5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
 operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job. Only the user who
 started a job can read or cancel it (anyone else gets **404**); a finished job cannot be cancelled
 (**409**). The worker runs as the requester (user, role, client, organization, language captured at
 submit) and always releases its context and DAL session.
+
+**Watching the limits (ETP-5676).** Every submit decision logs one `[BATCH-JOB-LIMIT]` line with the
+counts it saw and the limits, e.g. `[BATCH-JOB-LIMIT] refused limit=tenant client=… user=… channel=rest
+activeUser=2/4 activeClient=6/6 activeTotal=7/12`. A refusal is a **WARN** (`limit=user|tenant|total|queue`)
+and is indexed in full, so `service:etendo-core "[BATCH-JOB-LIMIT] refused" "limit=tenant"` counts how
+often a tenant hits its cap. An acceptance is an **INFO** (`[BATCH-JOB-LIMIT] accepted …`): INFO lines
+of `etendo-core` are 99 % excluded from the Datadog index, so follow how close accepted jobs run to the
+limits through a log-based metric (computed before the exclusion), not through log search.
 
 **Bulk delete: `DELETE` operations (ETP-6143).** An operation with `"method":"DELETE"` and a
 `"recordId"` removes that record instead of creating one:

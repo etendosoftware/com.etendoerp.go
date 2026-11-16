@@ -31,7 +31,7 @@ dropped in a follow-up once production is confirmed empty.
 | Document | `AD_TABLE_ID`, `RECORD_ID`, `DOCUMENT_KIND` (`QUOTATION`, `ORDER`, `SHIPMENT`, `INVOICE`; a credit note is `INVOICE`) |
 | Recipients | `RECIPIENTS_TO`, `RECIPIENTS_CC`, `EMAIL_LANGUAGE` of the send — a renewal goes back to exactly these |
 | Lifecycle | Minted **pending** (`SENT_AT` null) while the email is built; confirmed by `EmailContract#onDelivered` only on a `SENT` outcome (`SENT_AT`, `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`). A pending row is invalid forever |
-| Chain | `LINK_ORIGIN` = `SEND` or `RENEWAL`; `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
+| Chain | `LINK_ORIGIN` = `SEND`, `RENEWAL` or `DECISION` (minted by a confirmed quotation decision, §6b); `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
 | Usage | `FIRST_USED`, `LAST_USED` |
 
 Each link lives **48 hours** from its send (`etendo.go.portal.link.ttlMinutes`,
@@ -238,6 +238,20 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   notice or KPI event). **Accepted trade-off (PO, one-step flow):** a mail scanner that executes
   the page's JavaScript could confirm a pending decision. The token is single-use, and the email
   only ever reaches the quotation's main recipient (the first To of the original send).
+  **Into the portal (PO).** After the confirmation, whatever its state (applied now, answered
+  before, superseded, no longer pending, expired), `PortalDecisionEntry` mints a new portal link
+  for the customer, like a renewal: same tenant, Business Partner, recipients and language as the
+  decision's link, 48 h from now, `LINK_ORIGIN = DECISION`, parent = the decision's link, root =
+  its root, and usable at once (`SENT_AT`/`EXPIRES_AT` set on insert, committed): no email carries
+  it. Its raw token is returned only in the confirm POST's answer (`portalToken`, plus
+  `quotationId`); only its hash is stored. The SPA then opens `/portal/<token>?view=doc&kind=
+  QUOTATION&id=<quotationId>` with a one-off notice carried in router state (never in the URL).
+  Opening the portal records `portal.link.opened` as usual (with `origin: DECISION`). No link
+  (the landing keeps its own card): invalid token, portal closed for the customer by the access
+  checks, or minting failed. Bound: at most 10 `DECISION` links per decision link and day (by
+  creation, like the renewal cool-down), on top of the confirm route's rate limiter (`/renew`'s,
+  30 per IP and minute). **Needs `update.database`:** `ETGO_PORTAL_LINK_ORIGIN_CHK` accepts
+  `DECISION`.
   **Access checks at confirm time:** a decision token never expires, so `confirm` re-runs
   `PortalAccessChecks` (blocked or inactive customer, expired plan) for the link's client and
   Business Partner; closed → `not_pending`, nothing applied, the row stays pending, the reason is
@@ -290,8 +304,22 @@ Four server-only types in `UsageEventTypes` (a browser cannot submit them), sour
 | `portal.link.renewed` | Ok when the renewal link is confirmed after its email left; refused with `errorCode` `BLOCKED_CUSTOMER`, `INACTIVE`, `PLAN_EXPIRED`, `COOLDOWN`, `DAILY_LIMIT`, the email status (`DUPLICATE`, `THROTTLED`) or `SEND_FAILED` |
 | `portal.document.downloaded` | `/pdf` after the file was actually streamed (a failed read emits nothing) |
 
-Metric queries, the per-send vs per-document reading and the link-scanner caveat: plan §A.7. The
-metric definitions are pending PO confirmation.
+Metric queries, the per-send vs per-document reading and the link-scanner caveat: plan §A.7.
+These usage events stay as they are.
+
+**PO KPIs (etendo-ai#22, 2026-11-16) — Mixpanel.** The PO's two success metrics are computed from
+three backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; contract
+and Mixpanel recipes in `backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
+
+| Event | Hook | "First" / dedup |
+|---|---|---|
+| `backend_portal_document_sent` (`type`) | `PortalLinkService#confirm`, after the link's commit, `SEND` origin only | no other sent `SEND` link of the same record (renewals, decision links and re-sends never emit) |
+| `backend_portal_document_downloaded` (`type`) | `/pdf` after the stream succeeded | atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link (`UPDATE … WHERE first_downloaded IS NULL`): only the request that set it emits; a document never sent with a link emits nothing (it is outside the KPI's denominator) |
+| `backend_quotation_decided` (`decision`, `source`) | portal: `PortalDecisionService#confirm` when applied now; app: `RejectQuotationHandler#reject`, `Convertquotation` and the quotation path of `createDraftInvoice` | the app's conversion of an `ETGO_AC` quotation (accepted from the portal) is not a second decision |
+
+`type` is the portal kind in lower case (`invoice`, `quotation`, `order`, `shipment`); a credit
+note is an `invoice` (the portal kinds do not tell it apart). **Needs `update.database`** for the
+`FIRST_DOWNLOADED` column.
 
 ## 8. Tests
 

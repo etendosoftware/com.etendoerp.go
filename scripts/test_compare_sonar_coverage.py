@@ -22,10 +22,13 @@ class FakeSonar:
     """Coverage by selector ('pr:<key>', 'branch:<name>' or 'main'); a value that is an exception
     is raised. Task statuses are returned in order, the last one repeating."""
 
-    def __init__(self, coverage=None, statuses=('SUCCESS',)):
+    def __init__(self, coverage=None, statuses=('SUCCESS',), gate_status=('OK', []), analysis='A1'):
         self.cov = coverage or {}
         self.statuses = list(statuses)
         self.asked = []
+        self.gate_status = gate_status
+        self.analysis = analysis
+        self.gates_asked = []
 
     def coverage(self, key, pullRequest='', branch=''):
         selector = f'pr:{pullRequest}' if pullRequest else f'branch:{branch}' if branch else 'main'
@@ -37,6 +40,15 @@ class FakeSonar:
 
     def task_status(self, task_id):
         return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def task_analysis_id(self, task_id):
+        return self.analysis
+
+    def quality_gate(self, analysis_id):
+        self.gates_asked.append(analysis_id)
+        if isinstance(self.gate_status, Exception):
+            raise self.gate_status
+        return self.gate_status
 
 
 def run(argv, sonar, env=None):
@@ -78,6 +90,20 @@ class RuleTest(unittest.TestCase):
                       FakeSonar({'pr:12': 80.0, 'branch:develop': 85.0}),
                       {'COVERAGE_TOLERANCE': '6', 'COVERAGE_MINIMUM': '50'})
         self.assertEqual(code, 0)
+
+    def test_an_80_minimum_from_the_environment_fails_a_coverage_the_default_would_pass(self):
+        code, out = run(['--base-branch', 'develop', '--pull-request', '12'],
+                        FakeSonar({'pr:12': 75.0, 'branch:develop': 75.0}),
+                        {'COVERAGE_MINIMUM': '80', 'COVERAGE_TOLERANCE': '1'})
+        self.assertEqual(code, 1)
+        self.assertIn('COVERAGE BELOW MINIMUM: 75.00% < 80.00%', out)
+
+    def test_unset_organization_variables_arrive_empty_and_keep_the_defaults(self):
+        code, out = run(['--base-branch', 'develop', '--pull-request', '12'],
+                        FakeSonar({'pr:12': 75.0, 'branch:develop': 75.0}),
+                        {'COVERAGE_MINIMUM': '', 'COVERAGE_TOLERANCE': ''})
+        self.assertEqual(code, 0)
+        self.assertIn('Rule: at least 70.00%, and no more than 1.00pp below the base.', out)
 
     def test_without_a_selector_reads_the_project_main_branch_as_run_sonar_did(self):
         sonar = FakeSonar({'main': 80.0, 'branch:develop': 80.0})
@@ -150,6 +176,61 @@ class WaitTest(unittest.TestCase):
         self.assertEqual(status, 'TIMEOUT')
 
 
+class QualityGateTest(unittest.TestCase):
+
+    FAILED = ('ERROR', [{'status': 'ERROR', 'metricKey': 'new_violations', 'comparator': 'GT',
+                         'errorThreshold': '0', 'actualValue': '2'}])
+
+    def gate_run(self, sonar, extra=('--check-quality-gate',), current=85.0):
+        sonar.cov = {'pr:12': current, 'branch:main': 85.0}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'report-task.txt')
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write('ceTaskId=AX12\n')
+            return run(['--base-branch', 'main', '--pull-request', '12', '--context', 'ci',
+                        '--report-task', path, *extra], sonar)
+
+    def test_a_failed_gate_fails_and_lists_its_conditions_after_the_coverage(self):
+        code, out = self.gate_run(FakeSonar(gate_status=self.FAILED))
+        self.assertEqual(code, 1)
+        self.assertLess(out.index('Coverage is OK'), out.index('QUALITY GATE FAILED'))
+        self.assertIn('- new_violations: 2 (GT 0)', out)
+
+    def test_a_passed_gate_of_the_same_analysis_passes(self):
+        sonar = FakeSonar(analysis='AN-7')
+        code, out = self.gate_run(sonar)
+        self.assertEqual(code, 0)
+        self.assertEqual(sonar.gates_asked, ['AN-7'])
+        self.assertIn('Quality gate passed', out)
+
+    def test_the_gate_is_reported_even_when_the_coverage_fails(self):
+        code, out = self.gate_run(FakeSonar(gate_status=self.FAILED), current=60.0)
+        self.assertEqual(code, 1)
+        self.assertIn('COVERAGE BELOW MINIMUM', out)
+        self.assertIn('QUALITY GATE FAILED', out)
+
+    def test_an_unreadable_gate_fails_in_ci(self):
+        code, out = self.gate_run(FakeSonar(gate_status=gate.SonarError('HTTP 500')))
+        self.assertEqual(code, 1)
+        self.assertIn('the quality gate could not be read', out)
+
+    def test_a_project_without_gate_passes_with_a_warning(self):
+        code, out = self.gate_run(FakeSonar(gate_status=('NONE', [])))
+        self.assertEqual(code, 0)
+        self.assertIn('no quality gate', out)
+
+    def test_without_the_flag_the_gate_is_not_read(self):
+        sonar = FakeSonar(gate_status=self.FAILED)
+        code, _ = self.gate_run(sonar, extra=())
+        self.assertEqual(code, 0)
+        self.assertEqual(sonar.gates_asked, [])
+
+    def test_the_flag_needs_a_report_task(self):
+        code, out = run(['--base-branch', 'main', '--pull-request', '12', '--check-quality-gate'], FakeSonar())
+        self.assertEqual(code, 2)
+        self.assertIn('needs --report-task', out)
+
+
 class SonarClientTest(unittest.TestCase):
 
     def response(self, payload):
@@ -182,6 +263,15 @@ class SonarClientTest(unittest.TestCase):
         with self.assertRaises(gate.SonarError) as raised:
             gate.Sonar('https://s', 't', http(403)).coverage('key', branch='b')
         self.assertIn('Browse permission', str(raised.exception))
+
+    def test_reads_the_failed_conditions_of_an_analysis_gate(self):
+        opener = mock.MagicMock(return_value=self.response({'projectStatus': {'status': 'ERROR', 'conditions': [
+            {'status': 'OK', 'metricKey': 'new_coverage'},
+            {'status': 'ERROR', 'metricKey': 'new_violations', 'actualValue': '2'}]}}))
+        status, failed = gate.Sonar('https://s', 't', opener).quality_gate('AN-7')
+        self.assertEqual(status, 'ERROR')
+        self.assertEqual([c['metricKey'] for c in failed], ['new_violations'])
+        self.assertIn('/api/qualitygates/project_status?analysisId=AN-7', opener.call_args.args[0].full_url)
 
 
 if __name__ == '__main__':

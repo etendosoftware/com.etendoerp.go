@@ -208,6 +208,24 @@ public class PortalLinkDalTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  public void countChildrenOfBindsTheOriginItIsGiven() {
+    // The decision landing's daily limit counts DECISION children; the renewal cool-down keeps
+    // counting RENEWAL ones through the same query.
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(query.count()).thenReturn(4);
+    when(obDal.createQuery(eq(PortalLinkDal.ENTITY), anyString())).thenReturn(query);
+    Date since = new Date(5_000L);
+
+    assertEquals(4, PortalLinkDal.countChildrenOf("LINK-1", PortalLink.ORIGIN_DECISION, since));
+
+    verify(query).setNamedParameter("origin", PortalLink.ORIGIN_DECISION);
+    verify(query, never()).setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    verify(query).setNamedParameter("parentLinkId", "LINK-1");
+    verify(query).setNamedParameter("since", since);
+  }
+
+  @Test
   @SuppressWarnings({ "unchecked", "rawtypes" })
   public void lockForRenewalSelectsTheExpiredRowForUpdateWithItsIdBound() {
     // The W1 race fix: a second open of the same link waits on this row lock until the first

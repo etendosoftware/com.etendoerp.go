@@ -27,8 +27,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.Arrays;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -39,6 +42,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.RejectReason;
+
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 
 /**
  * Unit tests for {@link RejectQuotationHandler}.
@@ -514,6 +519,50 @@ public class RejectQuotationHandlerTest {
       assertNotNull(r);
       assertEquals(200, r.getHttpStatus());
       verify(quotation).setRejectReason(reason);
+    }
+  }
+
+  // ── ETP-6209 KPI ──────────────────────────────────────────────────────────
+
+  /**
+   * Only a reject that went through records the app's "rejected" decision; a refused one (not
+   * Under Evaluation, unknown or inactive reason) records nothing.
+   */
+  @Test
+  public void testOnlyASuccessfulRejectRecordsAnAppRejection() throws JSONException {
+    // Columns: quotation status, reason found, reason active, expected HTTP status.
+    Object[][] cases = {
+        { "UE", true, true, 200 },
+        { "DR", true, true, 400 },
+        { "UE", false, true, 400 },
+        { "UE", true, false, 400 },
+    };
+    for (Object[] c : cases) {
+      try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Order quotation = mock(Order.class);
+        when(quotation.getDocumentStatus()).thenReturn((String) c[0]);
+        when(dal.get(eq(Order.class), anyString())).thenReturn(quotation);
+        RejectReason reason = mock(RejectReason.class);
+        when(reason.isActive()).thenReturn((Boolean) c[2]);
+        when(dal.get(eq(RejectReason.class), anyString()))
+            .thenReturn((Boolean) c[1] ? reason : null);
+
+        NeoResponse r = new RejectQuotationHandler().handle(NeoContext.builder()
+            .specName(SPEC_SALES_QUOTATION).entityName(ENTITY_HEADER)
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_REJECT).recordId("q-kpi")
+            .requestBody(new JSONObject().put("rejectReason", "rr-1")).build());
+
+        int status = (Integer) c[3];
+        assertEquals(Arrays.toString(c), status, r.getHttpStatus());
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(false, quotation),
+            times(status == 200 ? 1 : 0));
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(eq(true), any()), never());
+      }
     }
   }
 
