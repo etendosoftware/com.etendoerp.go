@@ -87,6 +87,9 @@ final class BatchJobJdbcStore implements BatchJobStore {
       "SELECT count(*) FROM etgo_batch_job WHERE ad_client_id = ? AND owner_user_id = ? "
           + "AND state IN ('QUEUED', 'RUNNING')";
 
+  private static final String COUNT_ALL_SQL =
+      "SELECT count(*) FROM etgo_batch_job WHERE state IN ('QUEUED', 'RUNNING')";
+
   private static final String COUNT_CLIENT_SQL =
       "SELECT count(*) FROM etgo_batch_job WHERE ad_client_id = ? AND state IN ('QUEUED', 'RUNNING')";
 
@@ -125,6 +128,11 @@ final class BatchJobJdbcStore implements BatchJobStore {
   @Override
   public int countActiveForUser(String clientId, String userId) {
     return count(COUNT_USER_SQL, clientId, userId);
+  }
+
+  @Override
+  public int countActive() {
+    return count(COUNT_ALL_SQL);
   }
 
   @Override

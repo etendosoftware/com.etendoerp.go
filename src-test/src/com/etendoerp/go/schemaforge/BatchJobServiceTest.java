@@ -206,10 +206,32 @@ public class BatchJobServiceTest {
     assertTrue(service.heldJobs().isEmpty());
   }
 
+  /** Submits {@code n} one-row jobs as {@code owner}; the manual executor never runs them. */
+  private void fill(Owner owner, int n) throws Exception {
+    for (int i = 0; i < n; i++) {
+      submit(owner, rows(1), committing(new ArrayList<>()));
+    }
+  }
+
+  private int submitStatus(Owner owner) {
+    return httpStatusOf(() -> {
+      try {
+        submit(owner, rows(1), committing(new ArrayList<>()));
+      } catch (JobException e) {
+        throw e;
+      } catch (Exception e) {
+        throw new IllegalStateException(e);
+      }
+    });
+  }
+
+  private static Owner user(String userId, String clientId) {
+    return new Owner(userId, "R1", clientId, "O1", "en_US", null);
+  }
+
   @Test
   public void aUserOverTheLimitGetsA429WithARetryHintAndNoRow() throws Exception {
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
     try {
       submit(ALICE, rows(1), committing(new ArrayList<>()));
       fail("expected 429");
@@ -217,28 +239,43 @@ public class BatchJobServiceTest {
       assertEquals(429, e.getStatus());
       assertEquals(Integer.valueOf(BatchJobService.RETRY_AFTER_SECONDS), e.getRetryAfter());
     }
-    assertEquals(2, store.jobs.size());
+    assertEquals(BatchJobService.MAX_ACTIVE_PER_USER, store.jobs.size());
   }
 
   @Test
   public void aClientOverItsLimitIsRefusedEvenForAnotherUser() throws Exception {
-    Owner carol = new Owner("U3", "R1", "C1", "O1", "en_US", null);
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(BOB, rows(1), committing(new ArrayList<>()));
-    submit(BOB, rows(1), committing(new ArrayList<>()));
-    assertEquals(429, httpStatusOf(() -> {
-      try {
-        submit(carol, rows(1), committing(new ArrayList<>()));
-      } catch (JobException e) {
-        throw e;
-      } catch (Exception e) {
-        throw new IllegalStateException(e);
-      }
-    }));
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
+    fill(BOB, BatchJobService.MAX_ACTIVE_PER_CLIENT - BatchJobService.MAX_ACTIVE_PER_USER);
+    assertEquals(429, submitStatus(user("U3", "C1")));
     // another tenant is not affected
     submit(EVE, rows(1), committing(new ArrayList<>()));
-    assertEquals(5, store.jobs.size());
+    assertEquals(BatchJobService.MAX_ACTIVE_PER_CLIENT + 1, store.jobs.size());
+  }
+
+  @Test
+  public void theInstallationOverItsTotalLimitRefusesATenantThatIsUnderItsOwn() throws Exception {
+    int perClient = BatchJobService.MAX_ACTIVE_PER_CLIENT;
+    int tenants = BatchJobService.MAX_ACTIVE_TOTAL / perClient;
+    for (int t = 0; t < tenants; t++) {
+      for (int u = 0; u < perClient; u++) {
+        submit(user("U" + t + "-" + u, "T" + t), rows(1), committing(new ArrayList<>()));
+      }
+    }
+    for (int u = 0; u < BatchJobService.MAX_ACTIVE_TOTAL % perClient; u++) {
+      submit(user("R" + u, "TR"), rows(1), committing(new ArrayList<>()));
+    }
+    assertEquals(BatchJobService.MAX_ACTIVE_TOTAL, store.jobs.size());
+
+    // a fresh tenant with no job of its own is still refused: the cap is installation-wide
+    assertEquals(429, submitStatus(user("NEW", "FRESH")));
+    assertEquals(BatchJobService.MAX_ACTIVE_TOTAL, store.jobs.size());
+  }
+
+  @Test
+  public void finishedJobsFreeTheirSlot() throws Exception {
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
+    executor.runAll();
+    assertEquals(-1, submitStatus(ALICE));
   }
 
   @Test
@@ -714,6 +751,11 @@ public class BatchJobServiceTest {
     @Override
     public synchronized int countActiveForUser(String clientId, String userId) {
       return (int) active(j -> j.clientId.equals(clientId) && j.userId.equals(userId));
+    }
+
+    @Override
+    public synchronized int countActive() {
+      return (int) active(j -> true);
     }
 
     @Override
