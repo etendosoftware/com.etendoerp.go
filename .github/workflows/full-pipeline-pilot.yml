@@ -205,7 +205,8 @@ jobs:
           args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
 
       # Fails the job when the coverage is below the minimum, more than the tolerance below main, or
-      # cannot be evaluated (--context ci).
+      # cannot be evaluated (--context ci), and when this analysis's quality gate failed
+      # (--check-quality-gate): the same gate "SonarQube Code Analysis" reports, read in the same wait.
       - name: Compare coverage with main
         if: github.event_name == 'pull_request'
         working-directory: etendo_core/modules/com.etendoerp.go
@@ -219,7 +220,8 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
-            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt | tee -a "$GITHUB_STEP_SUMMARY"
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt --check-quality-gate \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   integration:
     name: 'Pilot: Integration (Tomcat + Playwright)'
