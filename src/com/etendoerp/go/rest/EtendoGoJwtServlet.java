@@ -3133,8 +3133,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * GET /sws/go/terms?language=es_ES (ETP-6081).
    *
    * <p>Deliberately unauthenticated: the register screen shows the terms before any account
-   * exists. Returns only the text in force and its identity ({@code version}, {@code language},
-   * {@code content}, {@code publishedAt}); 404 when no version is published.
+   * exists. Returns only the identity of the version in force ({@code version}, {@code language},
+   * {@code null} for a version of every language, and {@code publishedAt}); its text is the Word
+   * document {@code /terms/document} serves. 404 when no version with a document is published.
    */
   private void handleTermsAndConditions(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -3162,7 +3163,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * GET /sws/go/terms/document?language=es_ES&amp;version=1.0 (ETP-6244).
    *
    * <p>Unauthenticated like {@code /terms}: the Word document attached in Classic to that version,
-   * for the register screen to show when {@code /terms} said {@code hasDocument}. Only the
+   * for the register screen to show the version {@code /terms} named; an empty or missing
+   * {@code language} reads a version of every language. Only the
    * {@code .docx} of an active, published {@code ETGO_TERMS} row is ever served; anything else,
    * a malformed parameter included, is a 404.
    */
