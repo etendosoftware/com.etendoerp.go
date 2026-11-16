@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.PublicApiUsageCounter;
@@ -203,6 +204,8 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
 
+    AccountingKpiTelemetry.beginRestRequest(pathInfo.specName, pathInfo.entityName, method,
+        pathInfo.actionName);
     try {
       OBContext.setAdminMode();
       // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
@@ -221,6 +224,7 @@ public class NeoServlet extends HttpBaseServlet {
           "NEO " + method + " request", null));
     } finally {
       OBContext.restorePreviousMode();
+      AccountingKpiTelemetry.endRestRequest();
     }
   }
 
@@ -233,6 +237,8 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
     requestRouter.handleSpecRequest(pathInfo, method, request, response);
+    // ETP-6230: enqueue only (own thread, own connection); branches on nothing about the entity.
+    AccountingKpiTelemetry.restWriteSucceeded(response.getStatus());
   }
 
   /**
@@ -386,6 +392,8 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     response.setStatus(neoResponse.getHttpStatus());
+    // ETP-6230: period refusals, enqueue only.
+    AccountingKpiTelemetry.observeRestResponse(neoResponse.getHttpStatus(), neoResponse.getBody());
 
     if (neoResponse.getBody() != null) {
       response.setContentType(ContentType.APPLICATION_JSON.getMimeType());

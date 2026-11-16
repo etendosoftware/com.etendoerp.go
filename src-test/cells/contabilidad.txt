@@ -3,7 +3,8 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=contabilidad [-Pkind=mock|integration|all]
 
-# --- con mocks (42)
+# --- con mocks (44)
+com.etendoerp.go.mcp.McpAccountingKpiObserverTest
 com.etendoerp.go.schemaforge.AccountReportTreeTest
 com.etendoerp.go.schemaforge.AccountingDimensionsSupportTest
 com.etendoerp.go.schemaforge.AccountingPostingCustomizationsTest
@@ -41,6 +42,7 @@ com.etendoerp.go.schemaforge.handlers.ReactivationUnpostTest
 com.etendoerp.go.schemaforge.handlers.TaxAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.YearAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.PostingAccountCombinationSelectorPolicyTest
+com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetryTest
 com.etendoerp.go.schemaforge.util.AccountingDocumentTypeSupportTest
 com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicyTest
 com.etendoerp.go.schemaforge.util.PostingAccountCombinationsTest

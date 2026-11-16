@@ -859,6 +859,132 @@ public class GoodsShipmentHeaderHandlerTest {
     }
   }
 
+  /**
+   * The documentAction POST snapshots the stored status before completion and still lets the
+   * native flow run; any other request (GET, a different action) never touches the telemetry.
+   */
+  @Test
+  public void handleDocumentActionTakesTheTelemetrySnapshotAndStillReturnsNull() {
+    try (MockedStatic<NeoHandlerUtils> utils = Mockito.mockStatic(NeoHandlerUtils.class);
+         MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+         MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+      NeoContext post = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+      NeoContext get = NeoContext.builder()
+          .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+
+      assertNull(new GoodsShipmentHeaderHandler().handle(post));
+      telemetry.verify(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+          .beforeAction(post));
+
+      new GoodsShipmentHeaderHandler().handle(get);
+      telemetry.verify(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+          .beforeAction(any()), Mockito.times(1));
+    }
+  }
+
+  /** The post-hook of the documentAction POST emits through the telemetry and keeps the result. */
+  @Test
+  public void afterHandleDocumentActionCallsTheTelemetryAndKeepsTheDefaultResult() {
+    try (MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+      NeoContext post = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+      NeoContext get = getCtx();
+
+      assertNull(new GoodsShipmentHeaderHandler().afterHandle(post));
+      telemetry.verify(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+          .afterAction(post));
+
+      new GoodsShipmentHeaderHandler().afterHandle(get);
+      telemetry.verify(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+          .afterAction(any()), Mockito.times(1));
+    }
+  }
+
+  /**
+   * A refused {@code documentAction} POST (the unpost gate, the posting service) never reaches the
+   * snapshot: no attribute is left on the context, so {@code afterHandle} has nothing to emit.
+   */
+  @Test
+  public void handleRefusedByTheUnpostGateTakesNoTelemetrySnapshot() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction").recordId("ship-1").build();
+    NeoResponse refusal = NeoResponse.error(422, "not posted");
+
+    try (MockedStatic<GoodsPostingContracts> gate = Mockito.mockStatic(GoodsPostingContracts.class);
+         MockedStatic<NeoHandlerUtils> utils = Mockito.mockStatic(NeoHandlerUtils.class);
+         MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+      gate.when(() -> GoodsPostingContracts.checkUnpost(ctx)).thenReturn(refusal);
+      GoodsShipmentHeaderHandler h = new GoodsShipmentHeaderHandler();
+
+      assertSame(refusal, h.handle(ctx));
+
+      telemetry.verifyNoInteractions();
+      assertNull(ctx.getAttribute(TELEMETRY_STATUS_ATTRIBUTE));
+    }
+  }
+
+  @Test
+  public void handleRefusedByThePostingServiceTakesNoTelemetrySnapshot() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction").recordId("ship-1").build();
+    NeoResponse refusal = NeoResponse.error(403, "accounting access denied");
+    when(service.handleAction(ctx)).thenReturn(refusal);
+    GoodsShipmentHeaderHandler h = new GoodsShipmentHeaderHandler();
+    h.setPostingService(service);
+
+    try (MockedStatic<NeoHandlerUtils> utils = Mockito.mockStatic(NeoHandlerUtils.class);
+         MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+      assertSame(refusal, h.handle(ctx));
+
+      telemetry.verifyNoInteractions();
+      assertNull(ctx.getAttribute(TELEMETRY_STATUS_ATTRIBUTE));
+    }
+  }
+
+  /**
+   * A CRUD write on the header, even one carrying a status field, is not the {@code documentAction}
+   * POST: it neither snapshots nor emits. (The spec also exposes {@code documentStatus} as
+   * {@code readOnly}, so the CRUD path is not a way to complete a shipment.)
+   */
+  @Test
+  public void crudWritesWithAStatusFieldDoNotArmTheTelemetry() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+      for (String method : new String[] {"PATCH", "PUT"}) {
+        JSONObject body = new JSONObject().put("documentStatus", "CO").put("docStatus", "CO")
+            .put("documentAction", "CO");
+        NeoContext ctx = NeoContext.builder()
+            .httpMethod(method).endpointType(NeoEndpointType.CRUD).recordId("ship-1")
+            .requestBody(body).build();
+        GoodsShipmentHeaderHandler h = new GoodsShipmentHeaderHandler();
+
+        assertNull(h.handle(ctx));
+        assertNull(ctx.getAttribute(TELEMETRY_STATUS_ATTRIBUTE));
+
+        ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+            new JSONObject().put("data", new JSONArray().put(new JSONObject().put("id", "ship-1")
+                .put("documentStatus", "CO"))))));
+        assertNull(h.afterHandle(ctx));
+      }
+      telemetry.verifyNoInteractions();
+    }
+  }
+
+  private static final String TELEMETRY_STATUS_ATTRIBUTE =
+      "etgo.goodsShipmentTelemetry.statusBefore";
+
   @Test
   public void handleDocumentActionWithNullRecordIdSkipsReanchor() {
     NeoContext ctx = NeoContext.builder()

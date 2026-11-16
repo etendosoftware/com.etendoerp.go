@@ -25,7 +25,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -51,6 +54,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 
@@ -667,6 +671,250 @@ public class GoSessionEndpointsTest {
     assertEquals("newcsrf", new JSONObject(resp.body.toString()).getString("csrfToken"));
   }
 
+  // ETP-6152 — the session row must be committed before the response that hands out its cookie
+  // is written: the request filter commits only after the servlet returns, and the client's next
+  // request (sent the moment this one answers) otherwise finds no session and gets a 401.
+
+  @Test
+  public void environmentEntryCommitsTheRotatedSessionBeforeAnswering() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData(
+        "R1", new JSONArray().put(roleEntry("R1", "O1")));
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O2"), roles, new JSONObject()
+        .put("userId", "U1").put("roleId", "R1").put("orgId", "O1"), "R1", obDal);
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).rotate(any());
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    order.verify(resp.response).getWriter();
+  }
+
+  @Test
+  public void createCommitsTheSessionBeforeAnswering() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord()));
+
+    CapturedResponse resp = postSessionCreate(obDal);
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).create(eq("ACC1"), eq("password"), any(), any());
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=sess-token-xyz"));
+    order.verify(resp.response).getWriter();
+  }
+
+  /** A session that could not be committed must not be answered with a 200 and its cookie. */
+  @Test
+  public void createAnswersAnErrorWithoutACookieWhenTheSessionCommitFails() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    doThrow(new IllegalStateException("commit failed")).when(obDal).commitAndClose();
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord()));
+
+    CapturedResponse resp = postSessionCreate(obDal);
+
+    assertEquals(500, resp.status);
+    assertNull("no cookie for a session that never landed",
+        resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    verify(obDal).rollbackAndClose();
+  }
+
+  @Test
+  public void logoutCommitsTheRevocationBeforeAnswering() throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doDelete(deleteRequest("tok", CSRF), resp.response);
+    }
+
+    assertEquals(204, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).revoke(sessionRecord);
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).setStatus(204);
+  }
+
+  @Test
+  public void refreshCommitsTheRotationBeforeSettingTheCookies() throws Exception {
+    when(goSessionService.refresh("rtok")).thenReturn(
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord()));
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = postRefreshWith(obDal, "rtok");
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).refresh("rtok");
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    order.verify(resp.response).getWriter();
+  }
+
+  /** A replayed refresh revokes the family: that revocation must land before the 401 is sent. */
+  @Test
+  public void refreshReplayCommitsTheRevocationBeforeAnswering401() throws Exception {
+    when(goSessionService.refresh("rtok")).thenReturn(null);
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = postRefreshWith(obDal, "rtok");
+
+    assertEquals(401, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).refresh("rtok");
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "="));
+    order.verify(resp.response).setStatus(401);
+  }
+
+  @Test
+  public void refreshAnswersAnErrorWithoutCookiesWhenTheRotationCommitFails() throws Exception {
+    when(goSessionService.refresh("rtok")).thenReturn(
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord()));
+    OBDal obDal = mock(OBDal.class);
+    doThrow(new IllegalStateException("commit failed")).when(obDal).commitAndClose();
+
+    CapturedResponse resp = postRefreshWith(obDal, "rtok");
+
+    assertEquals(500, resp.status);
+    assertNull("no cookie for a rotation that never landed",
+        resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    assertNull(resp.cookie(GoSessionSecurity.REFRESH_COOKIE_NAME));
+    verify(obDal).rollbackAndClose();
+  }
+
+  @Test
+  public void loginLinkCommitsTheSessionBeforeAnswering() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(goSessionService.create(eq("ACC1"), eq("link"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord()));
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      signup.when(() -> SignupAccountDalHelper.findAccountByLoginLinkHash(
+          eq(AccountRegistrationService.hashAuthToken("link-token")), any())).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      signup.when(() -> SignupAccountDalHelper.environmentUserId(account)).thenReturn("USER1");
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "link-token")),
+          resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).create(eq("ACC1"), eq("link"), any(), any());
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=sess-token-xyz"));
+    order.verify(resp.response).getWriter();
+  }
+
+  /** Change-password on the cookie path rotates the session: commit first, then the cookies. */
+  @Test
+  public void changePasswordOnACookieSessionCommitsTheRotationBeforeAnswering() throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    when(goSessionService.rotate(sessionRecord)).thenReturn(
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord()));
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      // No local password: the account is enrolling, so no current password is verified.
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(false);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(cookiePost("/change-password",
+          new JSONObject().put("newPassword", "Str0ng!Pass1")), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(goSessionService, obDal, resp.response);
+    order.verify(goSessionService).rotate(sessionRecord);
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    order.verify(resp.response).getWriter();
+  }
+
+  private CapturedResponse postRefreshWith(OBDal obDal, String refreshCookie) {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(postRefresh(refreshCookie), resp.response);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+    return resp;
+  }
+
+  /** A same-origin JSON POST carrying the session cookie {@code tok} and its CSRF token. */
+  private static HttpServletRequest cookiePost(String path, JSONObject body) throws Exception {
+    HttpServletRequest req = jsonPost(path, body);
+    when(req.getHeader("Origin")).thenReturn(ORIGIN);
+    when(req.getHeader("Referer")).thenReturn(null);
+    when(req.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(CSRF);
+    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go" + path));
+    when(req.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "tok") });
+    return req;
+  }
+
+  /** {@code POST /session} with valid credentials for ACC1, the servlet seeing {@code obDal}. */
+  private CapturedResponse postSessionCreate(OBDal obDal) throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    when(account.getPasswordHash()).thenReturn(storedHash(PASSWORD));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(jsonPost("/session",
+          new JSONObject().put("email", EMAIL).put("password", PASSWORD)), resp.response);
+    }
+    return resp;
+  }
+
   /** A live session already inside U1/R1/C1/{@code orgId}/W1, as the resolver returns it. */
   private static GoSessionRecord sessionInEnvironment(String orgId) {
     GoSessionRecord sessionRecord = new GoSessionRecord();
@@ -702,6 +950,14 @@ public class GoSessionEndpointsTest {
   private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord,
       EtendoGoJwtSupport.RoleListData roleListData, JSONObject requestBody, String enteredRoleId)
       throws Exception {
+    return enterEnvironment(sessionRecord, roleListData, requestBody, enteredRoleId,
+        mock(OBDal.class));
+  }
+
+  /** As above, with the {@link OBDal} the servlet sees, so a test can verify its commits. */
+  private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord,
+      EtendoGoJwtSupport.RoleListData roleListData, JSONObject requestBody, String enteredRoleId,
+      OBDal obDal) throws Exception {
     when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
@@ -709,7 +965,6 @@ public class GoSessionEndpointsTest {
 
     User user = mock(User.class);
     Role role = mock(Role.class);
-    OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "U1")).thenReturn(user);
     when(obDal.get(Role.class, enteredRoleId)).thenReturn(role);
 

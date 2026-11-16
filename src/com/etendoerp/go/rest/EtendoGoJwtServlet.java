@@ -115,6 +115,7 @@ import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.CheckoutPromotionTerms;
@@ -497,6 +498,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_SUPPORT_SESSION = "supportSession";
   private static final String PATH_SUPPORT_HANDOFF = "/session/support-handoff";
   private static final String ACTION_SUPPORT_HANDOFF = "support handoff";
+  /** ETP-6152 — the operation named in the log when committing a session write fails. */
+  private static final String ACTION_SESSION_WRITE = "session write";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
@@ -3776,7 +3779,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               "Session changed concurrently; restore and retry");
           return;
         }
-        setSessionCookies(response, rotated);
+        commitAndSetSessionCookies(response, rotated);
         result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       } else {
         result.put(FIELD_TOKEN, sessionToken);
@@ -4533,6 +4536,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         calendarReviewService.confirm(session.clientId, userId);
       }
       EtendoGoDalHelper.commitDalChanges("calendar review", log);
+      // ETP-6230: after the commit; enqueue only.
+      AccountingKpiTelemetry.calendarReviewCompleted(session.clientId,
+          AccountingKpiTelemetry.REVIEW_FIRST_STEPS,
+          regenerate ? AccountingKpiTelemetry.TYPE_MODIFY : AccountingKpiTelemetry.TYPE_CONFIRM,
+          AccountingKpiTelemetry.SOURCE_FIRST_STEPS);
       // Same shape as the GET: the caller is the owner, or it would have been refused above.
       JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
       result.put("isOwner", true);
@@ -5892,6 +5900,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
     alertAttempt.committed = true;
     alertAttempt.stage = "committed";
+    if (paidUpgrade) {
+      // ETP-6230: productive signup, after the onboarding commit; enqueue only.
+      AccountingKpiTelemetry.productiveEnvironmentCreated(clientId);
+    }
     notifyProvisioningAlert(alertAttempt,
         com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK, null);
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
@@ -7579,7 +7591,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
       IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
           request.getHeader(HEADER_USER_AGENT), null);
-      setSessionCookies(response, issued);
+      commitAndSetSessionCookies(response, issued);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       JSONObject result = new JSONObject();
@@ -7676,7 +7688,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         // ETP-5351: the support logout frees the tenant and closes the audit row ('logout').
         supportAccessService.closeOnLogout(auth.getRecord());
       }
-      clearSessionCookies(response);
+      commitAndClearSessionCookies(response);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -7932,7 +7944,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
     if (rotated != null) {
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated);
     }
     return rotated;
   }
@@ -8125,7 +8137,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       IssuedGoSession issued = handoff.getSession();
       Account account = EtendoGoJwtDalHelper.findActiveAccountById(issued.getRecord().getAccountId());
 
-      setSessionCookies(response, issued);
+      commitAndSetSessionCookies(response, issued);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       JSONObject result = new JSONObject();
@@ -8217,12 +8229,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String rawRefresh = extractRefreshToken(request);
       IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
       if (rotated == null) {
-        clearSessionCookies(response);
+        commitAndClearSessionCookies(response);
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
@@ -8242,12 +8254,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+  /**
+   * Commits the session write, then sets the session + refresh cookies that point at it.
+   *
+   * <p>ETP-6152 — the session row is written through the request's DAL transaction, which the
+   * Etendo request filter only commits after this servlet returns, while the response is already
+   * on the wire. A client that sends its next request the moment this one answers (the SPA enters
+   * the environment and immediately reads the next screen) raced that commit and got a 401 for a
+   * session that did not exist yet, and the SPA logs out on a 401. Committing here, the one place
+   * every issued or rotated session goes through before its cookie is handed out, means a cookie is
+   * never sent for a row that has not landed. A failed commit throws, so the caller answers an error
+   * with no cookie instead of a 200. Writes made after this point run in a fresh transaction that
+   * the request filter commits as before.
+   */
+  private void commitAndSetSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+    EtendoGoDalHelper.commitDalChanges(ACTION_SESSION_WRITE, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
   }
 
-  private void clearSessionCookies(HttpServletResponse response) {
+  /**
+   * Commits the session write (a revocation), then clears the session + refresh cookies. ETP-6152:
+   * a session revoked by logout, or a refresh family revoked on replay, must not still resolve
+   * for a request that arrives right after this response.
+   */
+  private void commitAndClearSessionCookies(HttpServletResponse response) {
+    EtendoGoDalHelper.commitDalChanges(ACTION_SESSION_WRITE, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredSessionCookie());
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredRefreshCookie());
   }
@@ -8286,7 +8318,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
-    setSessionCookies(response, issued);
+    commitAndSetSessionCookies(response, issued);
     response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 

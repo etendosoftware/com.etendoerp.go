@@ -103,6 +103,11 @@ public class ToolRegistry {
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
       tools.add(buildFeedbackTool());
+      // ETP-6236: offered to every session that can read, behind its flag; each step asks its own
+      // scope.
+      if (McpRoutinesFlag.isEnabled()) {
+        tools.add(McpRoutineTool.definition());
+      }
     }
 
     // Query all active specs
@@ -343,7 +348,8 @@ public class ToolRegistry {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
         || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
-        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)
+        || McpConstants.TOOL_NEO_ROUTINE.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -767,6 +773,7 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.extract(List.of()); break;
       // etendo-ai#53: only includePermissions; anything else is refused.
       case McpConstants.TOOL_NEO_WHOAMI: definition = McpWhoamiToolDefinition.definition(); break;
+      case McpConstants.TOOL_NEO_ROUTINE: definition = McpRoutineTool.definition(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
