@@ -124,6 +124,28 @@ public final class NeoTelemetryEvents {
       "backend_bank_bounce_suggestions_applied";
 
   /**
+   * ETP-6209 — the first portal link of a document was emailed (renewals, decision links and
+   * re-sends excluded). Emitted by {@code PortalKpiTelemetry}; properties {@code account_id},
+   * {@code type} (the portal document kind). Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_DOCUMENT_SENT = "backend_portal_document_sent";
+
+  /**
+   * ETP-6209 — the first portal download of a document sent with a portal link. Emitted by
+   * {@code PortalKpiTelemetry}; properties {@code account_id}, {@code type}. Never a record
+   * identifier.
+   */
+  public static final String BACKEND_PORTAL_DOCUMENT_DOWNLOADED =
+      "backend_portal_document_downloaded";
+
+  /**
+   * ETP-6209 — a quotation was accepted or rejected, from the portal or in the app. Emitted by
+   * {@code PortalKpiTelemetry}; properties {@code account_id}, {@code decision}
+   * ({@code accepted|rejected}), {@code source} ({@code portal|app}). Never a record identifier.
+   */
+  public static final String BACKEND_QUOTATION_DECIDED = "backend_quotation_decided";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

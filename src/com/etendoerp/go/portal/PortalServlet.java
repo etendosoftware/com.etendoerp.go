@@ -721,6 +721,7 @@ public class PortalServlet extends HttpBaseServlet {
     if (AnonymousAttachmentStreamer.stream(attachment, response,
         "portal kind=" + kind.name() + " record=" + id)) {
       PortalUsageEvents.downloaded(validated, id);
+      PortalKpiTelemetry.documentDownloaded(validated, kind, id);
     }
   }
 

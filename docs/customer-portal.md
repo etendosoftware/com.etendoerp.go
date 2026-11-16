@@ -304,8 +304,22 @@ Four server-only types in `UsageEventTypes` (a browser cannot submit them), sour
 | `portal.link.renewed` | Ok when the renewal link is confirmed after its email left; refused with `errorCode` `BLOCKED_CUSTOMER`, `INACTIVE`, `PLAN_EXPIRED`, `COOLDOWN`, `DAILY_LIMIT`, the email status (`DUPLICATE`, `THROTTLED`) or `SEND_FAILED` |
 | `portal.document.downloaded` | `/pdf` after the file was actually streamed (a failed read emits nothing) |
 
-Metric queries, the per-send vs per-document reading and the link-scanner caveat: plan §A.7. The
-metric definitions are pending PO confirmation.
+Metric queries, the per-send vs per-document reading and the link-scanner caveat: plan §A.7.
+These usage events stay as they are.
+
+**PO KPIs (etendo-ai#22, 2026-11-16) — Mixpanel.** The PO's two success metrics are computed from
+three backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; contract
+and Mixpanel recipes in `backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
+
+| Event | Hook | "First" / dedup |
+|---|---|---|
+| `backend_portal_document_sent` (`type`) | `PortalLinkService#confirm`, after the link's commit, `SEND` origin only | no other sent `SEND` link of the same record (renewals, decision links and re-sends never emit) |
+| `backend_portal_document_downloaded` (`type`) | `/pdf` after the stream succeeded | atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link (`UPDATE … WHERE first_downloaded IS NULL`): only the request that set it emits; a document never sent with a link emits nothing (it is outside the KPI's denominator) |
+| `backend_quotation_decided` (`decision`, `source`) | portal: `PortalDecisionService#confirm` when applied now; app: `RejectQuotationHandler#reject`, `Convertquotation` and the quotation path of `createDraftInvoice` | the app's conversion of an `ETGO_AC` quotation (accepted from the portal) is not a second decision |
+
+`type` is the portal kind in lower case (`invoice`, `quotation`, `order`, `shipment`); a credit
+note is an `invoice` (the portal kinds do not tell it apart). **Needs `update.database`** for the
+`FIRST_DOWNLOADED` column.
 
 ## 8. Tests
 

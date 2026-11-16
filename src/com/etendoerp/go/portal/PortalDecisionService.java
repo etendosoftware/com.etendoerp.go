@@ -569,6 +569,8 @@ public class PortalDecisionService {
         () -> confirmInTransaction(decision, voided));
     if (result.isAppliedNow()) {
       PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.action);
+      PortalKpiTelemetry.portalQuotationDecided(DECISION_ACCEPT.equals(decision.action),
+          decision.clientId);
       if (!voided.isEmpty()) {
         PortalDecisionEvents.voided(decision.quotationId, voided.size());
       }
