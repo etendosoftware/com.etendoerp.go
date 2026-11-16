@@ -14,7 +14,8 @@ name: Mini Pipeline
 # and on every push to develop and main, the tests always run whole, with JaCoCo, and "Sonar Build"
 # publishes the analysis with that coverage. On a PR it also compares the overall coverage with
 # the base branch (scripts/compare-sonar-coverage.py, the rule of Jenkins' "Compare Coverage
-# Results": at least 70 %, no more than 1 point below the base). The pushes are what keep
+# Results": a minimum, and no more than a tolerance below the base; both come from the
+# organization variables COVERAGE_MINIMUM and COVERAGE_TOLERANCE, ETP-6298). The pushes are what keep
 # develop's and main's coverage real on Sonar: the former Sonar Build (sonar-scan.yml) analyzed
 # without tests, so both stood at 0 % and the comparison could never fail. This job is now the
 # required "Sonar Build" check; sonar-scan.yml is gone. A push also fills the Gradle cache that the
@@ -264,7 +265,8 @@ jobs:
           args: ${{ needs.go-test.result == 'success' && '-Dsonar.coverage.jacoco.xmlReportPaths=coverage/jacocoRootReport.xml' || '' }}
 
       # Same rule as Jenkins' Compare Coverage Results; fails this check on a drop, or when the
-      # coverage cannot be evaluated (--context ci).
+      # coverage cannot be evaluated (--context ci). The thresholds are organization variables
+      # (ETP-6298), so they can be raised without a PR; unset, the script falls back to 70 and 1.
       - name: Compare coverage with the base branch
         if: github.event_name == 'pull_request' && needs.go-test.result == 'success'
         env:
@@ -272,6 +274,8 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_BRANCH: ${{ github.base_ref }}
+          COVERAGE_MINIMUM: ${{ vars.COVERAGE_MINIMUM }}
+          COVERAGE_TOLERANCE: ${{ vars.COVERAGE_TOLERANCE }}
         run: |
           set -o pipefail
           python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
