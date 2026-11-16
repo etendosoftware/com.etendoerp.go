@@ -180,6 +180,7 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String FIELD_HAS_LOGO = "hasLogo";
 
   private final transient PortalLinkService linkService = new PortalLinkService();
+  private final transient PortalDecisionEntry decisionEntry = new PortalDecisionEntry(linkService);
   private final transient PortalDecisionService decisionService = new PortalDecisionService();
   private final transient PortalRateLimiter meRateLimiter = new PortalRateLimiter();
   private final transient PortalRateLimiter renewRateLimiter = new PortalRateLimiter();
@@ -547,7 +548,8 @@ public class PortalServlet extends HttpBaseServlet {
   /**
    * Part C: confirms the decision — single use, never expires, the first confirmed request of a
    * quotation wins. Answers the same shape as the view, with the state reached and
-   * {@code appliedNow} ({@code true} only for the call that applied it). The landing sends it by
+   * {@code appliedNow} ({@code true} only for the call that applied it), plus a new portal link's
+   * token when the customer may enter the portal ({@link PortalDecisionEntry}). The landing sends it by
    * script as soon as the email's button opens it (one step); a bare GET of the link applies
    * nothing.
    */
@@ -557,7 +559,8 @@ public class PortalServlet extends HttpBaseServlet {
       sendError(response, HTTP_TOO_MANY_REQUESTS, MSG_TOO_MANY_REQUESTS);
       return;
     }
-    sendDecision(response, decisionService.confirm(request.getHeader(HEADER_DECISION_TOKEN)));
+    sendConfirmation(response,
+        decisionService.confirm(request.getHeader(HEADER_DECISION_TOKEN)));
   }
 
   private void sendDecision(HttpServletResponse response, PortalDecisionService.View view)
@@ -566,22 +569,21 @@ public class PortalServlet extends HttpBaseServlet {
       rejectInvalidLink(response);
       return;
     }
-    PortalDecisionService.Decision decision = view.getDecision();
-    JSONObject body = new JSONObject();
-    body.put(FIELD_STATE, view.getState().getCode());
-    body.put("appliedNow", view.isAppliedNow());
-    body.put("decision", decision.getDecision());
-    if (decision.getReasonCode() != null) {
-      body.put("reasonCode", decision.getReasonCode());
+    sendJson(response, HttpServletResponse.SC_OK, decisionEntry.body(view));
+  }
+
+  /**
+   * The confirmation's answer, plus the way into the portal ({@code portalToken},
+   * {@code quotationId}) when the customer may enter it: only over this POST, never in a URL.
+   */
+  private void sendConfirmation(HttpServletResponse response, PortalDecisionService.View view)
+      throws IOException, JSONException {
+    if (view.getState() == PortalDecisionService.State.INVALID) {
+      rejectInvalidLink(response);
+      return;
     }
-    if (decision.getReasonText() != null) {
-      body.put("reasonText", decision.getReasonText());
-    }
-    body.put("documentNo", view.getQuotation() == null ? ""
-        : StringUtils.defaultString(view.getQuotation().getDocumentNo()));
-    // The company's name only: the landing carries no portal token, so it cannot fetch /logo.
-    body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
-        .map(PortalLink::getClientName).orElse(""));
+    JSONObject body = decisionEntry.body(view);
+    decisionEntry.addPortalEntry(body, view);
     sendJson(response, HttpServletResponse.SC_OK, body);
   }
 

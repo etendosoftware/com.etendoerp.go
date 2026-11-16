@@ -31,7 +31,7 @@ dropped in a follow-up once production is confirmed empty.
 | Document | `AD_TABLE_ID`, `RECORD_ID`, `DOCUMENT_KIND` (`QUOTATION`, `ORDER`, `SHIPMENT`, `INVOICE`; a credit note is `INVOICE`) |
 | Recipients | `RECIPIENTS_TO`, `RECIPIENTS_CC`, `EMAIL_LANGUAGE` of the send — a renewal goes back to exactly these |
 | Lifecycle | Minted **pending** (`SENT_AT` null) while the email is built; confirmed by `EmailContract#onDelivered` only on a `SENT` outcome (`SENT_AT`, `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`). A pending row is invalid forever |
-| Chain | `LINK_ORIGIN` = `SEND` or `RENEWAL`; `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
+| Chain | `LINK_ORIGIN` = `SEND`, `RENEWAL` or `DECISION` (minted by a confirmed quotation decision, §6b); `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
 | Usage | `FIRST_USED`, `LAST_USED` |
 
 Each link lives **48 hours** from its send (`etendo.go.portal.link.ttlMinutes`,
@@ -238,6 +238,20 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   notice or KPI event). **Accepted trade-off (PO, one-step flow):** a mail scanner that executes
   the page's JavaScript could confirm a pending decision. The token is single-use, and the email
   only ever reaches the quotation's main recipient (the first To of the original send).
+  **Into the portal (PO).** After the confirmation, whatever its state (applied now, answered
+  before, superseded, no longer pending, expired), `PortalDecisionEntry` mints a new portal link
+  for the customer, like a renewal: same tenant, Business Partner, recipients and language as the
+  decision's link, 48 h from now, `LINK_ORIGIN = DECISION`, parent = the decision's link, root =
+  its root, and usable at once (`SENT_AT`/`EXPIRES_AT` set on insert, committed): no email carries
+  it. Its raw token is returned only in the confirm POST's answer (`portalToken`, plus
+  `quotationId`); only its hash is stored. The SPA then opens `/portal/<token>?view=doc&kind=
+  QUOTATION&id=<quotationId>` with a one-off notice carried in router state (never in the URL).
+  Opening the portal records `portal.link.opened` as usual (with `origin: DECISION`). No link
+  (the landing keeps its own card): invalid token, portal closed for the customer by the access
+  checks, or minting failed. Bound: at most 10 `DECISION` links per decision link and day (by
+  creation, like the renewal cool-down), on top of the confirm route's rate limiter (`/renew`'s,
+  30 per IP and minute). **Needs `update.database`:** `ETGO_PORTAL_LINK_ORIGIN_CHK` accepts
+  `DECISION`.
   **Access checks at confirm time:** a decision token never expires, so `confirm` re-runs
   `PortalAccessChecks` (blocked or inactive customer, expired plan) for the link's client and
   Business Partner; closed → `not_pending`, nothing applied, the row stays pending, the reason is

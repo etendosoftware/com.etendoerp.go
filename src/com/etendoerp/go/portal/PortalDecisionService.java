@@ -257,16 +257,38 @@ public class PortalDecisionService {
     private final Decision decision;
     private final Order quotation;
     private final boolean appliedNow;
+    private final boolean customerClosed;
 
     View(State state, Decision decision, Order quotation) {
       this(state, decision, quotation, false);
     }
 
     View(State state, Decision decision, Order quotation, boolean appliedNow) {
+      this(state, decision, quotation, appliedNow, false);
+    }
+
+    private View(State state, Decision decision, Order quotation, boolean appliedNow,
+        boolean customerClosed) {
       this.state = state;
       this.decision = decision;
       this.quotation = quotation;
       this.appliedNow = appliedNow;
+      this.customerClosed = customerClosed;
+    }
+
+    /** The answer when the portal is closed for the customer: nothing applied, no way in. */
+    static View closedForCustomer(Decision decision, Order quotation) {
+      return new View(State.NOT_PENDING, decision, quotation, false, true);
+    }
+
+    /**
+     * Whether the portal's access checks closed it for this customer (blocked or inactive
+     * customer, expired plan). Such an answer never leads into the portal.
+     *
+     * @return {@code true} when closed for the customer
+     */
+    public boolean isCustomerClosed() {
+      return customerClosed;
     }
 
     /**
@@ -626,7 +648,7 @@ public class PortalDecisionService {
         return null;
       }
       log.info("Portal decision {} was not applied: {}", decision.id, reason.get());
-      return new View(State.NOT_PENDING, decision,
+      return View.closedForCustomer(decision,
           OBDal.getInstance().get(Order.class, decision.quotationId));
     } finally {
       OBContext.restorePreviousMode();

@@ -37,6 +37,11 @@ public final class PortalLink {
   public static final String ORIGIN_SEND = "SEND";
   /** {@code LINK_ORIGIN} of a link emailed because an older one had expired. */
   public static final String ORIGIN_RENEWAL = "RENEWAL";
+  /**
+   * {@code LINK_ORIGIN} of a link minted when a quotation decision was confirmed: no email carries
+   * it, its token is handed to the confirmation landing so the customer lands in the portal.
+   */
+  public static final String ORIGIN_DECISION = "DECISION";
 
   private static final String RECIPIENT_SEPARATOR = ",";
 
