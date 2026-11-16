@@ -391,6 +391,9 @@ public class EtendoGoJwtServletLegacyFallbackTest {
 
   private ResponseCapture get(PlanCatalogService catalog) throws Exception {
     servlet.planCatalogService = catalog;
+    // The catalog asks whether the account already paid (the once-per-account free trial,
+    // ETP-6216); an account with no purchase, without touching the database.
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = authenticatedRequest("/plans");
     Account account = account();
