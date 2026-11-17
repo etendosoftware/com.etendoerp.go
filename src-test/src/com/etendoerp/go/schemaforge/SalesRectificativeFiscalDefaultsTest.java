@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -325,7 +324,7 @@ public class SalesRectificativeFiscalDefaultsTest {
       when(invoice.getAeatsiiClaveTipo()).thenReturn("F1");
       assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(invoice).isEmpty());
       verify(invoice, never()).setAeatsiiClaveTipo(any());
-      assertNull(invoice.getAeatsiiTipoRectif());
+      verify(invoice, never()).setAeatsiiTipoRectif(any());
     }
   }
 
