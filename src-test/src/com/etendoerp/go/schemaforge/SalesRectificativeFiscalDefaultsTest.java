@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -34,6 +35,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -44,6 +46,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 
 /**
  * Unit tests for {@link SalesRectificativeFiscalDefaults#computeAndSet}/{@code #apply}.
@@ -185,8 +189,8 @@ public class SalesRectificativeFiscalDefaultsTest {
   /**
    * The core CP-20 repro: a DocType configured with VERI*FACTU code "R1" must NEVER reach the
    * invoice, even when VERI*FACTU is active for the org — only TicketBAI's structural fields are
-   * applied, and the reverse type is never defaulted either (the invoice's own code is still the
-   * non-rectificative AD default).
+   * applied, and the reverse type is never defaulted either. ETP-5747 CP-5/CP-11: the invoice's
+   * AD default {@code F1} is cleared to null instead (no code is picked).
    */
   @Test
   public void rectificativeInvoice_docTypeConfiguredWithR1_neverCopiesItToEtvfacInvType()
@@ -198,11 +202,31 @@ public class SalesRectificativeFiscalDefaultsTest {
     Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
 
     verify(invoice, never()).setEtvfacInvType(anyString());
+    verify(invoice).setEtvfacInvType(null);
     verify(invoice, never()).setEtvfacReverseinvtype(anyString());
-    assertFalse(applied.containsKey(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+    assertEquals(JSONObject.NULL, applied.get(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
     // TicketBAI's own structural fields are unaffected by this fix.
     verify(invoice).setTbaiIsreverseinvoice(true);
     verify(invoice).setTbaiReverseinvoicetype("I");
+  }
+
+  /**
+   * ETP-5747 CP-5: a blank-but-not-null code is normalized to null; an already-null one is left
+   * alone (nothing to report).
+   */
+  @Test
+  public void verifactuBlankCodeIsNormalizedAndNullIsLeftAlone() throws Exception {
+    configActive(verifactuStatement, true);
+    Invoice blank = draftInvoice(docType(true, null, null));
+    when(blank.getEtvfacInvType()).thenReturn(" ");
+    assertEquals(JSONObject.NULL, SalesRectificativeFiscalDefaults.computeAndSet(blank)
+        .get(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+    verify(blank).setEtvfacInvType(null);
+
+    Invoice none = draftInvoice(docType(true, null, null));
+    when(none.getEtvfacInvType()).thenReturn(null);
+    assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(none).isEmpty());
+    verify(none, never()).setEtvfacInvType(any());
   }
 
   @Test
@@ -256,6 +280,56 @@ public class SalesRectificativeFiscalDefaultsTest {
   }
 
   // ---------------------------------------------------------------------------
+  // SII — ETP-5747 CP-11: clave R enforced, tipo I defaulted, motivo never picked
+  // ---------------------------------------------------------------------------
+
+  private MockedStatic<SIIUtils> siiActive(boolean enrolled) {
+    Organization org = mock(Organization.class);
+    when(dal.get(Organization.class, ORG_ID)).thenReturn(org);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isAcogidaAlSII()).thenReturn(enrolled);
+    MockedStatic<SIIUtils> sii = Mockito.mockStatic(SIIUtils.class);
+    sii.when(() -> SIIUtils.getSiiConfigFromOrg(org)).thenReturn(config);
+    return sii;
+  }
+
+  /** The CP-11 repro: an F1 rectificative draft of an SII org gets R + I, never a motivo. */
+  @Test
+  public void siiOrgRectificativeDraftGetsClaveRAndTipoIButNoMotivo() throws Exception {
+    try (MockedStatic<SIIUtils> sii = siiActive(true)) {
+      Invoice invoice = draftInvoice(docType(true, null, null));
+      when(invoice.getAeatsiiClaveTipo()).thenReturn("F1");
+
+      Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+      verify(invoice).setAeatsiiClaveTipo("R");
+      verify(invoice).setAeatsiiTipoRectif("I");
+      verify(invoice, never()).setAeatsiiMotivoRectif(any());
+      assertEquals("R", applied.get("aeatsiiClaveTipo"));
+      assertEquals("I", applied.get("aeatsiiTipoRectif"));
+      assertEquals(2, applied.size());
+    }
+  }
+
+  /** Already R with a chosen type: nothing moves. Not enrolled in SII: nothing is written. */
+  @Test
+  public void siiChosenValuesAreKeptAndUnenrolledOrgIsUntouched() throws Exception {
+    try (MockedStatic<SIIUtils> sii = siiActive(true)) {
+      Invoice invoice = draftInvoice(docType(true, null, null));
+      when(invoice.getAeatsiiClaveTipo()).thenReturn("R");
+      when(invoice.getAeatsiiTipoRectif()).thenReturn("S");
+      assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(invoice).isEmpty());
+    }
+    try (MockedStatic<SIIUtils> sii = siiActive(false)) {
+      Invoice invoice = draftInvoice(docType(true, null, null));
+      when(invoice.getAeatsiiClaveTipo()).thenReturn("F1");
+      assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(invoice).isEmpty());
+      verify(invoice, never()).setAeatsiiClaveTipo(any());
+      assertNull(invoice.getAeatsiiTipoRectif());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Eligibility / cross-cutting
   // ---------------------------------------------------------------------------
 
@@ -268,7 +342,7 @@ public class SalesRectificativeFiscalDefaultsTest {
 
     assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(invoice).isEmpty());
     verify(invoice, never()).setTbaiIsreverseinvoice(anyBoolean());
-    verify(invoice, never()).setEtvfacInvType(anyString());
+    verify(invoice, never()).setEtvfacInvType(any());
   }
 
   /** A completed invoice, a purchase invoice, and an org with no fiscal system: untouched. */

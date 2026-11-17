@@ -14629,26 +14629,34 @@ rectificative was computed either on the detail GET or by the header callout whe
   on the next detail GET.
 - *Server-side defaults* (`SalesRectificativeFiscalDefaults`, called on every CRUD POST/PUT/PATCH of
   the header, ids-only included). Only on a draft (`DR`), unprocessed sales invoice whose document type
-  is `EM_Etsg_Isrectificative = 'Y'`:
+  is `EM_Etsg_Isrectificative = 'Y'`. It writes only the fields that say "this is a correction" and
+  **never picks a reason code** (TicketBAI `tbaiReverseinvoicecode`, VERI*FACTU `R1`–`R5`, SII
+  `aeatsiiMotivoRectif`): `RectificationFiscalCodeGuard` blocks completion while one is missing.
+  - with the organization enrolled in the SII (`siiConfigActive`, `AEATSIIConfig.isAcogidaAlSII`):
+    `aeatsiiClaveTipo` is **enforced** to `R`, `aeatsiiTipoRectif = I` only when blank (ETP-5747
+    CP-11). Possible because `EM_AEATSII_C_INV_RECT_CHK` (SII module) now reads
+    `PROCESSED = 'N' OR <type + motivo rules>`: a draft may hold `R` with no motivo; the motivo and
+    type are required only once the invoice is processed (completed), so Classic and GO completion
+    still hit the constraint, and a reactivated draft is free again;
   - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
     the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
     rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
-    `tbaiReverseinvoicetype = I` and `tbaiReverseinvoicecode = R4` only when blank (the callout's values);
+    `tbaiReverseinvoicetype = I` only when blank;
   - with an active VERI*FACTU config in the system for the legal entity (the
-    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` = the document type's `em_etvfac_inv_type`
-    (when that is an `R*` code) over a blank or non-rectificative `F*` value — an `R*` value already on the
-    invoice is kept; then, when the type is `R*` and `etvfacReverseinvtype` is blank, the document type's
-    reverse type, or `I` when the document type has none.
+    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): a non-rectificative `F*` `etvfacInvType` (in practice the AD
+    default `F1` an insert stamps) or a blank one is **cleared to null** (ETP-5747 CP-5/CP-11), matching
+    the empty "Tipo de Factura" the doc-type callout and the SIF tab show; an `R*` value is kept and the
+    document type's own code is never copied. When the type is `R*` and `etvfacReverseinvtype` is blank,
+    the document type's reverse type, or `I` when it has none.
 
-  Any other value already set is never overwritten, and nothing is ever cleared. The values are
+  Any other value already set is never overwritten. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
   and answered as "nothing applied", but a DB-level failure on the flush aborts the write, as for
-  `persistSiiAuthorizationno`. An invoice created with the rectificative type already
+  `persistSiiAuthorizationno` (so this needs the SII module version carrying the relaxed
+  `EM_AEATSII_C_INV_RECT_CHK`). An invoice created with the rectificative type already
   set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
-  so TicketBAI kept no reverse code (its XML generator then fails with `TBAI_SetKey`) and VERI*FACTU
-  showed `F1` while in draft. SII is **not** defaulted on the server: `EM_AEATSII_C_INV_RECT_CHK` requires
-  `aeatsiiMotivoRectif` once the type is `R`, and the motivo is a user choice — that default stays in the
-  SPA (`useSifFieldPatcher.js`), driven by the `isRectificative` the write response now carries.
+  so without these defaults it kept SII `F1` and VERI*FACTU `F1` while in draft. The written keys
+  (`etvfacInvType` as JSON `null`) are echoed in the write response.
 - Same behaviour on REST single, `/batch` and MCP `etendo_create` / `etendo_update` (all run the
   header's `afterHandle`); no divergence to declare. The added keys are not AD fields of the spec and
   are put by the post-hook, after `NeoFieldFilter.filterGetResponse` has run, so they reach the caller
