@@ -32,7 +32,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.weld.test.WeldBaseTest;
+import org.openbravo.test.base.OBBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -50,7 +50,7 @@ import com.etendoerp.go.schemaforge.data.IncomingDocument;
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInboxProcessor
  */
-public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends WeldBaseTest {
+public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends OBBaseTest {
 
   private static final String CLIENT_ID = TestConstants.Clients.FB_GRP;
   private static final String ORG_ID = TestConstants.Orgs.ESP;
