@@ -82,10 +82,6 @@ jobs:
             const checkRuns = await github.paginate(github.rest.checks.listForRef, {
               owner, repo, ref: sha, per_page: 100,
             });
-            // ETP-6149: the GitHub Actions pilot of the full pipeline (full-pipeline-pilot.yml) runs in
-            // shadow next to Jenkins, its job names prefixed "Pilot: ". Its runs on main take ~26 min,
-            // so counting them would hold every PR into main while they run, or for good if one fails.
-            // Remove this filter together with the prefix when Actions replaces Jenkins.
             // ETP-6327: GitHub hangs a PR's check runs on the PR's head commit, and the main -> develop
             // PR has main's head as its head: its red check says nothing about main, yet painted it red
             // (go#1634). Leave out the check runs whose suite a pull_request event started; main's
@@ -98,7 +94,6 @@ jobs:
               .map(w => w.check_suite_id));
             const latestRuns = new Map();
             for (const run of checkRuns) {
-              if (run.name.startsWith('Pilot: ')) continue;
               if (prSuites.has(run.check_suite?.id)) continue;
               const seen = latestRuns.get(run.name);
               if (!seen || run.id > seen.id) latestRuns.set(run.name, run);
