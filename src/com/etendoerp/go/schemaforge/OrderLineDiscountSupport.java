@@ -153,8 +153,18 @@ final class OrderLineDiscountSupport {
 
   private static final String METHOD_POST = "POST";
 
-  /** {@code C_OrderLine.C_Currency_ID}: the line's currency, read for its rounding precision. */
+  /**
+   * {@code C_OrderLine.C_Currency_ID}: the line's currency, read for its rounding precision and set
+   * to the order's on create ({@link OrderLineCurrencyConversion}).
+   */
   static final String FIELD_CURRENCY = OrderLine.PROPERTY_CURRENCY;
+
+  /**
+   * The price fields {@code McpLinePriceInjector} fills from the price list on {@code etendo_create},
+   * in the order {@link #setStandardPriceOnCreate} passes their raw amounts.
+   */
+  private static final String[] RAW_CATALOG_FIELDS = { FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
+      OrderLine.PROPERTY_PRICELIMIT };
 
   /** The amounts {@link NeoCommercialLinePolicy#injectCommercialAmounts} derives for an order line. */
   private static final List<String> AMOUNT_OUTPUTS = Arrays.asList(FIELD_LINE_NET_AMOUNT,
@@ -208,6 +218,12 @@ final class OrderLineDiscountSupport {
    * for it, and {@code McpLinePriceInjector} only covers MCP. A non-zero price in the body is never
    * replaced.
    *
+   * <p><b>A line of a foreign-currency order</b> (ETP-6177) gets the order's currency, and the
+   * price-list prices written here — {@code unitPrice}, {@code listPrice}, {@code standardPrice},
+   * and on {@code etendo_create} the {@code priceLimit} {@code McpLinePriceInjector} wrote — are
+   * converted by the order's org→document rate ({@link OrderLineCurrencyConversion}), as the form
+   * converts the price of a product picked into a line. A price the caller sent is never converted.
+   *
    * <p><b>A line sent with only its list price</b> is priced from it,
    * {@code unitPrice = listPrice × (1 − discount / 100)}. Over {@code etendo_create} the
    * {@code discount} the agent did not send is first reset to 0 when the body has no price yet
@@ -251,19 +267,28 @@ final class OrderLineDiscountSupport {
       if (productPrice == null) {
         return;
       }
+      // ETP-6177: the line is in its order's currency, and the price list's prices are converted
+      // into it by the order's rate when the order is in a foreign currency, as the form does.
+      OrderLineCurrencyConversion conversion = OrderLineCurrencyConversion.forOrder(
+          OBDal.getInstance().get(Order.class, parentOrderId(body)));
+      conversion.applyLineCurrency(body);
+      BigDecimal standardPrice = conversion.convert(productPrice.getStandardPrice());
+      BigDecimal catalogList = conversion.convert(productPrice.getListPrice());
       // A line sent without a price takes the price list's (ETP-5881); a price the caller sent stays.
       // Not after the client's own list price: a 100% discount leaves a unit price of 0, which
       // would otherwise read as "no price" and be replaced by the catalog's.
-      if (!clientPriced) {
-        LinePriceListSupport.applyCatalogPrice(body, productPrice, FIELD_UNIT_PRICE,
-            FIELD_LIST_PRICE);
+      if (!clientPriced && !LinePriceListSupport.applyCatalogPrice(body, standardPrice,
+          catalogList, FIELD_UNIT_PRICE, FIELD_LIST_PRICE)
+          && OrderLineCreateDiscount.agentLeftPriceToServer(ctx)) {
+        // etendo_create: McpLinePriceInjector already wrote the raw price-list prices.
+        conversion.convertRawPrices(body, RAW_CATALOG_FIELDS, new BigDecimal[] {
+            productPrice.getStandardPrice(), productPrice.getListPrice(),
+            productPrice.getPriceLimit() });
       }
-      BigDecimal standardPrice = productPrice.getStandardPrice();
       if (standardPrice != null) {
         body.put(FIELD_STANDARD_PRICE, standardPrice);
       }
-      BigDecimal listPrice = listPriceFromStandard(body, productPrice.getListPrice(),
-          standardPrice);
+      BigDecimal listPrice = listPriceFromStandard(body, catalogList, standardPrice);
       if (listPrice != null) {
         body.put(FIELD_LIST_PRICE, listPrice);
       }
@@ -349,7 +374,7 @@ final class OrderLineDiscountSupport {
    * The parent order of a create body: {@code salesOrder} on {@code etendo_create} (its
    * {@code parentId} is already resolved into the FK), {@code parentId} on REST and batch creates.
    */
-  private static String parentOrderId(JSONObject body) {
+  static String parentOrderId(JSONObject body) {
     String salesOrder = body.optString(FIELD_SALES_ORDER, null);
     if (StringUtils.isNotBlank(salesOrder) && !"null".equals(salesOrder)) {
       return salesOrder;

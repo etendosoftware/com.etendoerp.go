@@ -154,6 +154,25 @@ final class OrderLineCreateDiscount {
     return provided instanceof Collection ? (Collection<?>) provided : Collections.emptySet();
   }
 
+  /**
+   * Whether an {@code etendo_create} agent left the price of the new line to the server: an MCP
+   * create carrying {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} (set only by
+   * {@code etendo_create}) whose agent sent none of {@code unitPrice}, {@code listPrice} or
+   * {@code grossUnitPrice}. The prices in such a body are the ones {@code McpLinePriceInjector}
+   * took from the price list, so {@link OrderLineCurrencyConversion} may convert them (ETP-6177).
+   * {@code false} on every other request — there the body is what the caller sent.
+   */
+  static boolean agentLeftPriceToServer(NeoContext ctx) {
+    if (ctx == null || !ctx.isMcpOrigin()
+        || ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS) == null) {
+      return false;
+    }
+    Collection<?> sent = agentSentKeys(ctx);
+    return !sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE);
+  }
+
   /** The agent priced the line by its list price alone: no discount, net or gross price sent. */
   private static boolean sentOnlyListPrice(Collection<?> sent) {
     return sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)

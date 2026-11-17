@@ -52,8 +52,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
@@ -82,6 +85,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * @covers com.etendoerp.go.schemaforge.OrderLineDiscountSupport
  * @covers com.etendoerp.go.schemaforge.OrderLineCreateDiscount
  * @covers com.etendoerp.go.schemaforge.OrderLineBodyRules
+ * @covers com.etendoerp.go.schemaforge.OrderLineCurrencyConversion
  */
 class OrderLineDiscountSupportTest {
 
@@ -1259,5 +1263,97 @@ class OrderLineDiscountSupportTest {
     }
     assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
     assertAmount(label, "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
+
+  // ── ETP-6177: a line of a foreign-currency order is priced in the order's currency ──
+
+  static Stream<Arguments> foreignCurrencyCreate() {
+    String noPrice = "{\"product\":\"P1\",\"parentId\":\"O1\",\"orderedQuantity\":1}";
+    String injected = "{\"product\":\"P1\",\"salesOrder\":\"O1\",\"orderedQuantity\":1,"
+        + "\"unitPrice\":12,\"listPrice\":12,\"priceLimit\":10}";
+    return Stream.of(
+        // The live case: USD order, EUR price list, rate 1.47 → the SPA persists 17.64.
+        Arguments.of("REST without price: converted by the order's rate", noPrice, false, null,
+            "USD", "1.47", "17.64", "17.64", "17.64", "USD"),
+        Arguments.of("REST with the caller's price: kept, never converted",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}", false, null, "USD",
+            "1.47", "9", null, "17.64", "USD"),
+        Arguments.of("REST with the caller's list price: kept, never converted",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"listPrice\":20}", false, null, "USD",
+            "1.47", "20", "20", "17.64", "USD"),
+        Arguments.of("etendo_create, price left to the server: injector's prices converted",
+            injected, true, "product,orderedQuantity", "USD", "1.47", "17.64", "17.64", "17.64",
+            "USD"),
+        Arguments.of("etendo_create, the agent's own price: kept",
+            injected, true, "product,orderedQuantity,unitPrice", "USD", "1.47", "12", "12",
+            "17.64", "USD"),
+        Arguments.of("org-currency order: nothing converts", noPrice, false, null, "EUR", null,
+            "12", "12", "12", "EUR"),
+        Arguments.of("foreign order without a rate: left unconverted", noPrice, false, null, "USD",
+            null, "12", "12", "12", "USD"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("foreignCurrencyCreate")
+  void setStandardPriceOnCreateConvertsIntoTheOrderCurrency(String label, String body,
+      boolean mcp, String agentSent, String orderIso, String rate, String expectedUnit,
+      String expectedList, String expectedStd, String expectedCurrency) throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Organization org = mock(Organization.class);
+    Currency eur = currency("EUR");
+    Currency orderCurrency = "EUR".equals(orderIso) ? eur : currency(orderIso);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(order.getCurrency()).thenReturn(orderCurrency);
+    when(order.getOrganization()).thenReturn(org);
+    when(order.getETGOCurrencyRate()).thenReturn(rate == null ? null : new BigDecimal(rate));
+    when(org.getId()).thenReturn("ORG");
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(priceList.getCurrency()).thenReturn(eur);
+    when(price.getListPrice()).thenReturn(new BigDecimal("12"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+    when(price.getPriceLimit()).thenReturn(new BigDecimal("10"));
+    NeoContext context = NeoContext.builder().specName(SPEC).entityName(ENTITY)
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json)
+        .mcpOrigin(mcp).build();
+    if (agentSent != null) {
+      context.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, keys(agentSent));
+    }
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class);
+        MockedStatic<OBCurrencyUtils> currencies = mockStatic(OBCurrencyUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          anyBoolean(), eq(priceList), eq(false))).thenReturn(price);
+      currencies.when(() -> OBCurrencyUtils.getOrgCurrency("ORG")).thenReturn("EUR");
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(context);
+    }
+
+    assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedList, json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, expectedStd, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+    assertEquals(expectedCurrency, json.optString(OrderLineDiscountSupport.FIELD_CURRENCY, null),
+        label);
+    if (mcp && "17.64".equals(expectedUnit)) {
+      assertAmount(label, "14.70", json, OrderLine.PROPERTY_PRICELIMIT);
+    }
+  }
+
+  private static Currency currency(String id) {
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn(id);
+    when(currency.getPricePrecision()).thenReturn(2L);
+    return currency;
   }
 }
