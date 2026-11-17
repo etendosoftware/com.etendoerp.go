@@ -1387,6 +1387,56 @@ class OrderLineDiscountSupportTest {
     assertAmount("no catalog entry", null, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
   }
 
+  // ── ETP-6177: agentLeftPriceToServer ──
+
+  private static NeoContext createCtx(String method, NeoEndpointType type, boolean mcp,
+      Object provided) {
+    NeoContext context = NeoContext.builder().specName(SPEC).entityName(ENTITY)
+        .httpMethod(method).endpointType(type).requestBody(new JSONObject()).mcpOrigin(mcp)
+        .build();
+    if (provided != null) {
+      context.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, provided);
+    }
+    return context;
+  }
+
+  static Stream<Arguments> agentPriceWitness() {
+    Collection<String> noPrice = keys("product,orderedQuantity");
+    return Stream.of(
+        Arguments.of("etendo_create, no price key sent", "POST", NeoEndpointType.CRUD, true,
+            noPrice, true),
+        // etendo_batch: not MCP-origin, the preprocessor hands the keys over
+        Arguments.of("etendo_batch (non-MCP context) carrying the attribute", "POST",
+            NeoEndpointType.CRUD, false, noPrice, true),
+        Arguments.of("agent sent unitPrice", "POST", NeoEndpointType.CRUD, true,
+            keys("product,unitPrice"), false),
+        Arguments.of("agent sent listPrice", "POST", NeoEndpointType.CRUD, true,
+            keys("product,listPrice"), false),
+        Arguments.of("agent sent grossUnitPrice", "POST", NeoEndpointType.CRUD, true,
+            keys("product,grossUnitPrice"), false),
+        Arguments.of("REST: attribute absent", "POST", NeoEndpointType.CRUD, false, null, false),
+        Arguments.of("attribute is not a collection", "POST", NeoEndpointType.CRUD, true,
+            "product", false),
+        Arguments.of("an update is not a create", "PUT", NeoEndpointType.CRUD, true, noPrice,
+            false),
+        Arguments.of("a non-CRUD endpoint", "POST", NeoEndpointType.DEFAULTS, true, noPrice,
+            false));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("agentPriceWitness")
+  void agentLeftPriceToServerReadsTheClientProvidedKeys(String label, String method,
+      NeoEndpointType type, boolean mcp, Object provided, boolean expected) {
+    assertEquals(expected,
+        OrderLineCreateDiscount.agentLeftPriceToServer(createCtx(method, type, mcp, provided)),
+        label);
+  }
+
+  @Test
+  void agentLeftPriceToServerIsFalseWithoutAContext() {
+    assertFalse(OrderLineCreateDiscount.agentLeftPriceToServer(null));
+  }
+
   private static Currency currency(String id) {
     Currency currency = mock(Currency.class);
     when(currency.getId()).thenReturn(id);
