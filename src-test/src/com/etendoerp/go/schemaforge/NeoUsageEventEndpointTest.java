@@ -829,6 +829,74 @@ class NeoUsageEventEndpointTest {
     }
   }
 
+  // ── generated document PDFs (ETP-5993) ────────────────────────────────
+
+  @Nested
+  @DisplayName("generated document PDFs")
+  class GeneratedDocumentPdfs {
+
+    private static final String PDF = UsageEventTypes.DOCUMENT_PDF_GENERATE;
+
+    private final List<String> lookups = new ArrayList<>();
+
+    @BeforeEach
+    void savedCompact() {
+      endpoint = new NeoUsageEventEndpoint(sunk::add, clock::get, (org, docType) -> {
+        lookups.add(docType);
+        return "compact";
+      });
+    }
+
+    private JSONObject pdf(String docType, String channel) throws Exception {
+      return event(PDF).put("target", docType).put("action", channel);
+    }
+
+    @Test
+    void aDownloadIsRecordedWithOnlyTypeChannelAndTemplate() throws Exception {
+      UsageEvent recorded = single(pdf("sales-invoice", "download")
+          .put("errorCode", "boom").put("durationMs", 12).put("properties", new JSONObject()
+              .put("variant", "modern").put("documentNo", "FV-0001").put("total", 121.0)));
+
+      assertAll(
+          () -> assertEquals(PDF, recorded.eventType()),
+          () -> assertEquals("sales-invoice", recorded.target()),
+          () -> assertEquals("download", recorded.action()),
+          () -> assertEquals(UsageEvent.OUTCOME_OK, recorded.outcome()),
+          () -> assertNull(recorded.errorCode()),
+          () -> assertNull(recorded.durationMs()),
+          () -> assertEquals("{\"variant\":\"modern\"}", recorded.properties()));
+      assertTrue(lookups.isEmpty(), "a valid variant from the client needs no lookup");
+    }
+
+    @Test
+    void aMissingVariantIsTheOrganizationsSavedOne() throws Exception {
+      UsageEvent recorded = single(pdf("goods-shipment", "print"));
+
+      assertEquals("{\"variant\":\"compact\"}", recorded.properties());
+      assertEquals(List.of("goods-shipment"), lookups);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "preview", "open", "", "server_render" })
+    void aPreviewOrAnyOtherChannelIsDropped(String channel) throws Exception {
+      assertAccepted(postEvents(pdf("sales-invoice", channel)), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "listing", "purchase-invoice", "" })
+    void aTypeThatIsNotADocumentIsDropped(String docType) throws Exception {
+      assertAccepted(postEvents(pdf(docType, "email")), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void aFailedGenerationIsNotCounted() throws Exception {
+      assertAccepted(postEvents(pdf("sales-order", "email").put("outcome", "error")), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+  }
+
   // ── failures ──────────────────────────────────────────────────────────
 
   @Test
