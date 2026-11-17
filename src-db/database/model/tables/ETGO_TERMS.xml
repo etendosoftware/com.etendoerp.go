@@ -37,10 +37,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="CONTENT" primaryKey="false" required="true" type="CLOB" size="4000" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="PUBLISHED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -49,7 +45,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="AD_LANGUAGE" primaryKey="false" required="true" type="VARCHAR" size="6" autoIncrement="false">
+      <column name="AD_LANGUAGE" primaryKey="false" required="false" type="VARCHAR" size="6" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>

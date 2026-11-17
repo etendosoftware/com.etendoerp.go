@@ -34,6 +34,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -510,6 +511,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    */
   private NeoResponse handleConvertQuotation(String quotationId) {
     try {
+      Order quotation = PortalKpiTelemetry.quotationOf(quotationId);
+      String statusBefore = quotation == null ? null : quotation.getDocumentStatus();
       Order newOrder = convertQuotationProcess.convertQuotationIntoSalesOrder(false, quotationId);
       log.info("[ETP-4027] Created sales order {} from quotation {} with quoted prices preserved",
           newOrder.getDocumentNo(), quotationId);
@@ -518,6 +521,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       // ETP-5051: the plan-quota check of the order created from the quotation and its lines.
       // Nothing is committed before this point, so a refusal rolls the conversion back whole.
       NeoQuotaCreateCheck.requireAllowedDocument(newOrder);
+      // ETP-6209 KPI: an app acceptance (not for one the portal already accepted), after commit.
+      PortalKpiTelemetry.appQuotationConverted(statusBefore, quotation);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
       result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());

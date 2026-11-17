@@ -27,7 +27,8 @@ class SubscriptionBillingCalendarTest {
   private static final String PRICE_YEAR = "price_test_year";
 
   @Test void signedPaidWebhookRunsErpPurchaseAndMonthlyPromotion() throws Exception {
-    JSONObject terms = CheckoutPromotionTerms.describe("req", PRICE_MONTH, 1100, "EUR", "month", true);
+    JSONObject terms = MonthlySecondMonthPromotionServiceTest.secondMonthFreeTerms("req",
+        PRICE_MONTH, 1100);
     Harness h = new Harness(terms);
     CheckoutRequestStore purchases = mock(CheckoutRequestStore.class);
     BillingEventStore billing = mock(BillingEventStore.class);
@@ -121,8 +122,8 @@ class SubscriptionBillingCalendarTest {
 
   @Test void monthlyCheckoutPreservesElevenEurosAndInstallsOnlySecondMonthFree() throws Exception {
     StripePriceService.Price price = price(PRICE_MONTH, 1100, "month");
-    JSONObject terms = CheckoutPromotionTerms.describe("req", price.getId(), price.getAmountMinor(),
-        price.getCurrency(), price.getInterval(), true);
+    JSONObject terms = MonthlySecondMonthPromotionServiceTest.secondMonthFreeTerms("req",
+        price.getId(), price.getAmountMinor());
     assertEquals(1100, terms.getLong("initialAmountMinor"));
     assertEquals(2, terms.getInt("firstPaymentCoverageMonths"));
     assertEquals(3, terms.getInt("recurringFromMonth"));
@@ -137,8 +138,13 @@ class SubscriptionBillingCalendarTest {
       assertEquals(PRICE_MONTH, form.get("phases[" + i + "][items][0][price]"));
       assertEquals("1", form.get("phases[" + i + "][items][0][quantity]"));
     }
-    assertEquals("1", form.get("phases[1][iterations]"));
-    assertEquals("1", form.get("phases[2][iterations]"));
+    // etendo-ai#141: iterations is unknown to current Stripe APIs; each free/regular phase is one
+    // month expressed as a duration.
+    for (int i = 1; i < 3; i++) {
+      assertEquals("month", form.get("phases[" + i + "][duration][interval]"));
+      assertEquals("1", form.get("phases[" + i + "][duration][interval_count]"));
+    }
+    assertTrue(form.keySet().stream().noneMatch(key -> key.contains("iterations")), form.toString());
     assertFalse(form.containsKey("phases[0][discounts][0][coupon]"));
     assertEquals(MonthlySecondMonthPromotionService.COUPON,
         form.get("phases[1][discounts][0][coupon]"));

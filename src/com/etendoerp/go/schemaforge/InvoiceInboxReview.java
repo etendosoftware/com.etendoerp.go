@@ -19,6 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_UNKNOWN;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CANDIDATES;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CURRENCY_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CHECK;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DUPLICATE;
@@ -29,12 +32,16 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INBOX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICE_DATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LINES;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NOTICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RECEIVER;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_SOURCE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALIDATION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VERSION;
@@ -64,6 +71,7 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
+import com.etendoerp.go.schemaforge.ocr.InboxTaxModes;
 import com.etendoerp.go.schemaforge.ocr.OcrConfig;
 import com.etendoerp.go.schemaforge.ocr.OcrDocType;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
@@ -93,7 +101,7 @@ final class InvoiceInboxReview {
   static final String CODE_NOT_FOUND = "not_found";
   static final String CODE_PROCESSING = "processing";
 
-  /** The states a document can be edited in (the editor itself arrives in a later slice). */
+  /** The states a document can be edited in ({@code apply} and {@code mark-reviewed} judge it too). */
   private static final Set<String> EDITABLE = Set.of("PENDING_REVIEW", "ERROR", "READY");
   private static final String STATUS_PROCESSING = "PROCESSING";
   private static final String TABLE = "ETGO_Incoming_Document";
@@ -129,6 +137,34 @@ final class InvoiceInboxReview {
     }
   }
 
+  /**
+   * Whether a document in this state can be edited: waiting for the user and not addressed to
+   * another company. The one rule of the {@code editable} flag of the answer and of the refusals of
+   * {@code apply} and {@code mark-reviewed}.
+   *
+   * @param status    the row status
+   * @param errorCode the row error code, may be {@code null}
+   * @return {@code true} when the document is editable
+   */
+  static boolean isEditable(String status, String errorCode) {
+    return EDITABLE.contains(status) && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode);
+  }
+
+  /**
+   * The review answer of a row already loaded (what {@code apply} and {@code mark-reviewed} answer
+   * after saving).
+   *
+   * @param row the inbox row
+   * @return 200 with the review document
+   */
+  static NeoResponse respond(IncomingDocument row) {
+    try {
+      return NeoResponse.ok(answer(row));
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the review answer", e);
+    }
+  }
+
   private static JSONObject answer(IncomingDocument row) throws JSONException {
     String status = row.getStatus();
     String errorCode = row.getErrorCode();
@@ -140,8 +176,7 @@ final class InvoiceInboxReview {
     out.put("reviewed", Boolean.TRUE.equals(row.isReviewed()));
     out.put("adjusted", Boolean.TRUE.equals(row.isAdjusted()));
     out.put("updated", orNull(NeoDateFormat.toAuditToken(row.getUpdated())));
-    out.put("editable", EDITABLE.contains(status)
-        && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode));
+    out.put("editable", isEditable(status, errorCode));
     out.put("fileName", StringUtils.defaultString(row.getFileName()));
     out.put("sender", StringUtils.defaultString(row.getSender()));
     out.put("source", StringUtils.defaultString(row.getSource()));
@@ -151,8 +186,9 @@ final class InvoiceInboxReview {
             .put("documentNo", StringUtils.defaultString(invoice.getDocumentNo()))
             .put("identifier", invoice.getIdentifier()));
     out.put("attachment", attachment(row.getId()));
-    out.put("currency", currency(row.getOrganization()));
-    out.put("document", document(row));
+    JSONObject document = document(row);
+    out.put("currency", currency(row, document));
+    out.put("document", document);
     return out;
   }
 
@@ -197,8 +233,53 @@ final class InvoiceInboxReview {
     return DEFAULT_MIME;
   }
 
+  /**
+   * The currency of the document with the decimals of its amounts ({@code scale}): the one stored in
+   * the header, else derived now from the vendor (its purchase price list currency) or the
+   * organization, without writing; the organization's, then the client's, when the lookups are not
+   * available. Nulls when none can be established; {@code scale} is then 2.
+   */
+  private static JSONObject currency(IncomingDocument row, JSONObject document)
+      throws JSONException {
+    Optional<OcrLookups.DocCurrency> found = lookedUpCurrency(row, document);
+    if (found.isEmpty()) {
+      return organizationCurrency(row.getOrganization());
+    }
+    Object symbol = found.get().symbol() == null ? JSONObject.NULL : found.get().symbol();
+    return new JSONObject().put("id", found.get().id()).put("isoCode", found.get().isoCode())
+        .put("symbol", symbol).put("scale", found.get().scale());
+  }
+
+  /** The stored currency, else the one derived now; empty when unknown or the lookup failed. */
+  private static Optional<OcrLookups.DocCurrency> lookedUpCurrency(IncomingDocument row,
+      JSONObject document) {
+    Optional<OcrLookups> lookups = lookupsFor(row.getTargetType());
+    if (lookups.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      JSONObject header = document.optJSONObject(K_HEADER);
+      String stored = header == null ? "" : header.optString(K_CURRENCY_ID, "");
+      if (!stored.isEmpty()) {
+        return lookups.get().currencyById(stored);
+      }
+      String organizationId = row.getOrganization() == null ? null
+          : row.getOrganization().getId();
+      return lookups.get().documentCurrency(linkedVendorId(header), organizationId);
+    } catch (RuntimeException e) {
+      log.warn("Invoice inbox review: currency lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  private static String linkedVendorId(JSONObject header) {
+    JSONObject vendor = header == null ? null : header.optJSONObject(K_VENDOR);
+    return vendor != null && S_LINKED.equals(vendor.optString(K_STATE))
+        ? vendor.optString(K_ID) : null;
+  }
+
   /** The organization's currency, the client's when the organization has none; nulls when neither. */
-  private static JSONObject currency(Organization organization) throws JSONException {
+  private static JSONObject organizationCurrency(Organization organization) throws JSONException {
     Currency currency = organization == null ? null : organization.getCurrency();
     if (currency == null) {
       Client client = OBContext.getOBContext().getCurrentClient();
@@ -207,7 +288,8 @@ final class InvoiceInboxReview {
     return new JSONObject()
         .put("id", currency == null ? JSONObject.NULL : currency.getId())
         .put("isoCode", currency == null ? JSONObject.NULL : currency.getISOCode())
-        .put("symbol", currency == null ? JSONObject.NULL : currency.getSymbol());
+        .put("symbol", currency == null ? JSONObject.NULL : currency.getSymbol())
+        .put("scale", 2);
   }
 
   /** The stored document (or the skeleton) with the verdict recomputed and the read-time enrichment. */
@@ -247,7 +329,7 @@ final class InvoiceInboxReview {
         .put(K_LINES, new JSONArray()).put(K_NOTICES, new JSONArray());
   }
 
-  private static Optional<OcrLookups> lookupsFor(String targetType) {
+  static Optional<OcrLookups> lookupsFor(String targetType) {
     String spec = targetType == null ? null : InvoiceInboxProcessor.SPEC_BY_TARGET.get(targetType);
     Optional<OcrDocType> type = spec == null ? Optional.empty() : OcrConfig.get().forSpec(spec);
     return type.flatMap(t -> OcrLookupsRegistry.forResolver(t.getResolver()));
@@ -263,6 +345,8 @@ final class InvoiceInboxReview {
     try {
       enrichVendor(document.optJSONObject(K_HEADER), lookups.get());
       enrichProducts(document.optJSONArray(K_LINES), lookups.get());
+      enrichTaxes(document.optJSONArray(K_LINES), lookups.get());
+      InboxTaxModes.stamp(document.optJSONArray(K_LINES), lookups.get());
     } catch (RuntimeException e) {
       // The lookups are total; this is a belt for the document walk. The panel still opens.
       log.warn("Invoice inbox review: enrichment failed: {}", e.getClass().getSimpleName());
@@ -315,8 +399,64 @@ final class InvoiceInboxReview {
       JSONObject product = productOf(lines.optJSONObject(i));
       if (product != null) {
         applyProductDetails(product, details);
+        applyNewProductNames(product, lookups);
       }
     }
+  }
+
+  /**
+   * The names of the category and the unit of a product to create, from the ids the document
+   * stores (ETP-6050): resolved here, in the language of the request, never stored, so they always
+   * follow the UI language. A name stored by an earlier version is replaced; an id that no longer
+   * resolves for the session (inactive, another tenant) leaves no name.
+   */
+  private static void applyNewProductNames(JSONObject product, OcrLookups lookups)
+      throws JSONException {
+    JSONObject draft = product.optJSONObject(K_NEW);
+    if (draft == null) {
+      return;
+    }
+    putName(draft, K_CATEGORY, lookups.productCategoryById(draft.optString(K_CATEGORY_ID, "")));
+    putName(draft, K_UOM, lookups.uomById(draft.optString(K_UOM_ID, "")));
+  }
+
+  private static void putName(JSONObject draft, String key, Optional<OcrLookups.Party> found)
+      throws JSONException {
+    draft.remove(key);
+    if (found.isPresent() && !StringUtils.isBlank(found.get().name())) {
+      draft.put(key, found.get().name());
+    }
+  }
+
+  /**
+   * The name of the tax of each line, in the language of the request (ETP-6050): resolved here from
+   * the id, never stored. A tax whose id does not resolve keeps what the document holds.
+   */
+  private static void enrichTaxes(JSONArray lines, OcrLookups lookups) throws JSONException {
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; lines != null && i < lines.length(); i++) {
+      String id = taxIdOf(lines.optJSONObject(i));
+      if (id != null) {
+        ids.add(id);
+      }
+    }
+    if (ids.isEmpty()) {
+      return;
+    }
+    Map<String, String> names = lookups.taxNames(ids);
+    for (int i = 0; i < lines.length(); i++) {
+      String name = names.get(taxIdOf(lines.optJSONObject(i)));
+      if (name != null) {
+        lines.optJSONObject(i).getJSONObject(K_TAX).put(K_NAME, name);
+      }
+    }
+  }
+
+  /** The id of the line's tax, {@code null} when the line has no tax block or the block no id. */
+  private static String taxIdOf(JSONObject line) {
+    JSONObject tax = line == null ? null : line.optJSONObject(K_TAX);
+    String id = tax == null ? "" : tax.optString(K_ID);
+    return StringUtils.isBlank(id) ? null : id;
   }
 
   private static JSONObject productOf(JSONObject line) {

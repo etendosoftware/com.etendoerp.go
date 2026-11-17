@@ -168,20 +168,55 @@ class InvoiceInboxValidatorTest {
   }
 
   @Test
-  @DisplayName("an amount of zero, a negative one, null or absent is a missing amount")
-  void theAmountMustBeAboveZero() throws Exception {
-    for (Object amount : new Object[] { 0, 0.0, -5.0, JSONObject.NULL }) {
+  @DisplayName("the total must exist, whatever its sign: zero and negative are accepted, null or absent is missing")
+  void theAmountMustExistButHasNoSign() throws Exception {
+    for (Object amount : new Object[] { 0, 0.0, -5.0, 0.01 }) {
+      JSONObject document = complete();
+      header(document).put("totalAmount", amount);
+      assertTrue(validate(document).isValid(), "amount " + amount);
+    }
+    JSONObject asNull = complete();
+    header(asNull).put("totalAmount", JSONObject.NULL);
+    assertMissing(asNull, "amount");
+
+    JSONObject absent = complete();
+    header(absent).remove("totalAmount");
+    assertMissing(absent, "amount");
+  }
+
+  @Test
+  @DisplayName("an amount that is text, a boolean or an object is not a number, so the amount is missing")
+  void anAmountThatIsNotANumberIsMissing() throws Exception {
+    for (Object amount : new Object[] { "121", "", "NaN", true, new JSONObject(),
+        new JSONArray() }) {
       JSONObject document = complete();
       header(document).put("totalAmount", amount);
       assertMissing(document, "amount");
     }
-    JSONObject absent = complete();
-    header(absent).remove("totalAmount");
-    assertMissing(absent, "amount");
+  }
 
-    JSONObject cents = complete();
-    header(cents).put("totalAmount", 0.01);
-    assertTrue(validate(cents).isValid());
+  @Test
+  @DisplayName("a zero quantity or a zero price is a number: valid on a linked and on a new product")
+  void zeroQuantityAndZeroPriceAreValid() throws Exception {
+    for (boolean newProduct : new boolean[] { false, true }) {
+      JSONObject document = complete();
+      JSONObject line = firstLine(document);
+      if (newProduct) {
+        line.put(PRODUCT, newProductWithCategoryAndUnit());
+      }
+      line.put(QUANTITY, 0).put(UNIT_PRICE, 0);
+      assertTrue(validate(document).isValid(), "new product: " + newProduct);
+    }
+  }
+
+  @Test
+  @DisplayName("negative quantity and price on the same line, and a negative total, are all valid together")
+  void aWholeCreditDocumentIsValid() throws Exception {
+    JSONObject document = complete();
+    header(document).put("totalAmount", -121.0);
+    firstLine(document).put(QUANTITY, -2).put(UNIT_PRICE, -50);
+
+    assertTrue(validate(document).isValid());
   }
 
   @Test
@@ -242,40 +277,160 @@ class InvoiceInboxValidatorTest {
     assertMissing(none, "line[0].product");
   }
 
+  /** ETP-6050 D8: a new product also needs the category and the unit it will be created with. */
+  private static JSONObject newProductWithCategoryAndUnit() throws Exception {
+    return new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("categoryId", "CAT").put("uomId", "UOM"));
+  }
+
   @Test
-  @DisplayName("D8: a new product is complete with a description, a quantity above zero and a price of zero or more")
-  void aNewProductNeedsDescriptionQuantityAndPrice() throws Exception {
+  @DisplayName("a new product is complete with a name and its category and unit; quantity and price are judged for every line")
+  void aNewProductNeedsOnlyItsNameCategoryAndUnit() throws Exception {
     JSONObject full = complete();
-    firstLine(full).put(PRODUCT, new JSONObject().put(STATE, NEW));
+    firstLine(full).put(PRODUCT, newProductWithCategoryAndUnit());
     assertTrue(validate(full).isValid());
 
-    JSONObject free = complete();
-    firstLine(free).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(UNIT_PRICE, 0);
-    assertTrue(validate(free).isValid(), "a price of zero is allowed");
-
-    String[][] broken = { { "description", "  " }, { QUANTITY, "0" }, { QUANTITY, "-1" },
-        { UNIT_PRICE, "-0.01" } };
-    for (String[] change : broken) {
+    // the purchase invoice takes any sign and zero for quantity and price
+    for (Object[] change : new Object[][] { { QUANTITY, 0 }, { QUANTITY, -1 }, { UNIT_PRICE, 0 },
+        { UNIT_PRICE, -0.01 } }) {
       JSONObject document = complete();
-      firstLine(document).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(change[0],
-          "description".equals(change[0]) ? change[1] : Double.valueOf(change[1]));
-      assertMissing(document, "line[0].product");
+      firstLine(document).put(PRODUCT, newProductWithCategoryAndUnit()).put((String) change[0],
+          change[1]);
+      assertTrue(validate(document).isValid(), change[0] + " " + change[1]);
     }
-    for (String key : new String[] { "description", QUANTITY, UNIT_PRICE }) {
-      JSONObject asNull = complete();
-      firstLine(asNull).put(PRODUCT, new JSONObject().put(STATE, NEW)).put(key, JSONObject.NULL);
-      assertMissing(asNull, "line[0].product");
-      JSONObject absent = complete();
-      firstLine(absent).put(PRODUCT, new JSONObject().put(STATE, NEW)).remove(key);
-      assertMissing(absent, "line[0].product");
+
+    JSONObject blank = complete();
+    firstLine(blank).put(PRODUCT, newProductWithCategoryAndUnit()).put("description", "  ");
+    assertMissing(blank, "line[0].product");
+    for (Object missing : new Object[] { JSONObject.NULL, null }) {
+      JSONObject document = complete();
+      JSONObject line = firstLine(document).put(PRODUCT, newProductWithCategoryAndUnit());
+      if (missing == null) {
+        line.remove("description");
+      } else {
+        line.put("description", missing);
+      }
+      assertMissing(document, "line[0].product");
     }
   }
 
   @Test
-  @DisplayName("a linked product needs no quantity or price: the match is what counts")
+  @DisplayName("quantity and price must be numbers on EVERY line, linked or new, of any sign")
+  void quantityAndPriceMustExistOnEveryLine() throws Exception {
+    for (boolean newProduct : new boolean[] { false, true }) {
+      for (String key : new String[] { QUANTITY, UNIT_PRICE }) {
+        String code = "line[0]." + (QUANTITY.equals(key) ? "quantity" : "unitPrice");
+        JSONObject asNull = complete();
+        JSONObject line = firstLine(asNull);
+        if (newProduct) {
+          line.put(PRODUCT, newProductWithCategoryAndUnit());
+        }
+        line.put(key, JSONObject.NULL);
+        assertMissing(asNull, code);
+
+        JSONObject absent = complete();
+        JSONObject other = firstLine(absent);
+        if (newProduct) {
+          other.put(PRODUCT, newProductWithCategoryAndUnit());
+        }
+        other.remove(key);
+        assertMissing(absent, code);
+
+        JSONObject text = complete();
+        firstLine(text).put(key, "12");
+        assertMissing(text, code);
+      }
+    }
+    JSONObject signs = complete();
+    firstLine(signs).put(QUANTITY, -2).put(UNIT_PRICE, -3.5);
+    assertTrue(validate(signs).isValid(), "a credit/return line is valid, as in the purchase invoice");
+  }
+
+  @Test
+  @DisplayName("ETP-6050 D8: a new product also needs its category and its unit, each non-blank")
+  void aNewProductNeedsItsCategoryAndItsUnit() throws Exception {
+    String[][] cases = { { "categoryId", null }, { "categoryId", "  " }, { "uomId", null },
+        { "uomId", "" } };
+    for (String[] change : cases) {
+      JSONObject document = complete();
+      JSONObject draft = new JSONObject().put("categoryId", "CAT").put("uomId", "UOM");
+      if (change[1] == null) {
+        draft.remove(change[0]);
+      } else {
+        draft.put(change[0], change[1]);
+      }
+      firstLine(document).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new", draft));
+      assertMissing(document, "line[0].product");
+    }
+    JSONObject noBlock = complete();
+    firstLine(noBlock).put(PRODUCT, new JSONObject().put(STATE, NEW));
+    assertMissing(noBlock, "line[0].product");
+    JSONObject nullIds = complete();
+    firstLine(nullIds).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("categoryId", JSONObject.NULL).put("uomId", JSONObject.NULL)));
+    assertMissing(nullIds, "line[0].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050 D8: the name of a new product is its own, else the line description")
+  void theEffectiveNameOfANewProduct() throws Exception {
+    JSONObject ownName = complete();
+    firstLine(ownName).put("description", "").put(PRODUCT, new JSONObject().put(STATE, NEW)
+        .put("new", new JSONObject().put("name", "Tornillo").put("categoryId", "CAT")
+            .put("uomId", "UOM")));
+    assertTrue(validate(ownName).isValid());
+
+    JSONObject blankName = complete();
+    firstLine(blankName).put(PRODUCT, new JSONObject().put(STATE, NEW).put("new",
+        new JSONObject().put("name", "  ").put("categoryId", "CAT").put("uomId", "UOM")));
+    assertTrue(validate(blankName).isValid(), "a blank own name falls back to the description");
+
+    JSONObject neither = complete();
+    firstLine(neither).put("description", " ").put(PRODUCT, new JSONObject().put(STATE, NEW)
+        .put("new", new JSONObject().put("name", "").put("categoryId", "CAT")
+            .put("uomId", "UOM")));
+    assertMissing(neither, "line[0].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the codes of a line use its stable index, not its position")
+  void theLineCodesUseTheStableIndex() throws Exception {
+    JSONObject document = complete();
+    JSONObject first = firstLine(document).put("index", 3);
+    first.put(TAX, new JSONObject().put(STATE, "unknown"));
+    JSONObject second = line().put("index", 7);
+    second.put(PRODUCT, new JSONObject().put(STATE, AMBIGUOUS));
+    document.getJSONArray("lines").put(second);
+
+    assertMissing(document, "line[3].tax", "line[7].product");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a line without an index, or with a null one, is coded by its position")
+  void aLineWithoutIndexIsCodedByItsPosition() throws Exception {
+    JSONObject document = complete();
+    firstLine(document).remove(PRODUCT);
+    JSONObject second = line().put("index", JSONObject.NULL);
+    second.remove(TAX);
+    document.getJSONArray("lines").put(second);
+
+    assertMissing(document, "line[0].product", "line[1].tax");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: after a removed line the surviving one keeps its index in the code")
+  void aSurvivingLineKeepsItsIndex() throws Exception {
+    JSONObject document = complete();
+    firstLine(document).put("index", 1).remove(PRODUCT);
+
+    assertMissing(document, "line[1].product");
+  }
+
+  @Test
+  @DisplayName("a linked product is complete: the match is what counts for the product")
   void aLinkedProductIsComplete() throws Exception {
     JSONObject document = complete();
-    firstLine(document).put(QUANTITY, JSONObject.NULL).put(UNIT_PRICE, JSONObject.NULL);
+    firstLine(document).put(PRODUCT, new JSONObject().put(STATE, "linked").put("id", "P"));
 
     assertTrue(validate(document).isValid());
   }
@@ -287,7 +442,7 @@ class InvoiceInboxValidatorTest {
   void missingItemsAreReportedTogether() throws Exception {
     JSONObject document = complete();
     header(document).getJSONObject(VENDOR).put(STATE, AMBIGUOUS);
-    header(document).put("invoiceDate", JSONObject.NULL).put("totalAmount", 0);
+    header(document).put("invoiceDate", JSONObject.NULL).put("totalAmount", JSONObject.NULL);
     JSONObject second = line();
     second.put(TAX, new JSONObject().put(STATE, "unknown"))
         .put(PRODUCT, new JSONObject().put(STATE, AMBIGUOUS));
@@ -302,7 +457,8 @@ class InvoiceInboxValidatorTest {
     JSONObject document = complete();
     document.put("lines", new JSONArray().put("not an object"));
 
-    assertMissing(document, "line[0].tax", "line[0].product");
+    assertMissing(document, "line[0].tax", "line[0].product", "line[0].quantity",
+        "line[0].unitPrice");
   }
 
   // ---------------------------------------------------------------- error code priority

@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.terms;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,7 +41,7 @@ import com.etendoerp.go.terms.TermsAndConditionsService.Terms;
  */
 class TermsAndConditionsServiceTest {
 
-  private static final Terms CURRENT = new Terms("2026-11", "es_ES", "Texto", new Date(1000L));
+  private static final Terms CURRENT = new Terms("2026-11", "es_ES", new Date(1000L));
 
   private final Store store = mock(Store.class);
   private final TermsAndConditionsService service = new TermsAndConditionsService(store);
@@ -134,14 +135,55 @@ class TermsAndConditionsServiceTest {
   }
 
   @Test
-  void thePublicBodyCarriesOnlyTheTextAndItsIdentity() throws Exception {
+  void thePublicBodyCarriesOnlyTheIdentityOfTheVersion() throws Exception {
     JSONObject json = CURRENT.toJson();
 
     assertEquals("2026-11", json.getString("version"));
     assertEquals("es_ES", json.getString("language"));
-    assertEquals("Texto", json.getString("content"));
     assertEquals(1000L, json.getLong("publishedAt"));
-    assertEquals(4, json.length());
-    assertTrue(json.has("publishedAt"));
+    assertEquals(3, json.length());
+  }
+
+  @Test
+  void aVersionOfEveryLanguageHasNoLanguageInThePublicBody() throws Exception {
+    JSONObject json = new Terms("1.0", null, new Date(1000L)).toJson();
+
+    assertTrue(json.isNull("language"));
+  }
+
+  @Test
+  void servesTheDocumentOfAVersionOfEveryLanguage() {
+    byte[] docx = { 'P', 'K' };
+    when(store.findDocumentId("", "1.0")).thenReturn(Optional.of("FILE1"));
+    when(store.download("FILE1")).thenReturn(docx);
+
+    assertArrayEquals(docx, service.findDocument(null, "1.0").orElseThrow());
+    assertArrayEquals(docx, service.findDocument(" ", "1.0").orElseThrow());
+  }
+
+  @Test
+  void servesTheDocumentAttachedToTheExactVersionAndLanguage() {
+    byte[] docx = { 'P', 'K' };
+    when(store.findDocumentId("es_ES", "1.0")).thenReturn(Optional.of("FILE1"));
+    when(store.download("FILE1")).thenReturn(docx);
+
+    assertArrayEquals(docx, service.findDocument(" es_ES ", " 1.0 ").orElseThrow());
+  }
+
+  @Test
+  void aVersionWithoutDocumentHasNone() {
+    when(store.findDocumentId("es_ES", "1.0")).thenReturn(Optional.empty());
+
+    assertTrue(service.findDocument("es_ES", "1.0").isEmpty());
+    verify(store, never()).download(anyString());
+  }
+
+  @Test
+  void neverLooksUpADocumentWithMalformedParameters() {
+    assertTrue(service.findDocument("es_ES", null).isEmpty());
+    assertTrue(service.findDocument("es_ES", "v".repeat(61)).isEmpty());
+    assertTrue(service.findDocument("'; drop table c_file; --", "1.0").isEmpty());
+
+    verify(store, never()).findDocumentId(anyString(), anyString());
   }
 }

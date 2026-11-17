@@ -29,6 +29,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -85,12 +86,14 @@ public class PortalDecisionServiceTest {
   private static final String QUOTATION_ID = "Q-1";
   private static final String ROOT_ID = "ROOT-1";
   private static final String DECISION_ID = "D-1";
+  private static final String CLIENT_ID = "CLIENT-1";
 
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<OBContext> obContext;
   private MockedStatic<SystemContext> system;
   private MockedStatic<PortalDecisionEvents> events;
   private MockedStatic<PortalDocumentQuery> documents;
+  private MockedStatic<PortalKpiTelemetry> kpi;
   private MockedConstruction<TransactionalEmailService> emails;
 
   private OBDal obDal;
@@ -125,6 +128,7 @@ public class PortalDecisionServiceTest {
         .thenAnswer(inv -> ((Supplier<?>) inv.getArgument(1)).get());
     events = mockStatic(PortalDecisionEvents.class);
     documents = mockStatic(PortalDocumentQuery.class);
+    kpi = mockStatic(PortalKpiTelemetry.class);
     emails = mockConstruction(TransactionalEmailService.class,
         (service, context) -> when(service.send(anyString(), any(JSONObject.class)))
             .thenAnswer(inv -> emailAnswer()));
@@ -151,6 +155,7 @@ public class PortalDecisionServiceTest {
   @After
   public void tearDown() {
     emails.close();
+    kpi.close();
     documents.close();
     events.close();
     system.close();
@@ -379,6 +384,9 @@ public class PortalDecisionServiceTest {
       // The portal's reason never becomes the tenant's internal reject reason.
       verify(rejected, never()).setRejectReason(any(RejectReason.class));
     }
+    // The KPI counts each applied rejection once, for the decision's tenant.
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(false, CLIENT_ID),
+        times(cases.length));
   }
 
   @Test
@@ -392,6 +400,8 @@ public class PortalDecisionServiceTest {
     verify(quotation).setProcessed(true);
     verify(quotation, never()).setDescription(anyString());
     assertTrue(executed("SET status = 'CONFIRMED'"));
+    assertFalse(view.isCustomerClosed());
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(true, CLIENT_ID));
   }
 
   @Test
@@ -422,6 +432,8 @@ public class PortalDecisionServiceTest {
     verify(quotation, never()).setDocumentStatus(anyString());
     assertTrue("no second notice", emails.constructed().isEmpty());
     assertFalse(updated());
+    assertFalse(view.isCustomerClosed());
+    kpi.verifyNoInteractions();
   }
 
   @Test
@@ -444,8 +456,11 @@ public class PortalDecisionServiceTest {
       assertFalse(view.isAppliedNow());
       assertTrue(executed("SET status = 'NOT_APPLIED'"));
       verify(quotation, never()).setProcessed(anyBoolean());
+      // Not applied is not closed for the customer: the answer still leads into the portal.
+      assertFalse(view.isCustomerClosed());
     }
     assertTrue(emails.constructed().isEmpty());
+    kpi.verifyNoInteractions();
   }
 
   @Test
@@ -455,7 +470,7 @@ public class PortalDecisionServiceTest {
     for (String closed : Arrays.asList(PortalAccessChecks.BLOCKED_CUSTOMER,
         PortalAccessChecks.INACTIVE, PortalAccessChecks.PLAN_EXPIRED)) {
       statements.clear();
-      when(accessChecks.blockReasonOrClosed("CLIENT-1", "BP-1")).thenReturn(Optional.of(closed));
+      when(accessChecks.blockReasonOrClosed(CLIENT_ID, "BP-1")).thenReturn(Optional.of(closed));
       decisionRow = row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, true);
 
       PortalDecisionService.View view = service().confirm(TOKEN);
@@ -463,10 +478,14 @@ public class PortalDecisionServiceTest {
       assertEquals(closed, PortalDecisionService.State.NOT_PENDING, view.getState());
       assertFalse(closed, view.isAppliedNow());
       assertFalse(closed, updated());
+      assertTrue(closed, view.isCustomerClosed());
     }
     // A link that can no longer be read fails closed the same way.
     when(linkService.findLink("LINK-1")).thenReturn(Optional.empty());
-    assertEquals(PortalDecisionService.State.NOT_PENDING, service().confirm(TOKEN).getState());
+    PortalDecisionService.View unreadable = service().confirm(TOKEN);
+    assertEquals(PortalDecisionService.State.NOT_PENDING, unreadable.getState());
+    assertTrue(unreadable.isCustomerClosed());
+    kpi.verifyNoInteractions();
 
     verify(quotation, never()).setDocumentStatus(anyString());
     verify(quotation, never()).setProcessed(anyBoolean());
@@ -575,12 +594,12 @@ public class PortalDecisionServiceTest {
 
   private static Object[] row(String decision, String reasonCode, String reasonText,
       String status, boolean sent) {
-    return new Object[] { DECISION_ID, "CLIENT-1", QUOTATION_ID, "LINK-1", decision, reasonCode,
+    return new Object[] { DECISION_ID, CLIENT_ID, QUOTATION_ID, "LINK-1", decision, reasonCode,
         reasonText, "first@customer.test", "es_ES", status, sent ? new Date() : null };
   }
 
   private static PortalLink link(String to, String cc) {
-    return new PortalLink("LINK-1", "CLIENT-1", "Acme", "ORG-1", "BP-1", "Customer SL",
+    return new PortalLink("LINK-1", CLIENT_ID, "Acme", "ORG-1", "BP-1", "Customer SL",
         PortalDocumentKind.QUOTATION, QUOTATION_ID, PortalLink.ORIGIN_SEND, null, ROOT_ID,
         "sales-quotation-send", to, cc, "es_ES", new Date(0L), new Date(1L), true, false);
   }

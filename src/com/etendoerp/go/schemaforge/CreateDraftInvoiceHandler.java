@@ -61,6 +61,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.base.weld.WeldUtils;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.usage.quota.QuotaWriteGuard;
@@ -1075,6 +1076,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     if (quotation == null) {
       return;
     }
+    // ETP-6209 KPI: an app acceptance (not for one the portal already accepted), after commit.
+    PortalKpiTelemetry.appQuotationConverted(quotation.getDocumentStatus(), quotation);
     quotation.setDocumentStatus(STATUS_INVOICE_CREATED);
     OBDal.getInstance().save(quotation);
   }
