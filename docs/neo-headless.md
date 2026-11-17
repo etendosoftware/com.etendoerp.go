@@ -14710,30 +14710,44 @@ rectificative was computed either on the detail GET or by the header callout whe
   on the next detail GET.
 - *Server-side defaults* (`SalesRectificativeFiscalDefaults`, called on every CRUD POST/PUT/PATCH of
   the header, ids-only included). Only on a draft (`DR`), unprocessed sales invoice whose document type
-  is `EM_Etsg_Isrectificative = 'Y'`:
+  is `EM_Etsg_Isrectificative = 'Y'`. It writes only the fields that say "this is a correction" and
+  **never picks a reason code** (TicketBAI `tbaiReverseinvoicecode`, VERI*FACTU `R1`–`R5`, SII
+  `aeatsiiMotivoRectif`): `RectificationFiscalCodeGuard` blocks completion while one is missing.
+  - with the organization enrolled in the SII (`siiConfigActive`, `AEATSIIConfig.isAcogidaAlSII`):
+    `aeatsiiClaveTipo` is **enforced** to `R`, `aeatsiiTipoRectif = I` only when blank (ETP-5747
+    CP-11). Possible because `EM_AEATSII_C_INV_RECT_CHK` (SII module) now reads
+    `PROCESSED = 'N' OR <type + motivo rules>`: a draft may hold `R` with no motivo; the motivo and
+    type are required only once the invoice is processed (completed), so Classic and GO completion
+    still hit the constraint, and a reactivated draft is free again;
   - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
     the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
     rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
     `tbaiReverseinvoicetype = I` only when blank. `tbaiReverseinvoicecode` is **never** defaulted
     (ETP-5745 CP-14 reverted the ETP-5747 `R4` auto-pick): it stays empty until the user chooses it;
   - with an active VERI*FACTU config in the system for the legal entity (the
-    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` is **never** written (ETP-5745 CP-20); only
-    when the invoice already carries an `R1`-`R5` type the user picked and `etvfacReverseinvtype` is
-    blank, the reverse type gets the document type's one, or `I` when the document type has none.
+    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): a non-rectificative `F*` `etvfacInvType` (in practice the AD
+    default `F1` an insert stamps) or a blank one is **cleared to null** (ETP-5747 CP-5/CP-11), matching
+    the empty "Tipo de Factura" the doc-type callout and the SIF tab show; an `R*` value is kept and the
+    document type's own code is never copied. When the type is `R*` and `etvfacReverseinvtype` is blank,
+    the document type's reverse type, or `I` when it has none.
 
-  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive and the TicketBAI
-  code stay empty, and `RectificationFiscalCodeGuard` blocks completion until the user chooses them.
-  (A customer return is different: its "Datos fiscales" step preselects `R1`, see ETP-6179.)
+  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive, the TicketBAI
+  code and the VERI*FACTU `R1`-`R5` type stay empty, and `RectificationFiscalCodeGuard` blocks
+  completion until the user chooses them. (A customer return is different: its "Datos fiscales" step
+  preselects `R1`, see ETP-6179.)
 
-  Any other value already set is never overwritten, and nothing is ever cleared. The values are
+  Any other value already set is never overwritten. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
   and answered as "nothing applied", but a DB-level failure on the flush aborts the write, as for
-  `persistSiiAuthorizationno`. An invoice created with the rectificative type already
+  `persistSiiAuthorizationno`.
+  **Deployment coupling:** this change requires the `org.openbravo.module.sii` version carrying the
+  relaxed `EM_AEATSII_C_INV_RECT_CHK` (`PROCESSED = 'N' OR ...`, ETP-5747). No `AD_MODULE_DEPENDENCY`
+  of this module enforces it, so deploy both together: against an older SII module, storing `R`
+  with no motivo violates the constraint on the flush and the header write of a draft sales
+  rectificative fails for every SII-enrolled organization. An invoice created with the rectificative type already
   set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
-  so TicketBAI kept no reverse code (its XML generator then fails with `TBAI_SetKey`) and VERI*FACTU
-  showed `F1` while in draft. SII is **not** defaulted on the server: `EM_AEATSII_C_INV_RECT_CHK` requires
-  `aeatsiiMotivoRectif` once the type is `R`, and the motivo is a user choice — that default stays in the
-  SPA (`useSifFieldPatcher.js`), driven by the `isRectificative` the write response now carries.
+  so without these defaults it kept SII `F1` and VERI*FACTU `F1` while in draft. The written keys
+  (`etvfacInvType` as JSON `null`) are echoed in the write response.
 - Same behaviour on REST single, `/batch` and MCP `etendo_create` / `etendo_update` (all run the
   header's `afterHandle`); no divergence to declare. The added keys are not AD fields of the spec and
   are put by the post-hook, after `NeoFieldFilter.filterGetResponse` has run, so they reach the caller
