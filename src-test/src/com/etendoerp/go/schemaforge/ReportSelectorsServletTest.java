@@ -678,6 +678,53 @@ class ReportSelectorsServletTest {
     }
 
     @Test
+    @DisplayName("ids beyond the cap of 100 are dropped, not an error")
+    void idsBeyondTheCapAreDropped() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      List<String> sent = new java.util.ArrayList<>();
+      for (int i = 0; i < 120; i++) {
+        sent.add(String.format("AB%04X", i));
+      }
+      when(request.getParameter("ids")).thenReturn(String.join(",", sent));
+
+      servlet.doGet(request, response);
+
+      verify(response, never()).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(dataQuery).setParameterList("ids", sent.subList(0, 100));
+      verify(dataQuery).setMaxResults(100);
+    }
+
+    @Test
+    @DisplayName("an unsupported selector answers 400 to a blank ids too")
+    void unsupportedSelectorRefusesBlankIds() throws Exception {
+      configureAuthenticatedGet("org");
+      when(request.getParameter("ids")).thenReturn("");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("product ids sit on top of the client and role-org scoping, keeping only the safe ids")
+    void productIdsKeepTheScoping() throws Exception {
+      configureAuthenticatedGet("product");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3", "D4E5F6" });
+      when(request.getParameter("ids")).thenReturn("AA11BB22,x'y, CC33DD44");
+
+      servlet.doGet(request, response);
+
+      for (String sql : sqlRun()) {
+        assertTrue(sql.contains("ad_client_id = :clientId"), sql);
+        assertTrue(sql.contains("l.ad_org_id IN (:roleOrgIds)"), sql);
+        assertTrue(sql.contains("m_product_id IN (:ids)"), sql);
+      }
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22", "CC33DD44"));
+      verify(dataQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
+    }
+
+    @Test
     @DisplayName("without ids the normal list is unchanged: no ids predicate, the request's q and paging apply")
     void normalPathUnchanged() throws Exception {
       configureAuthenticatedGet("bpartner");
