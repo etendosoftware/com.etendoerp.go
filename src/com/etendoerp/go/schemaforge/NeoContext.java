@@ -93,6 +93,14 @@ public class NeoContext {
    * NOT {@link #isMcpOrigin()}, so the readers that gate on MCP origin keep ignoring it there. REST
    * single and REST batch hand the pre-hook the body as sent, so there key presence already
    * answers "did the caller choose this field". Absent means: presence in the body is the answer.
+   *
+   * <p>The readers NOT gated on MCP origin ({@code ContactTypeRules.isExplicit},
+   * {@code PaymentTermCreateDefaults.isCallerValue}, and through it {@code PaymentTermHandler})
+   * therefore also see the {@code etendo_batch} key set. Their result is unchanged: that set is the
+   * op body before the batch preprocessor ran, and the preprocessor only adds the line {@code uOM},
+   * the bill-to address and the line prices (FK-name resolution replaces values of keys the agent
+   * sent, it adds none), none of which those readers ask about; {@code parentId} is added later by
+   * {@code BatchService} and is not asked about either.
    */
   public static final String ATTR_CLIENT_PROVIDED_FIELDS = "neo.clientProvidedFields";
 
