@@ -599,10 +599,19 @@ public class OnboardingDatasetNormalizer {
    * {@code DocumentNo_*} name. Dropping those would remove a counter the tenant has no other source
    * for. A future {@code DocumentNo_*} row added to the dataset for a table the client setup does
    * not cover must be added here, or it will be silently filtered out.
+   *
+   * <p><b>Column sequences (ETP-6340).</b> A row bound to a column ({@code AD_COLUMN_ID} set) is a
+   * transactional sequence, like {@code C_BPartner.EM_Etgo_Identifier}'s. Onboarding creates those
+   * for the tenant's business organization itself ({@code OnboardingSequenceGeneratorService},
+   * core's {@code SequencesGenerator}, named {@code <Table>-<Column>}), so a copy from this dataset
+   * would be a second one for the same column. They are dropped here; {@code import.sample.data}
+   * still loads them into GOClient, which never runs that generator and could not create a contact
+   * without one.
    */
   private static final class TableCounterSequenceFilter {
     private static final String SEQUENCE_TABLE = "AD_SEQUENCE";
     private static final String NAME_COLUMN = "NAME";
+    private static final String COLUMN_ID_COLUMN = "AD_COLUMN_ID";
     /** The name shape {@code InitialClientSetup} gives a per-table counter. */
     private static final String TABLE_COUNTER_PREFIX = "DocumentNo_";
 
@@ -617,6 +626,10 @@ public class OnboardingDatasetNormalizer {
     private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
       if (tableName == null || !SEQUENCE_TABLE.equalsIgnoreCase(tableName)) {
         return false;
+      }
+      String columnId = rawColumns.get(COLUMN_ID_COLUMN);
+      if (columnId != null && !columnId.isBlank()) {
+        return true;
       }
       String name = rawColumns.get(NAME_COLUMN);
       return name != null

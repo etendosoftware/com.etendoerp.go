@@ -73,6 +73,8 @@ final class McpSelectorContextHelper {
   private static final String PARAM_COUNTRY = "C_Country_ID";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  private static final String PARAM_FINANCIAL_ACCOUNT = "FIN_Financial_Account_ID";
+  private static final String FIELD_FINANCIAL_ACCOUNT = "financialAccount";
   private static final String COLUMN_REGION = "C_Region_ID";
 
   private McpSelectorContextHelper() {
@@ -248,6 +250,23 @@ final class McpSelectorContextHelper {
     copySalesContext(context, contextParams);
     copyDateContext(context, contextParams);
     copyCountryContext(context, contextParams);
+    copyFinancialAccountContext(context, contextParams);
+  }
+
+  /**
+   * Carries the financial account into the selectors that depend on it (ETP-6340): the remittance
+   * header's {@code remittanceType} offers only the types linked to the account the form holds,
+   * read from {@code FIN_Financial_Account_ID} (the field's {@code dependsOn.filterKey}, which the
+   * SPA sends). Without this mapping {@code recordContext.financialAccount} was dropped and the
+   * selector answered no types, while {@code etendo_defaults} did resolve one. Accepted under the
+   * property name and the classic column name, like the country.
+   */
+  private static void copyFinancialAccountContext(JSONObject context,
+      Map<String, String> contextParams) {
+    String account = firstNonBlank(context, FIELD_FINANCIAL_ACCOUNT, PARAM_FINANCIAL_ACCOUNT);
+    if (StringUtils.isNotBlank(account)) {
+      contextParams.put(PARAM_FINANCIAL_ACCOUNT, account);
+    }
   }
 
   /**
