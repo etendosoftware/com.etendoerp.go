@@ -7867,6 +7867,37 @@ A client that needs its own wording keys on `messageKeys`, never on the prose.
 Never edit the Classic module's `AD_MESSAGE` to get the same effect, and never add a spec or window
 condition here: the catalog is keyed by message only.
 
+### 4.18 Report selectors endpoint and its `ids` lookup (ETP-6239)
+
+`ReportSelectorsServlet` (`GET /sws/report-selectors/{type}`, entry point `report-selectors`) feeds the
+searchable pickers of report parameters (`currency`, `bpartner`, `product`, `warehouse`, `org`, `account`,
+`acctschema`, `year`, `tax`, `project`). It is a standalone servlet, not a NEO spec. The normal call is
+`?q=&limit=20&offset=0` and answers `{ items: [{ id, name, label }], totalCount, hasMore }`; the optional
+`selectedOrgId`, `selectedAcctSchemaId` and `warehouseIds` narrow some types (see the class Javadoc).
+
+**`ids` - resolve exactly these records.** A report restored from a link (the SPA keeps its selections in
+the URL, `docs/dynamic-reports.md` in the functional repo) carries ids only. To label the chips it asks for
+those rows and nothing else, however many there are (a plain search would only see the first page):
+
+```
+GET /sws/report-selectors/bpartner?ids=4028E6C72959682B01295A070DC80D06,B81EE5C5...
+-> { "items": [ { "id": "4028...", "name": "Acme, S.L.", "label": "Acme, S.L." } ], "totalCount": 1, "hasMore": false }
+```
+
+| Case | Answer |
+|------|--------|
+| Type other than `bpartner` / `product` | `400` (`ids is not supported for selector: <type>`), checked before anything else, so a blank `ids` on `org` is also a 400 |
+| `ids` present but blank, or with no valid id (`ids=`, `ids=,,`, `ids=not-an-id`) | `200` with no items. It never falls back to the whole selector |
+| A mix of valid and invalid ids | Each invalid one is dropped on its own (valid ids are hex and hyphens, at most 36 characters); the valid ones resolve |
+| More than 100 ids | The first 100 are kept, the rest silently dropped (`MAX_IDS`; the SPA caps a filter at the same number) |
+| `q`, `limit`, `offset` | Ignored: no search, no paging, at most one row per id |
+| `isactive` | Ignored in this mode: a contact or product deactivated since the link was shared still resolves its name |
+| Scoping | Unchanged: `ids` only adds an `AND ... IN (:ids)` to the normal query, so the client filter, the role's organizations, and for products the system-category exclusion and the stock `EXISTS` still apply. An id the role cannot reach does not resolve |
+
+An id that comes back absent (deleted, other client, out of the role's reach) is the caller's signal that it
+is stale. The ids are bound with `setParameterList`, never concatenated. Tests: `ReportSelectorsServletTest`.
+The SPA dev server mirrors the rule in `tools/app-shell/vite-plugins/report-api.js`; keep both in sync.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
