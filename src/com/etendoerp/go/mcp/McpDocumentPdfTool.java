@@ -281,9 +281,14 @@ final class McpDocumentPdfTool {
       + "again. If it was just completed, " + OVER_BUDGET + ", its PDF is being regenerated: ask "
       + "again in a few seconds. Otherwise " + APP_FALLBACK;
 
-  /** The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint. */
+  /**
+   * The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint.
+   * ETP-5848: bounded to one retry. Unbounded, an agent on a server that cannot render the PDF asked
+   * fifteen times and completed the document again between asks; neither makes the PDF appear.
+   */
   static final String JUST_COMPLETED_HINT = "If the document was just completed, its PDF is being "
-      + "generated: ask again in a few seconds. ";
+      + "generated: ask again in a few seconds, once. If it is still missing then, asking again or "
+      + "completing the document again will not produce it. ";
 
   /** The same retry for a stale PDF, worded "regenerated"; the email tool's stale hint uses it. */
   static final String STALE_RETRY_HINT = "If the document was just completed, its PDF is being "

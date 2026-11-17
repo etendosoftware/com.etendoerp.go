@@ -29,6 +29,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
@@ -186,12 +188,24 @@ public class NeoServlet extends HttpBaseServlet {
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
+    // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
+    String previousLanguage = NeoLanguage.captureRequestCode();
+    try {
+      dispatchAuthenticated(request, response, method);
+    } finally {
+      NeoLanguage.restoreRequestCode(previousLanguage);
+    }
+  }
 
+  private void dispatchAuthenticated(HttpServletRequest request, HttpServletResponse response,
+      String method) throws IOException {
     NeoPathInfo pathInfo = requestRouter.parseRequestPath(request, response);
     if (pathInfo == null) {
       return;
     }
 
+    AccountingKpiTelemetry.beginRestRequest(pathInfo.specName, pathInfo.entityName, method,
+        pathInfo.actionName);
     try {
       OBContext.setAdminMode();
       // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
@@ -210,6 +224,7 @@ public class NeoServlet extends HttpBaseServlet {
           "NEO " + method + " request", null));
     } finally {
       OBContext.restorePreviousMode();
+      AccountingKpiTelemetry.endRestRequest();
     }
   }
 
@@ -222,6 +237,8 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
     requestRouter.handleSpecRequest(pathInfo, method, request, response);
+    // ETP-6230: enqueue only (own thread, own connection); branches on nothing about the entity.
+    AccountingKpiTelemetry.restWriteSucceeded(response.getStatus());
   }
 
   /**
@@ -363,6 +380,8 @@ public class NeoServlet extends HttpBaseServlet {
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     NeoResponse.identifyPeriodRefusal(neoResponse);
+    // ETP-6158: Classic fiscal messages that name Classic-only UI, reworded for GO.
+    ClassicMessageRemap.apply(neoResponse);
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;
@@ -373,6 +392,8 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     response.setStatus(neoResponse.getHttpStatus());
+    // ETP-6230: period refusals, enqueue only.
+    AccountingKpiTelemetry.observeRestResponse(neoResponse.getHttpStatus(), neoResponse.getBody());
 
     if (neoResponse.getBody() != null) {
       response.setContentType(ContentType.APPLICATION_JSON.getMimeType());

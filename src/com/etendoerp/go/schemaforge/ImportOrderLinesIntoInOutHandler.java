@@ -75,6 +75,14 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_ORDERS = 50;
   private static final long LINE_STEP = 10L;
+  /** What {@code detail} adds to an {@code availableOrders} row (ETP-6099). */
+  static final String DOC_DETAIL_KEYS = "creationDate (ISO instant, UTC) and amount (unit price x pending quantity summed over the "
+      + "lines with a positive pending, at the order currency's precision: the import popup's "
+      + "row total)";
+  /** What {@code detail} adds to an {@code availableOrderLines} row (ETP-6099). */
+  static final String LINE_DETAIL_KEYS = "orderedQuantity, deliveredQuantity, unitPrice, "
+      + "description of the order line, and inDraftDocuments (the document numbers of the OTHER "
+      + "draft documents holding quantity of the line, [] when none)";
 
   /**
    * The three contracts of the document this delegate is injected in, in flow order.
@@ -86,26 +94,35 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
     String doc = sales ? "goods shipment" : "goods receipt";
     String oneStep = sales ? "createShipment on the sales order" : "createGoodsReceipt on the "
         + "purchase order";
+    String verb = sales ? "ship" : "receive";
     String flow = " Flow: create the draft " + doc + " header with etendo_create (business partner "
         + "and the rest defaulted; etendo_schema view:\"create\" is the authority), call "
         + "availableOrders, then availableOrderLines, then importOrderLines on that header, and "
-        + "confirm it with documentAction (CO). To " + (sales ? "ship" : "receive") + " a whole "
+        + "confirm it with documentAction (CO). To " + verb + " a whole "
         + "order in ONE step, without a draft header to fill, call " + oneStep + " instead.";
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_AVAILABLE_ORDERS, NeoActionContract.read(ACTION_AVAILABLE_ORDERS,
         "Lists the completed " + order + "s of this " + doc + "'s business partner and currency "
-            + "that still have quantity to " + (sales ? "ship" : "receive") + ": {data:[{id, "
+            + "that still have quantity to " + verb + ": {data:[{id, "
             + "documentNo, date, businessPartner, businessPartner$_identifier, currency, "
-            + "pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft documents already hold. Step 1." + flow)
+            + "pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft documents already hold. "
+            + ImportInOutLinesIntoInvoiceHandler.LISTING_NOTE + " includeCovered also lists the "
+            + "orders whose pending lines are all held by draft documents, with pendingLines 0; "
+            + "detail adds " + DOC_DETAIL_KEYS + ". "
+            + "Step 1." + flow,
+        ImportListing.listParams(MAX_ORDERS, DOC_DETAIL_KEYS))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + order + " that can still be imported: {data:[{id, lineNo, "
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
             + "ordered minus delivered minus what any draft document (this one included) already "
-            + "holds, and the id is the sourceLineId importOrderLines takes. Step 2." + flow,
-        NeoActionContract.Param.required(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
-            "Id of an order returned by availableOrders."))
+            + "holds, and the id is the sourceLineId importOrderLines takes. includeCovered also "
+            + "lists the order's other product lines (nothing left to " + verb
+            + ") at pendingQuantity 0; detail adds " + LINE_DETAIL_KEYS + ". Step 2." + flow,
+        ImportListing.linesParams(LINE_DETAIL_KEYS,
+            NeoActionContract.Param.required(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
+                "Id of an order returned by availableOrders.")))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
@@ -155,9 +172,10 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
     JSONObject body = context.getRequestBody();
     switch (action) {
       case ACTION_AVAILABLE_ORDERS:
-        return availableOrders(target);
+        return availableOrders(target, listRequest(body));
       case ACTION_AVAILABLE_LINES:
-        return availableOrderLines(requireSourceOrder(target, body));
+        return availableOrderLines(target, requireSourceOrder(target, body),
+            ImportListing.includeCovered(body), ImportListing.detail(body));
       default:
         return importLines(target, body);
     }
@@ -269,32 +287,115 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
   // availableOrders / availableOrderLines
   // ---------------------------------------------------------------------------
 
-  private NeoResponse availableOrders(ShipmentInOut target) throws JSONException {
+  private NeoResponse availableOrders(ShipmentInOut target, ImportListing.ListRequest request)
+      throws JSONException {
     boolean sales = Boolean.TRUE.equals(target.isSalesTransaction());
     String partnerId = target.getBusinessPartner() == null ? null
         : target.getBusinessPartner().getId();
     String currencyId = target.getEtgoCurrency() == null ? null : target.getEtgoCurrency().getId();
-    return discover(findCandidateOrders(partnerId, sales, currencyId), order -> {
-      int pendingLines = pendingLines(order, sales, new LinkedHashSet<>()).size();
-      if (pendingLines == 0) {
+    List<Order> candidates = request.isDefault(scanLimit())
+        ? findCandidateOrders(partnerId, sales, currencyId)
+        : findCandidateOrders(partnerId, sales, currencyId, request.offset, request.scan);
+    return discover(candidates, order -> {
+      List<PendingOrderLine> pending = pendingLines(order, sales, new LinkedHashSet<>());
+      int pendingLines = pending.size();
+      if (pendingLines == 0 && !(request.includeCovered && hasPendingBeforeDrafts(order))) {
         return null;
       }
       String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
-      return documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
+      JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
           partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
-    });
+      if (request.detail) {
+        ImportListing.putCreationDate(row, order.getCreationDate());
+        row.put("amount", pendingAmount(order, pending));
+      }
+      return row;
+    }, request);
   }
 
-  private NeoResponse availableOrderLines(Order order) throws JSONException {
+  /**
+   * The popup's row total (ETP-6099): unit price x pending over the lines with a positive pending
+   * (the popup clamps a pending at 0 and drops a receipt's negative lines), at the order
+   * currency's precision.
+   */
+  private static BigDecimal pendingAmount(Order order, List<PendingOrderLine> pending) {
+    BigDecimal sum = BigDecimal.ZERO;
+    for (PendingOrderLine line : pending) {
+      if (line.getPendingQty().signum() > 0) {
+        sum = sum.add(OrderImportListing.unitPriceOf(line.getOrderLine())
+            .multiply(line.getPendingQty()));
+      }
+    }
+    return sum.setScale(OrderImportListing.amountPrecision(order), java.math.RoundingMode.HALF_UP);
+  }
+
+  /** ordered - delivered left on a line, same sign as ordered: what drafts can have taken. */
+  private static boolean hasPendingBeforeDrafts(Order order) {
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal base = InOutLineFromOrderFactory.pendingQuantityFor(ol);
+      if (base != null && ol.getOrderedQuantity() != null
+          && base.signum() == ol.getOrderedQuantity().signum()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The lines that can still be imported. With {@code includeCovered} (ETP-6099) also every other
+   * product line of the order (active, not the total-discount line) at {@code pendingQuantity} 0,
+   * in the order's line order: the popup lists them greyed out.
+   */
+  private NeoResponse availableOrderLines(ShipmentInOut target, Order order,
+      boolean includeCovered, boolean detail) throws JSONException {
     boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
+    List<PendingOrderLine> pendingLines = pendingLines(order, sales, new LinkedHashSet<>());
+    List<OrderLine> listed = new ArrayList<>();
+    Map<String, BigDecimal> pending = new LinkedHashMap<>();
+    for (PendingOrderLine line : pendingLines) {
+      pending.put(line.getOrderLine().getId(), line.getPendingQty());
+      listed.add(line.getOrderLine());
+    }
+    if (includeCovered) {
+      listed = new ArrayList<>();
+      for (OrderLine ol : order.getOrderLineList()) {
+        if (pending.containsKey(ol.getId()) || isProductLine(ol)) {
+          listed.add(ol);
+        }
+      }
+    }
+    Map<String, Set<String>> drafts = detail ? draftDocumentNos(idsOf(listed), sales,
+        target.getId()) : Map.of();
     JSONArray rows = new JSONArray();
-    for (PendingOrderLine pending : pendingLines(order, sales, new LinkedHashSet<>())) {
-      OrderLine ol = pending.getOrderLine();
-      rows.put(DocumentLineImport.lineRow(ol.getId(), ol.getLineNo(), ol.getProduct().getId(),
-          ol.getProduct().getName(), ol.getUOM() == null ? null : ol.getUOM().getId(),
-          pending.getPendingQty()));
+    for (OrderLine ol : listed) {
+      JSONObject row = DocumentLineImport.lineRow(ol.getId(), ol.getLineNo(),
+          ol.getProduct().getId(), ol.getProduct().getName(),
+          ol.getUOM() == null ? null : ol.getUOM().getId(),
+          pending.getOrDefault(ol.getId(), BigDecimal.ZERO));
+      if (detail) {
+        ImportListing.putNullable(row, "orderedQuantity", ol.getOrderedQuantity());
+        ImportListing.putNullable(row, "deliveredQuantity", ol.getDeliveredQuantity());
+        ImportListing.putNullable(row, "unitPrice", ol.getUnitPrice());
+        ImportListing.putNullable(row, "description", ol.getDescription());
+        row.put("inDraftDocuments", new JSONArray(drafts.getOrDefault(ol.getId(), Set.of())));
+      }
+      rows.put(row);
     }
     return completePage(rows);
+  }
+
+  /** An active line with a product other than the total-discount line. */
+  private static boolean isProductLine(OrderLine ol) {
+    return ol.isActive() && ol.getProduct() != null
+        && !TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(ol.getProduct().getId());
+  }
+
+  private static List<String> idsOf(List<OrderLine> lines) {
+    List<String> ids = new ArrayList<>();
+    for (OrderLine ol : lines) {
+      ids.add(ol.getId());
+    }
+    return ids;
   }
 
   /**
@@ -385,6 +486,12 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
     return InOutLineFromOrderFactory.collectPendingLines(order, sales, coveringDrafts);
   }
 
+  /** Seam: the OTHER drafts holding each order line (ETP-6099, the popup's draft note). */
+  protected Map<String, Set<String>> draftDocumentNos(Collection<String> orderLineIds,
+      boolean sales, String targetId) {
+    return InOutLineFromOrderFactory.draftDocumentNos(orderLineIds, sales, targetId);
+  }
+
   protected Locator resolveBin(ShipmentInOut target) {
     return NeoHandlerUtils.resolveWarehouseAnchorBin(target.getWarehouse(), log);
   }
@@ -409,17 +516,23 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
 
   /** Completed orders of the partner, newest first; a bounded scan, not the whole history. */
   protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currencyId) {
+    return findCandidateOrders(partnerId, sales, currencyId, 0, scanLimit());
+  }
+
+  /** {@link #findCandidateOrders(String, boolean, String)} paged (ETP-6099). */
+  protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currencyId,
+      int offset, int scan) {
     StringBuilder hql = new StringBuilder("from Order o where o.documentStatus = 'CO' "
         + "and o.salesTransaction = :sot and o.businessPartner.id = :bp and o.active = true");
     hql.append(" and o.client.id = :client");
     if (currencyId != null) {
       hql.append(" and o.currency.id = :cur");
     }
-    hql.append(" order by o.orderDate desc, o.documentNo desc");
+    hql.append(" order by o.orderDate desc, o.documentNo desc, o.id desc");
     org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())
-        .setMaxResults(scanLimit());
+        .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
     }

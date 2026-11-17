@@ -73,7 +73,8 @@ class OcrConfigTest {
       assertTrue(properties.has(key), "schema property " + key);
     }
     JSONObject line = properties.getJSONObject("line_items").getJSONObject("items");
-    for (String key : List.of("description", "quantity", "unit_price", "tax_label", "tax_rate")) {
+    for (String key : List.of("description", "quantity", "unit_price", "discount_percent",
+        "discount_amount", "tax_label", "tax_rate")) {
       assertTrue(line.getJSONObject("properties").has(key), "line property " + key);
     }
     assertFalse(properties.has("total"), "no totals are read");
@@ -192,7 +193,8 @@ class OcrConfigTest {
     }
     JSONObject line = properties.getJSONObject("line_items").getJSONObject("items")
         .getJSONObject("properties");
-    for (String key : List.of("description", "quantity", "unit_price", "tax_label", "tax_rate")) {
+    for (String key : List.of("description", "quantity", "unit_price", "discount_percent",
+        "discount_amount", "tax_label", "tax_rate")) {
       assertTrue(line.has(key), "line key " + key);
     }
   }
@@ -202,7 +204,8 @@ class OcrConfigTest {
   void numericFieldsAreTypedAsNumbers() throws JSONException {
     JSONObject line = purchaseInvoice().getSchema().getJSONObject("properties")
         .getJSONObject("line_items").getJSONObject("items").getJSONObject("properties");
-    for (String key : List.of("quantity", "unit_price", "tax_rate")) {
+    for (String key : List.of("quantity", "unit_price", "discount_percent", "discount_amount",
+        "tax_rate")) {
       assertTrue(line.getJSONObject(key).getJSONArray("type").toString().contains("number"), key);
     }
   }
@@ -237,5 +240,31 @@ class OcrConfigTest {
   @DisplayName("the question asks for the total with taxes, so the model fills the field")
   void questionAsksForTheTotal() {
     assertTrue(purchaseInvoice().getQuestion().contains("total amount with taxes"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the two discount keys of a line are nullable numbers, required, and the question is untouched")
+  void lineDiscountKeysAreNullableAndRequired() throws JSONException {
+    JSONObject item = purchaseInvoice().getSchema().getJSONObject("properties")
+        .getJSONObject("line_items").getJSONObject("items");
+    JSONArray required = item.getJSONArray("required");
+    for (String key : List.of("discount_percent", "discount_amount")) {
+      JSONArray type = item.getJSONObject("properties").getJSONObject(key).getJSONArray("type");
+      assertEquals("[\"number\",\"null\"]", type.toString(), key);
+      assertTrue(required.toString().contains("\"" + key + "\""), key + " is required");
+      assertTrue(item.getJSONObject("properties").getJSONObject(key).getString("description")
+          .contains("THIS line"), key + " is about the line, not the document");
+    }
+    assertEquals(item.getJSONObject("properties").length(), required.length());
+    assertFalse(purchaseInvoice().getQuestion().contains("discount"),
+        "the question string is not touched by the schema addition");
+    assertStrict(purchaseInvoice().getSchema());
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the discount keys are not data keys of the document level")
+  void discountKeysAreNotHeaderDataKeys() {
+    assertFalse(purchaseInvoice().getDataKeys().contains("discount_percent"));
+    assertFalse(purchaseInvoice().getDataKeys().contains("discount_amount"));
   }
 }

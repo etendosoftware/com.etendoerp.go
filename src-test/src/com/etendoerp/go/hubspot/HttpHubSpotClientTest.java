@@ -79,7 +79,7 @@ class HttpHubSpotClientTest {
 
   private HttpHubSpotClient client() {
     return new HttpHubSpotClient(new HubSpotConfiguration("pat-test",
-        "http://127.0.0.1:" + server.getAddress().getPort(), "p", "t", "a", "w", "l"));
+        "http://127.0.0.1:" + server.getAddress().getPort(), "p", "m", "s", "c", "f", "e", "l"));
   }
 
   @Test
@@ -150,7 +150,7 @@ class HttpHubSpotClientTest {
     when(interrupted.send(any(), any(HttpResponse.BodyHandler.class)))
         .thenThrow(new InterruptedException("stop"));
     HttpHubSpotClient client = new HttpHubSpotClient(new HubSpotConfiguration("t",
-        "http://127.0.0.1:1", "p", "t", "a", "w", "l"), interrupted);
+        "http://127.0.0.1:1", "p", "m", "s", "c", "f", "e", "l"), interrupted);
 
     try {
       HubSpotUnreachableException e = assertThrows(HubSpotUnreachableException.class,

@@ -251,9 +251,10 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
    * built by {@link NeoErrorResponses#writeFailure}, which attaches the classification (ETP-5782) —
    * a foreign-key violation here means the record is still in use, a 409, not a 500.
    *
-   * <p>Like core, it commits twice (the response is built and committed before the delete runs in a
-   * transaction of its own). Customizations can dispatch a delete inside a batch; this inherited
-   * commit behavior must be checked when upgrading core.
+   * <p>Outside a batch it commits twice, like core (the response is built and committed before the
+   * delete runs in a transaction of its own). When a batch owns the transaction (ETP-6143: batch
+   * {@code DELETE} operations) both commits become flushes, and the first also clears the session,
+   * so the delete joins the batch's transaction and its rollback.
    *
    * {@inheritDoc}
    */
@@ -283,7 +284,16 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       jsonResponse.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_SUCCESS);
       jsonResponse.put(JsonConstants.RESPONSE_DATA, new JSONArray(jsonObjects));
       jsonResult.put(JsonConstants.RESPONSE_RESPONSE, jsonResponse);
-      OBDal.getInstance().commitAndClose();
+      final boolean callerOwnsTransaction = BatchService.callerOwnsTransaction();
+      if (callerOwnsTransaction) {
+        // ETP-6143: a batch delete must not commit underneath the batch. Core commits here only to
+        // start the delete from a fresh session (Openbravo issue 21229); flushing and clearing the
+        // session gives the delete that same clean state without ending the caller's transaction.
+        OBDal.getInstance().flush();
+        OBDal.getInstance().getSession().clear();
+      } else {
+        OBDal.getInstance().commitAndClose();
+      }
 
       doPreAction(parameters, jsonObjects.toString(), DataSourceAction.REMOVE);
 
@@ -297,7 +307,13 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       final String result = doPostAction(parameters, jsonResult.toString(),
           DataSourceAction.REMOVE, null);
 
-      OBDal.getInstance().commitAndClose();
+      if (callerOwnsTransaction) {
+        // Flush inside the try so a foreign-key violation (the record is still in use) is
+        // classified here as this operation's 409 instead of surfacing at the batch commit.
+        OBDal.getInstance().flush();
+      } else {
+        OBDal.getInstance().commitAndClose();
+      }
 
       return result;
     } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match

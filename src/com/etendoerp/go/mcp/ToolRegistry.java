@@ -103,6 +103,11 @@ public class ToolRegistry {
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
       tools.add(buildFeedbackTool());
+      // ETP-6236: offered to every session that can read, behind its flag; each step asks its own
+      // scope.
+      if (McpRoutinesFlag.isEnabled()) {
+        tools.add(McpRoutineTool.definition());
+      }
     }
 
     // Query all active specs
@@ -343,7 +348,8 @@ public class ToolRegistry {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
         || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
-        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)
+        || McpConstants.TOOL_NEO_ROUTINE.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -767,6 +773,7 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.extract(List.of()); break;
       // etendo-ai#53: only includePermissions; anything else is refused.
       case McpConstants.TOOL_NEO_WHOAMI: definition = McpWhoamiToolDefinition.definition(); break;
+      case McpConstants.TOOL_NEO_ROUTINE: definition = McpRoutineTool.definition(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -905,16 +912,18 @@ public class ToolRegistry {
             + "`data` ({\"data\": {…}}), like etendo_get. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
-            + "Recommended: call etendo_defaults first to get the initial/base set of field values "
-            + "for this record type, then build the fields object by overriding only the values "
-            + "the user actually wants to change on top of that base — instead of asking the "
-            + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.). Send back only what the user chose or what "
-            + "you need on the record: a value you send is deliberate, and it is protected from "
-            + "the callouts that would otherwise derive it from this record's real context — a "
-            + "generic default echoed back can pin the wrong one (etendo_defaults resolves before "
-            + "there is a business partner). Any field where that happened comes back in "
-            + "\"supersededDefaults\" with the value the callout had resolved. "
+            + "A field that points to another record takes that record's name as well as its id "
+            + "(e.g. businessPartner: \"Acme Corp\", taxCategory: \"IVA 21%\"): the server looks "
+            + "it up, answers with the candidates when several match and says so when none does, "
+            + "so there is no need to look ids up first. Send only what the user asked for and the "
+            + "fields the entity requires: the server fills every other value that has a default "
+            + "(document number, dates, prices, etc.), so etendo_defaults is optional — call it "
+            + "only to show the user the values a record would start with. A value you send is "
+            + "deliberate, and it is protected from the callouts that would otherwise derive it "
+            + "from this record's real context — a generic default echoed back can pin the wrong "
+            + "one (etendo_defaults resolves before there is a business partner). Any field where "
+            + "that happened comes back in \"supersededDefaults\" with the value the callout had "
+            + "resolved. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
             + unknownFieldsNote

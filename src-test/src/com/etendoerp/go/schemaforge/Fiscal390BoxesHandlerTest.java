@@ -46,6 +46,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -59,6 +60,8 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.Year;
@@ -73,6 +76,9 @@ import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
  * file generation ({@link Fiscal390GenerateSupport}) and the boxes payload / snapshot
  * ({@link Fiscal390SnapshotSupport}). The box computation itself is covered by
  * {@link Fiscal390BoxesCalculatorTest}.
+ *
+ * <p>{@code generate-validated} (the file checked by the AEAT validator): only its routing and the
+ * guards that run before it; the endpoint itself is {@link Fiscal390FileValidationSupportTest}.
  *
  * @covers com.etendoerp.go.schemaforge.Fiscal390BoxesHandler
  * @covers com.etendoerp.go.schemaforge.Fiscal390GenerateSupport
@@ -322,6 +328,139 @@ public class Fiscal390BoxesHandlerTest {
     handler.handle(Fiscal390BoxesHandler.GENERATE, "GET", request("0A"), resp);
 
     verify(generate).handleGenerate(eq("org1"), eq(2026), anyMap(), eq(resp));
+  }
+
+  // ── generate-validated: routing and guards ──────────────────────────
+
+  /** Stubs the collaborators {@code generate-validated} reaches before its support. */
+  private Fiscal390FileValidationSupport stubGenerateValidated() {
+    doNothing().when(handler).guardNotAlreadySubmitted("org1", 2026, "0A", "390");
+    doReturn(new LinkedHashMap<String, String>()).when(handler).storedInputs(2026, "0A");
+    Fiscal390FileValidationSupport fileValidation = mock(Fiscal390FileValidationSupport.class);
+    doReturn(fileValidation).when(handler).fileValidationSupport();
+    return fileValidation;
+  }
+
+  /** It stores the AEAT answer in the declaration's incidents: POST-only. */
+  @Test
+  public void testGenerateValidatedIsAKnownPostOnlyEntity() throws Exception {
+    assertEquals("generate-validated", Fiscal390FileValidationSupport.GENERATE_VALIDATED);
+    assertTrue(handler.isKnownEntity(Fiscal390FileValidationSupport.GENERATE_VALIDATED));
+    assertTrue(handler.allowsPost(Fiscal390FileValidationSupport.GENERATE_VALIDATED));
+    assertFalse(handler.allowsGet(Fiscal390FileValidationSupport.GENERATE_VALIDATED));
+    Fiscal390FileValidationSupport fileValidation = stubGenerateValidated();
+    HttpServletResponse resp = response(new StringWriter());
+
+    handler.handle(Fiscal390FileValidationSupport.GENERATE_VALIDATED, "GET", request("0A"), resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        anyString());
+    verify(fileValidation, never()).handle(anyString(), anyInt(), anyString(), anyMap(), any(),
+        any());
+  }
+
+  /** Past the guards, the request reaches the support with the merged inputs. */
+  @Test
+  public void testGenerateValidatedIsRoutedToItsSupport() throws Exception {
+    Fiscal390FileValidationSupport fileValidation = stubGenerateValidated();
+    Fiscal390IncidentsSupport incidents = mock(Fiscal390IncidentsSupport.class);
+    doReturn(incidents).when(handler).incidentsSupport();
+    Fiscal390GenerateSupport generate = mock(Fiscal390GenerateSupport.class);
+    doReturn(generate).when(handler).generateSupport();
+    HttpServletResponse resp = response(new StringWriter());
+    HttpServletRequest req = request("0A", "id", "D390", "INGRESAR_01", "5");
+
+    handler.handle(Fiscal390FileValidationSupport.GENERATE_VALIDATED, "POST", req, resp);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> inputs = ArgumentCaptor.forClass(Map.class);
+    verify(fileValidation).handle(eq("org1"), eq(2026), eq("0A"), inputs.capture(), eq(req),
+        eq(resp));
+    assertEquals("5", inputs.getValue().get("INGRESAR_01"));
+    verify(incidents).rejectGenerate("org1", 2026, "0A", inputs.getValue(), resp);
+    // The plain GET generate is another route: nothing is served by it here.
+    verify(generate, never()).handleGenerate(anyString(), anyInt(), anyMap(), any());
+  }
+
+  /** Once the declaration is submitted: 409, and neither a file nor a validation. */
+  @Test
+  public void testGenerateValidatedOnSubmittedDeclarationIs409() throws Exception {
+    Fiscal390FileValidationSupport fileValidation = stubGenerateValidated();
+    doThrow(new AbstractFiscalHandler.AlreadySubmittedException("already submitted"))
+        .when(handler).guardNotAlreadySubmitted("org1", 2026, "0A", "390");
+    HttpServletResponse resp = response(new StringWriter());
+
+    handler.handle(Fiscal390FileValidationSupport.GENERATE_VALIDATED, "POST", request("0A"),
+        resp);
+
+    verify(servlet).sendError(resp, HttpServletResponse.SC_CONFLICT, "already submitted");
+    verify(handler, never()).storedInputs(anyInt(), anyString());
+    verify(fileValidation, never()).handle(anyString(), anyInt(), anyString(), anyMap(), any(),
+        any());
+  }
+
+  /** A blocking rule incident: the 409 of {@code generate}, and the AEAT is never asked. */
+  @Test
+  public void testGenerateValidatedWithBlockingIncidentsIs409() throws Exception {
+    Fiscal390FileValidationSupport fileValidation = stubGenerateValidated();
+    FiscalDeclCrudHandler declHandler = mock(FiscalDeclCrudHandler.class);
+    doReturn(declHandler).when(handler).declHandler();
+    doReturn("org1").when(handler).declarationOrgId();
+    Fiscal390IncidentsSupport incidents = spy(new Fiscal390IncidentsSupport(handler));
+    doReturn(List.of(new Fiscal390IncidentRules.Incident(Fiscal390IncidentRules.NO_MAIN_IAE,
+        Fiscal390IncidentRules.SEVERITY_BLOCK, "no main IAE")))
+        .when(incidents).blockingIncidents(eq("org1"), eq(2026), any(), anyMap());
+    doReturn(incidents).when(handler).incidentsSupport();
+    HttpServletResponse resp = response(new StringWriter());
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn("client1");
+      when(ctx.getCurrentClient()).thenReturn(client);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      handler.handle(Fiscal390FileValidationSupport.GENERATE_VALIDATED, "POST", request("0A"),
+          resp);
+    }
+
+    ArgumentCaptor<NeoResponse> answer = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(resp), answer.capture());
+    assertEquals(HttpServletResponse.SC_CONFLICT, answer.getValue().getHttpStatus());
+    JSONObject error = answer.getValue().getBody().getJSONObject("error");
+    assertEquals(Fiscal390IncidentsSupport.ERR_BLOCKING_INCIDENTS, error.getString("code"));
+    assertEquals(Fiscal390IncidentRules.NO_MAIN_IAE,
+        error.getJSONArray("incidents").getJSONObject(0).getString("code"));
+    verify(fileValidation, never()).handle(anyString(), anyInt(), anyString(), anyMap(), any(),
+        any());
+  }
+
+  /**
+   * An incomplete fiscal calendar raised while the guards run is answered with the structured
+   * 422 {@code INCOMPLETE_FISCAL_YEAR}, and the support is never reached.
+   */
+  @Test
+  public void testGenerateValidatedWithIncompleteFiscalYearIs422() throws Exception {
+    Fiscal390FileValidationSupport fileValidation = stubGenerateValidated();
+    Fiscal390IncidentsSupport incidents = mock(Fiscal390IncidentsSupport.class);
+    doReturn(incidents).when(handler).incidentsSupport();
+    HttpServletResponse resp = response(new StringWriter());
+    when(incidents.rejectGenerate(eq("org1"), eq(2026), eq("0A"), anyMap(), eq(resp)))
+        .thenThrow(new OBException("wrapped",
+            new IncompleteFiscalYearException("org1", 2026, List.of(11L, 12L))));
+
+    handler.handle(Fiscal390FileValidationSupport.GENERATE_VALIDATED, "POST", request("0A"),
+        resp);
+
+    ArgumentCaptor<NeoResponse> answer = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(resp), answer.capture());
+    assertEquals(422, answer.getValue().getHttpStatus());
+    JSONObject error = answer.getValue().getBody().getJSONObject("error");
+    assertEquals("INCOMPLETE_FISCAL_YEAR", error.getString("code"));
+    assertEquals(2026, error.getInt("year"));
+    assertEquals(2, error.getJSONArray("missingPeriods").length());
+    verify(fileValidation, never()).handle(anyString(), anyInt(), anyString(), anyMap(), any(),
+        any());
   }
 
   /** No yearly 390 report up to the exercise: a clear error naming the year. */

@@ -69,8 +69,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -81,7 +84,22 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  *
  * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
  * {@link FinancialAccountSupport}. Both are mocked statically so the tests assert only this
- * handler's orchestration and response envelope.
+ * handler's orchestration and response envelope. The SEPA remittance provisioning of a created
+ * Bank account ({@link FinancialAccountRemittanceSupport}, ETP-6148) is a spy whose flag and DAL
+ * seams are stubbed.
+ *
+ * <p>{@code link} and {@code createAndLink} require {@code importFromDate} and
+ * {@code statementGrouping}: both are validated before any lookup (400 with the exact text),
+ * written on the account before the Salt Edge link, and an import-from date older than the bank's
+ * history adds the same top-level {@code messages} warning as {@code import-settings}.
+ * {@code import-settings} validates the configuration it would RESULT in and writes only the keys
+ * it is sent.
+ *
+ * <p>{@code sync} (ETP-6154): a sync another one already runs answers {@code IN_PROGRESS} with the
+ * translated "please wait" text of the {@code neo_hints} catalog, a lock that cannot be taken
+ * answers {@code ERROR} with {@code code: BANK_SYNC_LOCK_UNAVAILABLE}, the PSD2 module's
+ * {@code Success} goes on the wire as {@code OK}, and a run whose duplicate check failed keeps its
+ * status but carries {@code code: BANK_SYNC_DUPLICATE_CHECK_FAILED} and the translated text.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
@@ -92,18 +110,38 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
   private static final String ACTION_DISCONNECT = "disconnect";
+  /** The handler's inverted-range rejection, matched by exact text in the SPA. */
 
   private FinancialAccountBankConnectionHandler handler;
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
 
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
+    // ETP-6148: createAndLink reads the sepa-remittances flag for a Bank account, which a developer
+    // may have on locally; pin it off so these tests never provision remittances.
+    handler.remittanceSupport = spy(new FinancialAccountRemittanceSupport());
+    Mockito.doReturn(false).when(handler.remittanceSupport).isFlagEnabled();
   }
 
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Switches the ETP-6151 gate OFF for the rest of the test: the pre-ETP-6151 behaviour.
+   */
+  private void flagOff() {
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(false);
   }
 
   /** link with any blank required param is rejected with a 400 before any account lookup. */
@@ -270,10 +308,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
    */
   @Test
   public void testCreateAndLinkCardTypeAlsoProvisionsCreatedAccount() throws Exception {
-    JSONObject body = new JSONObject()
+    JSONObject body = withImportSettings(new JSONObject()
         .put(PARAM_TYPE, "CA")
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
-        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID));
     JSONArray nodes = new JSONArray().put(new JSONObject()
         .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Tarjeta Oro").put("currency_code", "EUR"));
     JSONObject details = new JSONObject().put("provider_name", "BBVA");
@@ -297,6 +335,102 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       assertEquals(201, response.getHttpStatus());
       support.verify(() -> FinancialAccountSupport.provisionNewAccount(created));
     }
+  }
+
+  // ── SEPA remittances: createAndLink provisions a Bank account before the Salt Edge link ────
+
+  /**
+   * Runs a createAndLink of an account of {@code type} with the remittance flag {@code flagOn},
+   * recording into {@code steps} the remittance provisioning and the Salt Edge link, in order. A
+   * non-null {@code provisioningFailure} is thrown by the provisioning after it is recorded.
+   */
+  private NeoResponse createAndLinkRecording(String type, boolean flagOn, List<String> steps,
+      FIN_FinancialAccount created, RuntimeException provisioningFailure) throws Exception {
+    JSONObject body = createAndLinkBody().put(PARAM_TYPE, type);
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    when(created.getId()).thenReturn("FA-NEW");
+    when(created.getName()).thenReturn("BBVA - Ahorro");
+    when(created.getType()).thenReturn(type);
+    Mockito.doReturn(flagOn).when(handler.remittanceSupport).isFlagEnabled();
+    Mockito.doAnswer(inv -> {
+      steps.add("remittance");
+      if (provisioningFailure != null) {
+        throw provisioningFailure;
+      }
+      return null;
+    }).when(handler.remittanceSupport).provisionAccount(created);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, type,
+          mock(Currency.class), created);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenAnswer(inv -> {
+            steps.add("saltEdgeLink");
+            return "";
+          });
+
+      return handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+    }
+  }
+
+  /**
+   * A Bank account created with the sepa-remittances flag on is provisioned for remittances in the
+   * create transaction, before it is linked to Salt Edge.
+   */
+  @Test
+  public void testCreateAndLinkProvisionsABankAccountForRemittancesBeforeLinkingIt()
+      throws Exception {
+    List<String> steps = new java.util.ArrayList<>();
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+
+    NeoResponse response = createAndLinkRecording("B", true, steps, created, null);
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(List.of("remittance", "saltEdgeLink"), steps);
+  }
+
+  /**
+   * A provisioning conflict (unique violation) answers 409 ETGO_RemittanceProvisioningConflict and
+   * the account is never linked to Salt Edge.
+   */
+  @Test
+  public void testCreateAndLinkSkipsTheSaltEdgeLinkWhenTheRemittanceProvisioningConflicts()
+      throws Exception {
+    List<String> steps = new java.util.ArrayList<>();
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    Mockito.doNothing().when(handler.remittanceSupport).rollback();
+    RuntimeException duplicate = new org.openbravo.base.exception.OBException("flush failed",
+        new java.sql.SQLException("duplicate key value violates unique constraint", "23505"));
+
+    NeoResponse response = createAndLinkRecording("B", true, steps, created, duplicate);
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_PROVISIONING_CONFLICT,
+        response.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    assertEquals("no Salt Edge link after a refused provisioning", List.of("remittance"), steps);
+    verify(handler.remittanceSupport).rollback();
+  }
+
+  /** A Card account, or the flag off, is linked to Salt Edge without remittance provisioning. */
+  @Test
+  public void testCreateAndLinkNeverProvisionsACardAccountOrWithTheFlagOff() throws Exception {
+    List<String> card = new java.util.ArrayList<>();
+    assertEquals(201, createAndLinkRecording("CA", true, card,
+        mock(FIN_FinancialAccount.class), null).getHttpStatus());
+    assertEquals(List.of("saltEdgeLink"), card);
+
+    List<String> flagOff = new java.util.ArrayList<>();
+    assertEquals(201, createAndLinkRecording("B", false, flagOff,
+        mock(FIN_FinancialAccount.class), null).getHttpStatus());
+    assertEquals(List.of("saltEdgeLink"), flagOff);
   }
 
   /**
@@ -374,7 +508,224 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
-  /** sync returns the status and trimmed messages produced by fetchAccountTransactions. */
+  // ── import settings at link time (link / createAndLink) ───────────────────
+
+  /**
+   * link writes BOTH import settings on the account before the Salt Edge link runs, so they are
+   * committed with it and no synchronization ever runs on the new link without an import-from date.
+   * The check runs inside the link call itself: an {@link AssertionError} there escapes the
+   * handler's {@code catch (Exception)} and fails this test instead of turning into a 500.
+   */
+  @Test
+  public void testLinkWritesTheImportSettingsBeforeLinking() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubLinkHappyPath(utils, linkHelper, obDal, finAcc);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenAnswer(invocation -> {
+            verifyImportSettingsWritten(finAcc);
+            return LINK_WARNING;
+          });
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any()));
+    }
+  }
+
+  /**
+   * link without one of the import settings, or with an invalid one, answers 400 with the exact
+   * validation text BEFORE the account is loaded or Salt Edge is called. A malformed date is a 400,
+   * never a 500.
+   */
+  @Test
+  public void testLinkWithMissingOrInvalidImportSettingsReturns400BeforeAnyLookup()
+      throws Exception {
+    for (String[] invalid : invalidImportSettings()) {
+      JSONObject body = new JSONObject()
+          .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+          .put(PARAM_CONNECTION_ID, CONNECTION_ID)
+          .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+      putIfNotNull(body, "importFromDate", invalid[0]);
+      putIfNotNull(body, "statementGrouping", invalid[1]);
+
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+          MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+              mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+        assertEquals(invalid[2], 400, response.getHttpStatus());
+        assertEquals(invalid[2], invalid[2], errorMessageOf(response));
+        utils.verifyNoInteractions();
+        linkHelper.verifyNoInteractions();
+      }
+    }
+    verify(handler, never()).loadAccount(anyString());
+  }
+
+  /**
+   * link with an import-from date later than the import-to date already stored on the account does
+   * not refuse: the stale import-to is cleared (set to null) together with the other settings and
+   * the link goes on. A stored import-to that is not older than the new date is left alone.
+   */
+  @Test
+  public void testLinkClearsStaleImportToAndProceeds() throws Exception {
+    JSONObject body = linkBody(); // importFromDate 2026-01-01
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    when(finAcc.getPSD2ImportToDate())
+        .thenReturn(FinancialAccountBankConnectionSupport.parseDate("2025-12-31"));
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn(LINK_WARNING);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("linked"));
+      verify(finAcc).setPSD2ImportToDate(null);
+      verify(finAcc).setPSD2ImportFromDate(
+          FinancialAccountBankConnectionSupport.parseDate("2026-01-01"));
+      verify(finAcc).setPSD2StatementFrequency("1BD");
+    }
+  }
+
+  /**
+   * link answers the non-blocking fetch-interval advisory when the import-from date is older than
+   * the bank's history: a REST caller gets it at the top level as
+   * {@code messages: [{type: "warning", text}]}, and the link itself still succeeds.
+   */
+  @Test
+  public void testLinkBeyondFetchIntervalAddsTopLevelWarning() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubObContext(obContext);
+      stubLinkHappyPath(utils, linkHelper, obDal, finAcc);
+      stubFetchIntervalExceeded(support, finAcc);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("linked"));
+      assertTopLevelFetchIntervalWarning(response);
+    }
+  }
+
+  /**
+   * createAndLink validates both import settings BEFORE anything else: a missing or invalid value
+   * answers 400 with the exact text, and no Salt Edge call is made and no account is ever created,
+   * so a bad request never leaves an orphan account behind.
+   */
+  @Test
+  public void testCreateAndLinkWithInvalidImportSettingsNeverCreatesTheAccount()
+      throws Exception {
+    for (String[] invalid : invalidImportSettings()) {
+      JSONObject body = new JSONObject()
+          .put(PARAM_TYPE, "B")
+          .put(PARAM_CONNECTION_ID, CONNECTION_ID)
+          .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+      putIfNotNull(body, "importFromDate", invalid[0]);
+      putIfNotNull(body, "statementGrouping", invalid[1]);
+
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+          MockedStatic<FinancialAccountSupport> support =
+              mockStatic(FinancialAccountSupport.class)) {
+        stubObContext(obContext);
+
+        NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+
+        assertEquals(invalid[2], 400, response.getHttpStatus());
+        assertEquals(invalid[2], invalid[2], errorMessageOf(response));
+        utils.verifyNoInteractions();
+        support.verify(() -> FinancialAccountSupport.createAccount(any(), any(), any(), any(),
+            any()), never());
+      }
+    }
+  }
+
+  /**
+   * createAndLink writes both import settings on the NEW account before linking it, and answers
+   * the same top-level fetch-interval advisory as link when the date is older than the bank's
+   * history.
+   */
+  @Test
+  public void testCreateAndLinkWritesTheImportSettingsBeforeLinkingAndWarns() throws Exception {
+    JSONObject body = createAndLinkBody();
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    Currency currency = mock(Currency.class);
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    when(created.getId()).thenReturn("FA-NEW");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> bankSupport = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubObContext(obContext);
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, "B", currency,
+          created);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenAnswer(invocation -> {
+            verifyImportSettingsWritten(created);
+            return "";
+          });
+      stubFetchIntervalExceeded(bankSupport, created);
+
+      NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+
+      assertEquals(201, response.getHttpStatus());
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any()));
+      assertTopLevelFetchIntervalWarning(response);
+    }
+  }
+
+  /** sync returns the status and trimmed messages produced by fetchAccountTransactionsWithResult. */
   @Test
   public void testSyncReturnsStatusAndMessage() throws Exception {
     JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
@@ -382,14 +733,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenAnswer(invocation -> {
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenAnswer(invocation -> {
             StringBuilder sb = invocation.getArgument(1);
             sb.append("  Imported 5 statements  ");
-            return "OK";
+            return new AccountTransactionsSync.SyncResult("OK", false);
           });
 
       NeoResponse response = handler.handle(postContext("sync", body));
@@ -411,11 +762,11 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenReturn("OK");
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("OK", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
@@ -432,17 +783,141 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
-          .thenReturn("ERROR");
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("ERROR", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
       assertTrue(data.has("lastSyncDate"));
       assertTrue(data.isNull("lastSyncDate"));
     }
+  }
+
+  /**
+   * A sync another sync of the account already runs answers 200 IN_PROGRESS with the "please
+   * wait" text in the request language (the PSD2 AD_MESSAGE is English only), never the PSD2
+   * buffer, and still echoes the last sync date.
+   */
+  @Test
+  public void testSyncInProgressAnswersThePleaseWaitTextInTheRequestLanguage() throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, "en_US");
+
+    assertEquals("IN_PROGRESS", spanish.getString("status"));
+    assertEquals("Trayendo extractos, por favor espera\u2026",
+        spanish.getString("message"));
+    assertFalse(spanish.has("code"));
+    assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
+    assertEquals("IN_PROGRESS", english.getString("status"));
+    assertEquals("Fetching statements, please wait\u2026", english.getString("message"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
+  }
+
+  /**
+   * A sync whose lock cannot be taken answers a retriable ERROR carrying
+   * {@code code: BANK_SYNC_LOCK_UNAVAILABLE} and the translated "try again" text.
+   */
+  @Test
+  public void testSyncLockUnavailableAnswersARetriableErrorCode() throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, "en_US");
+
+    assertEquals("ERROR", spanish.getString("status"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", spanish.getString("code"));
+    assertEquals("No se pudieron traer los extractos en este momento. Por favor, "
+        + "int\u00e9ntalo de nuevo en unos instantes.", spanish.getString("message"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", english.getString("code"));
+    assertEquals("The statements could not be fetched right now. Please try again in a few "
+        + "moments.", english.getString("message"));
+    assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
+  }
+
+  /**
+   * A finished sync reports the PSD2 module's {@code Success} as {@code OK} on the wire, keeps
+   * WARNING and ERROR unchanged, and carries the PSD2 messages, trimmed.
+   */
+  @Test
+  public void testSyncMapsThePsd2SuccessToOk() throws Exception {
+    JSONObject success = syncData(BankIntegrationConstants.SUCCESS, "es_ES");
+    JSONObject warning = syncData(BankIntegrationConstants.WARNING, "es_ES");
+
+    assertEquals("OK", success.getString("status"));
+    assertEquals("PSD2 buffer", success.getString("message"));
+    assertFalse(success.has("code"));
+    assertEquals("WARNING", warning.getString("status"));
+    assertEquals("OK", FinancialAccountBankConnectionHandler.wireSyncStatus("Success"));
+    assertEquals("ERROR", FinancialAccountBankConnectionHandler.wireSyncStatus("ERROR"));
+    assertEquals("IN_PROGRESS", FinancialAccountBankConnectionHandler.wireSyncStatus("IN_PROGRESS"));
+  }
+
+  /**
+   * A run whose "already imported?" check failed keeps its ERROR status and answers the stable
+   * {@code BANK_SYNC_DUPLICATE_CHECK_FAILED} code with the translated "retry" text in the request
+   * language, instead of the English PSD2 buffer.
+   */
+  @Test
+  public void testSyncDuplicateCheckFailedOnErrorAnswersTheCodeAndTranslatedText()
+      throws Exception {
+    JSONObject spanish = syncData(BankIntegrationConstants.ERROR, true, "es_ES");
+    JSONObject english = syncData(BankIntegrationConstants.ERROR, true, "en_US");
+
+    assertEquals("ERROR", spanish.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", spanish.getString("code"));
+    assertEquals("No se pudo comprobar si algunos movimientos bancarios ya estaban importados, "
+        + "as\u00ed que no se importaron para evitar duplicados. Por favor, int\u00e9ntalo de nuevo "
+        + "en unos instantes.", spanish.getString("message"));
+    assertEquals("ERROR", english.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", english.getString("code"));
+    assertEquals("Some bank movements could not be checked against the ones already imported, so "
+        + "they were not imported to avoid duplicates. Please try again in a few moments.",
+        english.getString("message"));
+    assertTrue(english.has("lastSyncDate"));
+  }
+
+  /**
+   * When another connection still imported movements the run ends in WARNING: the status stays
+   * WARNING and the duplicate-check code is still answered. A Success with the flag set is
+   * reported as OK on the wire, with the code.
+   */
+  @Test
+  public void testSyncDuplicateCheckFailedOnWarningKeepsWarningWithTheCode() throws Exception {
+    JSONObject warning = syncData(BankIntegrationConstants.WARNING, true, "en_US");
+    JSONObject success = syncData(BankIntegrationConstants.SUCCESS, true, "en_US");
+
+    assertEquals("WARNING", warning.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", warning.getString("code"));
+    assertFalse(warning.getString("message").contains("PSD2 buffer"));
+    assertEquals("OK", success.getString("status"));
+    assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", success.getString("code"));
+  }
+
+  /**
+   * Without a duplicate-check failure there is no {@code code}; the sync that did not run
+   * (IN_PROGRESS, lock unavailable) answers as before, whatever the flag says.
+   */
+  @Test
+  public void testSyncWithoutDuplicateCheckFailureHasNoCodeAndNotRunOutcomesAreUnchanged()
+      throws Exception {
+    JSONObject error = syncData(BankIntegrationConstants.ERROR, false, "en_US");
+    JSONObject inProgress = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, true, "en_US");
+    JSONObject unavailable = syncData(BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE, true, "en_US");
+
+    assertEquals("ERROR", error.getString("status"));
+    assertFalse(error.has("code"));
+    assertEquals("PSD2 buffer", error.getString("message"));
+    assertEquals("IN_PROGRESS", inProgress.getString("status"));
+    assertFalse(inProgress.has("code"));
+    assertEquals("Fetching statements, please wait\u2026", inProgress.getString("message"));
+    assertEquals("ERROR", unavailable.getString("status"));
+    assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", unavailable.getString("code"));
   }
 
   /** sync on a missing account resolves to a 404. */
@@ -462,7 +937,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put("importFromDate", "2026-01-01")
-        .put("statementGrouping", "MONTHLY");
+        .put("statementGrouping", "1BM");
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
@@ -477,7 +952,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       assertEquals(200, response.getHttpStatus());
       assertTrue(dataOf(response).getBoolean("saved"));
       verify(finAcc).setPSD2ImportFromDate(any());
-      verify(finAcc).setPSD2StatementFrequency("MONTHLY");
+      verify(finAcc).setPSD2StatementFrequency("1BM");
       verify(finAcc, Mockito.never()).setPSD2ImportToDate(any());
       verify(dal).save(finAcc);
       verify(dal).flush();
@@ -506,7 +981,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     // inverted-range guard cannot be what accepts or rejects this request.
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
-        .put("importFromDate", "2019-03-01");
+        .put("importFromDate", "2019-03-01")
+        .put("statementGrouping", "1BD");
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
@@ -532,6 +1008,185 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
+   * Flag {@code psd2-statement-import-settings} OFF — link neither requires nor reads the import
+   * keys: a body without them links (200), and keys that would be refused with the flag on are
+   * ignored, never stored.
+   */
+  @Test
+  public void testLinkFlagOffIgnoresTheImportSettingsKeys() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_CONNECTION_ID, CONNECTION_ID)
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID)
+        .put("importFromDate", "not-a-date")
+        .put("statementGrouping", "MONTHLY");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubLinkHappyPath(utils, linkHelper, obDal, finAcc);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn(LINK_WARNING);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(finAcc, never()).setPSD2ImportFromDate(any());
+      verify(finAcc, never()).setPSD2ImportToDate(any());
+      verify(finAcc, never()).setPSD2StatementFrequency(any());
+      assertFalse(response.getBody().has("messages"));
+    }
+  }
+
+  /**
+   * Flag OFF — createAndLink does not require the import keys either, and writes none of them on
+   * the new account.
+   */
+  @Test
+  public void testCreateAndLinkFlagOffIgnoresTheImportSettingsKeys() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject()
+        .put(PARAM_TYPE, "B")
+        .put(PARAM_CONNECTION_ID, CONNECTION_ID)
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    Currency currency = mock(Currency.class);
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    when(created.getId()).thenReturn("FA-NEW");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, "B", currency,
+          created);
+
+      NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+
+      assertEquals(201, response.getHttpStatus());
+      verify(created, never()).setPSD2ImportFromDate(any());
+      verify(created, never()).setPSD2StatementFrequency(any());
+      assertFalse(response.getBody().has("messages"));
+    }
+  }
+
+  /**
+   * Flag OFF — import-settings keeps the pre-ETP-6151 validation: nothing is required, so a body
+   * with only an import-from date saves on an account with no grouping stored, and only the keys
+   * carried are written.
+   */
+  @Test
+  public void testImportSettingsFlagOffRequiresNothing() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2026-01-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(finAcc).setPSD2ImportFromDate(
+          FinancialAccountBankConnectionSupport.parseDate("2026-01-01"));
+      verify(finAcc, never()).setPSD2StatementFrequency(any());
+      verify(dal).save(finAcc);
+    }
+  }
+
+  /**
+   * Flag OFF — an import-settings body that would be refused with the flag on (blank import-from
+   * date, grouping outside the codes) is accepted: no required-field and no grouping validation.
+   */
+  @Test
+  public void testImportSettingsFlagOffAcceptsWhatTheFlagOnRefuses() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("statementGrouping", "MONTHLY");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(finAcc).setPSD2StatementFrequency("MONTHLY");
+    }
+  }
+
+  /**
+   * Flag OFF — a malformed date is not turned into the coded 400: it fails as before ETP-6151
+   * (the raw parse error, a 500).
+   */
+  @Test
+  public void testImportSettingsFlagOffMalformedDateKeepsTheOldFailure() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "01/01/2026");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals(500, response.getHttpStatus());
+      verify(finAcc, never()).setPSD2ImportFromDate(any());
+    }
+  }
+
+  /** Flag ON and OFF are evaluated once per link request (the gate is one call, not many). */
+  @Test
+  public void testLinkEvaluatesTheFlagOncePerRequest() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubLinkHappyPath(utils, linkHelper, obDal, finAcc);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn(LINK_WARNING);
+
+      handler.handle(postContext(ACTION_LINK, body));
+
+      flagMock.verify(Psd2ImportSettingsFlag::isEnabled, Mockito.times(1));
+    }
+  }
+
+  /**
    * ETP-5805 — import-settings saves AND carries the non-blocking fetch-interval advisory in the
    * {@code messages} envelope (inside {@code response} for an MCP-origin request).
    */
@@ -539,7 +1194,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   public void testImportSettingsBeyondFetchIntervalAddsWarning() throws Exception {
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
-        .put("importFromDate", "2019-03-01");
+        .put("importFromDate", "2019-03-01")
+        .put("statementGrouping", "1BD");
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
@@ -577,6 +1233,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     Date storedFrom = FinancialAccountBankConnectionSupport.parseDate("2019-03-01");
     org.mockito.Mockito.when(finAcc.getPSD2ImportFromDate()).thenReturn(storedFrom);
+    // ETP-6151: the saved configuration needs a grouping; the stored one (the column default).
+    org.mockito.Mockito.when(finAcc.getPSD2StatementFrequency()).thenReturn("1BD");
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
@@ -606,7 +1264,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   public void testImportSettingsWithinFetchIntervalAddsNoMessages() throws Exception {
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
-        .put("importFromDate", "2026-10-01");
+        .put("importFromDate", "2026-10-01")
+        .put("statementGrouping", "1BD");
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
@@ -639,7 +1298,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     for (boolean mcp : new boolean[] {true, false}) {
       JSONObject body = new JSONObject()
           .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
-          .put("importFromDate", "2019-03-01");
+          .put("importFromDate", "2019-03-01")
+          .put("statementGrouping", "1BD");
       FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
       doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
@@ -675,6 +1335,109 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       assertEquals(404, handler.handle(postContext("import-settings", body)).getHttpStatus());
+    }
+  }
+
+  /**
+   * import-settings refuses a grouping outside the four PSD2 codes with a 400 and writes nothing.
+   * Before, any string was stored and only failed, silently, on the next synchronization.
+   */
+  @Test
+  public void testImportSettingsInvalidGroupingReturns400AndWritesNothing() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2026-01-01")
+        .put("statementGrouping", "MONTHLY");
+
+    assertImportSettingsRejected(body, mock(FIN_FinancialAccount.class),
+        BankImportSettingsRules.MSG_STATEMENT_GROUPING_INVALID);
+  }
+
+  /** A malformed import-from date is a 400 with its own text (it used to be a 500). */
+  @Test
+  public void testImportSettingsMalformedImportFromReturns400() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "01/01/2026")
+        .put("statementGrouping", "1BD");
+
+    assertImportSettingsRejected(body, mock(FIN_FinancialAccount.class),
+        BankImportSettingsRules.MSG_IMPORT_FROM_DATE_INVALID);
+  }
+
+  /** A malformed import-to date is a 400 with the import-to text, not the import-from one. */
+  @Test
+  public void testImportSettingsMalformedImportToReturns400() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importToDate", "2026-02-30");
+
+    assertImportSettingsRejected(body, storedSettings("2026-01-01", "1BD"),
+        BankImportSettingsRules.MSG_IMPORT_TO_DATE_INVALID);
+  }
+
+  /**
+   * The configuration being saved must keep an import-from date: a body that omits it on an
+   * account that has none stored (linked before the date was required) is refused, and so is a
+   * body that clears it with a blank value.
+   */
+  @Test
+  public void testImportSettingsWithoutResultingImportFromReturns400() throws Exception {
+    assertImportSettingsRejected(new JSONObject()
+            .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+            .put("statementGrouping", "1BW"),
+        storedSettings(null, "1BD"),
+        BankImportSettingsRules.MSG_IMPORT_FROM_DATE_REQUIRED);
+    assertImportSettingsRejected(new JSONObject()
+            .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+            .put("importFromDate", ""),
+        storedSettings("2026-01-01", "1BD"),
+        BankImportSettingsRules.MSG_IMPORT_FROM_DATE_REQUIRED);
+  }
+
+  /**
+   * Same for the grouping: omitted on an account with none stored, or cleared with a blank value,
+   * the resulting configuration has no grouping and is refused.
+   */
+  @Test
+  public void testImportSettingsWithoutResultingGroupingReturns400() throws Exception {
+    assertImportSettingsRejected(new JSONObject()
+            .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+            .put("importFromDate", "2026-01-01"),
+        storedSettings(null, null),
+        BankImportSettingsRules.MSG_STATEMENT_GROUPING_REQUIRED);
+    assertImportSettingsRejected(new JSONObject()
+            .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+            .put("statementGrouping", " "),
+        storedSettings("2026-01-01", "1BD"),
+        BankImportSettingsRules.MSG_STATEMENT_GROUPING_REQUIRED);
+  }
+
+  /**
+   * Only the keys the body carries are written: a body with just the grouping, on an account that
+   * already has an import-from date, updates the grouping and leaves both dates untouched.
+   */
+  @Test
+  public void testImportSettingsWritesOnlyTheSentKeys() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("statementGrouping", "1BW");
+    FIN_FinancialAccount finAcc = storedSettings("2026-01-01", "1BD");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(finAcc).setPSD2StatementFrequency("1BW");
+      verify(finAcc, never()).setPSD2ImportFromDate(any());
+      verify(finAcc, never()).setPSD2ImportToDate(any());
+      verify(dal).save(finAcc);
     }
   }
 
@@ -1205,21 +1968,230 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   private static JSONObject linkBody() throws Exception {
-    return new JSONObject()
+    return withImportSettings(new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
-        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID));
   }
 
   private static JSONObject createAndLinkBody() throws Exception {
-    return new JSONObject()
+    return withImportSettings(new JSONObject()
         .put(PARAM_TYPE, "B")
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
-        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID));
+  }
+
+  /** ETP-6151: {@code link} and {@code createAndLink} require both import settings. */
+  private static JSONObject withImportSettings(JSONObject body) throws Exception {
+    return body.put("importFromDate", "2026-01-01").put("statementGrouping", "1BD");
   }
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * The text of an error answer ({@code error.message}).
+   *
+   * @param response the 4xx / 5xx answer
+   * @return the message
+   */
+  private static String errorMessageOf(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  /**
+   * The import settings {@code link} and {@code createAndLink} must refuse, as
+   * {@code {importFromDate, statementGrouping, expected error text}} ({@code null} = key omitted).
+   *
+   * @return the cases
+   */
+  private static List<String[]> invalidImportSettings() {
+    return List.of(
+        new String[] {null, "1BD",
+            BankImportSettingsRules.MSG_IMPORT_FROM_DATE_REQUIRED},
+        new String[] {"2026-13-01", "1BD",
+            BankImportSettingsRules.MSG_IMPORT_FROM_DATE_INVALID},
+        new String[] {"2026-01-01", null,
+            BankImportSettingsRules.MSG_STATEMENT_GROUPING_REQUIRED},
+        new String[] {"2026-01-01", "MONTHLY",
+            BankImportSettingsRules.MSG_STATEMENT_GROUPING_INVALID});
+  }
+
+  /**
+   * Puts {@code value} under {@code key} unless it is {@code null} (the key is then omitted).
+   *
+   * @param body  the body to extend
+   * @param key   the key
+   * @param value the value, or {@code null}
+   */
+  private static void putIfNotNull(JSONObject body, String key, String value) throws Exception {
+    if (value != null) {
+      body.put(key, value);
+    }
+  }
+
+  /**
+   * Verifies that both import settings of {@link #withImportSettings} were written on
+   * {@code finAcc}: import-from 2026-01-01 (UTC midnight) and grouping {@code 1BD}.
+   *
+   * @param finAcc the account the handler is linking
+   */
+  private static void verifyImportSettingsWritten(FIN_FinancialAccount finAcc) {
+    verify(finAcc).setPSD2ImportFromDate(
+        FinancialAccountBankConnectionSupport.parseDate("2026-01-01"));
+    verify(finAcc).setPSD2StatementFrequency("1BD");
+  }
+
+  /**
+   * Stubs what {@code link} needs past validation: the API key, the connection's accounts (which
+   * contain {@link BankConnectionHandlerTestSupport#SALT_EDGE_ACCOUNT_ID}), its details, a link
+   * answering {@link #LINK_WARNING}, and an empty payment-method sweep.
+   *
+   * @param finAcc the account being linked
+   */
+  private static void stubLinkHappyPath(MockedStatic<BankIntegrationUtils> utils,
+      MockedStatic<SaltEdgeAccountLinkHelper> linkHelper, MockedStatic<OBDal> obDal,
+      FIN_FinancialAccount finAcc) throws Exception {
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc))
+        .thenReturn(API_KEY);
+    utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+        .thenReturn(new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID)));
+    utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+        .thenReturn(details);
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+        eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn(LINK_WARNING);
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    stubFinAccPaymentMethods(dal, Collections.emptyList());
+  }
+
+  /**
+   * Makes the fetch-interval rule report that {@code finAcc}'s import-from date (2026-01-01, the
+   * one of {@link #withImportSettings}) is beyond a 90-day history.
+   *
+   * @param support the open MockedStatic over the support class, with real methods
+   * @param finAcc  the account whose advisory is evaluated
+   */
+  private static void stubFetchIntervalExceeded(
+      MockedStatic<FinancialAccountBankConnectionSupport> support, FIN_FinancialAccount finAcc) {
+    // Resolved outside the stubbing lambda: parseDate is a method of the class mocked here, so
+    // calling it inside would be recorded as part of the stubbing.
+    Date importFrom = FinancialAccountBankConnectionSupport.parseDate("2026-01-01");
+    support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+        eq(finAcc), eq(importFrom)))
+        .thenReturn(new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(
+            90, java.time.LocalDate.of(2026, 7, 21)));
+  }
+
+  /**
+   * Asserts the REST-origin advisory envelope: one top-level {@code messages} entry
+   * {@code {type: "warning", text}} quoting the 90 days, and none inside {@code response}.
+   *
+   * @param response the successful link answer
+   */
+  private static void assertTopLevelFetchIntervalWarning(NeoResponse response) throws Exception {
+    JSONArray messages = response.getBody().getJSONArray("messages");
+    assertEquals(1, messages.length());
+    assertEquals("warning", messages.getJSONObject(0).getString("type"));
+    String text = messages.getJSONObject(0).getString("text");
+    assertTrue(text, text.contains("90"));
+    assertFalse(response.getBody().getJSONObject("response").has("messages"));
+  }
+
+  /**
+   * A mock account with the given stored import-from date and grouping.
+   *
+   * @param importFrom the stored import-from day ({@code yyyy-MM-dd}), or {@code null}
+   * @param grouping   the stored grouping, or {@code null}
+   * @return the account
+   */
+  private static FIN_FinancialAccount storedSettings(String importFrom, String grouping) {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2ImportFromDate())
+        .thenReturn(FinancialAccountBankConnectionSupport.parseDate(importFrom));
+    when(finAcc.getPSD2StatementFrequency()).thenReturn(grouping);
+    return finAcc;
+  }
+
+  /**
+   * Runs import-settings with {@code body} on {@code finAcc} and asserts a 400 with
+   * {@code expectedMessage}, with nothing written, saved or flushed.
+   *
+   * @param body            the request body
+   * @param finAcc          the account the request resolves to
+   * @param expectedMessage the exact error text
+   */
+  private void assertImportSettingsRejected(JSONObject body, FIN_FinancialAccount finAcc,
+      String expectedMessage) throws Exception {
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals(expectedMessage, 400, response.getHttpStatus());
+      assertEquals(expectedMessage, errorMessageOf(response));
+      verify(finAcc, never()).setPSD2ImportFromDate(any());
+      verify(finAcc, never()).setPSD2ImportToDate(any());
+      verify(finAcc, never()).setPSD2StatementFrequency(any());
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * Runs {@code sync} on a found account whose fetch answers {@code fetchStatus} (after writing
+   * "  PSD2 buffer  " to the PSD2 message buffer) in the given request language, and returns the
+   * answer's data after checking it is a 200.
+   *
+   * @param fetchStatus the status {@code fetchAccountTransactionsWithResult} returns
+   * @param language    the request language ({@code NeoLanguage.currentCode()})
+   * @return the {@code response.data} of the answer
+   */
+  private JSONObject syncData(String fetchStatus, String language) throws Exception {
+    return syncData(fetchStatus, false, language);
+  }
+
+  /**
+   * Same as {@link #syncData(String, String)}, with the run's duplicate-check flag.
+   *
+   * @param fetchStatus          the status the sync returns
+   * @param duplicateCheckFailed whether the "already imported?" check failed during the run
+   * @param language             the request language
+   * @return the {@code response.data} of the answer
+   */
+  private JSONObject syncData(String fetchStatus, boolean duplicateCheckFailed, String language)
+      throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class);
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
+      stubObContext(obContext);
+      lang.when(NeoLanguage::currentCode).thenReturn(language);
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenAnswer(invocation -> {
+            StringBuilder sb = invocation.getArgument(1);
+            sb.append("  PSD2 buffer  ");
+            return new AccountTransactionsSync.SyncResult(fetchStatus, duplicateCheckFailed);
+          });
+
+      NeoResponse response = handler.handle(postContext("sync", body));
+
+      assertEquals(200, response.getHttpStatus());
+      syncStatic.verify(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any()));
+      return dataOf(response);
+    }
   }
 
   /**

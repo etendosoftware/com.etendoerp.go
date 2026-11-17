@@ -86,6 +86,7 @@ import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
@@ -338,6 +339,7 @@ public class EtendoGoJwtServletTest {
     body.put("email", "new@test.com");
     body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
+    body.put("sector", "servicios");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
     Account account = mock(Account.class);
@@ -367,8 +369,10 @@ public class EtendoGoJwtServletTest {
       // The token is stored before the mail goes out, so a click can be honoured.
       verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
           eq(account), anyString(), any(Date.class)));
-      // ETP-5847: the new account is reported to HubSpot.
-      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
+      // ETP-6082: the sector is kept for HubSpot, but the account is reported only once its
+      // address is confirmed.
+      hubSpot.verify(() -> HubSpotOutbox.sector("servicios"));
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account), never());
     }
 
     assertEquals(201, resp.status);
@@ -440,6 +444,24 @@ public class EtendoGoJwtServletTest {
     assertFalse(EtendoGoJwtServlet.marketingConsentOf(null));
     assertEquals("2026-11",
         EtendoGoJwtServlet.termsVersionOf("{\"termsVersion\":\" 2026-11 \",\"marketingConsent\":true}"));
+  }
+
+  @Test
+  public void writesTheTermsDocumentAsAWordFile() throws Exception {
+    // ETP-6244: /terms/document answers the .docx bytes as the whole body.
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    javax.servlet.ServletOutputStream out = mock(javax.servlet.ServletOutputStream.class);
+    when(response.getOutputStream()).thenReturn(out);
+    byte[] docx = { 'P', 'K', 3, 4 };
+
+    EtendoGoJwtServlet.writeTermsDocument(response, docx);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response).setContentType(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    verify(response).setHeader("Cache-Control", "no-cache");
+    verify(response).setContentLength(4);
+    verify(out).write(docx);
   }
 
   @Test
@@ -812,6 +834,65 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
+  public void ssoSignInOfAnUnconfirmedRegisteredAccountReportsItToHubSpot() throws Exception {
+    // ETP-6082: signing in with the provider confirms the address, like the mailed link.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock =
+             mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(account);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(true);
+
+      ssoServlet.doPost(req, resp.response);
+
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
+    }
+  }
+
+  @Test
+  public void theOnboardingKeepsTheSectorOfAnAccountThatHadNone() {
+    Account account = mock(Account.class);
+
+    try (MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class)) {
+      EtendoGoJwtServlet.storeMissingSector(account, "industria");
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, "industria");
+      commitMock.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()));
+    }
+  }
+
+  @Test
+  public void theOnboardingNeverOverwritesTheSectorChosenAtSignUp() {
+    Account account = mock(Account.class);
+    when(account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR)).thenReturn("servicios");
+
+    try (MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class)) {
+      EtendoGoJwtServlet.storeMissingSector(account, "industria");
+      EtendoGoJwtServlet.storeMissingSector(mock(Account.class), null);
+
+      verify(account, never()).set(anyString(), any());
+      commitMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
   public void ssoUnsupportedProviderReturnsNotFound() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/sso/example");
@@ -1161,7 +1242,9 @@ public class EtendoGoJwtServletTest {
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
       verifyMock.when(() -> EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           anyString(), any(Date.class))).thenReturn(account);
       verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(false);
@@ -1170,6 +1253,8 @@ public class EtendoGoJwtServletTest {
 
       verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           eq(account), any(Date.class)));
+      // ETP-6082: confirming the address is what makes the sign-up a HubSpot lead.
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
     }
 
     assertEquals(200, resp.status);
@@ -1195,7 +1280,11 @@ public class EtendoGoJwtServletTest {
           anyString(), any(Date.class))).thenReturn(account);
       verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(true);
 
-      servlet.doPost(req, resp.response);
+      try (MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+        servlet.doPost(req, resp.response);
+
+        hubSpot.verify(() -> HubSpotOutbox.accountCreated(any(Account.class)), never());
+      }
 
       verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           any(Account.class), any(Date.class)), never());
@@ -2380,6 +2469,7 @@ public class EtendoGoJwtServletTest {
       setField(service, "checkoutRequestStore", store);
       setField(service, "stripeApiClient", stripe);
       setField(service, "stripePriceService", prices);
+      setField(service, "promotionTerms", mock(com.etendoerp.go.payment.CheckoutPromotionTerms.class));
       servlet.hostedCheckoutService = service;
       // Also the servlet's own store: no purchase in flight, so a new checkout is opened.
       servlet.checkoutRequestStore = store;
@@ -2393,11 +2483,15 @@ public class EtendoGoJwtServletTest {
       Plan plan = mock(Plan.class);
       when(plan.getSearchKey()).thenReturn(planKey);
       when(plan.getProviderPriceID()).thenReturn(priceId);
+      when(plan.getDisplayPrice()).thenReturn(BigDecimal.ZERO);
+      when(plan.getCurrencyCode()).thenReturn("EUR");
+      when(plan.getBillingInterval()).thenReturn("month");
       when(catalog.findPurchasablePlan(planKey)).thenReturn(Optional.of(plan));
       when(catalog.hasProviderPrice(plan)).thenReturn(true);
       StripePriceService.Price price = mock(StripePriceService.Price.class);
       when(price.getId()).thenReturn(priceId);
       when(price.getInterval()).thenReturn("month");
+      when(price.getCurrency()).thenReturn("EUR");
       when(prices.retrievePrice(priceId)).thenReturn(price);
       when(stripe.postForm(anyString(), anyString(), anyString())).thenReturn(new StripeResponse(
           200, new JSONObject().put("id", "cs_test_1").put("url", "https://checkout.test/s")
@@ -2451,6 +2545,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(List.of(quotable, unquotable));
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     // Built before the try: stubbing a fresh mock INSIDE a mockStatic `when(...)` lambda leaves
     // Mockito's stubbing unfinished and fails the test.
@@ -2475,6 +2570,8 @@ public class EtendoGoJwtServletTest {
     assertEquals("49.00", plan.getString("displayPrice"));
     assertEquals("EUR", plan.getString("currency"));
     assertEquals("month", plan.getString("billingInterval"));
+    // A new account (no paid purchase) is offered the monthly plan's free trial.
+    assertEquals(30, plan.getInt("freeTrialDays"));
   }
 
   /**
@@ -2497,6 +2594,10 @@ public class EtendoGoJwtServletTest {
     when(catalog.listPurchasablePlans()).thenReturn(List.of(plain, plan));
     when(catalog.listActiveQuotas(plan)).thenReturn(List.of(invoices, seats));
     servlet.planCatalogService = catalog;
+    // An account that already paid a purchase is offered no free trial on any plan.
+    CheckoutRequestStore purchases = mock(CheckoutRequestStore.class);
+    when(purchases.findForAccount(any(), any())).thenReturn(List.of(mock(CheckoutRequest.class)));
+    servlet.checkoutRequestStore = purchases;
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -2514,6 +2615,7 @@ public class EtendoGoJwtServletTest {
     assertFalse(start.getBoolean("includesApi"));
     assertTrue(start.isNull("highlight"));
     assertEquals(0, start.getJSONArray("quotas").length());
+    assertEquals(0, start.getInt("freeTrialDays"));
 
     JSONObject pro = plans.getJSONObject(1);
     assertTrue(pro.getBoolean("includesApi"));
@@ -2540,6 +2642,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(List.of(plan));
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -2567,6 +2670,7 @@ public class EtendoGoJwtServletTest {
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.listPurchasablePlans()).thenReturn(Collections.emptyList());
     servlet.planCatalogService = catalog;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
     Account account = mockAccount();
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);

@@ -298,4 +298,159 @@ class InboxLineMatcherTest {
     assertEquals(1, lookups.taxDates.size());
     assertNull(lookups.taxDates.get(0), "no date read: the lookup falls back to today");
   }
+
+  // ---------------------------------------------------------------- the line discount (ETP-6050)
+
+  private static BigDecimal d(String value) {
+    return new BigDecimal(value);
+  }
+
+  private JSONObject reviewedLine(Object quantity, Object price, Object percent, Object amount)
+      throws Exception {
+    lookups.products = List.of(List.of());
+    JSONArray items = new JSONArray().put(new JSONObject().put(DESCRIPTION, "Widget")
+        .put("quantity", quantity).put("unit_price", price).put("tax_rate", 21)
+        .put("discount_percent", percent).put("discount_amount", amount));
+    return matcher.review(items, LOCATION, DATE).getJSONObject(0);
+  }
+
+  @Test
+  @DisplayName("a printed percent becomes the line's discount, at four decimals")
+  void aPrintedPercentIsTheDiscount() throws Exception {
+    JSONObject line = reviewedLine(2, 50, 10, JSONObject.NULL);
+
+    assertEquals(10.0, line.getDouble("discount"), 0.0);
+    assertEquals(50.0, line.getDouble("unitPrice"), 0.0, "the price stays the one before the discount");
+    assertEquals(12.3457, reviewedLine(2, 50, 12.34567, JSONObject.NULL).getDouble("discount"), 0.0);
+  }
+
+  @Test
+  @DisplayName("a printed amount is converted to a percent of the gross, scale 4 HALF_UP")
+  void aPrintedAmountIsConverted() throws Exception {
+    // 5 of a gross of 100 = 5 %
+    assertEquals(5.0, reviewedLine(2, 50, JSONObject.NULL, 5).getDouble("discount"), 0.0);
+    // 1 of a gross of 3 = 33.3333...
+    assertEquals(33.3333, reviewedLine(3, 1, JSONObject.NULL, 1).getDouble("discount"), 0.0);
+    // 2 of a gross of 3 = 66.6666...7 -> HALF_UP 66.6667
+    assertEquals(66.6667, reviewedLine(3, 1, JSONObject.NULL, 2).getDouble("discount"), 0.0);
+  }
+
+  @Test
+  @DisplayName("both printed: the percent wins")
+  void thePercentWinsOverTheAmount() throws Exception {
+    assertEquals(10.0, reviewedLine(2, 50, 10, 30).getDouble("discount"), 0.0);
+  }
+
+  @Test
+  @DisplayName("nothing printed, or anything that cannot be a discount, leaves the key out")
+  void noDiscountIsNoKey() throws Exception {
+    assertFalse(reviewedLine(2, 50, JSONObject.NULL, JSONObject.NULL).has("discount"));
+    assertFalse(reviewedLine(2, 50, 0, JSONObject.NULL).has("discount"));
+    assertFalse(reviewedLine(2, 50, -5, JSONObject.NULL).has("discount"));
+    assertFalse(reviewedLine(2, 50, 101, JSONObject.NULL).has("discount"));
+    assertFalse(reviewedLine(2, 50, JSONObject.NULL, 0).has("discount"));
+    assertFalse(reviewedLine(2, 50, JSONObject.NULL, -1).has("discount"));
+    assertFalse(reviewedLine(2, 50, JSONObject.NULL, 100.01).has("discount"), "over the gross");
+    assertFalse(reviewedLine(JSONObject.NULL, 50, JSONObject.NULL, 5).has("discount"));
+    assertFalse(reviewedLine(2, JSONObject.NULL, JSONObject.NULL, 5).has("discount"));
+  }
+
+  @Test
+  @DisplayName("a line that does not carry the keys at all (an old extraction) has no discount")
+  void aLineWithoutTheKeysHasNoDiscount() throws Exception {
+    lookups.products = List.of(List.of());
+
+    JSONObject line = matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0);
+
+    assertFalse(line.has("discount"));
+  }
+
+  @Test
+  @DisplayName("discountPercent: the percent is used when in (0, 100], the amount when it is in (0, gross]")
+  void discountPercentRules() {
+    assertEquals(d("10.0000"), InboxLineMatcher.discountPercent(d("10"), null, d("2"), d("50")));
+    assertEquals(d("100.0000"), InboxLineMatcher.discountPercent(d("100"), null, null, null));
+    assertEquals(d("100.0000"), InboxLineMatcher.discountPercent(null, d("100"), d("2"), d("50")),
+        "an amount equal to the gross is a full discount");
+    assertEquals(d("0.0001"), InboxLineMatcher.discountPercent(d("0.00005"), null, null, null),
+        "rounded up to the scale");
+    assertNull(InboxLineMatcher.discountPercent(d("0.00004"), null, null, null),
+        "a percent that rounds to zero is no discount");
+  }
+
+  @Test
+  @DisplayName("discountPercent: an out-of-range percent falls through to the amount")
+  void anOutOfRangePercentFallsToTheAmount() {
+    assertEquals(d("5.0000"), InboxLineMatcher.discountPercent(d("0"), d("5"), d("2"), d("50")));
+    assertEquals(d("5.0000"), InboxLineMatcher.discountPercent(d("-1"), d("5"), d("2"), d("50")));
+    assertEquals(d("5.0000"), InboxLineMatcher.discountPercent(d("150"), d("5"), d("2"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(d("150"), null, d("2"), d("50")));
+  }
+
+  @Test
+  @DisplayName("discountPercent: no quantity, no price, zero gross or negative gross is ignored")
+  void discountPercentNeedsAGross() {
+    assertNull(InboxLineMatcher.discountPercent(null, d("5"), null, d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("5"), d("2"), null));
+    assertNull(InboxLineMatcher.discountPercent(null, d("5"), d("0"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("5"), d("2"), d("0")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("5"), d("-2"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("0"), d("2"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("-5"), d("2"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, null, d("2"), d("50")));
+    assertNull(InboxLineMatcher.discountPercent(null, d("100.0001"), d("2"), d("50")));
+  }
+
+  // ---------------------------------------------------------------- taxState (shared with the review edits)
+
+  @Test
+  @DisplayName("taxState: without a location the tax is pending the vendor and nothing is asked")
+  void taxStateWithoutLocationIsPending() throws Exception {
+    JSONObject state = InboxLineMatcher.taxState(lookups, new java.util.HashMap<>(), d("21"),
+        null, DATE);
+
+    assertEquals("pending_vendor", state.getString(STATE));
+    assertTrue(lookups.taxAsks.isEmpty());
+  }
+
+  @Test
+  @DisplayName("taxState: resolved with the chosen tax and its candidates; asked once per rate")
+  void taxStateResolvesAndCaches() throws Exception {
+    Tax t21 = tax("T21", "IVA 21%", "21");
+    lookups.taxByRate.put("21", new TaxAnswer(true, t21, List.of(t21)));
+    java.util.Map<String, TaxAnswer> cache = new java.util.HashMap<>();
+
+    JSONObject first = InboxLineMatcher.taxState(lookups, cache, d("21.00"), LOCATION, DATE);
+    InboxLineMatcher.taxState(lookups, cache, d("21"), LOCATION, DATE);
+
+    assertEquals("resolved", first.getString(STATE));
+    assertEquals("T21", first.getString("id"));
+    assertEquals(21.0, first.getDouble("rate"), 0.0);
+    assertEquals(1, first.getJSONArray("candidates").length());
+    assertEquals(List.of(LOCATION + "|21"), lookups.taxAsks, "21.00 and 21 are the same rate");
+  }
+
+  @Test
+  @DisplayName("taxState: no chosen tax is no_tax_at_rate with its candidates; an unanswered one is unknown")
+  void taxStateOtherStates() throws Exception {
+    lookups.taxByRate.put("33", new TaxAnswer(true, null, List.of(tax("T4", "IVA 4%", "4"))));
+    lookups.taxByRate.put("44", new TaxAnswer(false, null, List.of()));
+    java.util.Map<String, TaxAnswer> cache = new java.util.HashMap<>();
+
+    JSONObject none = InboxLineMatcher.taxState(lookups, cache, d("33"), LOCATION, DATE);
+    JSONObject unknown = InboxLineMatcher.taxState(lookups, cache, d("44"), LOCATION, DATE);
+
+    assertEquals("no_tax_at_rate", none.getString(STATE));
+    assertEquals("T4", none.getJSONArray("candidates").getJSONObject(0).getString("id"));
+    assertEquals("unknown", unknown.getString(STATE));
+  }
+
+  @Test
+  @DisplayName("taxState: a null rate is asked as no rate and the date is passed through")
+  void taxStateWithoutARate() throws Exception {
+    InboxLineMatcher.taxState(lookups, new java.util.HashMap<>(), null, LOCATION, null);
+
+    assertEquals(List.of(LOCATION + "|"), lookups.taxAsks);
+    assertNull(lookups.taxDates.get(0));
+  }
 }

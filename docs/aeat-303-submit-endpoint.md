@@ -118,7 +118,7 @@ shape minus `declarationData`/`csv`/etc:
 | (none — plain `sendError`, no JSON body) | `404` | `id` doesn't resolve to a declaration belonging to the current client/org (`belongsTo`) | Same as above — no JSON body |
 | `MISSING_PRESENTER` | `400` | Production (`testMode=false`) and either `presenterNif` or `presenterName` is blank | Test mode never triggers this — presenter fields are optional there |
 | (none — plain `sendError`, no JSON body) | `409` | The corrective/ordinaria consistency rule is violated — see "Corrective/ordinaria consistency guard" below | Checked for BOTH `testMode` values (unlike every other row in this table, which is production-only) — a test-mode filing of an inconsistent declaration is just as wrong a state to validate as a production one |
-| `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below) |
+| `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below). The `errors` text is `ETGO_FiscalSubmitNoCertificate` in the request language (`NeoMessageText`, ETP-6158; was a hardcoded English sentence) — see neo-headless.md §4.17 |
 | `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already in the submitted family (`submitted`, `submitted_ext`, `submitted_ack`) | The idempotency guard (BUG-1 fix, widened in ETP-5438) — see dedicated section below |
 | `SNAPSHOT_FAILED` | `500` | Production, file generated, but the submission snapshot (the `GET /fiscal303/boxes` figures) could not be computed or would not fit the column | Checked **before** the AEAT call — the declaration is never sent to Hacienda without its frozen figures (ETP-5438). See "Submission snapshot" below |
 | `SUBMISSION_FAILED` | `500` (file-generation failure) or `502` (AEAT call itself threw `OBException`) | File regeneration threw, or `AEAT303SubmissionService.submitProduction`/`submitValidation` threw `OBException` (e.g. connection error, unsupported-charset gate, non-JSON response) | The one case where a raised exception maps to this code; a non-`OBException` runtime exception is a known, accepted gap (see "Known gaps") |
@@ -413,3 +413,22 @@ note.
 
 Frontend consumer: `../../../schema_forge/tools/app-shell/src/windows/custom/fiscal-models/models/303/AeatSubmitFlow.jsx`,
 documented in `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md`.
+
+## Validation before a real presentation (ETP-5716)
+
+With `testMode = false`, once every guard
+has passed and the file is generated, the server first sends that same file to the validation
+service (`FiscalAeatSubmissionSupport.validateBeforeSubmission`, 10 s connect + 30 s read; the
+service's default timeouts are restored for the presentation):
+
+| Validator | What happens |
+|---|---|
+| no errors (warnings allowed) | the presentation goes ahead, as before |
+| errors (at least one) | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
+| no answer, or an answer with neither a PDF nor an error | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
+
+It writes its own attempt row (path `pre_submission_validation`); the presentation that follows
+writes its `direct_submission` row. No PDF is attached for this validation. `testMode = true` is
+unchanged.
+
+Shared with `/fiscal390/submit`; attempt rows: `aeat-attempt-log.md`.

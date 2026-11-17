@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Warehouse;
@@ -56,6 +57,28 @@ final class InvoiceInOutMapping {
    */
   static InOutFollowUpCreator.Mapping map(String invoiceId,
       List<PendingResolver.SourceLine> pendingLines, FollowUpInputs inputs) {
+    return map(invoiceId, pendingLines, inputs, order -> true);
+  }
+
+  /**
+   * {@link #map} for a sales invoice (ETP-6002 CP-14), chosen by {@code SalesInvoiceHeaderHandler}:
+   * an order that is a QUOTATION ({@link SalesQuotations#isQuotation}) is not carried, neither as
+   * a line's order line nor as the movement's {@code C_Order_ID}. A shipment made from an invoice
+   * that came straight from a quotation relates to that invoice only; carrying the quotation line
+   * made {@code M_INOUT_POST} mark the quotation delivered and listed it on the shipment.
+   */
+  static InOutFollowUpCreator.Mapping mapDeliverableOrders(String invoiceId,
+      List<PendingResolver.SourceLine> pendingLines, FollowUpInputs inputs) {
+    return map(invoiceId, pendingLines, inputs, order -> !SalesQuotations.isQuotation(order));
+  }
+
+  /**
+   * @param delivers which orders the movement may point at; the order line of an invoice line whose
+   *     order it refuses is not carried, and such an order is never the movement's order
+   */
+  private static InOutFollowUpCreator.Mapping map(String invoiceId,
+      List<PendingResolver.SourceLine> pendingLines, FollowUpInputs inputs,
+      Predicate<Order> delivers) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
     if (invoice == null) {
       throw new FollowUpException(FollowUpException.Reason.NOT_FOUND);
@@ -77,7 +100,7 @@ final class InvoiceInOutMapping {
           .uom(il.getUOM())
           .attributeSetValue(il.getAttributeSetValue())
           .quantity(pending.getPendingQty())
-          .orderLine(il.getSalesOrderLine())
+          .orderLine(carried(il.getSalesOrderLine(), delivers))
           .description(il.getDescription())
           .stockable(InOutLineFromOrderFactory.isStockable(il.getProduct()))
           .build());
@@ -85,8 +108,13 @@ final class InvoiceInOutMapping {
     InOutTargetBuilder.Header header = new InOutTargetBuilder.Header(invoice.getClient(),
         invoice.getOrganization(), invoice.getBusinessPartner(), invoice.getPartnerAddress(),
         resolveWarehouse(invoice, invoiceLines, inputs), invoice.getCurrency(),
-        resolveOrder(invoice, invoiceLines));
+        resolveOrder(invoice, invoiceLines, delivers));
     return new InOutFollowUpCreator.Mapping(header, lines);
+  }
+
+  /** {@code orderLine} when its order is one {@code delivers} accepts, else {@code null}. */
+  private static OrderLine carried(OrderLine orderLine, Predicate<Order> delivers) {
+    return orderLine != null && delivers.test(orderLine.getSalesOrder()) ? orderLine : null;
   }
 
   /**
@@ -142,13 +170,21 @@ final class InvoiceInOutMapping {
    * carried line comes from, else none (lines from several orders, or none).
    */
   static Order resolveOrder(Invoice invoice, List<InvoiceLine> lines) {
-    if (invoice.getSalesOrder() != null) {
+    return resolveOrder(invoice, lines, order -> true);
+  }
+
+  /**
+   * {@link #resolveOrder(Invoice, List)} among the orders {@code delivers} accepts: a refused
+   * invoice order is skipped, and a line whose order is refused counts as a line without one.
+   */
+  static Order resolveOrder(Invoice invoice, List<InvoiceLine> lines, Predicate<Order> delivers) {
+    if (invoice.getSalesOrder() != null && delivers.test(invoice.getSalesOrder())) {
       return invoice.getSalesOrder();
     }
     Order common = null;
     for (InvoiceLine line : lines) {
       Order order = line.getSalesOrderLine() != null ? line.getSalesOrderLine().getSalesOrder() : null;
-      if (order == null) {
+      if (order == null || !delivers.test(order)) {
         return null;
       }
       if (common == null) {

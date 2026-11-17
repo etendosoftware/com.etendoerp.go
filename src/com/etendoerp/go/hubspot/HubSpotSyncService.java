@@ -20,6 +20,7 @@ package com.etendoerp.go.hubspot;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -37,10 +38,12 @@ import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
  * One pass of the HubSpot sync: detects what no business code reports, then sends what is pending.
  *
  * <ol>
- *   <li><b>Detect.</b> For every demo reported ready whose deal is still open: its first entry
- *       (a session or a login usage event on the environment), a payment (a paid checkout of the
- *       account since the demo), or the end of its trial (the access policy). Each becomes an
- *       outbox row, at most once per account.</li>
+ *   <li><b>Detect.</b> For every demo reported ready that has not paid yet: its first entry (a
+ *       session or a login usage event on the environment), each qualification milestone its
+ *       owner reached, a payment (a paid checkout of the account since the demo, also after the
+ *       trial ended), or the end of its trial (the access policy) when the account has no
+ *       productive environment. Each becomes an outbox row, at most once per account (once per
+ *       milestone).</li>
  *   <li><b>Send.</b> Pending rows, oldest first. An account's rows go in order: one that cannot
  *       be sent yet holds back the later ones, so a deal is never won before it exists.</li>
  * </ol>
@@ -57,6 +60,8 @@ public class HubSpotSyncService {
   static final int MAX_ATTEMPTS = 12;
   static final int BATCH_SIZE = 25;
   static final long MAX_DELAY_MINUTES = 360;
+  static final String FIELD_PLAN = "plan";
+  static final String FIELD_MILESTONE = "milestone";
 
   private final HubSpotConfiguration configuration;
   private final HubSpotOutboxStore store;
@@ -125,19 +130,39 @@ public class HubSpotSyncService {
             demo.environmentId(), null)) {
       result.detected++;
     }
-    Optional<PaidCheckout> paid = demo.readyAt() == null ? Optional.empty()
-        : store.findPaidCheckout(demo.accountId(), demo.readyAt());
+    if (demo.readyAt() == null) {
+      return;
+    }
+    detectMilestones(demo, result);
+    Optional<PaidCheckout> paid = store.findPaidCheckout(demo.accountId(), demo.readyAt());
     if (paid.isPresent()) {
       if (store.enqueue(demo.accountId(), HubSpotOutboxStore.PAID, demo.environmentId(),
-          planPayload(paid.get().planKey()))) {
+          paidPayload(paid.get()))) {
         result.detected++;
       }
       return;
     }
-    if (trials.find(demo.environmentId(), now).map(DemoTrials.Trial::expired).orElse(false)
+    // A demo also expires after its owner bought a productive some other way than a checkout
+    // paid since the demo (a support-made productive, an earlier purchase): that is no lost trial.
+    if (!demo.expired()
+        && trials.find(demo.environmentId(), now).map(DemoTrials.Trial::expired).orElse(false)
+        && !store.hasProductiveEnvironment(demo.accountId(), demo.environmentId())
         && store.enqueue(demo.accountId(), HubSpotOutboxStore.DEMO_EXPIRED,
             demo.environmentId(), null)) {
       result.detected++;
+    }
+  }
+
+  private void detectMilestones(OpenDemo demo, Result result) {
+    if (demo.milestones() >= HubSpotOutboxStore.MILESTONES.size()) {
+      return;
+    }
+    Map<String, Instant> reached = store.findMilestones(demo.environmentId(), demo.readyAt());
+    for (Map.Entry<String, Instant> milestone : reached.entrySet()) {
+      if (store.enqueueKeyed(demo.accountId(), HubSpotOutboxStore.MILESTONE, milestone.getKey(),
+          demo.environmentId(), milestonePayload(milestone.getKey(), milestone.getValue()))) {
+        result.detected++;
+      }
     }
   }
 
@@ -216,13 +241,33 @@ public class HubSpotSyncService {
   }
 
   static String planPayload(String planKey) {
-    if (planKey == null) {
+    return paidPayload(new PaidCheckout(planKey));
+  }
+
+  static String paidPayload(PaidCheckout checkout) {
+    if (checkout.planKey() == null && checkout.interval() == null) {
       return null;
     }
     try {
-      return new JSONObject().put("plan", planKey).toString();
+      JSONObject payload = new JSONObject();
+      if (checkout.planKey() != null) {
+        payload.put(FIELD_PLAN, checkout.planKey());
+      }
+      if (checkout.interval() != null) {
+        payload.put(StripeSubscriptionEvents.FIELD_INTERVAL, checkout.interval());
+      }
+      return payload.toString();
     } catch (JSONException e) {
       throw new IllegalStateException("Could not build the payment event payload", e);
+    }
+  }
+
+  static String milestonePayload(String milestone, Instant at) {
+    try {
+      return new JSONObject().put(FIELD_MILESTONE, milestone)
+          .put(StripeSubscriptionEvents.FIELD_AT, at.toString()).toString();
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the milestone event payload", e);
     }
   }
 

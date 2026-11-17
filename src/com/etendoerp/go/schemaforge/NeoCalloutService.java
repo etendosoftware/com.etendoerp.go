@@ -183,6 +183,10 @@ public class NeoCalloutService {
         log.info("[NEO-CALLOUT] Raw callout result: {}", calloutResult != null ? calloutResult.toString().substring(0, Math.min(500, calloutResult.toString().length())) : "null");
 
         JSONObject restResponse = transformResponse(calloutResult, adTab);
+        // ETP-5837: a callout may propose a doc type the tab's own filter does not allow
+        // (core falls back to the org default doc type, which ignores the tab). Drop it
+        // before the cascade sees it, so the form keeps its doc type and number sequence.
+        DocTypeResolver.dropDocTypesOutsideTabFilter(restResponse, adTab, ctx);
         long perfTransformEnd = System.nanoTime();
         log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
 

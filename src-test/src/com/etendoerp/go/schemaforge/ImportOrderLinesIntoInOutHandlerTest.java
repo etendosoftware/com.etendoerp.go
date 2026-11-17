@@ -41,8 +41,11 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -56,9 +59,11 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -74,6 +79,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInOutHandler
  * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
+ * @covers com.etendoerp.go.schemaforge.ImportListing
  */
 public class ImportOrderLinesIntoInOutHandlerTest {
 
@@ -203,6 +209,28 @@ public class ImportOrderLinesIntoInOutHandlerTest {
     @Override
     protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currency) {
       return candidates;
+    }
+
+    /** The offset of the last paged scan (ETP-6099); {@code null} while only the default ran. */
+    Integer pagedOffset;
+
+    @Override
+    protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currency,
+        int offset, int scan) {
+      pagedOffset = offset;
+      return new ArrayList<>(candidates.subList(Math.min(offset, candidates.size()),
+          candidates.size()));
+    }
+
+    /** What the draft-note seam answers, and what it was last asked. */
+    Map<String, Set<String>> draftDocs = new java.util.HashMap<>();
+    final List<Object[]> draftDocCalls = new ArrayList<>();
+
+    @Override
+    protected Map<String, Set<String>> draftDocumentNos(Collection<String> orderLineIds,
+        boolean sales, String targetId) {
+      draftDocCalls.add(new Object[] { new ArrayList<>(orderLineIds), sales, targetId });
+      return draftDocs;
     }
   }
 
@@ -697,6 +725,11 @@ public class ImportOrderLinesIntoInOutHandlerTest {
       assertEquals(422, NeoActionContract.validate(contracts, "importOrderLines",
           new JSONObject().put("orderId", "o1").put("foo", 1)).getHttpStatus());
       assertNull(NeoActionContract.validate(contracts, "availableOrders", new JSONObject()));
+      // ETP-6099: the shared listing parameters, documents and lines
+      assertNull(NeoActionContract.validate(contracts, "availableOrders", new JSONObject(
+          "{\"limit\":10,\"offset\":5,\"includeCovered\":true,\"detail\":true}")));
+      assertNull(NeoActionContract.validate(contracts, "availableOrderLines", new JSONObject(
+          "{\"orderId\":\"o1\",\"includeCovered\":true,\"detail\":true}")));
     }
   }
 
@@ -815,10 +848,191 @@ public class ImportOrderLinesIntoInOutHandlerTest {
     probe.rowLimit = 50;
     assertFalse(run(probe, "availableOrders", null).getBody().getJSONObject("response")
         .getBoolean("hasMore"));
+    // ETP-6099: the scan reads max(scanLimit, limit), so the page is narrowed with it
+    probe.rowLimit = 2;
     probe.scanLimit = 2;
-    assertTrue(run(probe, "availableOrders", null).getBody().getJSONObject("response")
-        .getBoolean("hasMore"));
+    assertTrue("a scan that hit its limit may have hidden orders", run(probe, "availableOrders",
+        null).getBody().getJSONObject("response").getBoolean("hasMore"));
     assertFalse(run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
         .getJSONObject("response").getBoolean("hasMore"));
+  }
+
+  // ── ETP-6099: paging, includeCovered, detail ──────────────────────────────
+
+  private static JSONObject page(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("response");
+  }
+
+  /** A second completed order of the scenario's partner with one line of 3 pending. */
+  private static Order secondOrder() {
+    OrderLine extra = orderLine("olx", 10, product("px", "Extra", false), "3", "0", "0");
+    return order("o2", false, extra);
+  }
+
+  /**
+   * With limit / offset the page echoes offset and answers nextOffset while hasMore (null once
+   * complete), the page starting where the scan is told; without them none of the new keys.
+   * A value out of range or of the wrong type is a 400 importInvalidParameter.
+   */
+  @Test
+  public void availableOrders_pagesThroughTheScan_andRefusesBadListingParameters()
+      throws Exception {
+    Probe probe = purchaseScenario();
+    Order second = secondOrder();
+    probe.candidates = List.of(probe.order, second);
+
+    JSONObject first = page(run(probe, "availableOrders", "{\"limit\":1}"));
+    assertEquals(List.of("o1"), ids(first.getJSONArray("data")));
+    assertTrue(first.getBoolean("hasMore"));
+    assertEquals(0, first.getInt("offset"));
+    assertEquals(1, first.getInt("nextOffset"));
+
+    JSONObject next = page(run(probe, "availableOrders", "{\"limit\":1,\"offset\":1}"));
+    assertEquals(Integer.valueOf(1), probe.pagedOffset);
+    assertEquals(List.of("o2"), ids(next.getJSONArray("data")));
+    assertFalse(next.getBoolean("hasMore"));
+    assertEquals(1, next.getInt("offset"));
+    assertTrue(next.has("nextOffset") && next.isNull("nextOffset"));
+
+    JSONObject plain = page(run(probe, "availableOrders", null));
+    assertFalse(plain.has("offset") || plain.has("nextOffset"));
+    JSONObject row = plain.getJSONArray("data").getJSONObject(0);
+    assertFalse("no detail keys by default", row.has("creationDate") || row.has("amount"));
+
+    for (String bad : new String[] { "{\"limit\":0}", "{\"limit\":1001}", "{\"limit\":\"x\"}",
+        "{\"offset\":-1}", "{\"includeCovered\":\"yes\"}", "{\"detail\":1}" }) {
+      NeoResponse refused = run(probe, "availableOrders", bad);
+      assertEquals(bad, 400, refused.getHttpStatus());
+      assertEquals(bad, "importInvalidParameter", errorCode(refused));
+    }
+  }
+
+  /**
+   * includeCovered also lists an order whose ordered - delivered is all held by drafts, at
+   * pendingLines 0; a fully delivered order stays out.
+   */
+  @Test
+  public void availableOrders_includeCovered_listsTheOrdersDraftsHoldEntirely() throws Exception {
+    Probe probe = purchaseScenario();
+    probe.pending = new ArrayList<>();
+    OrderLine done = orderLine("ol7", 10, product("p7", "Hecho", false), "3", "3", "0");
+    Order delivered = order("o7", false, done);
+    probe.candidates = List.of(probe.order, delivered);
+
+    assertEquals(0, page(run(probe, "availableOrders", null)).getJSONArray("data").length());
+    JSONArray rows = page(run(probe, "availableOrders", "{\"includeCovered\":true}"))
+        .getJSONArray("data");
+    assertEquals(List.of("o1"), ids(rows));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  /**
+   * detail adds creationDate (ISO instant, UTC, or null) and amount: unit price x pending summed
+   * over the lines with a positive pending, at the order currency's precision.
+   */
+  @Test
+  public void availableOrders_detail_addsCreationDateAndThePositivePendingAmount()
+      throws Exception {
+    Probe probe = purchaseScenario();
+    List<OrderLine> lines = probe.order.getOrderLineList();
+    OrderLine agua = lines.get(0);
+    OrderLine pan = lines.get(1);
+    OrderLine credit = orderLine("ol4", 40, product("p4", "Dev", false), "-3", "0", "0");
+    when(agua.getUnitPrice()).thenReturn(bd("47.50"));
+    when(pan.getUnitPrice()).thenReturn(bd("20"));
+    when(credit.getUnitPrice()).thenReturn(bd("9"));
+    Currency orderCurrency = probe.order.getCurrency();
+    when(orderCurrency.getStandardPrecision()).thenReturn(2L);
+    when(probe.order.getCreationDate())
+        .thenReturn(Date.from(Instant.parse("2026-11-05T09:12:33.456Z")));
+    probe.pending = List.of(new PendingOrderLine(agua, bd("10")),
+        new PendingOrderLine(pan, bd("5")), new PendingOrderLine(credit, bd("-3")));
+    Order undated = secondOrder();
+    probe.candidates = List.of(probe.order, undated);
+
+    JSONArray rows = page(run(probe, "availableOrders", "{\"detail\":true}"))
+        .getJSONArray("data");
+
+    JSONObject row = rows.getJSONObject(0);
+    assertEquals(3, row.getInt("pendingLines"));
+    assertEquals("47.50 x 10 + 20 x 5; the negative line is left out", "575.00",
+        row.get("amount").toString());
+    assertEquals("2026-11-05T09:12:33Z", row.getString("creationDate"));
+    assertTrue(rows.getJSONObject(1).has("creationDate")
+        && rows.getJSONObject(1).isNull("creationDate"));
+  }
+
+  /**
+   * includeCovered also lists the order's other active product lines at 0, in order-line order,
+   * never the total-discount nor an inactive line; detail adds the order line's quantities, price,
+   * description and the OTHER drafts holding it (the seam is asked for the target's id). Without
+   * detail the seam is not read and the rows keep their keys.
+   */
+  @Test
+  public void availableOrderLines_includeCoveredAndDetail() throws Exception {
+    Probe probe = purchaseScenario();
+    List<OrderLine> lines = probe.order.getOrderLineList();
+    OrderLine agua = lines.get(0);
+    Product discount = mock(Product.class);
+    when(discount.getId()).thenReturn(TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    OrderLine discountLine = orderLine("ol8", 30, discount, "-1", "0", "0");
+    OrderLine inactive = orderLine("ol9", 40, product("p9", "Viejo", false), "2", "0", "0");
+    when(inactive.isActive()).thenReturn(false);
+    lines.add(discountLine);
+    lines.add(inactive);
+    probe.pending = List.of(new PendingOrderLine(agua, bd("10")));
+
+    JSONArray pendingOnly = page(run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}"))
+        .getJSONArray("data");
+    assertEquals(List.of("ol1"), ids(pendingOnly));
+    assertFalse(pendingOnly.getJSONObject(0).has("inDraftDocuments"));
+
+    JSONArray covered = page(run(probe, "availableOrderLines",
+        "{\"orderId\":\"o1\",\"includeCovered\":true}")).getJSONArray("data");
+    assertEquals(List.of("ol1", "ol2"), ids(covered));
+    assertEquals(0, bd("0").compareTo(new BigDecimal(covered.getJSONObject(1)
+        .getString("pendingQuantity"))));
+    assertTrue("no detail, no draft read", probe.draftDocCalls.isEmpty());
+
+    when(agua.getUnitPrice()).thenReturn(bd("47.50"));
+    when(agua.getDescription()).thenReturn("fría");
+    probe.draftDocs.put("ol1", new LinkedHashSet<>(List.of("DS-2")));
+    JSONArray detailed = page(run(probe, "availableOrderLines",
+        "{\"orderId\":\"o1\",\"includeCovered\":true,\"detail\":true}")).getJSONArray("data");
+
+    JSONObject first = detailed.getJSONObject(0);
+    assertEquals(Arrays.asList("10", "0", "47.50", "fría"), Arrays.asList(
+        first.get("orderedQuantity").toString(), first.get("deliveredQuantity").toString(),
+        first.get("unitPrice").toString(), first.getString("description")));
+    assertEquals("DS-2", first.getJSONArray("inDraftDocuments").getString(0));
+    JSONObject second = detailed.getJSONObject(1);
+    assertTrue(second.isNull("unitPrice") && second.isNull("description"));
+    assertEquals(0, second.getJSONArray("inDraftDocuments").length());
+    Object[] asked = probe.draftDocCalls.get(0);
+    assertEquals(Arrays.asList(List.of("ol1", "ol2"), false, "r1"), Arrays.asList(asked));
+  }
+
+  /**
+   * ETP-6099 follow-up: this delegate offers no classic pending basis (the base seam's default),
+   * so the goods receipt's «desde pedido» refuses pendingBasis "classic" with a 400 before
+   * anything runs; "server" is the rule it always had.
+   */
+  @Test
+  public void pendingBasisClassic_isRefusedHere_serverIsTheDefault() throws Exception {
+    for (String action : new String[] { "availableOrders", "availableOrderLines",
+        "importOrderLines" }) {
+      Probe probe = purchaseScenario();
+      probe.candidates = List.of(probe.order);
+
+      NeoResponse refused = run(probe, action, "{\"orderId\":\"o1\",\"pendingBasis\":\"classic\"}");
+
+      assertEquals(action, 400, refused.getHttpStatus());
+      assertEquals(action, "importInvalidParameter", errorCode(refused));
+      assertEquals(action, List.of(), probe.calls);
+    }
+    Probe probe = purchaseScenario();
+    probe.candidates = List.of(probe.order);
+    assertEquals(List.of("o1"), ids(page(run(probe, "availableOrders",
+        "{\"pendingBasis\":\"server\"}")).getJSONArray("data")));
   }
 }

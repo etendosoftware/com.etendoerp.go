@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import java.lang.reflect.Modifier;
 import java.util.Set;
@@ -37,7 +39,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
- * The feature-flag gate and the {@code discard} dispatch of the invoice inbox header customization.
+ * The feature-flag gate and the {@code discard}, {@code review}, {@code apply} and {@code mark-reviewed} dispatch of the invoice inbox header customization.
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandler
  */
@@ -45,6 +47,9 @@ class InvoiceInboxHeaderHandlerTest {
 
   private MockedStatic<InvoiceInboxFlag> flag;
   private MockedStatic<InvoiceInboxDiscard> discard;
+  private MockedStatic<InvoiceInboxReview> review;
+  private MockedStatic<InvoiceInboxApply> apply;
+  private MockedStatic<InvoiceInboxMarkReviewed> markReviewed;
   private MockedStatic<OBMessageUtils> messages;
   private final InvoiceInboxHeaderHandler handler = new InvoiceInboxHeaderHandler();
 
@@ -52,6 +57,9 @@ class InvoiceInboxHeaderHandlerTest {
   void openStaticMocks() {
     flag = mockStatic(InvoiceInboxFlag.class);
     discard = mockStatic(InvoiceInboxDiscard.class);
+    review = mockStatic(InvoiceInboxReview.class);
+    apply = mockStatic(InvoiceInboxApply.class);
+    markReviewed = mockStatic(InvoiceInboxMarkReviewed.class);
     // Unstubbed messageBD answers null: the English default is used.
     messages = mockStatic(OBMessageUtils.class);
   }
@@ -59,6 +67,9 @@ class InvoiceInboxHeaderHandlerTest {
   @AfterEach
   void closeStaticMocks() {
     messages.close();
+    markReviewed.close();
+    apply.close();
+    review.close();
     discard.close();
     flag.close();
   }
@@ -157,12 +168,142 @@ class InvoiceInboxHeaderHandlerTest {
     discard.verifyNoInteractions();
   }
 
+  // ---------------------------------------------------------------- review
+
+  @Test
+  void flagOffRefusesTheReviewBeforeAnythingElseAndNeverRunsIt() throws Exception {
+    flag(false);
+
+    assertDisabled(handler.handle(ctx("GET", NeoEndpointType.ACTION, "ID-1", "review")));
+    assertDisabled(handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "review")));
+
+    review.verify(() -> InvoiceInboxReview.review(org.mockito.ArgumentMatchers.anyString()),
+        never());
+  }
+
+  @Test
+  void flagOnGetReviewDelegatesWithTheRecordIdAndReturnsItsAnswer() {
+    flag(true);
+    NeoResponse answer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    review.when(() -> InvoiceInboxReview.review("ID-1")).thenReturn(answer);
+
+    NeoResponse response = handler.handle(ctx("GET", NeoEndpointType.ACTION, "ID-1", "review"));
+
+    assertSame(answer, response);
+    review.verify(() -> InvoiceInboxReview.review("ID-1"));
+    discard.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnReviewIs405AndNeitherReviewsNorDiscards() {
+    flag(true);
+
+    NeoResponse response = handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "review"));
+
+    assertEquals(405, response.getHttpStatus());
+    review.verify(() -> InvoiceInboxReview.review(org.mockito.ArgumentMatchers.anyString()),
+        never());
+    discard.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnDiscardNeverTouchesTheReview() {
+    flag(true);
+    discard.when(() -> InvoiceInboxDiscard.discard("ID-1")).thenReturn(NeoResponse.error(409, "x"));
+
+    handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "discard"));
+
+    review.verifyNoInteractions();
+  }
+
+  // ---------------------------------------------------------------- apply and mark-reviewed (ETP-6050)
+
+  private static NeoContext post(String field, org.codehaus.jettison.json.JSONObject body) {
+    return NeoContext.builder().specName("invoice-inbox").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).recordId("ID-1")
+        .fieldName(field).requestBody(body).build();
+  }
+
+  @Test
+  void flagOffRefusesApplyAndMarkReviewedBeforeAnythingElse() throws Exception {
+    flag(false);
+
+    assertDisabled(handler.handle(post("apply", new org.codehaus.jettison.json.JSONObject())));
+    assertDisabled(handler.handle(post("mark-reviewed",
+        new org.codehaus.jettison.json.JSONObject())));
+
+    apply.verifyNoInteractions();
+    markReviewed.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnApplyDelegatesWithTheRecordIdAndTheBodyAndReturnsItsAnswer() throws Exception {
+    flag(true);
+    org.codehaus.jettison.json.JSONObject body = new org.codehaus.jettison.json.JSONObject()
+        .put("updated", "T");
+    NeoResponse answer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    apply.when(() -> InvoiceInboxApply.apply("ID-1", body)).thenReturn(answer);
+
+    assertSame(answer, handler.handle(post("apply", body)));
+
+    apply.verify(() -> InvoiceInboxApply.apply("ID-1", body));
+    markReviewed.verifyNoInteractions();
+    discard.verifyNoInteractions();
+    review.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnMarkReviewedDelegatesWithTheRecordIdAndTheBodyAndReturnsItsAnswer()
+      throws Exception {
+    flag(true);
+    org.codehaus.jettison.json.JSONObject body = new org.codehaus.jettison.json.JSONObject()
+        .put("updated", "T");
+    NeoResponse answer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    markReviewed.when(() -> InvoiceInboxMarkReviewed.markReviewed("ID-1", body))
+        .thenReturn(answer);
+
+    assertSame(answer, handler.handle(post("mark-reviewed", body)));
+
+    markReviewed.verify(() -> InvoiceInboxMarkReviewed.markReviewed("ID-1", body));
+    apply.verifyNoInteractions();
+    discard.verifyNoInteractions();
+    review.verifyNoInteractions();
+  }
+
+  @Test
+  void applyAndMarkReviewedAreRefusedWithA405ForEveryVerbButPost() {
+    flag(true);
+    for (String method : new String[] { "GET", "PUT", "PATCH", "DELETE" }) {
+      for (String action : new String[] { "apply", "mark-reviewed" }) {
+        NeoResponse response = handler.handle(
+            ctx(method, NeoEndpointType.ACTION, "ID-1", action));
+
+        assertEquals(405, response.getHttpStatus(), method + " " + action);
+      }
+    }
+
+    apply.verifyNoInteractions();
+    markReviewed.verifyNoInteractions();
+  }
+
+  @Test
+  void flagOnApplyAndMarkReviewedOnACrudEndpointContinueToTheDefaultHandling() {
+    flag(true);
+
+    assertNull(handler.handle(ctx("POST", NeoEndpointType.CRUD, "ID-1", "apply")));
+    assertNull(handler.handle(ctx("POST", NeoEndpointType.CRUD, "ID-1", "mark-reviewed")));
+    apply.verifyNoInteractions();
+    markReviewed.verifyNoInteractions();
+  }
+
   // ---------------------------------------------------------------- contract
 
   @Test
-  void itServesActionsAndHidesDiscardFromAgents() {
+  void itServesActionsAndHidesTheInboxActionsFromAgents() {
     assertTrue(handler.servesActions());
-    assertEquals(Set.of("discard"), handler.agentExcludedActions());
+    assertEquals(Set.of("discard", "review", "apply", "mark-reviewed"),
+        handler.agentExcludedActions());
+    assertEquals(4, handler.agentExcludedActions().size());
   }
 
   @Test

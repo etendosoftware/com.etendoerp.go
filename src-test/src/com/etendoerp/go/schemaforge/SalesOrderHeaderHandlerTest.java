@@ -91,6 +91,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionResolution
  * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -1330,7 +1331,7 @@ public class SalesOrderHeaderHandlerTest {
   public void actionContracts_declaresShipmentInvoiceAndClone() {
     Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createShipment", "createDraftInvoice", "cloneRecord"),
+    assertEquals(List.of("createShipment", "createDraftInvoice", "sifDefaults", "cloneRecord"),
         List.copyOf(contracts.keySet()));
     for (com.etendoerp.go.schemaforge.util.NeoActionContract c : contracts.values()) {
       assertEquals("POST", c.getHttpMethod());
@@ -1349,7 +1350,7 @@ public class SalesOrderHeaderHandlerTest {
         && invoice.contains("invoiced only for what those shipments still hold")
         && invoice.contains("including one whose shipped quantity draft invoices already hold"));
     assertFalse(invoice.contains("as importOrderLines would"));
-    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+    assertEquals(List.of("lines", "sifFields"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 
@@ -1581,5 +1582,49 @@ public class SalesOrderHeaderHandlerTest {
         org.openbravo.model.pricing.pricelist.PriceList.class), anyString());
     verify(draft, never()).setPriceList(any());
     verify(draft, never()).setCurrency(any());
+  }
+
+  // ── sifDefaults: the SIF fields createDraftInvoice would give its invoice (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesOrderHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.ORDER_SIF_DEFAULTS_CONTRACT,
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a sales order previews the invoice createDraftInvoice would create: SII and
+   * VERI*FACTU (no TicketBAI field on a normal invoice), the VERI*FACTU type of the invoice
+   * document type the order links (F2), the order's SII description and operation date — and
+   * creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheOrder() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    Field field = SalesOrderHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      when(mocks.dal.get(org.openbravo.model.common.order.Order.class, "so-1")).thenReturn(order);
+
+      NeoResponse response =
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("sales-order", "so-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      verify(mocks.dal, never()).save(any());
+    }
   }
 }

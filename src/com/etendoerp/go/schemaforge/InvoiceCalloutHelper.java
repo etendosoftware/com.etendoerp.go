@@ -20,11 +20,13 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -228,11 +230,17 @@ final class InvoiceCalloutHelper {
   }
 
   /**
-   * After a non-DocType callout, corrects any stale {@code etvfacVerifacDesc}/{@code etvfacInvType}
-   * values that a cascade may have injected based on the wrong DocType.
-   * Re-reads the values from the DocType the user actually selected ({@code formState.transactionDocument}).
+   * After a non-DocType callout, corrects a stale {@code etvfacVerifacDesc} that a cascade may
+   * have injected based on the wrong DocType. Re-reads the value from the DocType the user
+   * actually selected ({@code formState.transactionDocument}).
    * No-op when the trigger IS {@code transactionDocument} (handled by
    * {@link #applyVerifactuInvTypeFromDocType}) or when no Verifactu field appears in updates.
+   *
+   * <p>ETP-5745 CP-20: this used to ALSO realign {@code etvfacInvType} from the DocType's own
+   * configured code — removed, same reasoning as {@link #applyVerifactuInvTypeFromDocType}: that
+   * field encodes "this is a correction AND why" in one value (R1-R5), so copying ANY
+   * DocType-configured code into it — even one a human set up front, on the DocType, once — is
+   * still picking the user's reason for THIS invoice on their behalf.
    *
    * @param triggerField the field that fired the callout
    * @param formState    the form state snapshot from the callout request
@@ -254,41 +262,66 @@ final class InvoiceCalloutHelper {
       return;
     }
     try {
-      String sql = "SELECT em_etvfac_verifac_desc, em_etvfac_inv_type"
-          + " FROM c_doctype WHERE c_doctype_id = ?";
+      String sql = "SELECT em_etvfac_verifac_desc FROM c_doctype WHERE c_doctype_id = ?";
       Connection conn = OBDal.getReadOnlyInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, docTypeId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            String desc    = rs.getString(1);
-            String invType = rs.getString(2);
+            String desc = rs.getString(1);
             if (desc != null && !desc.trim().isEmpty()) {
               JSONObject descUpdate = new JSONObject();
               descUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, desc.trim());
               updates.put("etvfacVerifacDesc", descUpdate);
             }
-            // Also realign etvfacInvType if the cascade put a wrong value there
-            if (invType != null && !invType.trim().isEmpty()
-                && updates.has(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE)) {
-              JSONObject invUpdate = new JSONObject();
-              invUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, invType.trim());
-              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, invUpdate);
-            }
           }
         }
       }
-      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc/inv for docType={} (trigger={})",
+      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc for docType={} (trigger={})",
           docTypeId, triggerField);
     } catch (Exception e) {
       log.warn("[ETP-4783] realignVerifactuDescWithFormStateDocType failed (non-fatal): {}", e.getMessage());
     }
   }
 
+  /** The generic AD_Column default for {@code etvfacInvType} (ETP-4390: "Factura"). */
+  private static final String VERIFACTU_INV_TYPE_DEFAULT = "F1";
+
   /**
-   * When the user changes the document type ({@code transactionDocument} trigger), injects the
-   * new DocType's {@code em_etvfac_inv_type} value into the callout update map.
-   * No-op when the trigger is not {@code transactionDocument}.
+   * When the user changes the document type ({@code transactionDocument} trigger), sets
+   * {@code etvfacInvType} to EMPTY when the newly-selected document type is rectificative, or
+   * back to the generic default ({@code "F1"}) when it is not.
+   *
+   * <p>ETP-5745 CP-20: this method used to copy the NEW DocType's own configured
+   * {@code em_etvfac_inv_type} onto the invoice whenever the document type became rectificative
+   * — reverted, together with the javadoc rationale that survives it: VERI*FACTU folds "this is
+   * a correction" AND "for this reason" into the SAME {@code R1}-{@code R5} value, so copying
+   * ANY code — even one a human configured on the DocType itself, once, for every invoice of
+   * that type — is still picking a reason on behalf of THIS specific invoice, exactly the
+   * fiscal judgement call {@code aeatsiiMotivoRectif}/{@code tbaiReverseinvoicecode} are never
+   * allowed to guess either (see {@code SalesRectificativeFiscalDefaults}' class javadoc). The
+   * user must pick an {@code R1}-{@code R5} code manually, and
+   * {@link RectificationFiscalCodeGuard} blocks completion while it is still {@code F*}/blank.
+   *
+   * <p>ETP-5745 CP-22: a rectificative document type now ACTIVELY CLEARS
+   * {@code etvfacInvType} to {@code ""} — CP-20 had left it untouched instead, which meant SII's
+   * Clave visibly flips to {@code "R"} and TicketBAI's Código field visibly appears the instant
+   * the user picks a rectificative doc type, but VERI*FACTU's own "Tipo de Factura" silently sat
+   * at {@code "F1"} with no visual cue that it, too, needs a manual choice before completion —
+   * the user only found out at the 422. Clearing it gives the SAME "something needs your
+   * attention" signal the other two systems already have (the Select shows its empty-state
+   * placeholder — see {@code useSifFieldPatcher.js}'s matching exclusion of a rectificative
+   * invoice from its own F1-backfill effect, CP-22).
+   *
+   * <p>The CLEARING-to-{@code "F1"} side (switching AWAY from a rectificative doc type) is
+   * unchanged: cleanup of a now-irrelevant {@code R1}-{@code R5} value, not a guess (same
+   * reasoning as {@code tbaiReverseinvoicecode}'s own clear-on-revert).
+   * No-op when the trigger is not {@code transactionDocument}, when
+   * {@link RectificativeSupport#isColumnPresent()} is {@code false} (no way to tell direction), or
+   * when the current organization has no active VERI*FACTU configuration (ETP-5745 Warning 1 —
+   * aligned with {@code applyRectificativeFieldsFromDocType}'s own SII/TicketBAI gates: an org
+   * that does not use VERI*FACTU at all must not have this callout write {@code etvfacInvType} on
+   * every document-type change either).
    *
    * @param triggerField the field that fired the callout
    * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
@@ -302,29 +335,36 @@ final class InvoiceCalloutHelper {
     if (updates == null) {
       return;
     }
+    if (!RectificativeSupport.isColumnPresent()) {
+      return;
+    }
+    Organization currentOrg = OBContext.getOBContext().getCurrentOrganization();
+    String currentOrgId = currentOrg != null ? currentOrg.getId() : null;
+    if (!SalesRectificativeFiscalDefaults.verifactuConfigActive(currentOrgId)) {
+      return;
+    }
     try {
       Object rawValue = requestBody != null ? requestBody.opt(AbstractInvoiceHeaderHandler.FIELD_VALUE) : null;
       String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
       if (docTypeId.isEmpty()) {
         return;
       }
-      String sql = "SELECT em_etvfac_inv_type FROM c_doctype WHERE c_doctype_id = ?";
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
       Connection conn = OBDal.getReadOnlyInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, docTypeId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            String invType = rs.getString(1);
-            if (invType != null && !invType.trim().isEmpty()) {
-              // Updates entries must be { "value": "..." } objects, not raw strings —
-              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
-              // would give entry.value === undefined and silently skip the update.
-              JSONObject fieldUpdate = new JSONObject();
-              fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, invType.trim());
-              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
-              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
-                  invType.trim(), docTypeId);
-            }
+            boolean isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
+            String effectiveInvType = isRectificative ? "" : VERIFACTU_INV_TYPE_DEFAULT;
+            // Updates entries must be { "value": "..." } objects, not raw strings —
+            // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
+            // would give entry.value === undefined and silently skip the update.
+            JSONObject fieldUpdate = new JSONObject();
+            fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, effectiveInvType);
+            updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
+            log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: set etvfacInvType to '{}' for docType={}",
+                effectiveInvType, docTypeId);
           }
         }
       }
@@ -334,8 +374,10 @@ final class InvoiceCalloutHelper {
   }
 
   /**
-   * Injects TicketBAI rectificative fields into the callout response when the selected document
-   * type is marked as rectificative ({@code em_etsg_isrectificative = 'Y'}).
+   * Injects {@code isRectificative} plus TicketBAI's and SII's own STRUCTURAL rectificative
+   * fields into the callout response when the selected document type is marked as rectificative
+   * ({@code em_etsg_isrectificative = 'Y'}) — never a "motivo"/code, only the fields that say
+   * "this is a correction" (ETP-5745 CP-15).
    * Fires only when {@code triggerField} is {@code "transactionDocument"}.
    * No-op when {@link RectificativeSupport#isColumnPresent()} is {@code false}.
    *
@@ -358,10 +400,19 @@ final class InvoiceCalloutHelper {
    * {@code tbaiReverseinvoicecode} (this fix) still gets an EXPLICIT {@code issotrx} guard below —
    * belt-and-braces so the backend's intent doesn't silently depend on frontend field config, and
    * so this callout never emits a stray {@code updates} entry for a field structurally absent on the
-   * purchase side. TicketBAI reverse-invoice codes (AD_REF_LIST
-   * 89C6433F71584D23B95140DE86EDC726, e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an
-   * issued-document (AR) concept — a received (AP) purchase invoice is never TicketBAI-reported by
-   * the receiving party.
+   * purchase side. TicketBAI reverse-invoice codes (AD_REF_LIST 89C6433F71584D23B95140DE86EDC726,
+   * e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an issued-document (AR) concept — a
+   * received (AP) purchase invoice is never TicketBAI-reported by the receiving party.
+   *
+   * <p><b>ETP-5745 CP-14:</b> {@code tbaiReverseinvoicecode} is ONLY ever CLEARED here (when the
+   * document type stops being rectificative) — never auto-picked. See the inline comment at its
+   * block below for why.</p>
+   *
+   * <p><b>ETP-5745 CP-18:</b> {@code aeatsiiMotivoRectif} gets the same treatment — cleared on
+   * revert, never set. {@code aeatsiiClaveTipo}, unlike the two "motivo"/code fields, IS reverted
+   * to its generic default ({@code "F1"}) on revert (manual testing showed leaving it at
+   * {@code "R"} stranded the form in an inconsistent state within the same unsaved session) — see
+   * the inline comments at the {@code aeatsiiClaveTipo}/{@code aeatsiiMotivoRectif} block below.</p>
    *
    * @param triggerField the callout trigger field name
    * @param requestBody  the callout request body
@@ -384,44 +435,172 @@ final class InvoiceCalloutHelper {
       if (docTypeId.isEmpty()) {
         return;
       }
-      String sql = "SELECT em_etsg_isrectificative, issotrx FROM c_doctype WHERE c_doctype_id = ?";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      boolean isRectificative = false;
-      boolean isSalesTransaction = false;
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, docTypeId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
-            isSalesTransaction = "Y".equalsIgnoreCase(rs.getString(2));
-          }
-        }
-      }
-      JSONObject isReverseUpdate = new JSONObject();
-      isReverseUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "Y" : "N");
-      updates.put("tbaiIsreverseinvoice", isReverseUpdate);
+      DocTypeRectifFlags flags = queryDocTypeRectifFlags(docTypeId);
+      boolean isRectificative = flags.isRectificative;
+      boolean isSalesTransaction = flags.isSalesTransaction;
 
-      JSONObject reverseTypeUpdate = new JSONObject();
-      // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
-      // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
-      reverseTypeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
-      updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
+      // ETP-5745 CP-25: resolved once and reused for BOTH systems' gates below — the same
+      // current-session-organization resolution applySiiAuthorizationCallout already uses a few
+      // methods above (the callout has no invoice id yet on a brand new, unsaved record, so
+      // there is no invoice-level organization to read).
+      Organization currentOrg = OBContext.getOBContext().getCurrentOrganization();
+      String currentOrgId = currentOrg != null ? currentOrg.getId() : null;
+      boolean tbaiActive = StringUtils.isNotBlank(currentOrgId)
+          && SalesRectificativeFiscalDefaults.tbaiConfigActive(currentOrgId);
+      boolean siiActive = StringUtils.isNotBlank(currentOrgId)
+          && SalesRectificativeFiscalDefaults.siiConfigActive(currentOrgId);
 
-      // ETP-5229: tbaiReverseinvoicecode is SALES-ONLY (see javadoc) — never touched for a
-      // purchase (AP) doc type, so it is left exactly as-is on purchase invoices.
-      if (isSalesTransaction) {
-        JSONObject reverseCodeUpdate = new JSONObject();
-        // "R4" = "Factura rectificativa: Resto." (AD_REF_LIST VALUE for reference
-        // 89C6433F71584D23B95140DE86EDC726). Cleared when not rectificative.
-        reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R4" : "");
-        updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
-      }
+      putIsRectificativeEcho(updates, isRectificative);
+      applyTbaiRectificativeFields(updates, isRectificative, isSalesTransaction, tbaiActive);
+      applySiiRectificativeFields(updates, isRectificative, isSalesTransaction, siiActive);
 
       log.debug("[ETP-4783/ETP-5229] applyRectificativeFieldsFromDocType: docType={} isRectificative={} "
               + "isSalesTransaction={}",
           docTypeId, isRectificative, isSalesTransaction);
     } catch (Exception e) {
       log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /** The two {@code c_doctype} flags {@link #applyRectificativeFieldsFromDocType} needs. */
+  private static final class DocTypeRectifFlags {
+    private final boolean isRectificative;
+    private final boolean isSalesTransaction;
+
+    private DocTypeRectifFlags(boolean isRectificative, boolean isSalesTransaction) {
+      this.isRectificative = isRectificative;
+      this.isSalesTransaction = isSalesTransaction;
+    }
+  }
+
+  /**
+   * Resolves whether the given document type is flagged rectificative and whether it is a sales
+   * (as opposed to purchase) transaction — extracted so the complexity of reading two flags out
+   * of one query sits apart from the field-by-field update logic that consumes them (S3776).
+   */
+  private static DocTypeRectifFlags queryDocTypeRectifFlags(String docTypeId) throws SQLException {
+    String sql = "SELECT em_etsg_isrectificative, issotrx FROM c_doctype WHERE c_doctype_id = ?";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    boolean isRectificative = false;
+    boolean isSalesTransaction = false;
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, docTypeId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
+          isSalesTransaction = "Y".equalsIgnoreCase(rs.getString(2));
+        }
+      }
+    }
+    return new DocTypeRectifFlags(isRectificative, isSalesTransaction);
+  }
+
+  /**
+   * ETP-5745 CP-15: echoes the structural rectificative flag itself back to the client. The SIF
+   * tab's TicketBAI panel (and the SII structural auto-set below) both gate purely on the
+   * record's own isRectificative value, which otherwise only ever arrives via a GET response
+   * (AbstractInvoiceHeaderHandler's own enrichment), i.e. only after a header save triggers the
+   * window's refetch. Putting it in this callout's updates map — the same round trip that
+   * already carries the TicketBAI reverse-invoice flag — makes it available the instant the user
+   * picks the document type, no save required.
+   */
+  private static void putIsRectificativeEcho(JSONObject updates, boolean isRectificative)
+      throws JSONException {
+    JSONObject isRectificativeUpdate = new JSONObject();
+    isRectificativeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative);
+    updates.put("isRectificative", isRectificativeUpdate);
+  }
+
+  /**
+   * TicketBAI's own structural rectificative fields for the callout response.
+   *
+   * <p>ETP-5745 CP-25: all three fields below are gated on the organization actually having an
+   * active TicketBAI configuration, aligning them with SII (CP-24) and with how
+   * SalesRectificativeFiscalDefaults already gates TicketBAI's own after-write defaults. The
+   * reverse-invoice code already had a sales-only guard (still kept, it is a different structural
+   * condition), but the reverse flag and reverse type had none at all: for an organization with
+   * no TicketBAI configuration, this callout used to stamp them anyway. Harmless today, since no
+   * database check constraint enforces these two fields the way the SII one enforces its own, but
+   * inconsistent with every other system in this method, aligned here for the same reason: when a
+   * fiscal system does not apply, none of its fields should be touched at all.
+   */
+  private static void applyTbaiRectificativeFields(JSONObject updates, boolean isRectificative,
+      boolean isSalesTransaction, boolean tbaiActive)
+      throws JSONException {
+    if (!tbaiActive) {
+      return;
+    }
+    JSONObject isReverseUpdate = new JSONObject();
+    isReverseUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "Y" : "N");
+    updates.put("tbaiIsreverseinvoice", isReverseUpdate);
+
+    JSONObject reverseTypeUpdate = new JSONObject();
+    // "I" stands for "Por diferencias", the TicketBAI default reverse type (AD_REF_LIST value
+    // for reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
+    reverseTypeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
+    updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
+
+    // ETP-5229: the reverse-invoice code is sales-only (see the class javadoc) — never touched
+    // for a purchase document type, so it is left exactly as-is on purchase invoices.
+    //
+    // ETP-5745 CP-14: no longer auto-picks the "Resto" reverse-invoice code when the document
+    // type becomes rectificative. This is the exact kind of fiscal classification choice (why
+    // the invoice is being corrected) that must stay a manual, informed decision, the same
+    // reasoning SII's own rectification-reason field already followed. Only the clearing side is
+    // kept: switching the document type away from rectificative still blanks a now-irrelevant
+    // code, which is cleanup, not a guess. RectificationFiscalCodeGuard blocks completion while
+    // this field is still blank on a rectificative invoice.
+    if (isSalesTransaction && !isRectificative) {
+      JSONObject reverseCodeUpdate = new JSONObject();
+      reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
+      updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
+    }
+  }
+
+  /**
+   * SII's own structural rectificative fields for the callout response, via the same callout
+   * TicketBAI already uses — so the invoice-type dropdown shows the rectificative option the
+   * instant the user picks a rectificative document type, instead of only after a header save
+   * and refetch. Sales-only, mirroring useSifFieldPatcher.js's own precedent: purchase-side
+   * corrective support is not implemented, so purchase invoices keep the generic default.
+   *
+   * <p>ETP-5745 CP-24: additionally gated on the organization actually being enrolled in SII,
+   * unlike TicketBAI and VERI*FACTU above, whose fields used to be touched unconditionally. That
+   * was the real bug behind the SII rectification-code message firing for an organization using
+   * only VERI*FACTU, with SII never configured at all: the database check constraint fires on the
+   * invoice-type flag alone, with zero awareness of whether the organization even uses SII, so
+   * stamping that flag for such an organization guaranteed the save would fail on an empty
+   * rectification reason nobody was ever going to be asked for. When SII is not active for this
+   * organization, none of its three rectificative fields are touched, including on revert, as if
+   * this block did not run at all.
+   *
+   * <p>ETP-5745 CP-18: when SII is active, the invoice-type flag is also reverted to its generic
+   * default when the document type stops being rectificative, confirmed by manual testing that
+   * leaving it at the rectificative value (the earlier CP-15 behavior, deliberately asymmetric)
+   * stranded the invoice in an inconsistent state within the same unsaved session. The
+   * rectification-type field is cleared the same way the TicketBAI reverse type is. The
+   * rectification-reason field is never set to a value, still nobody's guess to make, but a value
+   * the user typed by hand while the document was rectificative must not stay stuck once it no
+   * longer applies, the same clearing-is-cleanup reasoning the TicketBAI reverse code follows.
+   */
+  private static void applySiiRectificativeFields(JSONObject updates, boolean isRectificative,
+      boolean isSalesTransaction, boolean siiActive)
+      throws JSONException {
+    if (!isSalesTransaction || !siiActive) {
+      return;
+    }
+    JSONObject claveTipoUpdate = new JSONObject();
+    claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R" : "F1");
+    updates.put("aeatsiiClaveTipo", claveTipoUpdate);
+
+    JSONObject tipoRectifUpdate = new JSONObject();
+    tipoRectifUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
+    updates.put("aeatsiiTipoRectif", tipoRectifUpdate);
+
+    if (!isRectificative) {
+      JSONObject motivoRectifUpdate = new JSONObject();
+      motivoRectifUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
+      updates.put("aeatsiiMotivoRectif", motivoRectifUpdate);
     }
   }
 }

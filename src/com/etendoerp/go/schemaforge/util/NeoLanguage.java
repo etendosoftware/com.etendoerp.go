@@ -74,8 +74,10 @@ public final class NeoLanguage {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       OBCriteria<Language> crit = OBDal.getInstance().createCriteria(Language.class);
       crit.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, code.trim()));
       crit.add(Restrictions.eq(Language.PROPERTY_ACTIVE, true));
@@ -107,8 +109,10 @@ public final class NeoLanguage {
   public static void applyToContext(String code) {
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       Language language = resolveActive(code);
       if (language != null) {
         OBContext.getOBContext().setLanguage(language);
@@ -141,6 +145,60 @@ public final class NeoLanguage {
   public static String currentCode() {
     Language language = current();
     return language != null ? language.getLanguage() : null;
+  }
+
+  /**
+   * The request language captured by {@link #captureRequestCode()} (ETP-6158). Pooled servlet
+   * threads: every capture is paired with a {@link #restoreRequestCode(String)} in a finally.
+   */
+  private static final ThreadLocal<String> REQUEST_CODE = new ThreadLocal<>();
+
+  /**
+   * Captures {@link #currentCode()} as the language of the request being served, right after
+   * authentication and before any Classic code runs: a Classic call can change the
+   * {@link OBContext} language mid-request (see {@code SiiSendHandler}), and text built on the way
+   * out (the Classic message remap) must still use the language the client asked for.
+   *
+   * @return the previously captured value, to hand back to {@link #restoreRequestCode(String)}
+   */
+  public static String captureRequestCode() {
+    String previous = REQUEST_CODE.get();
+    String code = null;
+    try {
+      code = currentCode();
+    } catch (Exception e) {
+      log.debug("No request language to capture: {}", e.getMessage());
+    }
+    if (code == null) {
+      REQUEST_CODE.remove();
+    } else {
+      REQUEST_CODE.set(code);
+    }
+    return previous;
+  }
+
+  /**
+   * Restores the value {@link #captureRequestCode()} replaced.
+   *
+   * @param previous the value it returned
+   */
+  public static void restoreRequestCode(String previous) {
+    if (previous == null) {
+      REQUEST_CODE.remove();
+    } else {
+      REQUEST_CODE.set(previous);
+    }
+  }
+
+  /**
+   * The language captured at the start of the request, or {@link #currentCode()} when none was
+   * (a background thread, a unit test).
+   *
+   * @return the request language code, or {@code null}
+   */
+  public static String requestCode() {
+    String captured = REQUEST_CODE.get();
+    return captured != null ? captured : currentCode();
   }
 
   /**

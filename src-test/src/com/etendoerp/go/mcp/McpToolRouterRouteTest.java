@@ -2683,6 +2683,42 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── etendo_routine (ETP-6236) ─────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — etendo_routine behind its flag")
+  class RoutineFlagTests {
+
+    @Test
+    @DisplayName("with the flag off a call is refused as tool_disabled and nothing runs")
+    void routineRefusedWhileFlagOff() throws Exception {
+      try (MockedStatic<McpRoutinesFlag> flag = mockStatic(McpRoutinesFlag.class)) {
+        flag.when(McpRoutinesFlag::isEnabled).thenReturn(false);
+        JSONObject result = router.route(McpConstants.TOOL_NEO_ROUTINE,
+            new JSONObject().put("mode", "help"), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertEquals(McpConstants.ERROR_TOOL_DISABLED, body.getString("error"));
+      }
+    }
+
+    @Test
+    @DisplayName("with the flag on the same call is answered by the tool")
+    void routineRoutedWhileFlagOn() throws Exception {
+      try (MockedStatic<McpRoutinesFlag> flag = mockStatic(McpRoutinesFlag.class)) {
+        flag.when(McpRoutinesFlag::isEnabled).thenReturn(true);
+        JSONObject result = router.route(McpConstants.TOOL_NEO_ROUTINE,
+            new JSONObject().put("mode", "help"), READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError", false), result.toString());
+        assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text")
+            .contains("examples"));
+      }
+    }
+  }
+
   // ── docs ────────────────────────────────────────────────────────────────
 
   @Nested
@@ -3032,6 +3068,65 @@ class McpToolRouterRouteTest {
       assertEquals("warning", body.getString("processResult"));
     }
 
+    /**
+     * The goods shipment customization over MCP: the real {@code GoodsShipmentHeaderHandler} is
+     * the resolved customization of an {@code etendo_action} documentAction call. Its pre-hook
+     * snapshots before the button fires, and its post-hook runs once, after the button, with the
+     * action's result already set as {@code previousResult}.
+     */
+    @Test
+    @DisplayName("etendo_action runs the goods shipment telemetry pre and post hooks around the button")
+    void actionRunsTheGoodsShipmentTelemetryHooks() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      responseBody.put("message", "Process completed successfully");
+      List<String> calls = new ArrayList<>();
+      List<Integer> previousStatuses = new ArrayList<>();
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(any(), any(), any(),
+          any())).thenAnswer(inv -> {
+            calls.add("button");
+            return NeoResponse.ok(responseBody);
+          });
+      // the real handler refreshes the draft match rows through the session before completing
+      when(mockOBDal.getSession()).thenReturn(
+          mock(org.hibernate.Session.class, org.mockito.Mockito.RETURNS_DEEP_STUBS));
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class);
+           MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+               mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString()))
+            .thenReturn(new com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler());
+        telemetry.when(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+            .beforeAction(any(NeoContext.class))).thenAnswer(inv -> {
+              calls.add("before:" + ((NeoContext) inv.getArgument(0)).getRecordId());
+              return null;
+            });
+        telemetry.when(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+            .afterAction(any(NeoContext.class))).thenAnswer(inv -> {
+              NeoContext ctx = inv.getArgument(0);
+              calls.add("after:" + ctx.getRecordId());
+              previousStatuses.add(ctx.getPreviousResult().getHttpStatus());
+              return null;
+            });
+        JSONObject args = new JSONObject();
+        args.put("spec", "goods-shipment");
+        args.put("entity", "goodsShipment");
+        args.put("id", RECORD_ID);
+        args.put("action", "documentAction");
+
+        JSONObject result = router.route("etendo_action", args, ACTION_SCOPES);
+
+        assertFalse(result.has("isError"), contentText(result));
+        assertEquals(List.of("before:" + RECORD_ID, "button", "after:" + RECORD_ID), calls);
+        assertEquals(List.of(200), previousStatuses);
+      }
+    }
+
     @Test
     @DisplayName("etendo_action runs the entity NeoHandler hooks around the button action")
     void actionRunsEntityHandlerHooks() throws Exception {
@@ -3206,6 +3301,7 @@ class McpToolRouterRouteTest {
   class ActionBatchTests {
 
     private static final String ACTION_NAME = "documentAction";
+    private MockedStatic<org.openbravo.base.model.ModelProvider> modelMock;
 
     @BeforeEach
     void setupBatchSupport() {
@@ -3213,6 +3309,9 @@ class McpToolRouterRouteTest {
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
           .thenCallRealMethod();
+      // Error normalization has its own tests; retain the guard's body at this mocked boundary.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
       // the batch calls this one; with the support class mocked it must run for real
       supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
           .thenCallRealMethod();
@@ -3225,6 +3324,39 @@ class McpToolRouterRouteTest {
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
       setupEntityLookup(entity, mockTab());
+
+      // Keep the real ownership/missing-document guards: these batches address existing orders
+      // readable by this tenant. Model metadata is a unit fixture, never a live DAL bootstrap.
+      org.openbravo.base.model.Entity dal = mock(org.openbravo.base.model.Entity.class);
+      when(dal.getName()).thenReturn("Order");
+      org.openbravo.base.model.ModelProvider provider =
+          mock(org.openbravo.base.model.ModelProvider.class);
+      when(provider.getEntityByTableId(TABLE_ID)).thenReturn(dal);
+      modelMock = mockStatic(org.openbravo.base.model.ModelProvider.class);
+      modelMock.when(org.openbravo.base.model.ModelProvider::getInstance).thenReturn(provider);
+      OBContext context = mock(OBContext.class);
+      when(context.getReadableClients()).thenReturn(new String[] {"batch-client"});
+      when(context.getReadableOrganizations()).thenReturn(new String[] {"batch-org"});
+      obContextMock.when(OBContext::getOBContext).thenReturn(context);
+      when(mockOBDal.get(eq("Order"), anyString())).thenAnswer(inv -> {
+        org.openbravo.model.common.order.Order row =
+            mock(org.openbravo.model.common.order.Order.class);
+        org.openbravo.model.ad.system.Client client =
+            mock(org.openbravo.model.ad.system.Client.class);
+        when(client.getId()).thenReturn("foreign".equals(inv.getArgument(1))
+            ? "other-client" : "batch-client");
+        when(row.getClient()).thenReturn(client);
+        org.openbravo.model.common.enterprise.Organization org =
+            mock(org.openbravo.model.common.enterprise.Organization.class);
+        when(org.getId()).thenReturn("batch-org");
+        when(row.getOrganization()).thenReturn(org);
+        return row;
+      });
+    }
+
+    @AfterEach
+    void closeBatchMetadata() {
+      modelMock.close();
     }
 
     private JSONObject batchArgs(String... ids) throws Exception {
@@ -3239,6 +3371,56 @@ class McpToolRouterRouteTest {
 
     private NeoResponse processOk(String message) throws Exception {
       return NeoResponse.ok(new JSONObject().put("status", "success").put("message", message));
+    }
+
+    /**
+     * {@code etendo_action_batch} goes through the same single-document path per id: the goods
+     * shipment customization's pre and post hooks run once per document, the post-hook after that
+     * document's button and with its result set.
+     */
+    @Test
+    @DisplayName("etendo_action_batch runs the goods shipment telemetry hooks once per completed id")
+    void batchRunsTheGoodsShipmentTelemetryHooksOncePerDocument() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn("goods-shipment-test-handler");
+      setupEntityLookup(entity, mockTab());
+      List<String> calls = new ArrayList<>();
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any()))
+          .thenAnswer(inv -> {
+            calls.add("button:" + inv.getArgument(1));
+            return processOk("completed");
+          });
+      // the real handler refreshes the draft match rows through the session before completing
+      when(mockOBDal.getSession()).thenReturn(
+          mock(org.hibernate.Session.class, org.mockito.Mockito.RETURNS_DEEP_STUBS));
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class);
+           MockedStatic<com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry> telemetry =
+               mockStatic(com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString()))
+            .thenReturn(new com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler());
+        telemetry.when(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+            .beforeAction(any(NeoContext.class))).thenAnswer(inv -> {
+              calls.add("before:" + ((NeoContext) inv.getArgument(0)).getRecordId());
+              return null;
+            });
+        telemetry.when(() -> com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry
+            .afterAction(any(NeoContext.class))).thenAnswer(inv -> {
+              NeoContext ctx = inv.getArgument(0);
+              assertEquals(200, ctx.getPreviousResult().getHttpStatus());
+              calls.add("after:" + ctx.getRecordId());
+              return null;
+            });
+
+        JSONObject result = router.route("etendo_action_batch", batchArgs("o1", "o2", "o3"),
+            WRITE_SCOPES);
+
+        assertFalse(result.has("isError"), contentText(result));
+        assertEquals(List.of(
+            "before:o1", "button:o1", "after:o1",
+            "before:o2", "button:o2", "after:o2",
+            "before:o3", "button:o3", "after:o3"), calls);
+      }
     }
 
     @Test
@@ -3302,6 +3484,24 @@ class McpToolRouterRouteTest {
 
       assertFalse(answer.getJSONArray("results").getJSONObject(0).getBoolean("ok"));
       assertTrue(answer.getJSONArray("results").getJSONObject(1).getBoolean("ok"));
+    }
+
+    @Test
+    @DisplayName("another tenant's document is refused before its process runs")
+    void foreignDocumentRunsNothing() throws Exception {
+      JSONObject answer = new JSONObject(contentText(
+          router.route("etendo_action_batch", batchArgs("foreign"), WRITE_SCOPES)));
+
+      assertEquals(0, answer.getJSONObject("summary").getInt("succeeded"));
+      assertEquals(1, answer.getJSONObject("summary").getInt("failed"));
+      assertFalse(answer.getJSONArray("results").getJSONObject(0).getBoolean("ok"));
+      JSONObject refusal = answer.getJSONArray("results").getJSONObject(0)
+          .getJSONObject("error").getJSONObject("error");
+      assertEquals(404, refusal.getInt("status"));
+      assertEquals("Record not found", refusal.getString("message"));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()), never());
+      verify(mockOBDal, never()).commitAndClose();
     }
 
     @Test

@@ -53,6 +53,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -100,6 +103,7 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * just as ambiguous as one carrying the published spelling.
  *
  * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
+ * @covers com.etendoerp.go.schemaforge.ContactAddressName
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -277,6 +281,57 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("bp-loc-id", resultRecord.getString("id"));
     assertEquals("geo-loc-id", resultRecord.getString("locationAddress"));
     verify(geoLoc).setCountry(country);
+  }
+
+  /**
+   * The ship-to and invoice-to flags a create writes on the new C_BPartner_Location. A body that
+   * omits them (the contacts CSV import sends neither) gets an address marked for both shipping
+   * and invoicing; an explicit {@code false} is stored as sent. Each flag reads its own key: the
+   * mixed row would fail if one were read from the other's. An empty cell is an omitted key.
+   */
+  @ParameterizedTest(name = "shipToAddress={0}, invoiceToAddress={1} -> ship={2}, invoice={3}")
+  @CsvSource({
+      ",      ,      true,  true",
+      "false, false, false, false",
+      "false, ,      false, true",
+  })
+  void testHandleCreateDefaultsShipToAndInvoiceToWhenOmitted(Boolean sentShipTo,
+      Boolean sentInvoiceTo, boolean expectedShipTo, boolean expectedInvoiceTo) throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    stubCountry("ES");
+
+    JSONObject body = createBodyWithCountry("ES");
+    body.put("name", "Test Address");
+    if (sentShipTo != null) {
+      body.put("shipToAddress", sentShipTo.booleanValue());
+    }
+    if (sentInvoiceTo != null) {
+      body.put("invoiceToAddress", sentInvoiceTo.booleanValue());
+    }
+
+    NeoResponse response = handler.handle(buildContext("POST", null, body, params));
+
+    assertEquals(201, response.getHttpStatus());
+    verify(bpLoc).setShipToAddress(expectedShipTo);
+    verify(bpLoc).setInvoiceToAddress(expectedInvoiceTo);
   }
 
   /**
@@ -648,6 +703,63 @@ class ContactsLocationAddressHandlerTest {
     when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
         .thenReturn(bpLoc);
     return bpLoc;
+  }
+
+  /**
+   * ETP-6206: an edit that sends "city, long address line" as the name used to fail at flush,
+   * because {@code C_BPartner_Location.Name} is 60 characters. The update path now caps it like the
+   * create path does.
+   */
+  @Test
+  void anUpdateNameOver60IsCappedAt60() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", "Madrid, Calle de la Ribera del Manzanares y Paseo de la Virgen del P");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Madrid, Calle de la Ribera del Manzanares y Paseo de la Virg");
+    }
+  }
+
+  /** ETP-6206: an update name that fits is stored as sent. */
+  @Test
+  void anUpdateNameThatFitsIsStoredUnchanged() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", "Madrid, Calle Mayor, 7");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Madrid, Calle Mayor, 7");
+    }
+  }
+
+  /**
+   * ETP-6206: the update path now runs the sent name through {@code ContactAddressName.capped},
+   * which cannot take a missing name. An empty name, or the literal "null" a cleared field is sent
+   * as, is no name: the stored one is kept and the rest of the edit is still saved.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = { "", "null" })
+  void aBlankUpdateNameKeepsTheStoredName(String sentName) throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", sentName);
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(bpLoc, never()).setName(any());
+      verify(geoLoc).setPostalCode("28002");
+    }
   }
 
   /** A PATCH changes the field it sends and keeps every address field it omits. */

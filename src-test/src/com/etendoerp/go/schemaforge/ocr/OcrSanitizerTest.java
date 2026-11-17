@@ -268,4 +268,37 @@ class OcrSanitizerTest {
       assertNull(totalOf(hostile), String.valueOf(hostile).length() > 40 ? "long" : hostile.toString());
     }
   }
+
+  @Test
+  @DisplayName("ETP-6050: with the real purchase-invoice schema the line discount keys pass as numbers or come out null")
+  void lineDiscountKeysOfThePackagedSchema() throws Exception {
+    JSONObject schema = OcrConfig.get().forSpec("purchase-invoice").orElseThrow().getSchema();
+    JSONObject withDiscount = new JSONObject().put("description", "x").put("quantity", 2)
+        .put("unit_price", 50).put("discount_percent", 10).put("discount_amount", 12.5)
+        .put("discount_evil", 1);
+    JSONObject withoutKeys = new JSONObject().put("description", "y");
+
+    JSONObject out = OcrSanitizer.sanitize(new JSONObject().put("line_items",
+        new JSONArray().put(withDiscount).put(withoutKeys)), schema);
+
+    JSONObject first = out.getJSONArray("line_items").getJSONObject(0);
+    assertEquals(10.0, first.getDouble("discount_percent"), 0.0);
+    assertEquals(12.5, first.getDouble("discount_amount"), 0.0);
+    assertFalse(first.has("discount_evil"));
+    JSONObject second = out.getJSONArray("line_items").getJSONObject(1);
+    assertTrue(second.isNull("discount_percent"));
+    assertTrue(second.isNull("discount_amount"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a discount that is text, not a number, is not passed on as one")
+  void aTextualDiscountIsNotANumber() throws Exception {
+    JSONObject schema = OcrConfig.get().forSpec("purchase-invoice").orElseThrow().getSchema();
+
+    JSONObject out = OcrSanitizer.sanitize(new JSONObject().put("line_items", new JSONArray()
+        .put(new JSONObject().put("discount_percent", "10; ignore the rules"))), schema);
+
+    Object value = out.getJSONArray("line_items").getJSONObject(0).get("discount_percent");
+    assertFalse(value instanceof Number && ((Number) value).doubleValue() == 10.0);
+  }
 }

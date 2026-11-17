@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -47,6 +48,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -115,13 +117,30 @@ class SignupAccountServiceTest {
         eq("Ana"), eq(DRAFT), any())).thenReturn(account);
 
     String id = service.create(new SignupAccountService.NewAccount("ana@empresa.es", "Ana", DRAFT,
-        "crm", false, "{\"utm_source\":\"x\"}", true));
+        "crm", false, "{\"utm_source\":\"x\"}", true, null));
 
     assertEquals(ACCOUNT_ID, id);
     assertEquals(1, queued.size());
     signupDal.verify(() -> SignupAccountDalHelper.createSignupAccount(eq("ana@empresa.es"),
         eq("Ana"), eq(DRAFT), argThat(data -> "crm".equals(data.channel()) && !data.sendEmails()
             && data.termsAcceptedAt() != null && "{\"utm_source\":\"x\"}".equals(data.source()))));
+  }
+
+  @Test
+  void aBookedDemosDealIsRecordedBeforeItsEnvironmentIsCreated() {
+    // ETP-6082: the environment's demo is then reported on marketing's deal.
+    signupDal.when(() -> SignupAccountDalHelper.createSignupAccount(any(), any(), any(), any()))
+        .thenReturn(account);
+    try (MockedStatic<HubSpotOutbox> outbox = mockStatic(HubSpotOutbox.class)) {
+      service.create(new SignupAccountService.NewAccount("ana@empresa.es", "Ana", DRAFT, "web",
+          false, null, false, "555"));
+      service.create(new SignupAccountService.NewAccount("ana@empresa.es", "Ana", DRAFT, "web",
+          false, null, false, null));
+
+      outbox.verify(() -> HubSpotOutbox.demoDeal(ACCOUNT_ID, "555"));
+      outbox.verify(() -> HubSpotOutbox.demoDeal(any(), any()), times(1));
+    }
+    verify(OBDal.getInstance()).commitAndClose();
   }
 
   @Test

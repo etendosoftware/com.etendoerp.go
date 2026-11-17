@@ -81,6 +81,26 @@ dependencies {
     implementation('com.etendoerp:accounting.dimensions.assets:[3.0.0,)')
     implementation('com.etendoerp:accounting.dimensions.assets.template:[3.0.0,)')
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
+    // ETP-6148 — SEPA remittances. com.etendoerp.go points ETGO_SF_* rows at the Classic Remittance
+    // window, reads and filters by REM_REMITTANCE.REMITTANCE_STATUS (added and maintained by the
+    // remittance module itself, ETP-6148) and reads the OBSEPAD mandate columns of C_BPARTNER. It adds
+    // no column to the REM tables. The floor is the version org.openbravo.sepa.iso20022 2.0.0 itself
+    // requires (5.1.1); it does NOT yet guarantee REMITTANCE_STATUS: raise it to the remittance
+    // version that publishes that column when the module is released. By decision the dependency is
+    // declared ONLY here: there is no AD_MODULE_DEPENDENCY row (the same as the PSD2, SII and
+    // Verifactu extensions), so every build that installs com.etendoerp.go must also install these
+    // modules.
+    implementation('org.openbravo:module.remittance:[5.1.1,)')
+    implementation('org.openbravo:sepa.iso20022:[2.0.0,)')
+    implementation('org.openbravo:sepa.iso20022.coredirectdebit.customertobank:[2.0.0,)')
+    // ETP-6148 — the remittance spec's ETGO_SF_FIELD rows reference columns of the automated
+    // remittance module (REM_Remittance.EM_Etar_Automaticprocess,
+    // REM_RemittanceLine_Cancel.EM_Etar_ReturnReceipt),
+    // and the automated-remittance work (returns and settlements) is planned on top of it. Without
+    // the module installed, update.database fails on ETGO_SF_FLD_COL_FK. Same Gradle-only pattern
+    // as the remittance module above: no AD_MODULE_DEPENDENCY row. It pins
+    // org.openbravo:module.remittance:5.2.0 exactly, which the range above resolves to.
+    implementation('com.etendoerp:automated.remittance:[3.2.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
     // Feature flags: OpenFeature is the application-facing API. GoFeatureFlags.createProvider() is
     // the single registration point that chooses the control plane — Datadog when switched on and
@@ -252,6 +272,21 @@ rootProject.afterEvaluate { rootProj ->
 }
 
 /**
+ * ETP-6069 — how many JVMs {@code goTestUnit} runs side by side.
+ *
+ * <p>One by default, the serial run. Measured on 12 cores: 1 fork 341 s, 2 forks ~250 s, more
+ * forks no faster. Not worth it yet: with more than one fork, which classes share a JVM depends on
+ * scheduling, so a leak {@code StaticStateLeakListener} cannot repair (a failed static
+ * initializer, see {@code docs/test-jvm-isolation.md}) would turn into a CI failure nobody can
+ * reproduce. {@code -PgoTestUnitForks=N} runs N forks, for a local run or once those leaks are
+ * fixed at their source.</p>
+ */
+def goTestUnitForks = { rootProj ->
+    def requested = rootProj.findProperty('goTestUnitForks')
+    return requested == null ? 1 : Math.max(1, requested.toString().toInteger())
+}
+
+/**
  * ETP-5695 — {@code goTestUnit}: the database-free half of this module's Java suite.
  *
  * <p>The module's test classes split cleanly in two. A few dozen reach {@code OBBaseTest} or
@@ -316,8 +351,8 @@ rootProject.afterEvaluate { rootProj ->
         t.maxHeapSize = rootTest.maxHeapSize
         t.workingDir = rootTest.workingDir
         t.environment(rootTest.environment)
-        t.maxParallelForks = rootTest.maxParallelForks
         t.forkEvery = rootTest.forkEvery
+        t.maxParallelForks = goTestUnitForks(rootProj)
     }
 
     // goTestUnit's own coverage, read by scripts/check-diff-coverage.py. jacocoRootReport merges
@@ -363,7 +398,7 @@ rootProject.afterEvaluate { rootProj ->
  * {@code goCellMockTest}.</p>
  */
 def cellsDir = file('src-test/cells')
-def schemaforgeTestsDir = file('src-test/src/com/etendoerp/go/schemaforge')
+def testsDir = file('src-test/src')
 
 def sharedCellsDir = new File(cellsDir, 'compartidos')
 
@@ -480,7 +515,7 @@ rootProject.afterEvaluate { rootProj ->
 
     rootProj.tasks.create('goCellCheck') { t ->
         t.group = 'verification'
-        t.description = 'Falla si algún test de schemaforge no está en ninguna célula o está en varias.'
+        t.description = 'Falla si algún test de src-test no está en ninguna célula o está en varias.'
         t.doLast {
             // Cada clase debe estar en un solo archivo; una célula puede además incluir grupos compartidos.
             readCells()
@@ -489,14 +524,14 @@ rootProject.afterEvaluate { rootProj ->
             }
             def byClass = assigned.groupBy { it[0] }
             def existing = []
-            schemaforgeTestsDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+            testsDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
                 if (!f.name.endsWith('.java')) {
                     return
                 }
                 String src = f.getText('UTF-8')
                 if (src =~ /@(org\.junit\.(jupiter\.api\.)?)?(Test|ParameterizedTest)\b/ && !(src =~ /abstract\s+class/)) {
-                    String rel = schemaforgeTestsDir.toPath().relativize(f.toPath()).toString()
-                    existing << 'com.etendoerp.go.schemaforge.' + (rel - '.java').replace(File.separator, '.')
+                    String rel = testsDir.toPath().relativize(f.toPath()).toString()
+                    existing << (rel - '.java').replace(File.separator, '.')
                 }
             }
             def missing = existing - byClass.keySet()
@@ -508,7 +543,7 @@ rootProject.afterEvaluate { rootProj ->
             if (missing || stale || duplicated) {
                 throw new GradleException("Revisa src-test/cells/: ${missing.size()} sin célula, ${stale.size()} obsoletos, ${duplicated.size()} duplicados.")
             }
-            println "OK: ${existing.size()} tests de schemaforge, cada uno en un solo archivo de célula."
+            println "OK: ${existing.size()} clases de test, cada una en un solo archivo de célula."
         }
     }
 }

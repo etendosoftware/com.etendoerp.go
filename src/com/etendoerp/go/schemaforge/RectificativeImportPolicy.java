@@ -51,14 +51,21 @@ final class RectificativeImportPolicy {
 
   /** Nothing is a rectificative, purchase rules: what a caller that sets none gets. */
   static final RectificativeImportPolicy NONE = new RectificativeImportPolicy(invoice -> false,
-      false);
+      false, false);
 
   private final Predicate<Invoice> rectificative;
   private final boolean salesModalRules;
+  private final boolean classicPendingListings;
 
   RectificativeImportPolicy(Predicate<Invoice> rectificative, boolean salesModalRules) {
+    this(rectificative, salesModalRules, false);
+  }
+
+  RectificativeImportPolicy(Predicate<Invoice> rectificative, boolean salesModalRules,
+      boolean classicPendingListings) {
     this.rectificative = rectificative;
     this.salesModalRules = salesModalRules;
+    this.classicPendingListings = classicPendingListings;
   }
 
   /** Whether {@code invoice} is a rectificative, by the header customization's own rule. */
@@ -76,9 +83,30 @@ final class RectificativeImportPolicy {
     return salesModalRules;
   }
 
+  /**
+   * Whether the shipment import popup of this side greys out a movement line that another invoice
+   * is already linked to (ETP-6099): the sales one does, the purchase one only greys the lines this
+   * invoice holds. Read by the {@code detail} count of {@code pendingLines}.
+   */
+  boolean excludesLinesInvoicedElsewhere() {
+    return salesModalRules;
+  }
+
   /** Whether the origin invoice and the return are compared by currency (the sales modals do). */
   boolean comparesCurrency() {
     return salesModalRules;
+  }
+
+  /**
+   * Whether this side's order and goods-receipt listings ({@code availableOrders},
+   * {@code availableOrderLines}, {@code availableReceipts}, {@code availableReceiptLines}) accept
+   * {@code pendingBasis: "classic"} (ETP-6099 follow-up, product decision): the purchase popups
+   * keep the pending rule they computed in the browser before they listed through the actions
+   * (no draft deduction; a receipt line at its full quantity unless THIS invoice holds it). The
+   * sales popups already used the server rule, so the sales side offers no classic basis.
+   */
+  boolean offersClassicPending() {
+    return classicPendingListings;
   }
 
   /**
@@ -96,7 +124,8 @@ final class RectificativeImportPolicy {
    * type ({@code transactionDocument}).
    *
    * @param classifier      the header's {@code classifyDocType}
-   * @param salesModalRules {@code true} when this side mirrors the sales window's modals
+   * @param salesModalRules {@code true} when this side mirrors the sales window's modals; the
+   *     purchase side (false) also offers the classic pending basis ({@link #offersClassicPending})
    */
   static RectificativeImportPolicy forHeader(Function<DocumentType, String> classifier,
       boolean salesModalRules) {
@@ -104,7 +133,7 @@ final class RectificativeImportPolicy {
       DocumentType type = invoice.getTransactionDocument();
       return type != null
           && AbstractInvoiceHeaderHandler.SUBTYPE_RECTIFICATIVA.equals(classifier.apply(type));
-    }, salesModalRules);
+    }, salesModalRules, !salesModalRules);
   }
 
   /** The policy the header stored on the request, or {@link #NONE}. */

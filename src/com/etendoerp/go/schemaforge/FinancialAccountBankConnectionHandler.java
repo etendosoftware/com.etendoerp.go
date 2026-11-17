@@ -17,10 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -41,8 +44,11 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountSyncLock;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -70,19 +76,50 @@ import com.google.common.cache.CacheBuilder;
  *   <li>{@code POST connect} — returns the Salt Edge connect URL. Same for both entry points; the
  *       account need not exist yet (case 2). The {@code return_to} is built server-side from the
  *       request {@code Origin} header so the popup returns to the SPA callback route.</li>
- *   <li>{@code POST link {financialAccountId, connectionId, saltEdgeAccountId}} — case 1: link the
- *       chosen Salt Edge account to an existing FA.</li>
- *   <li>{@code POST createAndLink {type, connectionId, saltEdgeAccountId}} — case 2: create the FA
- *       from the chosen Salt Edge account (name, currency) plus the chosen {@code type}, then link.</li>
+ *   <li>{@code POST link {financialAccountId, connectionId, saltEdgeAccountId, importFromDate,
+ *       statementGrouping}} — case 1: link the chosen Salt Edge account to an existing FA.</li>
+ *   <li>{@code POST createAndLink {type, connectionId, saltEdgeAccountId, importFromDate,
+ *       statementGrouping}} — case 2: create the FA from the chosen Salt Edge account (name,
+ *       currency) plus the chosen {@code type}, then link.</li>
  *   <li>{@code POST reconnect {financialAccountId}} — returns the Salt Edge reconnect URL.</li>
  *   <li>{@code POST disconnect {financialAccountId}} — unlinks (and deletes the Salt Edge
  *       connection when not shared).</li>
- *   <li>{@code POST sync {financialAccountId}} — imports bank statements for the account.</li>
+ *   <li>{@code POST sync {financialAccountId}} — imports bank statements for the account. One sync
+ *       per account at a time (ETP-6154): while another one runs it answers {@code IN_PROGRESS}
+ *       at once instead of waiting.</li>
+ *   <li>{@code POST syncStatus {financialAccountIds: [..]}} (or
+ *       {@code GET syncStatus&financialAccountIds=id1,id2}) — per account, whether a sync is
+ *       running and the outcome of the last one (ETP-6154).</li>
  *   <li>{@code POST import-settings {financialAccountId, importFromDate?, importToDate?,
- *       statementGrouping?}} — updates the import configuration on the FA.</li>
+ *       statementGrouping?}} — updates the import configuration on the FA. An omitted key keeps
+ *       its stored value, but the configuration it saves must have an import-from date and a
+ *       valid grouping (ETP-6151).</li>
  * </ul>
+ *
+ * <p><b>Import settings at link time (ETP-6151, flag {@code psd2-statement-import-settings}).</b>
+ * Everything in this paragraph, the {@code import-settings} requirements and {@code maxFetchInterval}
+ * on {@code accounts} applies only with the flag on for the account ({@link Psd2ImportSettingsFlag});
+ * off, the actions behave as before ETP-6151 and the new keys are ignored. {@code link} and {@code createAndLink} require
+ * {@code importFromDate} ({@code yyyy-MM-dd}) and {@code statementGrouping} (one of {@code 1BD},
+ * {@code 1BW}, {@code 1BM}, {@code 1BE}); a missing or invalid value answers 400 before anything
+ * is written or any Salt Edge call is made. Both are stored on the FA
+ * ({@code EM_PSD2_IMPORT_FROM_DATE}, {@code EM_PSD2_STATEMENT_FREQUENCY}) in the same transaction
+ * as the link, so no synchronization ever runs on the new link without them. The three write
+ * actions ({@code link}, {@code createAndLink}, {@code import-settings}) validate with the same
+ * code ({@link BankImportSettingsRules#requireImportSettings} and its parts) and add
+ * the same non-blocking {@code messages} warning when the import-from date is older than the
+ * history the bank serves. {@code accounts} exposes that history limit as
+ * {@code maxFetchInterval} so the selection modal can warn before the link is confirmed.
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-6154, following the ETP-5588 recipe): the
+ * {@code ETGO_SF_ENTITY} row of the {@code financial-account-bank-connection} report spec carries
+ * no {@code Java_Qualifier} and the class no {@code @Named}. Both surfaces (the SPA's
+ * {@code /sws/neo/financial-account-bank-connection} route and the MCP bank actions of
+ * {@code financial-account/account}, through {@link FinancialAccountBankConnectionEndpoint}) reach
+ * it through the annotation. See {@code neo-headless.md} §5.3.a.
  */
-@Named("financial-account-bank-connection")
+@NeoExtension(spec = "financial-account-bank-connection",
+    entity = "financial-account-bank-connection")
 public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountBankConnectionHandler.class);
@@ -102,6 +139,15 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
   private static final String PARAM_ACTION = "action";
   private static final String PARAM_ACCOUNT_ID = "financialAccountId";
+  private static final String PARAM_ACCOUNT_IDS = "financialAccountIds";
+  /**
+   * ETP-6154. Upper bound of the ids one {@code syncStatus} request may ask about: each id costs
+   * an account read, a connection read and a lock probe, so an unbounded list is an unbounded
+   * request. Generous for any accounts list the SPA renders.
+   */
+  static final int MAX_SYNC_STATUS_IDS = 200;
+  static final String MSG_TOO_MANY_SYNC_STATUS_IDS =
+      "Too many financial accounts in one syncStatus request: at most " + MAX_SYNC_STATUS_IDS;
   private static final String PARAM_CONNECTION_ID = "connectionId";
   private static final String PARAM_SALT_EDGE_ACCOUNT_ID = "saltEdgeAccountId";
   private static final String PARAM_TYPE = "type";
@@ -121,6 +167,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String ACTION_RECONNECT_CALLBACK = "reconnect-callback";
   private static final String ACTION_DISCONNECT = "disconnect";
   private static final String ACTION_SYNC = "sync";
+  private static final String ACTION_SYNC_STATUS = "syncStatus";
   private static final String ACTION_IMPORT_SETTINGS = "import-settings";
 
   /** SPA route the Salt Edge popup returns to; it relays the connection id and closes itself. */
@@ -130,22 +177,33 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_CONNECT_URL = "connectUrl";
   private static final String KEY_RECONNECT_URL = "reconnectUrl";
   private static final String KEY_ACCOUNTS = "accounts";
-  private static final String KEY_SALT_EDGE_ACCOUNT_ID = "saltEdgeAccountId";
-  private static final String KEY_NAME = "name";
-  private static final String KEY_IBAN = "iban";
-  private static final String KEY_CURRENCY = "currency";
-  private static final String KEY_NATURE = "nature";
+  private static final String KEY_SALT_EDGE_ACCOUNT_ID =
+      FinancialAccountBankAccountsPayload.KEY_SALT_EDGE_ACCOUNT_ID;
+  private static final String KEY_NAME =
+      FinancialAccountBankAccountsPayload.KEY_NAME;
   private static final String KEY_WARNING = "warning";
   private static final String KEY_PROVIDER_NAME = "providerName";
   private static final String KEY_LAST_SYNC_DATE = "lastSyncDate";
-  private static final String KEY_IMPORT_FROM_DATE = "importFromDate";
-  private static final String KEY_IMPORT_TO_DATE = "importToDate";
-  private static final String KEY_STATEMENT_GROUPING = "statementGrouping";
-  private static final String KEY_MAX_FETCH_INTERVAL = "maxFetchInterval";
-  private static final String KEY_PROVIDER_LOGO = "providerLogoUrl";
+  private static final String KEY_IMPORT_FROM_DATE =
+      BankImportSettingsRules.KEY_IMPORT_FROM_DATE;
+  private static final String KEY_IMPORT_TO_DATE =
+      BankImportSettingsRules.KEY_IMPORT_TO_DATE;
+  private static final String KEY_STATEMENT_GROUPING =
+      BankImportSettingsRules.KEY_STATEMENT_GROUPING;
+  private static final String KEY_MAX_FETCH_INTERVAL =
+      FinancialAccountBankAccountsPayload.KEY_MAX_FETCH_INTERVAL;
   private static final String KEY_LOGO_URL = "logo_url";
   private static final String KEY_DATA = "data";
   private static final String KEY_CODE = "code";
+  private static final String KEY_MESSAGE = "message";
+  private static final String KEY_IN_PROGRESS = "inProgress";
+  private static final String KEY_LAST_RESULT = "lastResult";
+  private static final String KEY_AT = "at";
+  // ETP-6154. Wire statuses of `sync` and `syncStatus`, a contract with the SPA (useBankSync) and
+  // the MCP bank actions. The PSD2 module reports success as "Success"; the wire says OK.
+  static final String SYNC_STATUS_OK = "OK";
+  static final String SYNC_STATUS_ERROR = "ERROR";
+  static final String SYNC_STATUS_IN_PROGRESS = "IN_PROGRESS";
   private static final String KEY_PROVIDERS = "providers";
   private static final String KEY_RECONNECTABLE = "reconnectable";
   // ETP-5089. Still connected, but the active connection stopped refreshing. Its own flag, never
@@ -153,19 +211,6 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // to block transfers and to swap the connected actions out, none of which applies here.
   private static final String KEY_STALE = "stale";
   private static final String KEY_STALE_MESSAGE = "staleMessage";
-  // ETP-5179. Diagnosis of an empty `accounts` list, as a machine-readable CODE rather than an
-  // English sentence. The obvious alternative — an AD_Message from
-  // com.etendoerp.psd2.bank.integration — cannot be used: those rows ship with istranslated='N',
-  // so Core resolves them to their English text unless the environment happened to import the
-  // translation pack, and their `%s` templates never interpolate either (OBMessageUtils
-  // .getI18NMessage only substitutes `%0`). A code is translated by the SPA in all three shipped
-  // locales, with its parameter, without depending on Core provisioning.
-  private static final String KEY_EMPTY_REASON = "emptyReason";
-  private static final String KEY_ACCOUNT_CURRENCY = "accountCurrency";
-  private static final String REASON_NO_ACCOUNTS = "noAccounts";
-  private static final String REASON_TYPE_MISMATCH = "typeMismatch";
-  private static final String REASON_ALL_LINKED = "allLinked";
-  private static final String REASON_CURRENCY_MISMATCH = "currencyMismatch";
   private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
@@ -177,6 +222,12 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
   /** Resolves the tenant's commercial plan; see {@link #includeSandboxProviders()}. */
   private final TenantPlanService tenantPlanService;
+
+  /**
+   * The SEPA remittance provisioning of a new Bank account (ETP-6148). Package-visible and
+   * non-final so unit tests can swap in one with its flag and DAL seams stubbed.
+   */
+  FinancialAccountRemittanceSupport remittanceSupport = new FinancialAccountRemittanceSupport();
 
   /** CDI requires a no-arg constructor; delegates to the test-injection one. */
   public FinancialAccountBankConnectionHandler() {
@@ -205,6 +256,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
         }
         if (ACTION_PROVIDERS.equals(action)) {
           return handleProviders(context);
+        }
+        if (ACTION_SYNC_STATUS.equals(action)) {
+          return handleSyncStatus(context);
         }
         return NeoResponse.error(400, MSG_MISSING + PARAM_ACTION);
       }
@@ -246,6 +300,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     }
     if (ACTION_SYNC.equals(action)) {
       return handleSync(context);
+    }
+    if (ACTION_SYNC_STATUS.equals(action)) {
+      return handleSyncStatus(context);
     }
     if (ACTION_IMPORT_SETTINGS.equals(action)) {
       return handleImportSettings(context);
@@ -315,6 +372,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // GET accounts (found bank accounts for a connection, filtered for the SPA modal)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Lists the bank accounts of a Salt Edge connection that can be linked: filtered by the
+   * Financial Account type, minus the ones already linked elsewhere, and — when an existing account
+   * is being connected — by its currency. When the list is not empty it also carries the bank's
+   * {@code providerName}, {@code providerLogoUrl} and, ETP-6151, {@code maxFetchInterval}: the
+   * whole days of history the provider declares ({@code PSD2_PROVIDER.MAX_FETCH_INTERVAL} resolved
+   * by the connection's provider code, else the {@code max_fetch_interval} of the same Salt Edge
+   * answer that carries the logo), an int, omitted when unknown — same field and same omission
+   * rule as in {@code status}. An empty list carries {@code emptyReason} instead.
+   *
+   * @param context the request: {@code connectionId} (required), {@code type},
+   *                {@code financialAccountId}
+   * @return the accounts payload, or 400 when the connection id is missing
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleAccounts(NeoContext context) throws JSONException {
     String connectionId = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_CONNECTION_ID);
     String type = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_TYPE);
@@ -343,20 +415,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       accounts = SaltEdgeAccountLinkHelper.filterAccountsByCurrency(unlinked, finAcc);
     }
 
-    JSONArray out = new JSONArray();
-    for (int i = 0; i < accounts.length(); i++) {
-      JSONObject node = accounts.optJSONObject(i);
-      if (node == null) {
-        continue;
-      }
-      JSONObject row = new JSONObject();
-      row.put(KEY_SALT_EDGE_ACCOUNT_ID, node.optString(BankIntegrationConstants.ID, ""));
-      row.put(KEY_NAME, node.optString(BankIntegrationConstants.NAME, ""));
-      row.put(KEY_CURRENCY, node.optString(BankIntegrationConstants.CURRENCY_CODE, ""));
-      row.put(KEY_NATURE, node.optString(BankIntegrationConstants.NATURE, ""));
-      row.put(KEY_IBAN, FinancialAccountBankConnectionSupport.ibanOf(node));
-      out.put(row);
-    }
+    JSONArray out = FinancialAccountBankAccountsPayload.toAccountRows(accounts);
     JSONObject data = new JSONObject();
     data.put(KEY_ACCOUNTS, out);
     // Include the bank/provider name so the selection modal can show which bank these
@@ -366,61 +425,13 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       data.put(KEY_PROVIDER_NAME, details.optString(BankIntegrationConstants.PROVIDER_NAME, ""));
       String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
       if (StringUtils.isNotBlank(providerCode)) {
-        data.put(KEY_PROVIDER_LOGO,
-            FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
+        FinancialAccountBankAccountsPayload.putProviderDisplay(data, providerCode, apiKey);
       }
     } else {
-      putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked, finAcc);
+      FinancialAccountBankAccountsPayload.putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked,
+          finAcc);
     }
     return FinancialAccountBankConnectionSupport.okData(data);
-  }
-
-  /**
-   * Explains an empty {@code accounts} list by naming the FIRST filtering stage that emptied it,
-   * so the SPA can raise a toast that states the actual cause instead of one generic message.
-   *
-   * <p>The reason is a code, not a sentence — see {@link #KEY_EMPTY_REASON} for why the wording is
-   * left to the SPA. {@link #KEY_ACCOUNT_CURRENCY} is added only for a currency mismatch, where the
-   * Financial Account's own ISO code is the single piece of data the message needs; the other
-   * reasons take no parameter, and the SPA treats the field's presence as meaningful.
-   *
-   * <p>Kept out of {@code handleAccounts} to hold that method's cognitive complexity down.
-   *
-   * @param data           response payload being built
-   * @param fromBank       accounts as the bank returned them, before any filtering
-   * @param typeFiltered   accounts left after the Financial Account type filter
-   * @param unlinked       accounts left after discarding the ones already linked elsewhere
-   * @param finAcc         the Financial Account being connected, or {@code null} in the create flow
-   */
-  private static void putEmptyDiagnosis(JSONObject data, JSONArray fromBank, JSONArray typeFiltered,
-      JSONArray unlinked, FIN_FinancialAccount finAcc) throws JSONException {
-    String reason = emptyReasonOf(fromBank, typeFiltered, unlinked);
-    data.put(KEY_EMPTY_REASON, reason);
-    if (!REASON_CURRENCY_MISMATCH.equals(reason)) {
-      return;
-    }
-    // filterAccountsByCurrency short-circuits on a currency-less FA, so reaching this branch means
-    // there is one — read it defensively all the same.
-    Currency currency = finAcc != null ? finAcc.getCurrency() : null;
-    String isoCode = currency != null ? currency.getISOCode() : null;
-    if (StringUtils.isNotBlank(isoCode)) {
-      data.put(KEY_ACCOUNT_CURRENCY, isoCode);
-    }
-  }
-
-  /** The first filtering stage that emptied the list; the currency filter is the last resort. */
-  private static String emptyReasonOf(JSONArray fromBank, JSONArray typeFiltered,
-      JSONArray unlinked) {
-    if (fromBank.length() == 0) {
-      return REASON_NO_ACCOUNTS;
-    }
-    if (typeFiltered.length() == 0) {
-      return REASON_TYPE_MISMATCH;
-    }
-    if (unlinked.length() == 0) {
-      return REASON_ALL_LINKED;
-    }
-    return REASON_CURRENCY_MISMATCH;
   }
 
   // ---------------------------------------------------------------------------
@@ -561,6 +572,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // POST link (case 1 — existing FA)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Case 1: links the chosen Salt Edge account to an existing Financial Account.
+   *
+   * <p>ETP-6151: the body must also carry {@code importFromDate} and {@code statementGrouping}
+   * (validated by {@link BankImportSettingsRules#requireImportSettings}, 400 when missing or
+   * invalid). They are written on the account before the link and committed with it. When the date
+   * is after the account's stored import-to date, that stale import-to is cleared (set to null) in
+   * the same transaction and the link goes on; {@code import-settings} keeps its range check. The answer adds the fetch-interval advisory when the date is older than the history
+   * the bank serves.
+   *
+   * @param context the request; body {@code {financialAccountId, connectionId, saltEdgeAccountId,
+   *                importFromDate, statementGrouping}}
+   * @return {@code {linked, financialAccountId, warning}}, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleLink(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -570,6 +596,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (StringUtils.isAnyBlank(accountId, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "financialAccountId/connectionId/saltEdgeAccountId");
     }
+    // Flag off: the import keys are neither required nor read, exactly as before ETP-6151.
+    BankImportSettingsRules.ImportSettings settings = Psd2ImportSettingsFlag.isEnabled()
+        ? BankImportSettingsRules.requireImportSettings(body) : null;
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
@@ -581,18 +610,47 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       return NeoResponse.error(404, "Selected bank account not found in the connection");
     }
     JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+    if (settings != null) {
+      settings.applyTo(finAcc);
+      // A stored import-to older than the new import-from is stale (the user is picking a fresh
+      // window while connecting): clear it in the same transaction instead of refusing the link.
+      if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(settings.getImportFrom(),
+          finAcc.getPSD2ImportToDate())) {
+        finAcc.setPSD2ImportToDate(null);
+      }
+    }
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put("linked", true);
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_WARNING, warning);
-    return FinancialAccountBankConnectionSupport.okData(data);
+    NeoResponse linked = FinancialAccountBankConnectionSupport.okData(data);
+    if (settings != null) {
+      FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(linked, context, finAcc,
+          settings.getImportFrom());
+    }
+    return linked;
   }
 
   // ---------------------------------------------------------------------------
   // POST createAndLink (case 2 — create the FA from the chosen Salt Edge account, then link)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Case 2: creates the Financial Account from the chosen Salt Edge account (name, currency) plus
+   * the chosen {@code type}, provisions it like any new account, then links it.
+   *
+   * <p>ETP-6151: the body must also carry {@code importFromDate} and {@code statementGrouping},
+   * validated BEFORE the account is created (400 when missing or invalid, so a bad request never
+   * leaves an account behind) and written on the new account in the same transaction as the link.
+   * The answer adds the fetch-interval advisory when the date is older than the history the bank
+   * serves.
+   *
+   * @param context the request; body {@code {type, connectionId, saltEdgeAccountId,
+   *                importFromDate, statementGrouping}}
+   * @return 201 {@code {financialAccountId, name, warning}}, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleCreateAndLink(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String type = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_TYPE);
@@ -602,6 +660,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (StringUtils.isAnyBlank(type, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "type/connectionId/saltEdgeAccountId");
     }
+    // Flag off: the import keys are neither required nor read, exactly as before ETP-6151.
+    BankImportSettingsRules.ImportSettings settings = Psd2ImportSettingsFlag.isEnabled()
+        ? BankImportSettingsRules.requireImportSettings(body) : null;
 
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
     JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
@@ -630,13 +691,29 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     // FIN_FINANCIAL_ACCOUNT_TRG has created the fin_financial_account_acct row the accounting step
     // corrects. Salt Edge linking below stays here — it is path-specific, not shared provisioning.
     FinancialAccountSupport.provisionNewAccount(finAcc);
+    // ETP-6148: a Bank account created with sepa-remittances on gets the remittance payment
+    // methods, in this same transaction (FinancialAccountRemittanceSupport). Not in
+    // provisionNewAccount: that seam is best-effort and unconditional, this is flag-gated and a
+    // failure refuses the create. Before the Salt Edge linking, so a refusal links nothing.
+    NeoResponse remittanceError = remittanceSupport.provisionNewAccount(finAcc);
+    if (remittanceError != null) {
+      return remittanceError;
+    }
 
+    if (settings != null) {
+      settings.applyTo(finAcc);
+    }
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_NAME, finAcc.getName());
     data.put(KEY_WARNING, warning);
-    return NeoResponse.createdWithData(data);
+    NeoResponse created = NeoResponse.createdWithData(data);
+    if (settings != null) {
+      FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(created, context, finAcc,
+          settings.getImportFrom());
+    }
+    return created;
   }
 
   // ---------------------------------------------------------------------------
@@ -823,6 +900,24 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // POST sync (import bank statements)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Imports the bank statements of one account, synchronously, and answers
+   * {@code {status, message, lastSyncDate}} with {@code status} one of {@code OK}, {@code WARNING},
+   * {@code ERROR} or {@code IN_PROGRESS} (always HTTP 200 once the account is found).
+   *
+   * <p>ETP-6154: {@code fetchAccountTransactions} runs the fetch under the account's
+   * {@code AccountSyncLock} and commits the imported lines before releasing it, so this action
+   * needs no commit of its own. When another sync of the account holds the lock it does not wait:
+   * the answer is {@code IN_PROGRESS} with a translated "please wait" message, and the caller
+   * follows the running sync through {@code syncStatus}. When the lock cannot be taken at all the
+   * answer is an {@code ERROR} carrying {@code code: BANK_SYNC_LOCK_UNAVAILABLE} (retriable).</p>
+   *
+   * <p>When the "already imported?" check failed during the run, the answer keeps the run's status
+   * ({@code ERROR}, or {@code WARNING} when another bank connection still imported transactions)
+   * and adds {@code code: BANK_SYNC_DUPLICATE_CHECK_FAILED} with a translated message instead of
+   * the PSD2 module's English lines (retriable). The MCP's {@code syncBank} returns this same
+   * answer.</p>
+   */
   private NeoResponse handleSync(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -833,14 +928,179 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     StringBuilder messages = new StringBuilder();
     // Single source of truth: the same per-account fetch behind the Classic "Get Bank Statement"
     // button (GetTransactions action) — both delegate to fetchAccountTransactions.
-    String status = SaltEdgeAccountLinkHelper.fetchAccountTransactions(finAcc, messages);
+    AccountTransactionsSync.SyncResult result =
+        AccountTransactionsSync.fetchAccountTransactionsWithResult(finAcc, messages);
+    String status = result.getStatus();
     JSONObject data = new JSONObject();
-    data.put(ACTION_STATUS, status);
-    data.put("message", messages.toString().trim());
+    String language = NeoLanguage.currentCode();
+    if (BankIntegrationConstants.SYNC_IN_PROGRESS.equals(status)) {
+      // The PSD2 AD_MESSAGE ships English only; the bridge answers in the caller's language.
+      data.put(ACTION_STATUS, SYNC_STATUS_IN_PROGRESS);
+      data.put(KEY_MESSAGE, NeoHints.text("psd2BankSyncInProgress", language));
+    } else if (BankIntegrationConstants.SYNC_LOCK_UNAVAILABLE.equals(status)) {
+      data.put(ACTION_STATUS, SYNC_STATUS_ERROR);
+      data.put(KEY_CODE, AccountSyncLock.LOCK_UNAVAILABLE_CODE);
+      data.put(KEY_MESSAGE, NeoHints.text("psd2BankSyncLockUnavailable", language));
+    } else if (result.isDuplicateCheckFailed()) {
+      // The status stays what the run produced (ERROR, or WARNING when another connection still
+      // imported); the code and a translated message replace the English lines of the buffer.
+      data.put(ACTION_STATUS, wireSyncStatus(status));
+      data.put(KEY_CODE, BankIntegrationConstants.SYNC_DUPLICATE_CHECK_FAILED_CODE);
+      data.put(KEY_MESSAGE, NeoHints.text("psd2BankSyncDuplicateCheckFailed", language));
+    } else {
+      data.put(ACTION_STATUS, wireSyncStatus(status));
+      data.put(KEY_MESSAGE, messages.toString().trim());
+    }
     // The PSD2 module stamps the account on the managed instance we already hold, so this reads
     // the fresh value without another query (ETP-5582).
     data.put(KEY_LAST_SYNC_DATE, lastSyncJson(finAcc));
     return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * The wire status of a finished sync: the PSD2 module's {@code Success} becomes {@code OK};
+   * {@code WARNING} and {@code ERROR} pass through unchanged.
+   *
+   * @param status the status {@code fetchAccountTransactions} returned
+   * @return the status the SPA and the MCP read
+   */
+  static String wireSyncStatus(String status) {
+    return BankIntegrationConstants.SUCCESS.equals(status) ? SYNC_STATUS_OK : status;
+  }
+
+  // ---------------------------------------------------------------------------
+  // POST / GET syncStatus (ETP-6154)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reports, per account, whether a bank sync is running and how the last one ended, for the SPA
+   * to restore its "syncing" state on load and to poll a running sync, and for the MCP's
+   * {@code bankSyncStatus}.
+   *
+   * <p>Request: {@code POST} with body {@code {financialAccountIds: [..]}} (the contract), or
+   * {@code GET} with {@code ?financialAccountIds=id1,id2}. Both answer
+   * {@code {accounts: {"<id>": {inProgress, lastSyncDate, lastResult: {status, message, at}}}}}.
+   * The {@code GET} form exists for roles with read-only access to the Financial Account window:
+   * the report-spec gate ({@code NeoAccessHelper.hasReportSpecAccess}) requires write access for a
+   * {@code POST}, so for them the {@code POST} is refused with 403 although this action only
+   * reads.</p>
+   *
+   * <p>The ids are trimmed and deduplicated before anything is read, and at most
+   * {@link #MAX_SYNC_STATUS_IDS} distinct ids are accepted (400 above it). Each id goes through
+   * {@link #loadAccount}, the same tenant guard as {@code sync}: an account the caller cannot read
+   * (or that does not exist) is simply omitted, never reported as an error, so the answer is no
+   * existence oracle.</p>
+   *
+   * <p>{@code inProgress} is read from the account's sync lock ({@code pg_locks}), which spans every
+   * node sharing the database. {@code lastResult} is the fetch health Salt Edge reports for the
+   * account's latest bank connection ({@code LAST_SUCCESS_AT} / {@code LAST_FAIL_AT} /
+   * {@code LAST_FAIL_MESSAGE}, ETP-5089): the newer of the two wins; all fields are null when the
+   * account has no connection or no recorded attempt.</p>
+   */
+  private NeoResponse handleSyncStatus(NeoContext context) throws JSONException {
+    Set<String> requestedIds = syncStatusIds(context);
+    if (requestedIds == null) {
+      return NeoResponse.error(400, MSG_MISSING + PARAM_ACCOUNT_IDS);
+    }
+    if (requestedIds.size() > MAX_SYNC_STATUS_IDS) {
+      return NeoResponse.error(400, MSG_TOO_MANY_SYNC_STATUS_IDS);
+    }
+    List<FIN_FinancialAccount> accounts = new ArrayList<>();
+    List<String> accountIds = new ArrayList<>();
+    for (String id : requestedIds) {
+      FIN_FinancialAccount finAcc = loadAccount(id);
+      if (finAcc != null) {
+        accounts.add(finAcc);
+        accountIds.add(finAcc.getId());
+      }
+    }
+    Set<String> running = AccountSyncLock.getInstance().heldAmong(accountIds);
+    JSONObject byId = new JSONObject();
+    for (FIN_FinancialAccount finAcc : accounts) {
+      JSONObject entry = new JSONObject();
+      entry.put(KEY_IN_PROGRESS, running.contains(finAcc.getId()));
+      entry.put(KEY_LAST_SYNC_DATE, lastSyncJson(finAcc));
+      entry.put(KEY_LAST_RESULT,
+          lastResultJson(SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc)));
+      byId.put(finAcc.getId(), entry);
+    }
+    JSONObject data = new JSONObject();
+    data.put(KEY_ACCOUNTS, byId);
+    return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * The distinct, trimmed, non-blank account ids a {@code syncStatus} request asks about, in
+   * request order: from the {@code financialAccountIds} array of the body on a {@code POST}, from
+   * the comma-separated {@code financialAccountIds} query parameter on a {@code GET}.
+   *
+   * @param context the request
+   * @return the ids (possibly empty), or {@code null} when the parameter is missing altogether
+   */
+  static Set<String> syncStatusIds(NeoContext context) {
+    Set<String> ids = new LinkedHashSet<>();
+    if (METHOD_GET.equals(context.getHttpMethod())) {
+      String raw = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_ACCOUNT_IDS);
+      if (raw == null) {
+        return null;
+      }
+      for (String id : raw.split(",")) {
+        addTrimmed(ids, id);
+      }
+      return ids;
+    }
+    JSONArray array = FinancialAccountBankConnectionSupport.requireBody(context)
+        .optJSONArray(PARAM_ACCOUNT_IDS);
+    if (array == null) {
+      return null;
+    }
+    for (int i = 0; i < array.length(); i++) {
+      addTrimmed(ids, array.optString(i, null));
+    }
+    return ids;
+  }
+
+  /**
+   * Adds {@code id} to {@code ids}, trimmed, unless it is blank.
+   *
+   * @param ids the target set
+   * @param id  the raw id, possibly {@code null}
+   */
+  private static void addTrimmed(Set<String> ids, String id) {
+    String trimmed = StringUtils.trimToNull(id);
+    if (trimmed != null) {
+      ids.add(trimmed);
+    }
+  }
+
+  /**
+   * The {@code lastResult} of {@code syncStatus}: the newer of the connection's last success and
+   * last failure, as {@code {status: OK|ERROR, message, at}}; every field null when there is no
+   * connection or neither was ever recorded.
+   *
+   * @param connection the account's latest bank connection, or {@code null}
+   * @return the JSON object, never {@code null}
+   * @throws JSONException never in practice (only string and null values are put)
+   */
+  static JSONObject lastResultJson(FinaccConnection connection) throws JSONException {
+    Date successAt = connection != null ? connection.getLastSuccessAt() : null;
+    Date failAt = connection != null ? connection.getLastFailAt() : null;
+    JSONObject result = new JSONObject();
+    if (failAt != null && (successAt == null || failAt.after(successAt))) {
+      result.put(ACTION_STATUS, SYNC_STATUS_ERROR);
+      result.put(KEY_MESSAGE, StringUtils.isNotBlank(connection.getLastFailMessage())
+          ? connection.getLastFailMessage() : JSONObject.NULL);
+      result.put(KEY_AT, FinancialAccountBankConnectionSupport.formatInstant(failAt));
+    } else if (successAt != null) {
+      result.put(ACTION_STATUS, SYNC_STATUS_OK);
+      result.put(KEY_MESSAGE, JSONObject.NULL);
+      result.put(KEY_AT, FinancialAccountBankConnectionSupport.formatInstant(successAt));
+    } else {
+      result.put(ACTION_STATUS, JSONObject.NULL);
+      result.put(KEY_MESSAGE, JSONObject.NULL);
+      result.put(KEY_AT, JSONObject.NULL);
+    }
+    return result;
   }
 
   /** ISO instant of the account's last successful sync, or JSON null when it never synced. */
@@ -855,6 +1115,40 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // POST import-settings
   // ---------------------------------------------------------------------------
 
+  /**
+   * Parses one import-settings date of the body. With the ETP-6151 flag on a malformed value
+   * answers the coded 400 message of {@code invalidMessage}; with it off the raw parse is used and
+   * a malformed value fails as it always did.
+   *
+   * @param body           the request body
+   * @param key            the body key holding the date
+   * @param invalidMessage the 400 message for a malformed date (flag on only)
+   * @param flagOn         whether the ETP-6151 flag is on for this request
+   * @return the parsed date, or {@code null} for a blank value
+   */
+  private static Date parseImportSettingsDate(JSONObject body, String key, String invalidMessage,
+      boolean flagOn) {
+    String value = FinancialAccountBankConnectionSupport.bodyString(body, key);
+    return flagOn ? BankImportSettingsRules.parseImportDate(value, invalidMessage)
+        : FinancialAccountBankConnectionSupport.parseDate(value);
+  }
+
+  /**
+   * Updates the import configuration of a Financial Account: import-from date, import-to date and
+   * statement grouping.
+   *
+   * <p>An omitted key keeps its stored value. ETP-6151: the configuration being saved must have an
+   * import-from date and a valid grouping — the same validation as {@code link} /
+   * {@code createAndLink}, applied to the values the request would RESULT in — and a malformed date
+   * answers 400 instead of 500. An account linked before ETP-6151 with no import-from date keeps
+   * syncing without a lower bound; it only has to provide one the next time it saves this
+   * configuration.
+   *
+   * @param context the request; body {@code {financialAccountId, importFromDate?, importToDate?,
+   *                statementGrouping?}}
+   * @return {@code {saved: true}} plus the fetch-interval advisory when it applies, or 400 / 404
+   * @throws JSONException never in practice
+   */
   private NeoResponse handleImportSettings(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -862,22 +1156,33 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
-    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the pair the
-    // request would RESULT in: a body may carry only one of the two bounds, in which case the other
-    // keeps its stored value and is just as much part of the range being saved. Applying the
-    // setters first and rejecting afterwards would not work — `finAcc` is a managed instance, so
-    // Hibernate's dirty checking would flush the rejected values at commit anyway.
+    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the values the
+    // request would RESULT in: a body may carry only some of the keys, in which case the others
+    // keep their stored values and are just as much part of the configuration being saved.
+    // Applying the setters first and rejecting afterwards would not work — `finAcc` is a managed
+    // instance, so Hibernate's dirty checking would flush the rejected values at commit anyway.
+    // The required / format checks throw OBException, which handle() turns into a 400.
+    // Flag off: the pre-ETP-6151 reading and validation (raw date parse, nothing required).
+    boolean importSettingsOn = Psd2ImportSettingsFlag.isEnabled();
     Date importFrom = body.has(KEY_IMPORT_FROM_DATE)
-        ? FinancialAccountBankConnectionSupport.parseDate(
-            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE))
+        ? parseImportSettingsDate(body, KEY_IMPORT_FROM_DATE,
+            BankImportSettingsRules.MSG_IMPORT_FROM_DATE_INVALID, importSettingsOn)
         : finAcc.getPSD2ImportFromDate();
     Date importTo = body.has(KEY_IMPORT_TO_DATE)
-        ? FinancialAccountBankConnectionSupport.parseDate(
-            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE))
+        ? parseImportSettingsDate(body, KEY_IMPORT_TO_DATE,
+            BankImportSettingsRules.MSG_IMPORT_TO_DATE_INVALID, importSettingsOn)
         : finAcc.getPSD2ImportToDate();
+    String grouping = body.has(KEY_STATEMENT_GROUPING)
+        ? FinancialAccountBankConnectionSupport.bodyString(body, KEY_STATEMENT_GROUPING)
+        : finAcc.getPSD2StatementFrequency();
+    if (importSettingsOn) {
+      BankImportSettingsRules.requireImportFromDate(importFrom);
+      BankImportSettingsRules.requireStatementGrouping(grouping);
+    }
     if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(importFrom, importTo)) {
       return NeoResponse.error(400, MSG_IMPORT_RANGE_INVALID);
     }
+    // Only the keys the body carries are written; an omitted one keeps its stored value.
     if (body.has(KEY_IMPORT_FROM_DATE)) {
       finAcc.setPSD2ImportFromDate(importFrom);
     }
@@ -885,8 +1190,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       finAcc.setPSD2ImportToDate(importTo);
     }
     if (body.has(KEY_STATEMENT_GROUPING)) {
-      finAcc.setPSD2StatementFrequency(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_STATEMENT_GROUPING));
+      finAcc.setPSD2StatementFrequency(grouping);
     }
     OBDal.getInstance().save(finAcc);
     OBDal.getInstance().flush();
@@ -894,13 +1198,8 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     data.put("saved", true);
     NeoResponse saved = FinancialAccountBankConnectionSupport.okData(data);
     // ETP-5805: non-blocking advisory, same rule and envelope as the PUT/PATCH hook.
-    FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
-        FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc, importFrom);
-    if (exceeded != null) {
-      NeoHints.addMessage(saved.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
-          FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded,
-              com.etendoerp.go.schemaforge.util.NeoLanguage.currentCode()));
-    }
+    FinancialAccountBankConnectionSupport.addFetchIntervalAdvisory(saved, context, finAcc,
+        importFrom);
     return saved;
   }
 
@@ -975,9 +1274,10 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   /**
    * The account named by the request, but only when it belongs to the current tenant.
    *
-   * <p>Single choke point for all nine actions of this handler ({@code status}, {@code accounts},
-   * {@code connect}, {@code link}, {@code reconnect}, {@code reconnect-callback},
-   * {@code disconnect}, {@code sync}, {@code import-settings}), every one of which takes the id from
+   * <p>Single choke point for every account-scoped action of this handler ({@code status},
+   * {@code accounts}, {@code connect}, {@code link}, {@code reconnect}, {@code reconnect-callback},
+   * {@code disconnect}, {@code sync}, {@code syncStatus}, {@code import-settings}), every one of
+   * which takes the id from
    * a query parameter or the body and runs under the {@code setAdminMode(true)} opened above. A bare
    * {@code OBDal.get} applies no tenant predicate, so a foreign id used to leak PSD2 data straight
    * off the entity — connection status, the Salt Edge account id, the masked card number and the

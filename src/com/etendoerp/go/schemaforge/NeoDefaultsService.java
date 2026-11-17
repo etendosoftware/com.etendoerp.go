@@ -346,7 +346,34 @@ public class NeoDefaultsService {
     // unconditionally at the primitive level, so an excluded column always comes back
     // null/absent here too — matching the "no default configured" contract this guard promises
     // — instead of silently swapping one wrong value for a different, cross-tenant one.
-    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
+    // ETP-5745 CP-17: also gated on the column being mandatory, mirroring the identical fallback
+    // the tryInjectFirstFromLookup method of NeoMandatoryDefaultsService already applies on the
+    // CREATE path since ETP-4274. That earlier fix established that a non-mandatory column should
+    // stop once the genuine default-resolution passes have run, because applying this fallback to
+    // an optional column would over-inject a value nobody asked for. This defaults bootstrap path
+    // never had that same gate, so an optional List-reference column with no declared AD default
+    // and no reference row flagged as the default fell through to whichever row happens to sort
+    // first. One real-world example is a rectification reason or code field whose business rule
+    // is that no value may ever be silently guessed. List references order by their sequence
+    // number, and a reference whose rows were never given one falls back to an arbitrary row
+    // ordering. A nullable column is, by definition, one where having no value yet is a valid and
+    // meaningful state; only a column that cannot be null needs some value to avoid breaking the
+    // save, and that is the one case this fallback exists for.
+    //
+    // Regression fix (merge-block cut): the mandatory gate above was written to stop a List-reference
+    // (AD_Reference_ID = 17 — a fixed, pre-defined set of judgment-call codes) from being
+    // silently guessed, but the condition as written applied to EVERY combo, including
+    // TABLE/TABLEDIR-reference FKs (e.g. FIN_Paymentmethod_ID, ISMANDATORY='N') that DO have a
+    // sane "first option" default and were resolved here unconditionally before ETP-5745. Gating
+    // those too broke sales-order/sales-quotation defaults: the third-party callout only fills
+    // paymentMethod when the business partner has one configured, so for partners without one the
+    // field came back null, the document saved with no payment method, and completion failed with
+    // APRM_PAYMENTMETHOD_MISSING. The gate is purely structural (isListReference reads the
+    // column's own AD_Reference_ID, never a table/column/entity name): a List-reference column
+    // keeps the mandatory-only restriction, a TABLE/TABLEDIR-reference column goes back to always
+    // receiving the first-option fallback, same as pre-ETP-5745.
+    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
+        && (!isListReference(adColumn) || Boolean.TRUE.equals(adColumn.isMandatory()))) {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {

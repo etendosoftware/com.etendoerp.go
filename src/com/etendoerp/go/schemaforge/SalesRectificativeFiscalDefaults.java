@@ -30,53 +30,73 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 
 /**
- * Server-side defaults of the TicketBAI and VERI*FACTU rectificative fields of a SALES invoice,
- * applied after every CRUD write of its header (ETP-5747).
+ * <h2>Merge history note (ETP-5745 / ETP-5747, resolved 2026-11-07)</h2>
+ *
+ * This class also exists on {@code origin/develop} as of ETP-5747 (PR #1555, commit
+ * {@code d07757ea2}). The two versions diverged in a way that was NOT just wording: the
+ * ETP-5747/develop version copied the document type's {@code em_etvfac_inv_type} onto the invoice
+ * in {@code applyVerifactu} and auto-picked TicketBAI's {@code tbaiReverseinvoicecode} to
+ * {@code R4}; THIS branch's version deliberately stopped doing both (ETP-5745 CP-14/CP-20 — see
+ * "What it does not do" below for why: picking or copying ANY fiscal-reason code on the user's
+ * behalf is exactly the kind of judgement call this guard exists to keep manual). The merge kept
+ * THIS branch's {@code applyTbai}/{@code applyVerifactu} behavior and adopted develop's
+ * {@code tbaiConfigActive} refactor (delegating to the single {@code InvoiceCalloutHelper
+ * #isTbaiConfigActive} lookup instead of a second, duplicate SQL constant here) since that part
+ * was a genuine, behavior-neutral consolidation.
+ *
+ * <h2>Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields</h2>
+ *
+ * Applied after every CRUD write of a SALES invoice's header (originally ETP-5747, brought into
+ * this branch and adjusted for ETP-5745 CP-13/CP-14 — see "What it does not do" below).
  *
  * <h2>Why on the server</h2>
  *
- * Until ETP-5747 these fields were only ever filled by the header callout, and only when its
- * trigger was {@code transactionDocument} ({@link InvoiceCalloutHelper#applyRectificativeFieldsFromDocType},
- * {@link InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType}). An invoice that reaches the
- * database with its rectificative document type already set — created through
- * "Importar desde factura origen", by {@code etendo_create} / {@code /batch}, or with the type
- * picked before the callout could answer — never had the document type "change", so the fields
- * stayed at their AD defaults for good: TicketBAI with no reverse-invoice flag/code (its XML
- * generator then fails on the {@code null} code with {@code TBAI_SetKey}), VERI*FACTU at
- * {@code F1}. A client-side effect would have the same blind spot on every channel that is not
- * the SPA, so the defaults are applied where every channel meets: the header's own post-hook.
+ * These fields were only ever filled by the header callout, and only when its trigger was
+ * {@code transactionDocument} ({@link InvoiceCalloutHelper#applyRectificativeFieldsFromDocType}).
+ * An invoice that reaches the database with its rectificative document type already set — created
+ * through "Importar desde factura origen", by {@code etendo_create} / {@code /batch}, or with the
+ * type picked before the callout could answer — never had the document type "change", so the
+ * fields stayed at their AD defaults for good. A client-side effect would have the same blind spot
+ * on every channel that is not the SPA, so the defaults are applied where every channel meets: the
+ * header's own post-hook.
  *
  * <h2>What it writes</h2>
  *
  * Only on a DRAFT, unprocessed sales invoice whose document type is flagged rectificative
  * ({@link RectificativeSupport#isRectificative(DocumentType)}), and never over a value already
  * chosen — except a non-rectificative {@code F*} VERI*FACTU code, which is replaced by the
- * document type's {@code R*} code, and the TicketBAI reverse flag, which is enforced:
+ * document type's {@code R*} code:
  * <ul>
  *   <li><b>TicketBAI</b> — only when the invoice's organization has an active {@code tbai_config}:
  *   {@code tbaiIsreverseinvoice = Y}, {@code tbaiReverseinvoicetype = I} (Por diferencias) when
- *   blank, {@code tbaiReverseinvoicecode = R4} (Resto) when blank — the exact values the
- *   doc-type callout injects.</li>
+ *   blank.</li>
  *   <li><b>VERI*FACTU</b> — only when the legal entity has an active VERI*FACTU config that is in
- *   the system (the same gate as {@code ETVFAC_C_INVOICE_SET_VERIFACTU}, which copies these values
- *   from the document type at completion): {@code etvfacInvType} = the document type's
- *   {@code em_etvfac_inv_type} when the invoice's value is blank or a non-rectificative
- *   {@code F*} code (the AD default {@code F1}); an {@code R*} code the user picked is kept. Then,
- *   when the type is {@code R*} and {@code etvfacReverseinvtype} is blank, the document type's
- *   reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
+ *   the system. {@code etvfacInvType} itself is NEVER written here (ETP-5745 CP-20 — see "What it
+ *   does not do" below). Only once the invoice ALREADY carries an {@code R1}-{@code R5} code the
+ *   user picked by hand, and {@code etvfacReverseinvtype} is blank, is the reverse type defaulted:
+ *   the document type's reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
  * </ul>
  *
- * <h2>What it does not do</h2>
+ * <h2>What it does not do (ETP-5745 CP-14: no "motivo"/code is ever auto-picked)</h2>
  *
  * <ul>
  *   <li><b>SII is not defaulted here.</b> {@code EM_AEATSII_C_INV_RECT_CHK} requires
  *   {@code aeatsiiMotivoRectif} as soon as the SII type is {@code R}, and the motivo is a user
- *   choice, so writing {@code R} on its own would make the save fail. The SII type stays a
- *   client-side default ({@code useSifFieldPatcher.js}) driven by {@code isRectificative}, which
- *   the write response now carries.</li>
+ *   choice. {@code aeatsiiClaveTipo}/{@code aeatsiiTipoRectif} ARE corrected server-side, but at
+ *   completion time, by {@link RectificationFiscalCodeGuard} — not here.</li>
+ *   <li><b>TicketBAI's {@code tbaiReverseinvoicecode} is NOT defaulted</b> — deliberately reverted
+ *   in ETP-5745 CP-14. The original ETP-5747 version of this class auto-picked {@code R4} ("Resto")
+ *   for it, which is exactly the kind of fiscal classification choice (why the invoice is being
+ *   corrected) that must stay a manual, informed decision — the same reasoning that already kept
+ *   SII's {@code aeatsiiMotivoRectif} out of this class. The field is left blank; the dedicated
+ *   completion-time guard ({@link RectificationFiscalCodeGuard}) blocks completion when it is still
+ *   blank, naming the missing system in its message.</li>
  *   <li>It never clears a value: a non-rectificative invoice is left exactly as it is.</li>
  *   <li>Purchase invoices are out of scope: VERI*FACTU never sends a purchase, and TicketBAI's
  *   rectificative fields are sales-only (see {@link InvoiceCalloutHelper#applyRectificativeFieldsFromDocType}).</li>
@@ -88,14 +108,10 @@ final class SalesRectificativeFiscalDefaults {
 
   static final String FIELD_TBAI_IS_REVERSE = "tbaiIsreverseinvoice";
   static final String FIELD_TBAI_REVERSE_TYPE = "tbaiReverseinvoicetype";
-  static final String FIELD_TBAI_REVERSE_CODE = "tbaiReverseinvoicecode";
-  static final String FIELD_VF_INV_TYPE = AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE;
   static final String FIELD_VF_REVERSE_TYPE = "etvfacReverseinvtype";
 
   /** TicketBAI / VERI*FACTU "Por diferencias" reverse type. */
   static final String REVERSE_TYPE_BY_DIFFERENCES = "I";
-  /** TicketBAI "Factura rectificativa: Resto." reverse-invoice code. */
-  static final String TBAI_REVERSE_CODE_REST = "R4";
 
   private static final String DRAFT = "DR";
   private static final String RECTIFICATIVE_PREFIX = "R";
@@ -136,7 +152,7 @@ final class SalesRectificativeFiscalDefaults {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.warn("[ETP-5747] Could not apply rectificative fiscal defaults to invoice {}: {}",
+      log.warn("[ETP-5745] Could not apply rectificative fiscal defaults to invoice {}: {}",
           invoiceId, e.getMessage());
       return Collections.emptyMap();
     }
@@ -161,7 +177,7 @@ final class SalesRectificativeFiscalDefaults {
     if (tbaiConfigActive(orgId)) {
       applyTbai(invoice, applied);
     }
-    if (configExists(VERIFACTU_ACTIVE_SQL, orgId)) {
+    if (verifactuConfigActive(orgId)) {
       applyVerifactu(invoice, docType, applied);
     }
     return applied;
@@ -178,7 +194,9 @@ final class SalesRectificativeFiscalDefaults {
   /**
    * TicketBAI: {@code tbaiIsreverseinvoice} is ENFORCED on a rectificative draft (set to
    * {@code Y} whatever it held, as the doc-type callout does — a rectificative is never a
-   * non-reverse TicketBAI invoice); the reverse type and code are only DEFAULTED when blank.
+   * non-reverse TicketBAI invoice); the reverse type is only DEFAULTED when blank.
+   * {@code tbaiReverseinvoicecode} is deliberately NEVER touched here — see the class javadoc's
+   * "What it does not do" section (ETP-5745 CP-14).
    */
   private static void applyTbai(Invoice invoice, Map<String, Object> applied) {
     if (!Boolean.TRUE.equals(invoice.isTbaiIsreverseinvoice())) {
@@ -189,21 +207,20 @@ final class SalesRectificativeFiscalDefaults {
       invoice.setTbaiReverseinvoicetype(REVERSE_TYPE_BY_DIFFERENCES);
       applied.put(FIELD_TBAI_REVERSE_TYPE, REVERSE_TYPE_BY_DIFFERENCES);
     }
-    if (StringUtils.isBlank(invoice.getTbaiReverseinvoicecode())) {
-      invoice.setTbaiReverseinvoicecode(TBAI_REVERSE_CODE_REST);
-      applied.put(FIELD_TBAI_REVERSE_CODE, TBAI_REVERSE_CODE_REST);
-    }
   }
 
+  /**
+   * ETP-5745 CP-20: no longer copies the DocType's own configured {@code em_etvfac_inv_type}
+   * onto the invoice — reverted, same reasoning as {@code InvoiceCalloutHelper
+   * #applyVerifactuInvTypeFromDocType}'s javadoc: VERI*FACTU's {@code R1}-{@code R5} codes fold
+   * "this is a correction" and "for this reason" into one value, so copying ANY code — even a
+   * human-configured per-DocType one — still picks the user's reason for THIS invoice on their
+   * behalf. {@code etvfacInvType} is left completely alone here; only the REVERSE type is
+   * defaulted, and only once the user has ALREADY picked an {@code R1}-{@code R5} code by hand.
+   */
   private static void applyVerifactu(Invoice invoice, DocumentType docType,
       Map<String, Object> applied) {
-    String docInvType = StringUtils.trimToNull(docType.getEtvfacInvType());
     String current = StringUtils.trimToNull(invoice.getEtvfacInvType());
-    if (isRectificativeCode(docInvType) && !isRectificativeCode(current)) {
-      invoice.setEtvfacInvType(docInvType);
-      applied.put(FIELD_VF_INV_TYPE, docInvType);
-      current = docInvType;
-    }
     if (isRectificativeCode(current) && StringUtils.isBlank(invoice.getEtvfacReverseinvtype())) {
       String reverseType = StringUtils.defaultIfBlank(docType.getEtvfacReverseInvType(),
           REVERSE_TYPE_BY_DIFFERENCES);
@@ -218,16 +235,60 @@ final class SalesRectificativeFiscalDefaults {
 
   /**
    * Whether the organization has an active TicketBAI configuration — the shared lookup
-   * {@link InvoiceCalloutHelper#isTbaiConfigActive}. Never throws a Java exception: a failure
-   * answers {@code false} (no default is better than a default for a system the org may not use).
+   * {@link InvoiceCalloutHelper#isTbaiConfigActive} (adopted from develop's ETP-5747 refactor so
+   * this class and the callout resolve "is TicketBAI active" through a single SQL constant).
+   * Never throws a Java exception: a failure answers {@code false} (no default is better than a
+   * default for a system the org may not use).
    */
   static boolean tbaiConfigActive(String orgId) {
     try {
       return InvoiceCalloutHelper.isTbaiConfigActive(orgId);
     } catch (Exception e) {
-      log.debug("[ETP-5747] TicketBAI config lookup failed for org {}: {}", orgId, e.getMessage());
+      log.debug("[ETP-5745] TicketBAI config lookup failed for org {}: {}", orgId, e.getMessage());
       return false;
     }
+  }
+
+  /**
+   * Whether the organization is actually enrolled in the SII ({@code aeatsii_config.insiisystem}
+   * via {@code AEATSIIConfig#isAcogidaAlSII}) — ETP-5745 CP-24. Same DAL-based lookup
+   * {@code AbstractInvoiceHeaderHandler}/{@code InvoiceCalloutHelper}'s own SII authorization
+   * callout and {@code NeoBackgroundDefaultsService#isOrganizationInSiiSystem} already use, so SII
+   * stays consistent with itself across the module. Unlike TicketBAI/VERI*FACTU (plain
+   * {@code tbai_config}/{@code etvfac_verifactu_config} tables, queried by raw SQL), SII has no
+   * such row-per-org config table in this module's reach — its config lives in the SII module's
+   * own DAL entity, keyed off the invoice's legal entity, hence the DAL lookup instead of
+   * {@link #configExists}.
+   *
+   * <p>Never throws: a failure to resolve the org or its config answers {@code false} — no SII
+   * default is better than one stamped for an org that was never actually registered.
+   */
+  static boolean siiConfigActive(String orgId) {
+    if (StringUtils.isBlank(orgId)) {
+      return false;
+    }
+    try {
+      Organization org = OBDal.getInstance().get(Organization.class, orgId);
+      if (org == null) {
+        return false;
+      }
+      AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
+      return config != null && Boolean.TRUE.equals(config.isAcogidaAlSII());
+    } catch (Exception e) {
+      log.debug("[ETP-5745] SII config lookup failed for org {}: {}", orgId, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Whether the invoice's legal entity has an active VERI*FACTU configuration in the system
+   * ({@code etvfac_verifactu_config}, via {@code ad_get_org_le_bu}) — ETP-5745 Warning 1. Mirrors
+   * {@link #tbaiConfigActive}/{@link #siiConfigActive} so every per-system gate in this class and
+   * in {@code InvoiceCalloutHelper} resolves "is this fiscal system active for this org" the same
+   * way. Never throws: a failure answers {@code false}.
+   */
+  static boolean verifactuConfigActive(String orgId) {
+    return StringUtils.isNotBlank(orgId) && configExists(VERIFACTU_ACTIVE_SQL, orgId);
   }
 
   /**
@@ -245,7 +306,7 @@ final class SalesRectificativeFiscalDefaults {
         }
       }
     } catch (Exception e) {
-      log.debug("[ETP-5747] fiscal config lookup failed for org {}: {}", orgId, e.getMessage());
+      log.debug("[ETP-5745] fiscal config lookup failed for org {}: {}", orgId, e.getMessage());
       return false;
     }
   }

@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -248,6 +249,63 @@ class NeoBatchJsonDataServiceTest {
       assertEquals(409, classification.getInt("status"));
       assertEquals(NeoErrorClassifier.CODE_RECORD_IN_USE, classification.getString("code"));
       verify(dal, times(1)).commitAndClose();
+    }
+  }
+
+  @Test
+  @DisplayName("a delete inside a batch flushes into the batch's transaction instead of committing")
+  void batchDeleteJoinsTheCallerTransaction() throws Exception {
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    try (MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> prov = mockStatic(OBProvider.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      prov.when(OBProvider::getInstance).thenReturn(provider);
+      BatchService.beginCallerOwnedTransaction();
+      try {
+        JSONObject result = new JSONObject(service.remove(params()));
+
+        assertEquals(JsonConstants.RPCREQUEST_STATUS_SUCCESS, result
+            .getJSONObject(JsonConstants.RESPONSE_RESPONSE).getInt(JsonConstants.RESPONSE_STATUS));
+      } finally {
+        BatchService.endCallerOwnedTransaction();
+      }
+      verify(dal, never()).commitAndClose();
+      InOrder order = inOrder(dal, session);
+      order.verify(dal).flush();
+      order.verify(session).clear();
+      order.verify(dal).remove(bob);
+      order.verify(dal).flush();
+    }
+  }
+
+  @Test
+  @DisplayName("a referenced row deleted inside a batch is refused 409 by its own operation")
+  void batchDeleteOfAReferencedRowIsRecordInUse() throws Exception {
+    // The FK check fires when the delete is flushed, the second flush of the operation.
+    doNothing().doThrow(new GenericJDBCException("could not execute statement",
+        new SQLException("ERROR: is still referenced from table \"c_orderline\"", "23503")))
+        .when(dal).flush();
+    try (MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> prov = mockStatic(OBProvider.class);
+        MockedStatic<JsonUtils> json = mockStatic(JsonUtils.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      prov.when(OBProvider::getInstance).thenReturn(provider);
+      json.when(() -> JsonUtils.convertExceptionToJson(any())).thenReturn(CORE_FAILURE);
+      BatchService.beginCallerOwnedTransaction();
+      JSONObject result;
+      try {
+        result = new JSONObject(service.remove(params()));
+      } finally {
+        BatchService.endCallerOwnedTransaction();
+      }
+
+      JSONObject classification = NeoErrorResponses.classificationOf(
+          result.getJSONObject(JsonConstants.RESPONSE_RESPONSE));
+      assertNotNull(classification);
+      assertEquals(409, classification.getInt("status"));
+      assertEquals(NeoErrorClassifier.CODE_RECORD_IN_USE, classification.getString("code"));
+      verify(dal, never()).commitAndClose();
     }
   }
 

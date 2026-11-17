@@ -1123,9 +1123,10 @@ meant two ways to write the same rows.
 
 ### Prefix validation
 
-`DocumentSequenceHandler` (a `NeoHandler` bound to the spec's `Java_Qualifier`) rejects a prefix
+`DocumentSequenceHandler` (a `NeoHandler` bound by `@NeoExtension(spec = "document-sequence",
+entity = "sequence")` since ETP-5837) rejects a prefix
 the Spanish fiscal localizations would refuse, **before** it is stored — see
-`docs/neo-headless-extensibility.md` for the handler pattern. Classic validates the same rules,
+`docs/neo-headless.md` §5.3.a for the binding. Classic validates the same rules,
 but only inside `ProcessInvoiceTbaiHook.preProcess`, which runs when a *rectificative* invoice is
 completed in a TicketBAI-configured organization. A prefix chosen during onboarding therefore
 went unchecked for as long as it took to issue that first corrective invoice.

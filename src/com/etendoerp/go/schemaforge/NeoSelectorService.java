@@ -51,7 +51,8 @@ public class NeoSelectorService {
   private static final Logger log = LogManager.getLogger(NeoSelectorService.class);
 
   private static final int DEFAULT_LIMIT = 20;
-  private static final int MAX_LIMIT = 100;
+  /** Largest page a selector request may ask for; the SPA walks to a committed value in big pages. */
+  private static final int MAX_LIMIT = 1000;
 
   /** AD_Reference base IDs for FK types — shared across Neo* and MCP classes. */
   public static final String REF_TABLE = "18";
@@ -174,7 +175,7 @@ public class NeoSelectorService {
    * @param column       the AD_Column to query selectors for
    * @param columnName   the DB column name (for error messages)
    * @param search       optional search text
-   * @param limit        page size (default 20, max 100)
+   * @param limit        page size (default 20, max 1000)
    * @param offset       page offset (default 0)
    * @param contextParams context parameters for validation rule resolution
    * @return a {@link NeoResponse} with the paginated selector items, or an error response
@@ -200,7 +201,7 @@ public class NeoSelectorService {
    * @param column        the AD_Column to query selectors for
    * @param columnName    the DB column name (for error messages)
    * @param search        optional search text
-   * @param limit         page size (default 20, max 100)
+   * @param limit         page size (default 20, max 1000)
    * @param offset        page offset (default 0)
    * @param contextParams context parameters for validation rule resolution
    * @return a {@link NeoResponse} with the paginated selector items, or an error response

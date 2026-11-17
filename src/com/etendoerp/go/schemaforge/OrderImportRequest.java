@@ -102,19 +102,9 @@ final class OrderImportRequest {
     return parseBoolean(body, key, false);
   }
 
+  /** {@link ImportListing#parseBoolean}, refused as {@code importInvalidLine} as it always was. */
   private static boolean parseBoolean(JSONObject body, String key, boolean whenAbsent) {
-    Object value = body == null ? null : body.opt(key);
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return whenAbsent;
-    }
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    String text = String.valueOf(value).trim();
-    if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
-      return Boolean.parseBoolean(text);
-    }
-    throw badRequest(key + " must be true or false");
+    return ImportListing.parseBoolean(body, key, whenAbsent, DocumentLineImport.ERROR_INVALID_LINE);
   }
 
   /** Whether {@code key} carries a value: a key sent as JSON null counts as absent. */

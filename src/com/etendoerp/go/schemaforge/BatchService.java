@@ -112,6 +112,13 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  *       underneath the batch, which no caller-side rollback can undo.</li>
  * </ul>
  *
+ * <p>Deletes (ETP-6143): an operation with {@code "method":"DELETE"} and a {@code "recordId"}
+ * removes that record instead of creating one, through the same access checks, write preflight and
+ * customization hooks as {@code DELETE /sws/neo/{spec}/{entity}/{id}}. It takes no {@code body}
+ * and no {@code parentRef}. A bulk delete is sent as {@code async:true}, one operation per record:
+ * each record is then its own row (its own transaction), so a record still in use fails alone and
+ * the job reports progress row by row.</p>
+ *
  * <p>Find-or-create logic is intentionally NOT in the server. Callers (the UI
  * descriptor or an LLM agent) decide whether to look up an entity first and
  * either embed an existing id or include a create op. This keeps the endpoint
@@ -218,7 +225,13 @@ public class BatchService {
   private static final String FIELD_SPEC = "spec";
   private static final String FIELD_BODY = "body";
   private static final String FIELD_PARENT_REF = "parentRef";
+  /** Operation method: absent or {@code POST} creates, {@value #METHOD_DELETE} removes (ETP-6143). */
+  static final String FIELD_METHOD = "method";
+  /** The record a {@code DELETE} operation removes. */
+  static final String FIELD_RECORD_ID = "recordId";
+  static final String METHOD_DELETE = NeoMethodPolicy.METHOD_DELETE;
   private static final String OPS_PREFIX = "operations[";
+  private static final String OPERATION_PREFIX = "Operation '";
 
   private final NeoServlet servlet;
   private final NeoCrudHandler crudHandler;
@@ -552,6 +565,9 @@ public class BatchService {
       return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
           "Spec not found: " + specName, null, tracker.durable());
     }
+    if (isDeleteOperation(op)) {
+      return processDeleteOperation(i, op, spec, resolvedIds, opResults, tracker);
+    }
 
     JSONObject opBody = op.optJSONObject(FIELD_BODY);
     if (opBody == null) {
@@ -597,11 +613,11 @@ public class BatchService {
     if (!isSuccess(rowResp)) {
       log.warn("[BATCH] op '{}' (index {}) failed with status {}", opId, i, rowResp.getHttpStatus());
       return failureBody(i, opId, rowResp.getHttpStatus(),
-          "Operation '" + opId + "' rejected by server", rowResp.getBody(), tracker.durable());
+          OPERATION_PREFIX + opId + "' rejected by server", rowResp.getBody(), tracker.durable());
     }
     if (StringUtils.isBlank(recordId)) {
       return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Operation '" + opId + "' created but id missing in response", null, tracker.durable());
+          OPERATION_PREFIX + opId + "' created but id missing in response", null, tracker.durable());
     }
     return null;
   }
@@ -883,6 +899,109 @@ public class BatchService {
     return resolvedIds.get(opId);
   }
 
+  /** @return whether the operation removes a record rather than creating one (ETP-6143) */
+  static boolean isDeleteOperation(JSONObject op) {
+    return op != null && METHOD_DELETE.equalsIgnoreCase(op.optString(FIELD_METHOD, ""));
+  }
+
+  /**
+   * Process one {@code DELETE} operation. Same contract as {@link #processOperation}: {@code null}
+   * on success, otherwise the failure body the caller returns after rolling back.
+   */
+  private JSONObject processDeleteOperation(int i, JSONObject op, SFSpec spec,
+      Map<String, String> resolvedIds, JSONArray opResults, TransactionTracker tracker)
+      throws JSONException {
+    String opId = op.optString(FIELD_ID, null);
+    String entityName = op.optString(FIELD_ENTITY, null);
+    String recordId = op.optString(FIELD_RECORD_ID, null);
+    if (StringUtils.isBlank(recordId)) {
+      return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "] DELETE requires 'recordId'", null, tracker.durable());
+    }
+    if (op.has(FIELD_BODY) || op.has(FIELD_PARENT_REF)) {
+      return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "] DELETE takes no 'body' or 'parentRef'", null, tracker.durable());
+    }
+
+    NeoResponse rowResp = deleteRecord(spec, entityName, recordId);
+    tracker.noteOpFinished(opResults);
+    if (!isSuccess(rowResp)) {
+      log.warn("[BATCH] delete op '{}' (index {}) failed with status {}", opId, i,
+          rowResp.getHttpStatus());
+      return failureBody(i, opId, rowResp.getHttpStatus(),
+          deleteRefusalMessage(opId, rowResp), rowResp.getBody(), tracker.durable());
+    }
+    resolvedIds.put(opId, recordId);
+    JSONObject perOp = new JSONObject();
+    perOp.put(FIELD_ID, opId);
+    perOp.put("ok", true);
+    perOp.put(FIELD_METHOD, METHOD_DELETE);
+    perOp.put(FIELD_RECORD_ID, recordId);
+    opResults.put(perOp);
+    return null;
+  }
+
+  /**
+   * The message of a refused delete: the server's own reason when it gave one ("the record is in
+   * use…"), so a bulk delete can tell the user why each row stayed.
+   */
+  private static String deleteRefusalMessage(String opId, NeoResponse rowResp) {
+    String reason = errorMessageOf(rowResp);
+    return StringUtils.isNotBlank(reason) ? reason
+        : OPERATION_PREFIX + opId + "' rejected by server";
+  }
+
+  /**
+   * Run the NEO DELETE pipeline for one record without going through HTTP: the same access checks,
+   * method policy, write preflight and customization hooks as
+   * {@code DELETE /sws/neo/{spec}/{entity}/{id}} ({@code NeoCrudHandler#handleWindowEntityCrud}).
+   * The delete joins the batch's transaction (see {@link NeoBatchJsonDataService#remove}).
+   */
+  private NeoResponse deleteRecord(SFSpec spec, String entityName, String recordId) {
+    if (!NeoAccessHelper.hasWindowAccessForSpec(spec, NeoMethodPolicy.METHOD_DELETE)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+    }
+    if (!NeoAccountingAccessPolicy.isEntityNameAllowed(spec, entityName)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to accounting entity for current role");
+    }
+    SFEntity sfEntity = NeoBatchScope.memoize(BatchService.class.getName() + "|entity|"
+        + spec.getId() + "|" + entityName.toLowerCase(java.util.Locale.ROOT),
+        () -> findEntity(spec.getId(), entityName));
+    if (sfEntity == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Entity not found in spec '" + spec.getId() + "': " + entityName);
+    }
+    if (!NeoMethodPolicy.isMethodEnabled(sfEntity, NeoMethodPolicy.METHOD_DELETE)) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          NeoMethodPolicy.buildNotEnabledMessage(NeoMethodPolicy.METHOD_DELETE, entityName));
+    }
+    Tab adTab = sfEntity.getADTab();
+    if (adTab == null) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "No AD_Tab linked to entity: " + entityName);
+    }
+
+    NeoContext ctx = NeoContext.builder()
+        .specName(spec.getName())
+        .entityName(entityName)
+        .httpMethod(NeoMethodPolicy.METHOD_DELETE)
+        .recordId(recordId)
+        .queryParams(Collections.emptyMap())
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    NeoResponse refusal = NeoWritePreflight.refusalFor(ctx);
+    if (refusal != null) {
+      return refusal;
+    }
+    return dispatchWithHooks(sfEntity, ctx);
+  }
+
   /**
    * Run the standard NEO POST pipeline (defaults injection, callout cascade,
    * field filtering, DefaultJsonDataService.add) for a single record without
@@ -986,6 +1105,16 @@ public class BatchService {
     if (refusal != null) {
       return refusal;
     }
+    return dispatchWithHooks(sfEntity, ctx);
+  }
+
+  /**
+   * Hands one batch write (create or delete) to the customization pipeline on the
+   * {@code REST_BATCH} channel. The one place this class reads the legacy {@code Java_Qualifier}
+   * binding: {@code NeoServletSupport#handleWithHooks} still takes it as the fallback to the
+   * {@code @NeoExtension} index (ETP-5588).
+   */
+  private NeoResponse dispatchWithHooks(SFEntity sfEntity, NeoContext ctx) {
     return NeoServletSupport.handleWithHooks(sfEntity.getJavaQualifier(), ctx, crudHandler,
         NeoExtensionChannel.REST_BATCH);
   }

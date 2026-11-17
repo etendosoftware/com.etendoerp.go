@@ -34,7 +34,7 @@ import org.junit.Test;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.base.weld.test.WeldBaseTest;
+import org.openbravo.test.base.OBBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -65,7 +65,7 @@ import com.etendoerp.go.schemaforge.handlers.YearAccountingHandler;
  * @covers com.etendoerp.go.schemaforge.ProductStockWarehouseHandler
  * @covers com.etendoerp.go.schemaforge.handlers.YearAccountingHandler
  */
-public class TenantReadIsolationIntegrationTest extends WeldBaseTest {
+public class TenantReadIsolationIntegrationTest extends OBBaseTest {
 
   private static final String SALES_ORDER_LINES_TAB_ID = "187";
   private static final String INP_PARTNER = "inpcBpartnerId";

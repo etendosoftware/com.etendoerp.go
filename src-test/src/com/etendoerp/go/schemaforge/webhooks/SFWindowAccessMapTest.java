@@ -51,6 +51,7 @@ import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.InvoiceInboxFlag;
+import com.etendoerp.go.schemaforge.SepaRemittancesFlag;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -72,6 +73,8 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * directly so the assertions are independent of the local {@code Openbravo.properties} toggle.
  *
  * <p>Also the {@code invoiceInbox} capability (ETP-6049): per account, same value in both branches.
+ * Likewise {@code sepaRemittances} (ETP-6148), from {@link SepaRemittancesFlag}: present in both
+ * branches, {@code true} or {@code false}, never folded into the admin's blanket trues.
  *
  * @covers com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap
  */
@@ -746,6 +749,68 @@ class SFWindowAccessMapTest {
         JSONObject capabilities = capabilitiesWithInvoiceInbox(null, false);
 
         assertFalse(capabilities.getBoolean("invoiceInbox"));
+    }
+
+    // ── sepaRemittances capability (ETP-6148) ────────────────────────────────
+
+    /** Runs the webhook with {@code SepaRemittancesFlag.isEnabledFor(email)} stubbed; returns capabilities. */
+    private JSONObject capabilitiesWithSepaRemittances(String accountEmail, boolean on) throws Exception {
+        try (MockedStatic<SepaRemittancesFlag> remittances = mockStatic(SepaRemittancesFlag.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn(accountEmail);
+            remittances.when(() -> SepaRemittancesFlag.isEnabledFor(accountEmail)).thenReturn(on);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            remittances.verify(() -> SepaRemittancesFlag.isEnabledFor(accountEmail));
+            return new JSONObject(responseVars.get(RESULT)).getJSONObject("capabilities");
+        }
+    }
+
+    @Test
+    @DisplayName("Restricted role resolves sepaRemittances from the flag, on and off")
+    void testSepaRemittancesFollowsTheFlagForRestrictedRole() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenRestrictedRole("role-remittances-" + on);
+            stubWindowAccessRows(Collections.emptyList());
+            stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+            JSONObject capabilities = capabilitiesWithSepaRemittances("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("sepaRemittances"), "off is an explicit false, not an absent key");
+            assertEquals(on, capabilities.getBoolean("sepaRemittances"));
+        }
+    }
+
+    /** Admin bypass: the flag is not folded into the blanket trues; an admin is not exempt. */
+    @Test
+    @DisplayName("Admin bypass resolves sepaRemittances from the flag, not a fixed true")
+    void testSepaRemittancesFollowsTheFlagForAdminBypass() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenSystemAdminRole();
+            stubSpecRows(Collections.emptyList());
+            stubWindowAccessRows(Collections.emptyList());
+
+            JSONObject capabilities = capabilitiesWithSepaRemittances("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("sepaRemittances"));
+            assertEquals(on, capabilities.getBoolean("sepaRemittances"));
+            assertTrue(capabilities.getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    @Test
+    @DisplayName("sepaRemittances with no account resolved is evaluated with a null email and does not fail")
+    void testSepaRemittancesWithNoAccountIsOffAndDoesNotFailTheRequest() throws Exception {
+        givenRestrictedRole("role-remittances-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        // capabilitiesWithSepaRemittances verifies the exact (null) email reached isEnabledFor.
+        JSONObject capabilities = capabilitiesWithSepaRemittances(null, false);
+
+        assertFalse(capabilities.getBoolean("sepaRemittances"));
     }
 
     // ── structuredAddressForSepa capability (ETP-5806) ──────────────────────

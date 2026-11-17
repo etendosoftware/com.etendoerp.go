@@ -45,6 +45,7 @@ public final class SelectorDescriptorResolver {
   private static final java.util.regex.Pattern SAFE_HQL_PATH =
       java.util.regex.Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.]*$");
   private static final String PROP_SEARCH_KEY = "searchKey";
+  private static final String PROP_DESCRIPTION = "description";
 
   private SelectorDescriptorResolver() {
   }
@@ -328,19 +329,36 @@ public final class SelectorDescriptorResolver {
         addIfAbsent(searchableProps, PROP_SEARCH_KEY);
       }
     }
-    // Always consider "description" a fallback searchable field, regardless of
-    // whether the block above already added something (e.g. a short identifier
-    // key). Almost every AD entity carries a description, and it is typically
-    // the text users actually read and type — e.g. the "IAE Activity Type"
-    // selector (epiae_type: Key + Description) has no explicit
-    // OBUISEL_Selector_Field config, so without this the fallback only searched
-    // the short numeric Key ("3") and typing "alquiler" (which IS in the
-    // description) matched nothing. Placed AFTER the isEmpty() block (not
-    // before it) so it never short-circuits the name/valueProp/searchKey
-    // fallback by making the list non-empty prematurely.
-    if (targetEntity.hasProperty("description")) {
-      addIfAbsent(searchableProps, "description");
+    // Still nothing (e.g. C_Invoice, shown by its documentNo): search the text the label shows.
+    if (searchableProps.isEmpty()) {
+      addStringIdentifierProperties(searchableProps, targetEntity);
     }
+    // "description" is searched only when the label shows it, so every result matches text the user
+    // can see (ETP-6103). ETP-4975: "IAE Activity Type" (epiae_type) shows Key + Description, so
+    // typing "alquiler" must still find it. Last resort when nothing else is searchable: an empty
+    // list drops the search and returns every row, which through MCP could resolve to a wrong record.
+    // Placed AFTER the isEmpty() block so it never short-circuits the name/valueProp/searchKey fallback.
+    if (targetEntity.hasProperty(PROP_DESCRIPTION)
+        && (searchableProps.isEmpty() || isIdentifierProperty(targetEntity, PROP_DESCRIPTION))) {
+      addIfAbsent(searchableProps, PROP_DESCRIPTION);
+    }
+  }
+
+  private static void addStringIdentifierProperties(List<String> props, Entity entity) {
+    for (Property identifier : entity.getIdentifierProperties()) {
+      if (identifier.isPrimitive() && String.class.equals(identifier.getPrimitiveObjectType())) {
+        addIfAbsent(props, identifier.getName());
+      }
+    }
+  }
+
+  private static boolean isIdentifierProperty(Entity entity, String property) {
+    for (Property identifier : entity.getIdentifierProperties()) {
+      if (property.equals(identifier.getName())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static void addIfPropertyExists(List<String> props, Entity entity, String property) {

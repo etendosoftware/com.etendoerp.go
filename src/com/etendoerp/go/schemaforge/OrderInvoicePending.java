@@ -18,11 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -41,6 +44,8 @@ import org.openbravo.model.common.order.OrderLine;
  * here selects an entity or a direction.</p>
  */
 final class OrderInvoicePending {
+
+  private static final Logger log = LogManager.getLogger(OrderInvoicePending.class);
 
   /**
    * Per order line, the quantity held by the active lines of DRAFT invoices of the direction.
@@ -117,6 +122,67 @@ final class OrderInvoicePending {
           BigDecimal::add);
     }
     return held;
+  }
+
+  /**
+   * The DRAFT invoices (of the direction, {@code exceptInvoiceId} left out) whose active lines hold
+   * each order line, by document number: the same population {@link #DRAFT_QUANTITIES_HQL} counts.
+   */
+  static final String DRAFT_HOLDERS_HQL = "select il.salesOrderLine.id, i.id, i.documentNo, "
+      + "sum(il.invoicedQuantity) from InvoiceLine il join il.invoice i "
+      + "where i.documentStatus = 'DR' "
+      + "and i.salesTransaction = :sot and il.active = true and il.salesOrderLine.id in :ids "
+      + "and i.id <> :inv and i.client.id = :client and i.organization.id in (:orgs) "
+      + "group by il.salesOrderLine.id, i.id, i.documentNo order by i.documentNo, i.id";
+
+  /** A draft invoice holding part of an order line: what the popup and the agent are told. */
+  static final class DraftInvoiceRef {
+    final String id;
+    final String documentNo;
+    /** What the draft's active lines hold of the order line, signed like those lines. */
+    final BigDecimal quantity;
+
+    DraftInvoiceRef(String id, String documentNo, BigDecimal quantity) {
+      this.id = id;
+      this.documentNo = documentNo;
+      this.quantity = quantity == null ? BigDecimal.ZERO : quantity;
+    }
+  }
+
+  /**
+   * Which OTHER draft invoices hold each order line (ETP-5828 QA UI-4): an order line the popup
+   * shows as taken can name the draft that took it instead of a bare «ya importado».
+   *
+   * @param orderLineIds    the order lines; an empty collection reads nothing
+   * @param sales           the direction of the drafts
+   * @param exceptInvoiceId the invoice the caller imports into (its own lines are "imported here")
+   * @param clientId        the session's client: a draft of another client is never named
+   * @param readableOrgs    the role's readable organizations: a draft outside them is never named
+   *                        (its quantity is still deducted by {@link #draftQuantities}, so such a
+   *                        line just reads «ya importado»)
+   * @return {@code orderLineId -> drafts by document number}; a line no other draft holds is absent
+   */
+  static Map<String, List<DraftInvoiceRef>> draftHolders(Collection<String> orderLineIds,
+      boolean sales, String exceptInvoiceId, String clientId, Collection<String> readableOrgs) {
+    Map<String, List<DraftInvoiceRef>> holders = new LinkedHashMap<>();
+    if (orderLineIds.isEmpty()) {
+      return holders;
+    }
+    if (readableOrgs == null || readableOrgs.isEmpty()) {
+      log.debug("No readable organization: no draft invoice holding order lines {} is named",
+          orderLineIds);
+      return holders;
+    }
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery(DRAFT_HOLDERS_HQL, Object[].class)
+        .setParameter("sot", sales).setParameter("inv", exceptInvoiceId)
+        .setParameter("client", clientId).setParameterList("orgs", readableOrgs)
+        .setParameterList("ids", orderLineIds).list();
+    for (Object[] row : rows) {
+      holders.computeIfAbsent((String) row[0], k -> new ArrayList<>())
+          .add(new DraftInvoiceRef((String) row[1], (String) row[2], (BigDecimal) row[3]));
+    }
+    return holders;
   }
 
   /**

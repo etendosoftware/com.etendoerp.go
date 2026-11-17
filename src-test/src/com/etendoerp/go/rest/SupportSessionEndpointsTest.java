@@ -25,7 +25,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -50,6 +52,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -81,6 +84,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * support session gets on the account surface. Same no-database style as
  * {@code GoSessionEndpointsTest}: the session and support services are mocks and the DAL helpers
  * are statically stubbed.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class SupportSessionEndpointsTest {
 
@@ -171,6 +176,36 @@ public class SupportSessionEndpointsTest {
     assertFalse("no credential in the body", body.has("token"));
     assertEquals("no-store", resp.headers.get("Cache-Control"));
     verify(supportHandoffService).retireBrowserSession(null);
+  }
+
+  /** The handoff session must be committed before its cookie is handed out. */
+  @Test
+  public void handoffCommitsTheSessionBeforeSettingTheCookie() throws Exception {
+    GoSessionRecord created = supportSession();
+    when(supportHandoffService.open(eq(TICKET), any(), any())).thenReturn(
+        new SupportHandoffService.SupportHandoff(
+            new IssuedGoSession("new-tok", "new-ref", "new-csrf", created),
+            new SupportAccessRecord()));
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      support.when(() -> EtendoGoJwtSupport.loadRoleListData(SUPPORT_USER)).thenReturn(
+          new EtendoGoJwtSupport.RoleListData(null, new JSONArray()));
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(handoffRequest(ORIGIN, null), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    InOrder order = inOrder(supportHandoffService, obDal, resp.response);
+    order.verify(supportHandoffService).open(eq(TICKET), any(), any());
+    order.verify(obDal).commitAndClose();
+    order.verify(resp.response).addHeader(eq("Set-Cookie"),
+        startsWith(GoSessionSecurity.COOKIE_NAME + "=new-tok"));
+    order.verify(resp.response).getWriter();
   }
 
   @Test

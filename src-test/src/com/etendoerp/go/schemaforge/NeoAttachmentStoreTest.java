@@ -22,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -87,8 +86,10 @@ class NeoAttachmentStoreTest {
     when(context.getCurrentOrganization()).thenReturn(org);
     contextMock = mockStatic(OBContext.class);
     contextMock.when(OBContext::getOBContext).thenReturn(context);
-    manager = mock(AttachImplementationManager.class);
-    helper = mockStatic(NeoAttachmentsHelper.class, CALLS_REAL_METHODS);
+    manager = NeoAttachmentTestFixtures.mockStorageManager();
+    helper = mockStatic(NeoAttachmentsHelper.class);
+    // Only file cleanup is real here; stubbing metadata/storage boundaries must not execute DAL.
+    helper.when(() -> NeoAttachmentsHelper.cleanupTempFile(any(File.class))).thenCallRealMethod();
     helper.when(() -> NeoAttachmentsHelper.resolveTableId(TABLE)).thenReturn(TABLE_ID);
     helper.when(() -> NeoAttachmentsHelper.resolveTabId(TABLE_ID, TAB_ID)).thenReturn(TAB_ID);
     helper.when(() -> NeoAttachmentsHelper.recordExists(TABLE_ID, RECORD)).thenReturn(true);

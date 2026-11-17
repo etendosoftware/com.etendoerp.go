@@ -110,10 +110,10 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void financeHasThirtyFourGrantsIncludingTheResolvedManualJournals() {
+  void financeHasThirtyFiveGrantsIncludingTheResolvedManualJournals() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
-    assertEquals(34, finance.size(),
+    assertEquals(35, finance.size(),
         "Finance's ETP-4878 column has 25 non-dash rows once the 12 windowless rows and the 2 "
             + "ETP-5116 over-grants (Categoría del producto, Inventario físico) are excluded, plus "
             + "window 107 (Receipt-Invoice Link, ETP-5075), 2 ETP-5116 proxy grants (SII "
@@ -121,7 +121,7 @@ class TemplateRoleWindowAccessTest {
             + "(SII/TBAI/Verifactu Configuration), 2 more ETP-5116 direct grants from a later "
             + "pass (Informes financieros, Escaneo inteligente), and 1 more from a still-later "
             + "pass (Informes de inventario), minus Escaneo inteligente again (ETP-5830), plus "
-            + "Invoice Inbox (ETP-6047)");
+            + "Invoice Inbox (ETP-6047), plus Remittance (ETP-6148)");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_MANUAL_JOURNALS);
     assertNotNull(glJournalGrant,
@@ -400,8 +400,8 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(74, total,
-        "12 (Sales) + 14 (Purchasing) + 34 (Finance) + 14 (Inventory) = 74 — from the original "
+    assertEquals(75, total,
+        "12 (Sales) + 14 (Purchasing) + 35 (Finance) + 14 (Inventory) = 75 — from the original "
             + "64: +2 for window 107 (Receipt-Invoice Link) added to Purchasing and Finance by "
             + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\")) "
             + "and added 3 net to Finance (+2/-2 for the 144/168 over-grant removals and the 2 "
@@ -411,7 +411,8 @@ class TemplateRoleWindowAccessTest {
             + "financieros to Finance only (+1), reaching 73, then a still-later ETP-5116 pass "
             + "added Informes de inventario to Purchasing/Finance/Inventory (+3), reaching 76, "
             + "then ETP-5830 removed Escaneo inteligente from all 4 roles (-4), reaching 72, then ETP-6047 "
-            + "added Invoice Inbox to Purchasing and Finance (+2), reaching 74");
+            + "added Invoice Inbox to Purchasing and Finance (+2), reaching 74, then ETP-6148 added "
+            + "the Remittance window to Finance only (+1), reaching 75");
   }
 
   /**
@@ -543,8 +544,8 @@ class TemplateRoleWindowAccessTest {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(42, distinctWindowIds.size(),
-        "The matrix's 74 grants must resolve to exactly 42 distinct AD_Window_IDs once shared "
+    assertEquals(43, distinctWindowIds.size(),
+        "The matrix's 75 grants must resolve to exactly 43 distinct AD_Window_IDs once shared "
             + "windows (e.g. Contactos, Producto, Tarifa) are counted once — "
             + "34 from ETP-4878/ETP-5075 (window 107 added to both Purchasing and Finance), plus "
             + "2 ETP-5116 proxy windows (SII Monitor, Tax Report) and 3 more ETP-5116 direct "
@@ -553,7 +554,8 @@ class TemplateRoleWindowAccessTest {
             + "Escaneo inteligente — all 4 roles, counted once), plus 1 more brand-new ETP-5116 "
             + "window from a still-later pass (Informes de inventario — Purchasing/Finance/"
             + "Inventory, counted once), minus Escaneo inteligente removed again by ETP-5830, plus 1 brand-new ETP-6047 "
-            + "window (Invoice Inbox — Purchasing/Finance, counted once)");
+            + "window (Invoice Inbox — Purchasing/Finance, counted once), plus 1 brand-new ETP-6148 "
+            + "window (Remittance — Finance only)");
   }
 
   /**

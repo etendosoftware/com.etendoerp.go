@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -42,6 +43,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.BatchJobService.JobException;
 import com.etendoerp.go.schemaforge.BatchJobService.Owner;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 
 /**
  * @covers com.etendoerp.go.schemaforge.BatchJobService
@@ -204,10 +206,32 @@ public class BatchJobServiceTest {
     assertTrue(service.heldJobs().isEmpty());
   }
 
+  /** Submits {@code n} one-row jobs as {@code owner}; the manual executor never runs them. */
+  private void fill(Owner owner, int n) throws Exception {
+    for (int i = 0; i < n; i++) {
+      submit(owner, rows(1), committing(new ArrayList<>()));
+    }
+  }
+
+  private int submitStatus(Owner owner) {
+    return httpStatusOf(() -> {
+      try {
+        submit(owner, rows(1), committing(new ArrayList<>()));
+      } catch (JobException e) {
+        throw e;
+      } catch (Exception e) {
+        throw new IllegalStateException(e);
+      }
+    });
+  }
+
+  private static Owner user(String userId, String clientId) {
+    return new Owner(userId, "R1", clientId, "O1", "en_US", null);
+  }
+
   @Test
   public void aUserOverTheLimitGetsA429WithARetryHintAndNoRow() throws Exception {
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
     try {
       submit(ALICE, rows(1), committing(new ArrayList<>()));
       fail("expected 429");
@@ -215,28 +239,43 @@ public class BatchJobServiceTest {
       assertEquals(429, e.getStatus());
       assertEquals(Integer.valueOf(BatchJobService.RETRY_AFTER_SECONDS), e.getRetryAfter());
     }
-    assertEquals(2, store.jobs.size());
+    assertEquals(BatchJobService.MAX_ACTIVE_PER_USER, store.jobs.size());
   }
 
   @Test
   public void aClientOverItsLimitIsRefusedEvenForAnotherUser() throws Exception {
-    Owner carol = new Owner("U3", "R1", "C1", "O1", "en_US", null);
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(ALICE, rows(1), committing(new ArrayList<>()));
-    submit(BOB, rows(1), committing(new ArrayList<>()));
-    submit(BOB, rows(1), committing(new ArrayList<>()));
-    assertEquals(429, httpStatusOf(() -> {
-      try {
-        submit(carol, rows(1), committing(new ArrayList<>()));
-      } catch (JobException e) {
-        throw e;
-      } catch (Exception e) {
-        throw new IllegalStateException(e);
-      }
-    }));
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
+    fill(BOB, BatchJobService.MAX_ACTIVE_PER_CLIENT - BatchJobService.MAX_ACTIVE_PER_USER);
+    assertEquals(429, submitStatus(user("U3", "C1")));
     // another tenant is not affected
     submit(EVE, rows(1), committing(new ArrayList<>()));
-    assertEquals(5, store.jobs.size());
+    assertEquals(BatchJobService.MAX_ACTIVE_PER_CLIENT + 1, store.jobs.size());
+  }
+
+  @Test
+  public void theInstallationOverItsTotalLimitRefusesATenantThatIsUnderItsOwn() throws Exception {
+    int perClient = BatchJobService.MAX_ACTIVE_PER_CLIENT;
+    int tenants = BatchJobService.MAX_ACTIVE_TOTAL / perClient;
+    for (int t = 0; t < tenants; t++) {
+      for (int u = 0; u < perClient; u++) {
+        submit(user("U" + t + "-" + u, "T" + t), rows(1), committing(new ArrayList<>()));
+      }
+    }
+    for (int u = 0; u < BatchJobService.MAX_ACTIVE_TOTAL % perClient; u++) {
+      submit(user("R" + u, "TR"), rows(1), committing(new ArrayList<>()));
+    }
+    assertEquals(BatchJobService.MAX_ACTIVE_TOTAL, store.jobs.size());
+
+    // a fresh tenant with no job of its own is still refused: the cap is installation-wide
+    assertEquals(429, submitStatus(user("NEW", "FRESH")));
+    assertEquals(BatchJobService.MAX_ACTIVE_TOTAL, store.jobs.size());
+  }
+
+  @Test
+  public void finishedJobsFreeTheirSlot() throws Exception {
+    fill(ALICE, BatchJobService.MAX_ACTIVE_PER_USER);
+    executor.runAll();
+    assertEquals(-1, submitStatus(ALICE));
   }
 
   @Test
@@ -302,6 +341,35 @@ public class BatchJobServiceTest {
     assertEquals("p1", failed.getJSONArray("ids").getString(0));
     assertTrue(rowResults.getJSONObject(2).getBoolean("committed"));
     assertTrue(job.getString("hint").contains("committed:false"));
+  }
+
+  /** ETP-6230: every worker row is handed to the KPI observer with the job owner's tenant. */
+  @Test
+  public void everyWorkerRowIsHandedToTheRefusalObserverWithTheOwnersClient() throws Exception {
+    BatchJobService.RowRunner runner = rowOps -> {
+      String id = rowOps.getJSONObject(0).getString("id");
+      if ("p0".equals(id)) {
+        return committing(new ArrayList<>()).run(rowOps);
+      }
+      return rejected(id).put("error", new JSONObject().put("status", 409)
+          .put("messageKeys", new JSONArray().put("PeriodNotAvailable")));
+    };
+    String id = submit(ALICE, rows(2), runner);
+
+    try (MockedStatic<AccountingKpiTelemetry> kpi = Mockito.mockStatic(AccountingKpiTelemetry.class)) {
+      executor.runAll();
+
+      org.mockito.ArgumentCaptor<JSONObject> rowCaptor =
+          org.mockito.ArgumentCaptor.forClass(JSONObject.class);
+      kpi.verify(() -> AccountingKpiTelemetry.observeBatchRow(rowCaptor.capture(),
+          Mockito.eq("C1")), Mockito.times(2));
+      assertTrue(rowCaptor.getAllValues().get(0).getBoolean("committed"));
+      JSONObject refused = rowCaptor.getAllValues().get(1);
+      assertFalse(refused.getBoolean("committed"));
+      assertEquals("PeriodNotAvailable",
+          refused.getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    }
+    assertEquals(2, status(ALICE, id).getJSONArray("rows").length());
   }
 
   @Test
@@ -584,6 +652,18 @@ public class BatchJobServiceTest {
   }
 
   @Test
+  public void aDeleteOperationWithoutRecordIdIsRefusedBeforeTheJobIsRecorded() throws Exception {
+    JSONArray ops = new JSONArray()
+        .put(new JSONObject().put("id", "d0").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE").put("recordId", "R0"))
+        .put(new JSONObject().put("id", "d1").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE"));
+
+    assertEquals("operations[1] DELETE requires 'recordId'", BatchJobService.validate(ops));
+    assertNull(BatchJobService.validate(new JSONArray().put(ops.get(0))));
+  }
+
+  @Test
   public void aWorkerCannotOverwriteTerminalStates() throws Exception {
     String id = submit(ALICE, rows(1), committing(new ArrayList<>()));
     service.cancel(ALICE, id);
@@ -671,6 +751,11 @@ public class BatchJobServiceTest {
     @Override
     public synchronized int countActiveForUser(String clientId, String userId) {
       return (int) active(j -> j.clientId.equals(clientId) && j.userId.equals(userId));
+    }
+
+    @Override
+    public synchronized int countActive() {
+      return (int) active(j -> true);
     }
 
     @Override

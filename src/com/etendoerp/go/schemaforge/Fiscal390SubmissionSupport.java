@@ -134,8 +134,7 @@ class Fiscal390SubmissionSupport {
     if (!testMode && !service.hasOrgCertificate(org)) {
       FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_CONFLICT,
           FiscalAeatSubmissionSupport.failureJson(false, ERR_NO_CERTIFICATE,
-              "No certificate configured for this organization. Upload one via Fiscal "
-                  + "Configuration before submitting in production mode."));
+              NeoMessageText.text("ETGO_FiscalSubmitNoCertificate")));
       return;
     }
 
@@ -168,13 +167,23 @@ class Fiscal390SubmissionSupport {
     }
 
     String fiscalYear = String.valueOf(year);
-    AEAT303SubmissionResult result;
-    try {
-      if (testMode) {
-        result = service.submitValidation(AEAT303SubmissionRequestBuilder.MODELO_390,
-            fileContent, fiscalYear, period, idi);
-      } else {
-        result = service.submitProduction(
+    // From here on the AEAT is called: whatever comes back — an answer or a failure — is an
+    // attempt and leaves its row in the attempt log (own connection, ETP-5716).
+    FiscalAeatAttemptLog.Declaration attempted = new FiscalAeatAttemptLog.Declaration(
+        Fiscal390BoxesHandler.MODEL, year, period, declId, orgId);
+    FiscalAeatValidationOutcome.Path path = FiscalAeatValidationOutcome.Path.ofSubmission(testMode);
+    // A real presentation is validated first, with the very file it is about to send: the
+    // validator's errors stop it (nothing presented, the declaration stays a draft).
+    if (!testMode && stoppedByValidation(service, attempted, new FiscalAeatSubmissionSupport
+        .FileToPresent(AEAT303SubmissionRequestBuilder.MODELO_390, fileContent, fiscalYear,
+            period, idi), decl, response)) {
+      return;
+    }
+    String endpoint = FiscalAeatAttemptLog.endpointOf(service, testMode);
+    FiscalAeatSubmissionSupport.AeatCall call = testMode
+        ? () -> service.submitValidation(AEAT303SubmissionRequestBuilder.MODELO_390, fileContent,
+            fiscalYear, period, idi)
+        : () -> service.submitProduction(
             AEAT303SubmissionService.ProductionSubmissionRequest.builder()
                 .modelo(AEAT303SubmissionRequestBuilder.MODELO_390)
                 .org(org)
@@ -186,7 +195,12 @@ class Fiscal390SubmissionSupport {
                 .nrc("")
                 .language(idi)
                 .build());
-      }
+    AEAT303SubmissionResult result;
+    try {
+      // Any failure around the AEAT call is an attempt (e.g. AEAT303ResponseParseException, a
+      // RuntimeException that is not an OBException): recorded, then handled as before.
+      result = FiscalAeatSubmissionSupport.callRecordingAttempt(owner.attemptLog, attempted,
+          path, testMode, endpoint, call);
     } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 390 submission failed (decl=" + declId + ")", e);
       FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
@@ -204,6 +218,45 @@ class Fiscal390SubmissionSupport {
     FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
         FiscalAeatSubmissionSupport.resultJson(result,
             declarationDataJson(decl, year, period, snapshot)));
+  }
+
+  /**
+   * Runs the validation that precedes a real presentation and, when it stops the presentation,
+   * answers the request ({@link #answerStoppedByValidation}). Returns {@code true} when the
+   * presentation must not go ahead.
+   */
+  private boolean stoppedByValidation(AEAT303SubmissionService service,
+      FiscalAeatAttemptLog.Declaration attempted, FiscalAeatSubmissionSupport.FileToPresent file,
+      FiscalDecl decl, HttpServletResponse response) throws Exception {
+    FiscalAeatSubmissionSupport.PreSubmissionValidation validation =
+        FiscalAeatSubmissionSupport.validateBeforeSubmission(service, owner.attemptLog, attempted,
+            file);
+    if (validation.proceed()) {
+      return false;
+    }
+    answerStoppedByValidation(validation, decl, attempted.declId(), attempted.year(),
+        attempted.period(), response);
+    return true;
+  }
+
+  /**
+   * The presentation did not go ahead: the validator rejected the file (its errors go to the
+   * declaration's incidents, like any AEAT answer) or — only when the policy says so — it could
+   * not be reached. Nothing else of the declaration changes.
+   */
+  private void answerStoppedByValidation(
+      FiscalAeatSubmissionSupport.PreSubmissionValidation validation, FiscalDecl decl,
+      String declId, int year, String period, HttpServletResponse response) throws Exception {
+    if (validation.rejected == null) {
+      FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
+          FiscalAeatSubmissionSupport.validationUnavailableJson());
+      return;
+    }
+    persistAeatIncidentsBestEffort(decl, validation.rejected);
+    commitBestEffort(declId);
+    FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
+        FiscalAeatSubmissionSupport.validationRejectedJson(validation.rejected,
+            declarationDataJson(decl, year, period, null)));
   }
 
   /**
@@ -392,6 +445,20 @@ class Fiscal390SubmissionSupport {
     SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
     f.setTimeZone(TimeZone.getTimeZone("UTC"));
     return f.format(date);
+  }
+
+  /**
+   * Name of the draft PDF the validator returns for a file validated before its download
+   * ({@code VALIDACION-390-<year>-0A.pdf}): its own prefix and no "justificante", so it is never
+   * taken for a filing receipt nor for the test-mode attachment.
+   */
+  static String validationFileName(int year, String period) {
+    return "VALIDACION-390-" + year + "-" + Fiscal303BoxesHandler.safeFileToken(period) + ".pdf";
+  }
+
+  /** The name {@link #validationFileName} had at first; an attachment left with it is replaced too. */
+  static String legacyValidationFileName(int year, String period) {
+    return "VALIDACION-" + justificanteFileName(year, period);
   }
 
   static String justificanteFileName(int year, String period) {
