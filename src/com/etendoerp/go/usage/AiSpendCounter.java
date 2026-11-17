@@ -28,6 +28,8 @@ import javax.inject.Named;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.usageevents.UsageEvent;
+
 /**
  * The money a tenant spent on AI, per day, in US cents: the sum of {@code ETGO_USAGE_EVENT.COST_USD}
  * (agent chat turns, document OCR — every event a provider priced).
@@ -56,7 +58,8 @@ public class AiSpendCounter implements UsageResourceCounter {
       + " sum(e.cost_usd) from etgo_usage_event e"
       + " where e.cost_usd is not null"
       + " and e.occurred_at >= :" + PARAM_FROM + " and e.occurred_at < :" + PARAM_TO
-      + " and e.source in ('backend', 'ai-bff', 'mcp')"
+      + " and e.source in ('" + UsageEvent.SOURCE_BACKEND + "', '" + UsageEvent.SOURCE_AI_BFF
+      + "', '" + UsageEvent.SOURCE_MCP + "')"
       + " and coalesce(cast(e.properties as jsonb) ->> 'actor', '') <> 'support'";
   static final String ONE_CLIENT = " and e.ad_client_id = :" + PARAM_CLIENT;
   static final String GROUP_BY = " group by e.ad_client_id, date_trunc('day', e.occurred_at)";

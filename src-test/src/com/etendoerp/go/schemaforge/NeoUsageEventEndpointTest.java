@@ -764,12 +764,14 @@ class NeoUsageEventEndpointTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = { "backend", "ui", "ai-bff", "mcp", "" })
-    void aToolExecuteEventWithACostFromTheBrowserIsDropped(String source) throws Exception {
-      assertAccepted(postEvents(event(UsageEventTypes.AI_TOOL_EXECUTE).put("source", source)
-          .put("costUsd", 99.0)), 0, 1);
+    @ValueSource(strings = { UsageEventTypes.AI_TOOL_EXECUTE, UsageEventTypes.AI_SUPPORT_MESSAGE })
+    void aCostedAiEventFromTheBrowserIsDroppedWhateverSourceItClaims(String type)
+        throws Exception {
+      for (String source : new String[] { "backend", "ui", "ai-bff", "mcp", "" }) {
+        assertAccepted(postEvents(event(type).put("source", source).put("costUsd", 99.0)), 0, 1);
+      }
 
-      assertTrue(sunk.isEmpty(), "a browser cannot add to the AI spend with ai.tool.execute");
+      assertTrue(sunk.isEmpty(), "a browser cannot add to the AI spend with " + type);
     }
 
     @ParameterizedTest
