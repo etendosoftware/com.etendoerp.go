@@ -254,7 +254,7 @@ final class McpSelectorContextHelper {
   }
 
   /**
-   * Carries the financial account into the selectors that depend on it (ETP-6340): the remittance
+   * Carries the financial account into the selectors that depend on it (ETP-5850): the remittance
    * header's {@code remittanceType} offers only the types linked to the account the form holds,
    * read from {@code FIN_Financial_Account_ID} (the field's {@code dependsOn.filterKey}, which the
    * SPA sends). Without this mapping {@code recordContext.financialAccount} was dropped and the

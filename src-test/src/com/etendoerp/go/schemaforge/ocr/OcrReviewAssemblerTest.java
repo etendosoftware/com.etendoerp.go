@@ -414,7 +414,7 @@ class OcrReviewAssemblerTest {
     }
 
     @Test
-    @DisplayName("a date with the month in words, as an invoice prints it, converts too (ETP-6340)")
+    @DisplayName("a date with the month in words, as an invoice prints it, converts too (ETP-5850)")
     void writtenDates() {
       assertEquals("2026-01-15", OcrJson.toIsoDate("15 de enero de 2026"));
       assertEquals("2026-09-03", OcrJson.toIsoDate("3 Septiembre 2026"));

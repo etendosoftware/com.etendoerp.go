@@ -424,7 +424,7 @@ class RemittanceHeaderHandlerTest {
   }
 
   /**
-   * ETP-6340: the MCP's {@code etendo_selectors} has no HTTP request; its {@code recordContext}
+   * ETP-5850: the MCP's {@code etendo_selectors} has no HTTP request; its {@code recordContext}
    * reaches the hook as query parameters only. The account read there must narrow the types too.
    */
   @Test

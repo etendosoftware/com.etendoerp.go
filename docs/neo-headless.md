@@ -2685,7 +2685,7 @@ everything is Classic's model.
   (`ibanValid` = the account form's pair check); `totalCount`/`hasMore` come from the same list as
   the items. `remittanceType` offers only the provisioned types linked to the request's
   `FIN_Financial_Account_ID`; through the MCP, `etendo_selectors` takes it as
-  `recordContext.financialAccount` (or `FIN_Financial_Account_ID`) and passes it on (ETP-6340;
+  `recordContext.financialAccount` (or `FIN_Financial_Account_ID`) and passes it on (ETP-5850;
   before, the key was dropped and the selector answered no types). Writes stay strict: saving with
   an account without a valid IBAN is
   `422 ETGO_RemittanceAccountIbanRequired`. DEFAULTS keep the strict rule too and never prefill an
@@ -15449,7 +15449,7 @@ recomputes address, duplicates and taxes for that vendor from the cached reading
 notice (warn-only; `iEquals` on `orderReference`, status ≠ `VO`, the vendor's invoices of the session's tenant, ≤ 10); `apply_*` = the two toggles (**respected**, unlike the
 SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`skip` because the server rejects a line without a product); `line_i_tax` =
 `findDefaultTax` (`no_rate` is informative — the default applies; `no_tax_at_rate` lists the alternatives of that rate; `pending_vendor` waits for a vendor with an
-address). **Dates.** `invoiceDateIso` and the `apply_invoiceDate` `sendValue` are the read date as `yyyy-MM-dd`: ISO stays, `d/M/yyyy` and `d-M-yy` convert, and so does a month in words, Spanish or English, as invoices print it (`15 de enero de 2026`, `15-ene-2026`, `January 15, 2026`; ETP-6340 — it used to reach both untouched). Any other shape, or an impossible day, is passed as read. **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
+address). **Dates.** `invoiceDateIso` and the `apply_invoiceDate` `sendValue` are the read date as `yyyy-MM-dd`: ISO stays, `d/M/yyyy` and `d-M-yy` convert, and so does a month in words, Spanish or English, as invoices print it (`15 de enero de 2026`, `15-ene-2026`, `January 15, 2026`; ETP-5850 — it used to reach both untouched). Any other shape, or an impossible day, is passed as read. **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
 existing tools); the SPA's modal navigation.
 
 **When a product line is `auto_matched`.** (1) Exactly one candidate whose name equals the line description after normalization (trim including Unicode edge whitespace, lowercase, accents folded; `ñ` stays distinct); two or more such candidates give `suggested`. (2) Otherwise, the single highest `similarity`, when it is >= 90 and no other candidate shares that top value; a tie at the top (>= 90) gives `suggested` with the first candidate, and below 90 or an unparseable value also gives `suggested`. (3) The `similarity` on a candidate is the raw pg_trgm score computed by the database, which is accent-sensitive, so a line can be `auto_matched` with a `similarity` below 90 (e.g. 82.35 for "Arnes ..." vs "Arnés ...") because it matched by normalized name equality, not by the percentage: consumers must rely on `state` and never recompute the threshold from `similarity`. The rule is mirrored by the application's `classifyProductMatch`, so the UI and MCP agree.

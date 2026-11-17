@@ -406,7 +406,7 @@ public class OnboardingDatasetNormalizerTest {
    * name), so filtering them out would leave the tenant with no counter for those tables at all.
    */
   /**
-   * ETP-6340 — a column-bound (transactional) sequence in the dataset, like GOClient's
+   * ETP-5850 — a column-bound (transactional) sequence in the dataset, like GOClient's
    * {@code C_BPartner-EM_Etgo_Identifier}, is there for {@code import.sample.data} only: onboarding
    * generates the tenant's own for its business organization, so a copy would be a second sequence
    * for the same column. The count above (46) already excludes it; this names it.

@@ -132,7 +132,7 @@ final class RemittanceHeaderSelectors {
    * {@value RemittanceHeaderHandler#PARAM_ACCOUNT}). No account, no types. Read from the hook
    * context's query parameters first, then from the HTTP request: the MCP's
    * {@code etendo_selectors} has no HTTP request of its own and hands its {@code recordContext}
-   * over as query parameters only, so reading the request alone answered no types there (ETP-6340).
+   * over as query parameters only, so reading the request alone answered no types there (ETP-5850).
    */
   private static NeoResponse typeSelector(RemittanceHeaderHandler handler,
       Map<String, String> queryParams) throws JSONException {
