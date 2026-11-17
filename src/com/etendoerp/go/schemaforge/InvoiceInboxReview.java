@@ -241,27 +241,35 @@ final class InvoiceInboxReview {
    */
   private static JSONObject currency(IncomingDocument row, JSONObject document)
       throws JSONException {
-    Optional<OcrLookups> lookups = lookupsFor(row.getTargetType());
-    if (lookups.isPresent()) {
-      try {
-        JSONObject header = document.optJSONObject(K_HEADER);
-        String stored = header == null ? "" : header.optString(K_CURRENCY_ID, "");
-        String organizationId = row.getOrganization() == null ? null
-            : row.getOrganization().getId();
-        Optional<OcrLookups.DocCurrency> found = stored.isEmpty()
-            ? lookups.get().documentCurrency(linkedVendorId(header), organizationId)
-            : lookups.get().currencyById(stored);
-        if (found.isPresent()) {
-          return new JSONObject().put("id", found.get().id())
-              .put("isoCode", found.get().isoCode())
-              .put("symbol", found.get().symbol() == null ? JSONObject.NULL : found.get().symbol())
-              .put("scale", found.get().scale());
-        }
-      } catch (RuntimeException e) {
-        log.warn("Invoice inbox review: currency lookup failed: {}", e.getClass().getSimpleName());
-      }
+    Optional<OcrLookups.DocCurrency> found = lookedUpCurrency(row, document);
+    if (found.isEmpty()) {
+      return organizationCurrency(row.getOrganization());
     }
-    return organizationCurrency(row.getOrganization());
+    Object symbol = found.get().symbol() == null ? JSONObject.NULL : found.get().symbol();
+    return new JSONObject().put("id", found.get().id()).put("isoCode", found.get().isoCode())
+        .put("symbol", symbol).put("scale", found.get().scale());
+  }
+
+  /** The stored currency, else the one derived now; empty when unknown or the lookup failed. */
+  private static Optional<OcrLookups.DocCurrency> lookedUpCurrency(IncomingDocument row,
+      JSONObject document) {
+    Optional<OcrLookups> lookups = lookupsFor(row.getTargetType());
+    if (lookups.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      JSONObject header = document.optJSONObject(K_HEADER);
+      String stored = header == null ? "" : header.optString(K_CURRENCY_ID, "");
+      if (!stored.isEmpty()) {
+        return lookups.get().currencyById(stored);
+      }
+      String organizationId = row.getOrganization() == null ? null
+          : row.getOrganization().getId();
+      return lookups.get().documentCurrency(linkedVendorId(header), organizationId);
+    } catch (RuntimeException e) {
+      log.warn("Invoice inbox review: currency lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
   }
 
   private static String linkedVendorId(JSONObject header) {
@@ -427,10 +435,9 @@ final class InvoiceInboxReview {
   private static void enrichTaxes(JSONArray lines, OcrLookups lookups) throws JSONException {
     List<String> ids = new ArrayList<>();
     for (int i = 0; lines != null && i < lines.length(); i++) {
-      JSONObject tax = lines.optJSONObject(i) == null ? null
-          : lines.optJSONObject(i).optJSONObject(K_TAX);
-      if (tax != null && !StringUtils.isBlank(tax.optString(K_ID))) {
-        ids.add(tax.optString(K_ID));
+      String id = taxIdOf(lines.optJSONObject(i));
+      if (id != null) {
+        ids.add(id);
       }
     }
     if (ids.isEmpty()) {
@@ -438,13 +445,18 @@ final class InvoiceInboxReview {
     }
     Map<String, String> names = lookups.taxNames(ids);
     for (int i = 0; i < lines.length(); i++) {
-      JSONObject tax = lines.optJSONObject(i) == null ? null
-          : lines.optJSONObject(i).optJSONObject(K_TAX);
-      String name = tax == null ? null : names.get(tax.optString(K_ID));
+      String name = names.get(taxIdOf(lines.optJSONObject(i)));
       if (name != null) {
-        tax.put(K_NAME, name);
+        lines.optJSONObject(i).getJSONObject(K_TAX).put(K_NAME, name);
       }
     }
+  }
+
+  /** The id of the line's tax, {@code null} when the line has no tax block or the block no id. */
+  private static String taxIdOf(JSONObject line) {
+    JSONObject tax = line == null ? null : line.optJSONObject(K_TAX);
+    String id = tax == null ? "" : tax.optString(K_ID);
+    return StringUtils.isBlank(id) ? null : id;
   }
 
   private static JSONObject productOf(JSONObject line) {

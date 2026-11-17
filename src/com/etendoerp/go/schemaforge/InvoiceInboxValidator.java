@@ -181,19 +181,35 @@ public final class InvoiceInboxValidator {
     }
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.optJSONObject(i);
-      int id = line == null || line.isNull(K_INDEX) ? i : line.optInt(K_INDEX, i);
-      if (line == null || !taxComplete(line)) {
-        missing.add(lineCode(id, "tax"));
+      checkLine(line, lineId(line, i), missing);
+    }
+  }
+
+  /** The stable {@code index} of a line, its position for a line that carries none. */
+  private static int lineId(JSONObject line, int position) {
+    boolean hasIndex = line != null && !line.isNull(K_INDEX);
+    return hasIndex ? line.optInt(K_INDEX, position) : position;
+  }
+
+  /** Adds, in order, what a line is missing: tax, product, quantity, unit price. */
+  private static void checkLine(JSONObject line, int id, List<String> missing) {
+    if (line == null) {
+      for (String field : new String[] { "tax", "product", "quantity", "unitPrice" }) {
+        missing.add(lineCode(id, field));
       }
-      if (line == null || !productComplete(line)) {
-        missing.add(lineCode(id, "product"));
-      }
-      if (line == null || !(line.opt(K_QUANTITY) instanceof Number)) {
-        missing.add(lineCode(id, "quantity"));
-      }
-      if (line == null || !(line.opt(K_UNIT_PRICE) instanceof Number)) {
-        missing.add(lineCode(id, "unitPrice"));
-      }
+      return;
+    }
+    if (!taxComplete(line)) {
+      missing.add(lineCode(id, "tax"));
+    }
+    if (!productComplete(line)) {
+      missing.add(lineCode(id, "product"));
+    }
+    if (!(line.opt(K_QUANTITY) instanceof Number)) {
+      missing.add(lineCode(id, "quantity"));
+    }
+    if (!(line.opt(K_UNIT_PRICE) instanceof Number)) {
+      missing.add(lineCode(id, "unitPrice"));
     }
   }
 

@@ -235,29 +235,42 @@ public final class InvoiceInboxTotals {
     BigDecimal base = BigDecimal.ZERO;
     boolean any = false;
     for (int i = 0; lines != null && i < lines.length(); i++) {
-      JSONObject line = lines.optJSONObject(i);
-      BigDecimal quantity = OcrJson.decimal(line, K_QUANTITY);
-      BigDecimal price = OcrJson.decimal(line, K_UNIT_PRICE);
-      if (quantity == null || price == null) {
-        continue;
-      }
-      any = true;
-      BigDecimal net = lineNet(quantity, price, OcrJson.decimal(line, K_DISCOUNT), scale);
-      base = base.add(net);
-      BigDecimal rate = effectiveRate(line);
-      if (rate != null) {
-        boolean lineBased = isLineBased(line);
-        BigDecimal[] row = rows.computeIfAbsent(new RowKey(rate.stripTrailingZeros(), lineBased),
-            k -> new BigDecimal[] { rate.stripTrailingZeros(), BigDecimal.ZERO, BigDecimal.ZERO });
-        row[1] = row[1].add(net);
-        if (lineBased) {
-          row[2] = row[2].add(taxOf(net, rate, scale));
-        }
+      BigDecimal net = addLine(rows, lines.optJSONObject(i), scale);
+      if (net != null) {
+        any = true;
+        base = base.add(net);
       }
     }
-    if (!any) {
+    return any ? summarize(rows, base, scale) : null;
+  }
+
+  /**
+   * Adds one line to the rows of its rate and rounding mode.
+   *
+   * @return the net of the line, {@code null} when it has no quantity or no price
+   */
+  private static BigDecimal addLine(Map<RowKey, BigDecimal[]> rows, JSONObject line, int scale) {
+    BigDecimal quantity = OcrJson.decimal(line, K_QUANTITY);
+    BigDecimal price = OcrJson.decimal(line, K_UNIT_PRICE);
+    if (quantity == null || price == null) {
       return null;
     }
+    BigDecimal net = lineNet(quantity, price, OcrJson.decimal(line, K_DISCOUNT), scale);
+    BigDecimal rate = effectiveRate(line);
+    if (rate != null) {
+      boolean lineBased = isLineBased(line);
+      BigDecimal[] row = rows.computeIfAbsent(new RowKey(rate.stripTrailingZeros(), lineBased),
+          k -> new BigDecimal[] { rate.stripTrailingZeros(), BigDecimal.ZERO, BigDecimal.ZERO });
+      row[1] = row[1].add(net);
+      if (lineBased) {
+        row[2] = row[2].add(taxOf(net, rate, scale));
+      }
+    }
+    return net;
+  }
+
+  /** The totals from the accumulated rows: the tax of each row by its mode, and their sum. */
+  private static Totals summarize(Map<RowKey, BigDecimal[]> rows, BigDecimal base, int scale) {
     BigDecimal tax = BigDecimal.ZERO;
     List<TaxRow> out = new ArrayList<>();
     for (Map.Entry<RowKey, BigDecimal[]> entry : rows.entrySet()) {

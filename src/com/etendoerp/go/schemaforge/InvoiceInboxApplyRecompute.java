@@ -176,31 +176,39 @@ final class InvoiceInboxApplyRecompute {
   /** The duplicate block and its notices, asked again because the number or the vendor changed. */
   private static void recheckDuplicates(InvoiceInboxApply.Edit edit) throws JSONException {
     JSONObject header = edit.header();
-    JSONObject vendor = edit.vendor();
-    String documentNo = text(header, K_DOCUMENT_NO);
-    JSONObject duplicate = new JSONObject().put(K_STATE, D_NONE).put(K_INVOICES, new JSONArray());
-    boolean unknown = false;
-    if (edit.lookups != null && S_LINKED.equals(vendor.optString(K_STATE))
-        && !documentNo.isEmpty()) {
-      Duplicates found = edit.lookups.duplicates(vendor.optString(K_ID), documentNo);
-      if (!found.known()) {
-        unknown = true;
-        duplicate.put(K_STATE, D_UNKNOWN);
-      } else {
-        JSONArray invoices = new JSONArray();
-        for (OcrLookups.Duplicate document : found.documents()) {
-          invoices.put(new JSONObject().put(K_ID, document.id()).put(K_DOCUMENT_NO,
-              document.documentNo() == null ? "" : document.documentNo()));
-        }
-        duplicate.put(K_STATE, invoices.length() > 0 ? D_FOUND : D_NONE).put(K_INVOICES, invoices);
-      }
-    }
+    JSONObject duplicate = lookedUpDuplicates(edit, edit.vendor(), text(header, K_DOCUMENT_NO));
+    boolean unknown = D_UNKNOWN.equals(duplicate.optString(K_STATE));
     header.put(K_DUPLICATE, duplicate);
     JSONArray inbox = InvoiceInboxDuplicates.find(edit.row, header,
         java.util.Arrays.asList(OBContext.getOBContext().getReadableOrganizations()));
     duplicate.put(K_INBOX, inbox);
     setNotice(edit, N_DUPLICATE_CHECK_UNKNOWN, unknown);
     setNotice(edit, N_DUPLICATE_IN_INBOX, inbox.length() > 0);
+  }
+
+  /**
+   * The {@code duplicate} block from the invoices of the linked vendor with this number: none when
+   * there is no linked vendor or no number, unknown when the lookup could not be made.
+   */
+  private static JSONObject lookedUpDuplicates(InvoiceInboxApply.Edit edit, JSONObject vendor,
+      String documentNo) throws JSONException {
+    JSONObject duplicate = new JSONObject().put(K_STATE, D_NONE).put(K_INVOICES, new JSONArray());
+    boolean askable = edit.lookups != null && S_LINKED.equals(vendor.optString(K_STATE))
+        && !documentNo.isEmpty();
+    if (!askable) {
+      return duplicate;
+    }
+    Duplicates found = edit.lookups.duplicates(vendor.optString(K_ID), documentNo);
+    if (!found.known()) {
+      return duplicate.put(K_STATE, D_UNKNOWN);
+    }
+    JSONArray invoices = new JSONArray();
+    for (OcrLookups.Duplicate document : found.documents()) {
+      String number = document.documentNo() == null ? "" : document.documentNo();
+      invoices.put(new JSONObject().put(K_ID, document.id()).put(K_DOCUMENT_NO, number));
+    }
+    return duplicate.put(K_STATE, invoices.length() > 0 ? D_FOUND : D_NONE)
+        .put(K_INVOICES, invoices);
   }
 
   /** The total follows the lines unless the document printed one (which never changes). */
