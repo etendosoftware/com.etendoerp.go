@@ -117,6 +117,7 @@ public final class UsageEventTypes {
    * or a decision whose cost counts in the tenant's AI spend. Each must also be in {@link #KNOWN}.
    */
   private static final Set<String> SERVER_ONLY = Set.of(
+      AI_TOOL_EXECUTE,
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,

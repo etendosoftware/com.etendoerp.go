@@ -119,6 +119,18 @@ class AiSpendCounterTest {
   }
 
   @Test
+  void onlyServerSourcesAreCountedNeverTheBrowsers() {
+    when(query.list()).thenReturn(List.of());
+
+    counter.count(new UsageCountRequest(mock(BillingResource.class), FROM, TO, null));
+
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    verify(session).createNativeQuery(sql.capture());
+    assertTrue(sql.getValue().contains("e.source in ('backend', 'ai-bff', 'mcp')"));
+    assertFalse(sql.getValue().contains("'ui'"));
+  }
+
+  @Test
   void oneTenantIsBoundAndNeverWidened() {
     when(query.list()).thenReturn(List.of());
 

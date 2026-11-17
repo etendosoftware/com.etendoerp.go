@@ -115,14 +115,14 @@ class UsageEventTypesTest {
   @ParameterizedTest
   @ValueSource(strings = { "session.login", "publicapi.request", "ai.decision.execute",
       "portal.link.sent", "portal.link.opened", "portal.link.renewed",
-      "portal.document.downloaded" })
+      "portal.document.downloaded", "ai.tool.execute" })
   void serverOnlyTypesAreFlagged(String type) {
     assertTrue(UsageEventTypes.isServerOnly(type));
     assertTrue(UsageEventTypes.isKnown(type));
   }
 
   @ParameterizedTest
-  @ValueSource(strings = { "ai.agent.message", "ai.support.message", "ai.tool.execute",
+  @ValueSource(strings = { "ai.agent.message", "ai.support.message",
       "nope.unknown", "", "PUBLICAPI.REQUEST" })
   void otherKnownAndUnknownTypesAreNotServerOnly(String type) {
     assertFalse(UsageEventTypes.isServerOnly(type));

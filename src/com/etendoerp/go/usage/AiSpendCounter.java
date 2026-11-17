@@ -36,7 +36,8 @@ import org.openbravo.dal.service.OBDal;
  * value is in cents because {@code ETGO_USAGE_DAILY.QTY} and quota quantities are integers; each
  * tenant-day is rounded half-up once, so a year's figure is within half a cent per active day of
  * the exact sum. Events of the Etendo support user ({@code "actor":"support"}) are not the tenant's
- * spend and are left out.
+ * spend and are left out, and so are events a browser reported ({@code SOURCE = 'ui'}): only the
+ * server-side sources count.
  *
  * <p>Annotated {@code @Named} and nothing else; see {@link UsageResourceCounter} for why.
  */
@@ -55,6 +56,7 @@ public class AiSpendCounter implements UsageResourceCounter {
       + " sum(e.cost_usd) from etgo_usage_event e"
       + " where e.cost_usd is not null"
       + " and e.occurred_at >= :" + PARAM_FROM + " and e.occurred_at < :" + PARAM_TO
+      + " and e.source in ('backend', 'ai-bff', 'mcp')"
       + " and coalesce(cast(e.properties as jsonb) ->> 'actor', '') <> 'support'";
   static final String ONE_CLIENT = " and e.ad_client_id = :" + PARAM_CLIENT;
   static final String GROUP_BY = " group by e.ad_client_id, date_trunc('day', e.occurred_at)";
