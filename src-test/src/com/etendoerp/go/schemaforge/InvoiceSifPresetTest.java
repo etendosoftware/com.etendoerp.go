@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -180,11 +181,24 @@ public class InvoiceSifPresetTest {
         Mockito.mockStatic(RectificativeSupport.class);
     final MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
         Mockito.mockStatic(SalesRectificativeFiscalDefaults.class);
-    final MockedStatic<RectificationFiscalCodeGuard> guardMock =
-        Mockito.mockStatic(RectificationFiscalCodeGuard.class);
+    /** {@code null} when the real guard runs ({@link #Env(boolean, boolean)}). */
+    final MockedStatic<RectificationFiscalCodeGuard> guardMock;
     private final MockedStatic<SIIUtils> siiMock = Mockito.mockStatic(SIIUtils.class);
 
     Env(boolean rectificative) {
+      this(rectificative, false);
+    }
+
+    /**
+     * @param realGuard {@code true} lets {@link RectificationFiscalCodeGuard#evaluate} run for
+     *     real, with VERI*FACTU's configuration active too, so its 422 is the one answered
+     */
+    Env(boolean rectificative, boolean realGuard) {
+      guardMock = realGuard ? null : Mockito.mockStatic(RectificationFiscalCodeGuard.class);
+      if (realGuard) {
+        defaultsMock.when(() -> SalesRectificativeFiscalDefaults.configExists(anyString(),
+            anyString())).thenReturn(true);
+      }
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       rectifMock.when(() -> RectificativeSupport.isRectificative(any())).thenReturn(rectificative);
       defaultsMock.when(() -> SalesRectificativeFiscalDefaults.siiConfigActive(anyString()))
@@ -194,13 +208,17 @@ public class InvoiceSifPresetTest {
       defaultsMock.when(() -> SalesRectificativeFiscalDefaults.verifactuConfigActive(anyString()))
           .thenReturn(true);
       siiMock.when(() -> SIIUtils.getSiiConfigFromOrg(any())).thenReturn(siiConfig);
-      guardMock.when(() -> RectificationFiscalCodeGuard.evaluate(any())).thenReturn(null);
+      if (guardMock != null) {
+        guardMock.when(() -> RectificationFiscalCodeGuard.evaluate(any())).thenReturn(null);
+      }
     }
 
     @Override
     public void close() {
       siiMock.close();
-      guardMock.close();
+      if (guardMock != null) {
+        guardMock.close();
+      }
       defaultsMock.close();
       rectifMock.close();
       dalMock.close();
@@ -344,6 +362,125 @@ public class InvoiceSifPresetTest {
     assertNull(InvoiceSifPreset.defaultVerifactuInvType(salesFacts(true, "R1")));
   }
 
+  private static final List<String> RECTIFICATION_KEYS = List.of(
+      Invoice.PROPERTY_AEATSIIMOTIVORECTIF, Invoice.PROPERTY_TBAIREVERSEINVOICECODE,
+      Invoice.PROPERTY_ETVFACINVTYPE);
+
+  /**
+   * The defaults of a sales rectificative carry the three rectification codes as present keys with
+   * no value: never R4, and VERI*FACTU's type never F1, whatever the document type configures.
+   */
+  @Test
+  public void theDefaultsOfASalesRectificativeLeaveEveryRectificationCodeEmpty() {
+    for (String docInvType : java.util.Arrays.asList("F1", "R4", null)) {
+      Map<String, Object> defaults = InvoiceSifPreset.defaults(salesFacts(true, docInvType));
+
+      for (String key : RECTIFICATION_KEYS) {
+        assertTrue(docInvType + "/" + key, defaults.containsKey(key));
+        assertNull(docInvType + "/" + key, defaults.get(key));
+      }
+    }
+  }
+
+  /**
+   * The sifDefaults preview of a sales rectificative shows the three rectification codes as JSON
+   * null (not absent, not R4, not F1), while VERI*FACTU's type still offers R1-R5 only.
+   */
+  @Test
+  public void thePreviewOfASalesRectificativeShowsNoCodeButOffersR1ToR5() throws Exception {
+    try (Env env = new Env(true)) {
+      JSONObject preview = InvoiceSifPreset.preview(
+          new InvoiceSifPreset.Target(org(), null, invoice(true, "F1").getTransactionDocument(),
+              true, null));
+
+      assertTrue(preview.getBoolean("rectificative"));
+      JSONObject fields = preview.getJSONObject("fields");
+      for (String key : RECTIFICATION_KEYS) {
+        assertTrue(key, fields.has(key));
+        assertTrue(key, fields.isNull(key));
+      }
+      JSONArray specs = preview.getJSONArray("fieldSpecs");
+      List<String> vfOptions = null;
+      for (int i = 0; i < specs.length(); i++) {
+        JSONObject spec = specs.getJSONObject(i);
+        if (Invoice.PROPERTY_ETVFACINVTYPE.equals(spec.getString("name"))) {
+          JSONArray options = spec.getJSONArray("options");
+          vfOptions = new java.util.ArrayList<>();
+          for (int j = 0; j < options.length(); j++) {
+            vfOptions.add(options.getString(j));
+          }
+        }
+      }
+      assertEquals(List.of("R1", "R2", "R3", "R4", "R5"), vfOptions);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // The unattended fallback (no sifFields at all)
+  // ---------------------------------------------------------------------------
+
+  /** An empty sifFields object is "nothing sent": the rectificative gets R4 in every system. */
+  @Test
+  public void anEmptySifFieldsObjectGetsTheUnattendedFallback() {
+    Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(true, "F1"), new JSONObject());
+
+    for (String key : RECTIFICATION_KEYS) {
+      assertEquals(key, "R4", values.get(key));
+    }
+  }
+
+  /** The fallback never applies to a normal sales invoice nor to a purchase. */
+  @Test
+  public void theFallbackIsEmptyOnAnInvoiceThatIsNotASalesRectificative() {
+    assertTrue(InvoiceSifPreset.unattendedRectificationFallback(salesFacts(false, "F1")).isEmpty());
+    assertTrue(InvoiceSifPreset.unattendedRectificationFallback(purchaseFacts(true)).isEmpty());
+
+    Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(false, "F2"), null);
+    assertEquals("F2", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
+    assertFalse(values.containsValue("R4"));
+  }
+
+  /** The fallback names only the fiscal systems active for the invoice. */
+  @Test
+  public void theFallbackIsLimitedToTheActiveSystems() {
+    assertEquals(Map.of(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R4"),
+        InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(true, false, false)));
+    assertEquals(Map.of(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R4"),
+        InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(false, true, false)));
+    assertEquals(Map.of(Invoice.PROPERTY_ETVFACINVTYPE, "R4"),
+        InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(false, false, true)));
+    assertTrue(InvoiceSifPreset.unattendedRectificationFallback(
+        rectificativeWith(false, false, false)).isEmpty());
+
+    Map<String, Object> values = InvoiceSifPreset.merge(rectificativeWith(false, true, false), null);
+    assertEquals("R4", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+    assertFalse(values.containsKey(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+    assertFalse(values.containsKey(Invoice.PROPERTY_ETVFACINVTYPE));
+  }
+
+  private static InvoiceSifPreset.Facts rectificativeWith(boolean sii, boolean tbai,
+      boolean verifactu) {
+    return new InvoiceSifPreset.Facts(true, true, sii, tbai, verifactu, "F1", null, false, false,
+        null, null, "2026-11-11", null, null);
+  }
+
+  /** sifFields {} on the request body is the same as sending none: R4 is written. */
+  @Test
+  public void applyBeforeCompletionWithAnEmptyOrNullSifFieldsWritesR4() throws Exception {
+    for (Object sifFields : List.of(new JSONObject(), JSONObject.NULL)) {
+      Invoice invoice = invoice(true, "F1");
+
+      try (Env env = new Env(true)) {
+        InvoiceSifPreset.applyBeforeCompletion(invoice,
+            new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, sifFields));
+
+        for (String key : RECTIFICATION_KEYS) {
+          verify(invoice).set(key, "R4");
+        }
+      }
+    }
+  }
+
   /**
    * End to end on a sales rectificative with every system active and no sifFields: R4 is written
    * (the unattended fallback) as SII motive,
@@ -439,6 +576,92 @@ public class InvoiceSifPresetTest {
     assertEquals("R1", values.get(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
     assertNull(values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
     assertNull(values.get(Invoice.PROPERTY_ETVFACINVTYPE));
+  }
+
+  /**
+   * Explicit nulls, or a sifFields carrying only non-rectification fields, are a reviewed step:
+   * no fallback, the codes stay empty.
+   */
+  @Test
+  public void explicitNullsOrAnUnrelatedFieldGetNoFallback() throws Exception {
+    JSONObject nulls = new JSONObject();
+    for (String key : RECTIFICATION_KEYS) {
+      nulls.put(key, JSONObject.NULL);
+    }
+    JSONObject unrelated = new JSONObject().put(Invoice.PROPERTY_ETVFACVERIFACDESC, "Abono");
+
+    for (JSONObject requested : List.of(nulls, unrelated)) {
+      Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(true, "F1"), requested);
+
+      for (String key : RECTIFICATION_KEYS) {
+        assertTrue(requested + "/" + key, values.containsKey(key));
+        assertNull(requested + "/" + key, values.get(key));
+      }
+    }
+  }
+
+  /**
+   * End to end with the real guard: a partial sifFields (SII motive sent, the rest omitted) gets no
+   * fallback and the completion is refused with 422 naming the systems still missing a code.
+   */
+  @Test
+  public void aPartialSifFieldsIsRefusedByTheGuardForTheOmittedSystems() throws Exception {
+    Invoice invoice = recordingInvoice();
+    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS,
+        new JSONObject().put(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1"));
+
+    try (Env env = new Env(true, true)) {
+      InvoiceSifPreset.Refused refused = refusal(null,
+          () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+
+      assertRectificationCodeRequired(refused, "TicketBAI", "Verifactu");
+      verify(invoice).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1");
+      verify(invoice, never()).set(anyString(), Mockito.eq("R4"));
+    }
+  }
+
+  /** Explicit nulls for every code: no fallback, the guard names all three systems. */
+  @Test
+  public void explicitNullCodesAreRefusedByTheGuardInEverySystem() throws Exception {
+    Invoice invoice = recordingInvoice();
+    JSONObject nulls = new JSONObject();
+    for (String key : RECTIFICATION_KEYS) {
+      nulls.put(key, JSONObject.NULL);
+    }
+    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, nulls);
+
+    try (Env env = new Env(true, true)) {
+      InvoiceSifPreset.Refused refused = refusal(null,
+          () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+
+      assertRectificationCodeRequired(refused, "SII", "TicketBAI", "Verifactu");
+      verify(invoice, never()).set(anyString(), Mockito.eq("R4"));
+    }
+  }
+
+  /** A sales rectificative invoice whose getters read back what {@code set} wrote. */
+  private static Invoice recordingInvoice() {
+    Invoice invoice = invoice(true, "F1");
+    Map<String, Object> written = new java.util.HashMap<>();
+    Mockito.doAnswer(call -> written.put(call.getArgument(0), call.getArgument(1)))
+        .when(invoice).set(anyString(), any());
+    when(invoice.getAeatsiiMotivoRectif()).thenAnswer(
+        call -> written.get(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+    when(invoice.getTbaiReverseinvoicecode()).thenAnswer(
+        call -> written.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+    when(invoice.getEtvfacInvType()).thenAnswer(
+        call -> written.get(Invoice.PROPERTY_ETVFACINVTYPE));
+    return invoice;
+  }
+
+  private static void assertRectificationCodeRequired(InvoiceSifPreset.Refused refused,
+      String... systems) throws JSONException {
+    assertRefusedAs(RectificationFiscalCodeGuard.MSG_RECTIFICATION_CODE_REQUIRED, null, refused);
+    JSONArray named = body(refused).getJSONObject("messageParams").getJSONArray("systems");
+    assertEquals(systems.length, named.length());
+    for (int i = 0; i < systems.length; i++) {
+      assertEquals(systems[i], named.getString(i));
+    }
   }
 
   /** A field that is not an editable SIF field of this invoice is refused with 422. */
