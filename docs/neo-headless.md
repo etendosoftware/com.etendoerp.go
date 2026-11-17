@@ -14495,12 +14495,16 @@ rectificative was computed either on the detail GET or by the header callout whe
   - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
     the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
     rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
-    `tbaiReverseinvoicetype = I` and `tbaiReverseinvoicecode = R4` only when blank (the callout's values);
+    `tbaiReverseinvoicetype = I` only when blank. `tbaiReverseinvoicecode` is **never** defaulted
+    (ETP-5745 CP-14 reverted the ETP-5747 `R4` auto-pick): it stays empty until the user chooses it;
   - with an active VERI*FACTU config in the system for the legal entity (the
-    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` = the document type's `em_etvfac_inv_type`
-    (when that is an `R*` code) over a blank or non-rectificative `F*` value — an `R*` value already on the
-    invoice is kept; then, when the type is `R*` and `etvfacReverseinvtype` is blank, the document type's
-    reverse type, or `I` when the document type has none.
+    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` is **never** written (ETP-5745 CP-20); only
+    when the invoice already carries an `R1`-`R5` type the user picked and `etvfacReverseinvtype` is
+    blank, the reverse type gets the document type's one, or `I` when the document type has none.
+
+  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive and the TicketBAI
+  code stay empty, and `RectificationFiscalCodeGuard` blocks completion until the user chooses them.
+  (A customer return is different: its "Datos fiscales" step preselects `R1`, see ETP-6179.)
 
   Any other value already set is never overwritten, and nothing is ever cleared. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
