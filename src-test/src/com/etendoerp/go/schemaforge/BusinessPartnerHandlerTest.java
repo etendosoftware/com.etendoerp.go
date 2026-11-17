@@ -73,7 +73,8 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * Unit tests for {@link BusinessPartnerHandler}.
  *
  * <p>Covers the full decision tree of {@code handle()} and {@code afterHandle()}:
- * method guards (GET/non-write returns null), name derivation from firstname/lastname,
+ * method guards (GET/non-write returns null), the wiring of the person/company identity rules
+ * (ETP-6175; the rules themselves are specified in {@code ContactIdentityRulesTest}),
  * searchKey injection, pre-create billing field stripping, and the post-save
  * searchKey synchronisation from {@code em_etgo_identifier}.
  *
@@ -142,36 +143,127 @@ class BusinessPartnerHandlerTest {
   }
 
   /**
-   * When the POST body contains {@code etgoFirstname} and {@code etgoLastname} but no
-   * {@code name}, the handler must derive {@code name} by concatenating the two parts.
+   * A person POST ({@code etgoIsperson = true}) with {@code etgoFirstname} and {@code etgoLastname}
+   * but no {@code name}: the handler derives {@code name} by concatenating the two parts, and the
+   * rest of the hook then runs on it (searchKey placeholder).
    */
   @Test
   void testHandlePostDerivesNameFromFirstnameAndLastname() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("etgoIsperson", true);
     body.put("etgoFirstname", "Juan");
     body.put("etgoLastname", "García");
     when(ctx.getHttpMethod()).thenReturn("POST");
     when(ctx.getRequestBody()).thenReturn(body);
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
 
     assertEquals("Juan García", body.getString("name"));
+    assertEquals("Juan García", body.getString("searchKey"));
   }
 
   /**
-   * When only {@code etgoFirstname} is present and {@code etgoLastname} is absent,
-   * {@code name} must be set to the first name only.
+   * A person needs both parts (ETP-6175): a first name alone is refused with
+   * {@code MISSING_REQUIRED_FIELDS} naming the last name, and the hook stops there (no name, no
+   * searchKey placeholder). Before ETP-6175 the name was derived from the first name only.
    */
   @Test
-  void testHandlePostDerivesNameFromFirstnameOnly() throws Exception {
+  void testHandlePostPersonWithFirstnameOnlyIsRefusedForTheLastname() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("etgoIsperson", true);
     body.put("etgoFirstname", "María");
     when(ctx.getHttpMethod()).thenReturn("POST");
     when(ctx.getRequestBody()).thenReturn(body);
 
-    handler.handle(ctx);
+    try (AutoCloseable noDb = withoutMessageDb()) {
+      NeoResponse result = handler.handle(ctx);
 
-    assertEquals("María", body.getString("name"));
+      assertNotNull(result);
+      assertEquals(400, result.getHttpStatus());
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("MISSING_REQUIRED_FIELDS", error.getString("code"));
+      assertEquals("etgoLastname", error.getJSONArray("fields").getString(0));
+      assertEquals(1, error.getJSONArray("fields").length());
+      assertEquals("ETGO_BPartnerPersonNamesRequired",
+          error.getJSONArray("messageKeys").getString(0));
+    }
+    assertFalse(body.has("name"));
+    assertFalse(body.has("searchKey"));
+  }
+
+  /**
+   * ETP-6175: a person's {@code name} is derived, so a different one is refused
+   * ({@code FIELD_NOT_ALLOWED} on {@code name}); one equal to the derivation is accepted. Without
+   * {@code etgoIsperson} the same body is a company and the name parts are refused instead.
+   */
+  @Test
+  void testHandlePostPersonNameMustBeTheDerivationAndACompanyRefusesTheParts() throws Exception {
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    JSONObject different = new JSONObject().put("etgoIsperson", true).put("name", "Nombre Existente")
+        .put("etgoFirstname", "Juan").put("etgoLastname", "García");
+    when(ctx.getRequestBody()).thenReturn(different);
+    try (AutoCloseable noDb = withoutMessageDb()) {
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("FIELD_NOT_ALLOWED", error.getString("code"));
+      assertEquals("name", error.getString("field"));
+    }
+
+    JSONObject same = new JSONObject().put("etgoIsperson", true).put("name", "Juan García")
+        .put("etgoFirstname", "Juan").put("etgoLastname", "García");
+    when(ctx.getRequestBody()).thenReturn(same);
+    assertNull(handler.handle(ctx));
+    assertEquals("Juan García", same.getString("name"));
+
+    JSONObject company = new JSONObject().put("name", "Nombre Existente")
+        .put("etgoFirstname", "Juan").put("etgoLastname", "García");
+    when(ctx.getRequestBody()).thenReturn(company);
+    try (AutoCloseable noDb = withoutMessageDb()) {
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("FIELD_NOT_ALLOWED", error.getString("code"));
+      assertEquals("etgoFirstname", error.getString("field"));
+    }
+  }
+
+  /**
+   * A company POST with no name is refused with {@code MISSING_REQUIRED_FIELDS} on {@code name}
+   * (and the missing key {@code ETGO_BPartnerCompanyNameRequired}); {@code name} alone passes.
+   * Before ETP-6175 a POST without a name went through to the database.
+   */
+  @Test
+  void testHandlePostCompanyWithoutNameIsRefused() throws Exception {
+    JSONObject body = new JSONObject();
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (AutoCloseable noDb = withoutMessageDb()) {
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(400, result.getHttpStatus());
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("MISSING_REQUIRED_FIELDS", error.getString("code"));
+      assertEquals("name", error.getJSONArray("fields").getString(0));
+      assertEquals("ETGO_BPartnerCompanyNameRequired",
+          error.getJSONArray("messageKeys").getString(0));
+    }
+    assertFalse(body.has("searchKey"));
+  }
+
+  /** Stubs the DAL statics so the message lookups of a refusal find no database row. */
+  private static AutoCloseable withoutMessageDb() {
+    MockedStatic<OBContext> context = mockStatic(OBContext.class);
+    MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+    return () -> {
+      dal.close();
+      context.close();
+    };
   }
 
   // ── handle() — POST: searchKey injection ────────────────────────────────────
@@ -258,6 +350,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void aCreateWithoutSearchKeyGetsItsPlaceholderBeforeTheMcpPrecheck() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("etgoIsperson", true);
     body.put("etgoFirstname", "Ana");
     body.put("etgoLastname", "Ruiz");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -265,8 +358,27 @@ class BusinessPartnerHandlerTest {
 
     handler.resolveServerCreateFields(ctx);
 
+    assertEquals("Ana Ruiz", body.getString("name"), "the person's name is derived for the pre-check");
     assertEquals("Ana Ruiz", body.getString("searchKey"));
     assertTrue(handler.serverResolvedCreateFields().contains("searchKey"));
+  }
+
+  /**
+   * ETP-6175: the MCP pre-pass derives a name only for a person. A company body without a name
+   * (here with name parts and no type) gets none, so the mandatory pre-check reports it.
+   */
+  @Test
+  void aCompanyCreateGetsNoDerivedNameFromTheMcpPrePass() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoFirstname", "Ana");
+    body.put("etgoLastname", "Ruiz");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.resolveServerCreateFields(ctx);
+
+    assertFalse(body.has("name"));
+    assertFalse(body.has("searchKey"));
   }
 
   /** ETP-5852 (M-107): a create without any name is left for the pre-check to report. */
@@ -617,61 +729,120 @@ class BusinessPartnerHandlerTest {
   }
 
   /**
-   * On PATCH, when the persisted name is blank, the handler must derive it by merging
-   * persisted parts with the incoming body values.
+   * On PATCH of a person's first name, the handler merges the persisted last name and writes the
+   * derived {@code name} (here the stored name was blank).
    */
   @Test
   void testHandlePatchDerivesNameWhenPersistedNameIsBlank() throws Exception {
     JSONObject body = new JSONObject();
     body.put("etgoFirstname", "Pedro");
 
-    when(ctx.getHttpMethod()).thenReturn("PATCH");
-    when(ctx.getRequestBody()).thenReturn(body);
-    when(ctx.getRecordId()).thenReturn("REC_001");
-
-    Connection connMock = mock(Connection.class);
-    PreparedStatement psMock = mock(PreparedStatement.class);
-    ResultSet rsMock = mock(ResultSet.class);
-
-    when(rsMock.next()).thenReturn(true);
-    when(rsMock.getString(1)).thenReturn("");
-    when(rsMock.getString(2)).thenReturn("OldFirst");
-    when(rsMock.getString(3)).thenReturn("López");
-    when(psMock.executeQuery()).thenReturn(rsMock);
-    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
-    givenStoredContactTypes(connMock, "Y", "N");
-
-    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
-      OBDal obDalMock = mock(OBDal.class);
-      when(obDalMock.getConnection()).thenReturn(connMock);
-      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
-
-      handler.handle(ctx);
-    }
+    patchAgainstStoredIdentity(body, "Y", "", "OldFirst", "López");
 
     assertEquals("Pedro López", body.getString("name"));
   }
 
   /**
-   * On PATCH, when the persisted name is already set, the handler must not overwrite it.
+   * ETP-6175: editing a person's first name re-derives {@code name} even when a name is already
+   * stored (before, a stored name was never touched).
    */
   @Test
-  void testHandlePatchSkipsNameDerivationWhenPersistedNameSet() throws Exception {
+  void testHandlePatchRederivesTheNameWhenAPersonsFirstNameIsEdited() throws Exception {
     JSONObject body = new JSONObject();
     body.put("etgoFirstname", "Pedro");
 
+    patchAgainstStoredIdentity(body, "Y", "Nombre Guardado", "OldFirst", "López");
+
+    assertEquals("Pedro López", body.getString("name"));
+  }
+
+  /**
+   * ETP-6175: a PATCH that converts a stored company into a person, sending the parts and a blank
+   * name (what the app sends), is accepted and gets the derived name.
+   */
+  @Test
+  void testHandlePatchConvertingACompanyToAPersonDerivesTheName() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoIsperson", true);
+    body.put("name", "");
+    body.put("etgoFirstname", "Ana");
+    body.put("etgoLastname", "Ruiz");
+
+    patchAgainstStoredIdentity(body, "N", "Acme", "", "");
+
+    assertEquals("Ana Ruiz", body.getString("name"));
+  }
+
+  /**
+   * ETP-6175: a PATCH that converts a stored person into a company, sending its name, clears the
+   * stored first and last name.
+   */
+  @Test
+  void testHandlePatchConvertingAPersonToACompanyClearsTheStoredParts() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoIsperson", false);
+    body.put("name", "Acme");
+
+    patchAgainstStoredIdentity(body, "Y", "Ana Ruiz", "Ana", "Ruiz");
+
+    assertEquals("", body.getString("etgoFirstname"));
+    assertEquals("", body.getString("etgoLastname"));
+  }
+
+  /**
+   * ETP-6175: the identity refusal of an update short-circuits the hook before the contact-type
+   * rules read the stored types.
+   */
+  @Test
+  void testHandlePatchIdentityRefusalStopsBeforeTheContactTypeRules() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "");
     when(ctx.getHttpMethod()).thenReturn("PATCH");
     when(ctx.getRequestBody()).thenReturn(body);
     when(ctx.getRecordId()).thenReturn("REC_001");
+    Connection connMock = connectionStoringIdentity("N", "Acme", "", "");
+    givenStoredContactTypes(connMock, "Y", "N");
 
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtx = mockStatic(OBContext.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("MISSING_REQUIRED_FIELDS", error.getString("code"));
+      assertEquals("name", error.getJSONArray("fields").getString(0));
+    }
+    verify(connMock, never()).prepareStatement(
+        argThat(s -> s != null && s.contains(CONTACT_TYPES_SQL_MARKER)));
+  }
+
+  /** A connection whose identity lookup answers one row: isperson, name, first name, last name. */
+  private static Connection connectionStoringIdentity(String isPerson, String name, String first,
+      String last) throws SQLException {
     Connection connMock = mock(Connection.class);
     PreparedStatement psMock = mock(PreparedStatement.class);
     ResultSet rsMock = mock(ResultSet.class);
-
     when(rsMock.next()).thenReturn(true);
-    when(rsMock.getString(1)).thenReturn("Nombre Guardado");
+    when(rsMock.getString(1)).thenReturn(isPerson);
+    when(rsMock.getString(2)).thenReturn(name);
+    when(rsMock.getString(3)).thenReturn(first);
+    when(rsMock.getString(4)).thenReturn(last);
     when(psMock.executeQuery()).thenReturn(rsMock);
     when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    return connMock;
+  }
+
+  /** Runs {@code handle()} on a PATCH of {@code body} against the stored identity given. */
+  private void patchAgainstStoredIdentity(JSONObject body, String isPerson, String name,
+      String first, String last) throws Exception {
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("REC_001");
+    Connection connMock = connectionStoringIdentity(isPerson, name, first, last);
     givenStoredContactTypes(connMock, "Y", "N");
 
     try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
@@ -679,13 +850,9 @@ class BusinessPartnerHandlerTest {
       when(obDalMock.getConnection()).thenReturn(connMock);
       mDal.when(OBDal::getInstance).thenReturn(obDalMock);
 
-      handler.handle(ctx);
+      assertNull(handler.handle(ctx));
     }
-
-    assertNull(body.optString("name", null));
   }
-
-  // ── afterHandle() — method guard ─────────────────────────────────────────────
 
   /**
    * On PATCH, when the recordId is blank, the handler must skip name derivation
@@ -733,6 +900,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandleTaxIdBlankSkipsValidation() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
     body.put("taxID", "   ");
     body.put("oBTIKTaxIDKey", "1");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -748,6 +916,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandlePostValidNifPassesValidation() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
     body.put("taxID", VALID_NIF);
     body.put("oBTIKTaxIDKey", "1");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -805,6 +974,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandlePostValidPassportPassesValidation() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
     body.put("taxID", VALID_PASSPORT);
     body.put("oBTIKTaxIDKey", "3");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -820,6 +990,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandlePostPassportIsNormalizedBeforeMatching() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
     body.put("taxID", "  ab123456c  ");
     body.put("oBTIKTaxIDKey", "3");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -871,6 +1042,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandlePostUnhandledTaxIdKeySkipsValidation() throws Exception {
     JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
     body.put("taxID", "anything-goes-here");
     body.put("oBTIKTaxIDKey", "4");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -989,6 +1161,109 @@ class BusinessPartnerHandlerTest {
     when(ctx.getRecordId()).thenReturn("");
 
     assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * ETP-6175: a create that omits {@code oBTIKTaxIDKey} is saved with the column's AD default
+   * (NIF) — the defaults pass runs after this hook — so an invalid NIF is refused, and a valid one
+   * passes.
+   */
+  @Test
+  void testHandlePostWithoutTaxIdKeyValidatesTheTaxIdAsNif() throws Exception {
+    JSONObject invalid = new JSONObject().put("name", "Empresa Test")
+        .put("taxID", INVALID_NIF_CHECK_DIGIT);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(invalid);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_CHECK_DIGIT,
+        result.getBody().getJSONObject("error").getString("message"));
+
+    JSONObject valid = new JSONObject().put("name", "Empresa Test").put("taxID", VALID_NIF);
+    when(ctx.getRequestBody()).thenReturn(valid);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /** ETP-6175: a blank {@code oBTIKTaxIDKey} on a create counts as absent, so it is NIF too. */
+  @Test
+  void testHandlePostWithBlankTaxIdKeyValidatesTheTaxIdAsNif() throws Exception {
+    JSONObject invalid = new JSONObject().put("name", "Empresa Test")
+        .put("taxID", INVALID_NIF_FORMAT).put("oBTIKTaxIDKey", "  ");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(invalid);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_FORMAT,
+        result.getBody().getJSONObject("error").getString("message"));
+
+    JSONObject valid = new JSONObject().put("name", "Empresa Test").put("taxID", VALID_NIF)
+        .put("oBTIKTaxIDKey", "");
+    when(ctx.getRequestBody()).thenReturn(valid);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * ETP-6175: a create sent in a {@code {"data": {...}}} envelope is judged on the envelope, the
+   * object generic CRUD persists — a company with a name passes the identity rules, and the tax id
+   * is validated against the NIF default there too (it used to skip validation entirely).
+   */
+  @Test
+  void testHandlePostInADataEnvelopeIsJudgedOnTheEnvelope() throws Exception {
+    JSONObject valid = new JSONObject().put("data", new JSONObject().put("name", "Empresa Test")
+        .put("searchKey", "EMP1").put("customer", true).put("taxID", VALID_NIF));
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(valid);
+
+    assertNull(handler.handle(ctx));
+
+    JSONObject invalid = new JSONObject().put("data", new JSONObject().put("name", "Empresa Test")
+        .put("taxID", INVALID_NIF_CHECK_DIGIT));
+    when(ctx.getRequestBody()).thenReturn(invalid);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_CHECK_DIGIT,
+        result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /**
+   * ETP-6175: the NIF default applies to a create only. On PATCH with no key in the body the
+   * persisted key dispatches: a stored "4" (foreign ID) lets a value no NIF rule would accept
+   * through.
+   */
+  @Test
+  void testHandlePatchWithoutTaxIdKeyKeepsUsingThePersistedKeyNotTheNifDefault() throws Exception {
+    JSONObject body = new JSONObject().put("taxID", "anything-goes-here");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("BP_TAX_4");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      Connection connMock = mock(Connection.class);
+      PreparedStatement psMock = mock(PreparedStatement.class);
+      ResultSet rsMock = mock(ResultSet.class);
+      when(rsMock.next()).thenReturn(true);
+      when(rsMock.getString(1)).thenReturn("OLDVALUE123");
+      when(rsMock.getString(2)).thenReturn("4"); // persisted key: foreign ID, not validated
+      when(psMock.executeQuery()).thenReturn(rsMock);
+      when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      givenStoredContactTypes(connMock, "Y", "N");
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.handle(ctx));
+    }
   }
 
   /**
@@ -2197,6 +2472,7 @@ class BusinessPartnerHandlerTest {
   void testHandlePostStillDerivesNameWhenEndpointTypeIsCrud() throws Exception {
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
     JSONObject body = new JSONObject();
+    body.put("etgoIsperson", true);
     body.put("etgoFirstname", "Juan");
     body.put("etgoLastname", "García");
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -2274,7 +2550,7 @@ class BusinessPartnerHandlerTest {
   @Test
   void testHandlePatchOfAContactStoredWithNoTypeIsRejectedOnAnUnrelatedEdit() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("etgoFirstname", "Pedro");
+    body.put("description", "Unrelated edit");
     when(ctx.getHttpMethod()).thenReturn("PATCH");
     when(ctx.getRequestBody()).thenReturn(body);
     when(ctx.getRecordId()).thenReturn("REC_001");
@@ -2536,8 +2812,10 @@ class BusinessPartnerHandlerTest {
    */
   @Test
   void testHandlePostWithSepaRemittancesOffDropsTheMandateKeys() throws Exception {
-    JSONObject data = new JSONObject().put(ContactSepaMandateDefaults.FIELD_MANDATE_DATE,
-        "2026-01-01");
+    // The name is in both places: the envelope is what is persisted (and what the identity rules
+    // judge), the top-level copy is what the searchKey placeholder reads.
+    JSONObject data = new JSONObject().put("name", "Cliente SL")
+        .put(ContactSepaMandateDefaults.FIELD_MANDATE_DATE, "2026-01-01");
     JSONObject body = new JSONObject();
     body.put("name", "Cliente SL");
     body.put(ContactSepaMandateDefaults.FIELD_MANDATE_ID, "MANDATE-1");
@@ -2566,7 +2844,7 @@ class BusinessPartnerHandlerTest {
   void testHandlePostWithSepaRemittancesOnDefaultsTheCustomerMandate() throws Exception {
     JSONObject body = new JSONObject();
     body.put("name", "Cliente SL");
-    body.put("taxID", "B12345678");
+    body.put("taxID", VALID_NIF);
     when(ctx.getHttpMethod()).thenReturn("POST");
     when(ctx.getRequestBody()).thenReturn(body);
     org.openbravo.base.model.Entity bpEntity = mock(org.openbravo.base.model.Entity.class);
@@ -2584,7 +2862,7 @@ class BusinessPartnerHandlerTest {
       assertNull(handler.handle(ctx));
     }
 
-    assertEquals("B12345678", body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_ID));
+    assertEquals(VALID_NIF, body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_ID));
     assertEquals(java.time.LocalDate.now().toString(),
         body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_DATE));
   }
