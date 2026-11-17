@@ -245,9 +245,10 @@ public final class ContactSepaMandateDefaults {
 
   /**
    * The body itself and, when present, its {@code data} envelope, outermost first. The innermost
-   * section is the one generic CRUD persists.
+   * section is the one generic CRUD persists. Also used by {@code ContactIdentityRules}, which
+   * judges that innermost section.
    */
-  static List<JSONObject> writeSections(JSONObject body) {
+  public static List<JSONObject> writeSections(JSONObject body) {
     JSONObject wrapped = body.optJSONObject(KEY_DATA);
     return wrapped != null ? List.of(body, wrapped) : List.of(body);
   }

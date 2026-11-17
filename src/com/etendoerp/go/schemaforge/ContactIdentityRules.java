@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 
 /**
@@ -69,6 +70,12 @@ import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
  * a requirement is enforced only for what the request touches: the part it sends, or every part of
  * the target type when the request switches the type. A person record with a null last name can
  * therefore still have its first name corrected.
+ *
+ * <p><b>Envelope</b>: a body sent as {@code {"data": {...}}} is judged and rewritten inside the
+ * envelope. {@code NeoFieldFilter#filterBody} persists only that inner object, so it is the record
+ * the rules apply to; a key beside the envelope never reaches the row and is not judged. The
+ * sections come from {@link ContactSepaMandateDefaults#writeSections}, the helper the SEPA mandate
+ * rule of the same handler uses.
  */
 final class ContactIdentityRules {
 
@@ -129,11 +136,12 @@ final class ContactIdentityRules {
    * {@link #apply(NeoContext, JSONObject, String)} with the persisted-row lookup supplied, so the
    * rules can be exercised without a database.
    */
-  static NeoResponse apply(NeoContext ctx, JSONObject body, String method,
+  static NeoResponse apply(NeoContext ctx, JSONObject requestBody, String method,
       Function<String, Persisted> persistedLoader) throws JSONException {
-    if (body == null) {
+    if (requestBody == null) {
       return null;
     }
+    JSONObject body = persistedSection(requestBody);
     boolean create = METHOD_POST.equals(method);
     boolean touches = body.has(FIELD_IS_PERSON) || body.has(FIELD_NAME) || body.has(FIELD_FIRSTNAME)
         || body.has(FIELD_LASTNAME);
@@ -168,10 +176,14 @@ final class ContactIdentityRules {
    * check.
    * A company body is left alone, so the pre-check reports its missing {@code name}.
    *
-   * @param body the create body, mutated in place
+   * @param requestBody the create body, mutated in place (inside its {@code data} envelope, if any)
    */
-  static void deriveNameForCreate(JSONObject body) throws JSONException {
-    if (body == null || !requestedType(body).orElse(false) || text(body, FIELD_NAME) != null) {
+  static void deriveNameForCreate(JSONObject requestBody) throws JSONException {
+    if (requestBody == null) {
+      return;
+    }
+    JSONObject body = persistedSection(requestBody);
+    if (!requestedType(body).orElse(false) || text(body, FIELD_NAME) != null) {
       return;
     }
     String derived = AbstractPersonNameHandler.buildFullName(
@@ -180,6 +192,15 @@ final class ContactIdentityRules {
     if (StringUtils.isNotBlank(derived)) {
       body.put(FIELD_NAME, derived);
     }
+  }
+
+  /**
+   * The part of the request body generic CRUD persists: the {@code data} envelope when present,
+   * else the body itself. Also used by {@link BusinessPartnerHandler}'s tax id validation.
+   */
+  static JSONObject persistedSection(JSONObject requestBody) {
+    List<JSONObject> sections = ContactSepaMandateDefaults.writeSections(requestBody);
+    return sections.get(sections.size() - 1);
   }
 
   private static NeoResponse applyPerson(JSONObject body, Persisted persisted, boolean checkAll)

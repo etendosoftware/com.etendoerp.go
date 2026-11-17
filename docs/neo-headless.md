@@ -9277,6 +9277,17 @@ request's `oBTIKTaxIDKey` only; a create that omitted it skipped the check, beca
 stored through the API. A create without a key is now validated as NIF,
 on every channel. Updates are unchanged (body key, else the persisted one).
 
+**`{"data": {...}}` envelope.** `NeoFieldFilter#filterBody` unwraps a write body sent as
+`{"data": {...}}` and persists only the inner object, so the identity rules and the tax id check
+judge (and the identity rules write `name` / the cleared parts into) that inner object
+(`ContactIdentityRules.persistedSection`, built on `ContactSepaMandateDefaults.writeSections`, the
+helper the SEPA mandate rule of the same handler uses). A key sent beside the envelope never reaches
+the row and is not judged. Judging only the top level refused every envelope create as a company
+without `name` (caught by `ContactSepaMandateIntegrationTest.aCreateInADataEnvelopeStoresTheMandate`)
+and let an envelope create skip the tax id check. Still top level only, unchanged by ETP-6175: the
+`searchKey` placeholder (an envelope create must send `searchKey`), the email/web/phone format checks
+and the contact-type rules.
+
 **KPI telemetry (ETP-5908), goods shipment.** `GoodsShipmentHeaderHandler` emits
 `backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
 after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.

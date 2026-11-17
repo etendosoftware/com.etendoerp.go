@@ -559,6 +559,84 @@ class ContactIdentityRulesTest {
     ContactIdentityRules.deriveNameForCreate(null);
   }
 
+  // ── {"data": {...}} envelope ─────────────────────────────────────────────────────────────────
+  // NeoFieldFilter#filterBody persists only the envelope's inner object, so the rules judge it
+  // and write into it (the innermost of ContactSepaMandateDefaults#writeSections).
+
+  private static JSONObject envelope(JSONObject data) throws Exception {
+    return json().put("data", data);
+  }
+
+  @Test
+  void anEnvelopeCompanyCreateWithANamePasses() throws Exception {
+    JSONObject data = json().put("name", "Acme").put("customer", true);
+
+    assertNull(post(envelope(data)));
+
+    assertEquals("Acme", data.getString("name"));
+  }
+
+  @Test
+  void anEnvelopePersonCreateDerivesTheNameInsideTheEnvelope() throws Exception {
+    JSONObject data = json().put("etgoIsperson", true).put("etgoFirstname", "F")
+        .put("etgoLastname", "L");
+    JSONObject body = envelope(data);
+
+    assertNull(post(body));
+
+    assertEquals("F L", data.getString("name"));
+    assertFalse(body.has("name"));
+  }
+
+  @Test
+  void anEnvelopeCreateIsJudgedLikeATopLevelOne() throws Exception {
+    assertRefusal(post(envelope(json().put("etgoIsperson", true).put("etgoFirstname", "F"))),
+        "MISSING_REQUIRED_FIELDS", ContactIdentityRules.MSG_PERSON_NAMES_REQUIRED, "etgoLastname");
+    assertRefusal(post(envelope(json().put("name", "Acme").put("etgoLastname", "L"))),
+        ContactIdentityRules.ERROR_FIELD_NOT_ALLOWED,
+        ContactIdentityRules.MSG_COMPANY_PERSON_NAMES_NOT_ALLOWED, "etgoLastname");
+    assertRefusal(post(envelope(json().put("customer", true))),
+        "MISSING_REQUIRED_FIELDS", ContactIdentityRules.MSG_COMPANY_NAME_REQUIRED, "name");
+  }
+
+  @Test
+  void anEnvelopeUpdateIsJudgedAndWrittenInsideTheEnvelope() throws Exception {
+    assertRefusal(patch(envelope(json().put("name", "Other")), person("A B", "A", "B")),
+        ContactIdentityRules.ERROR_FIELD_NOT_ALLOWED,
+        ContactIdentityRules.MSG_PERSON_NAME_NOT_ALLOWED, "name");
+
+    JSONObject data = json().put("etgoIsperson", false).put("name", "Acme");
+    JSONObject body = envelope(data);
+    assertNull(patch(body, person("A B", "A", "B")));
+    assertEquals("", data.getString("etgoFirstname"));
+    assertEquals("", data.getString("etgoLastname"));
+    assertFalse(body.has("etgoFirstname"));
+  }
+
+  @Test
+  void keysBesideAnEnvelopeAreNotJudgedBecauseTheyAreNotPersisted() throws Exception {
+    JSONObject data = json().put("etgoIsperson", true).put("etgoFirstname", "F")
+        .put("etgoLastname", "L");
+    JSONObject body = envelope(data).put("etgoIsperson", false).put("name", "Stale");
+
+    assertNull(post(body));
+
+    assertEquals("F L", data.getString("name"));
+    assertEquals("Stale", body.getString("name"));
+  }
+
+  @Test
+  void deriveNameForCreateNamesAPersonInsideTheEnvelope() throws Exception {
+    JSONObject data = json().put("etgoIsperson", true).put("etgoFirstname", "F")
+        .put("etgoLastname", "L");
+    JSONObject body = envelope(data);
+
+    ContactIdentityRules.deriveNameForCreate(body);
+
+    assertEquals("F L", data.getString("name"));
+    assertFalse(body.has("name"));
+  }
+
   // ── error shape ──────────────────────────────────────────────────────────────────────────────
 
   @Test

@@ -473,7 +473,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * @return an error {@link NeoResponse} when the value is rejected, {@code null} to continue
    *     with the default CRUD
    */
-  private NeoResponse validateTaxId(NeoContext ctx, JSONObject body, String method) throws Exception {
+  private NeoResponse validateTaxId(NeoContext ctx, JSONObject requestBody, String method)
+      throws Exception {
+    // ETP-6175: judged on the {"data": {...}} envelope when there is one — the object generic
+    // CRUD persists — so an envelope create cannot store a TaxID no rule has looked at.
+    JSONObject body = ContactIdentityRules.persistedSection(requestBody);
     if (!body.has(FIELD_TAX_ID)) {
       // A write that does not touch TaxID must not be re-validated against an already-stored
       // value it is not sending — otherwise a dirty legacy value would block every later edit,

@@ -1211,6 +1211,32 @@ class BusinessPartnerHandlerTest {
   }
 
   /**
+   * ETP-6175: a create sent in a {@code {"data": {...}}} envelope is judged on the envelope, the
+   * object generic CRUD persists — a company with a name passes the identity rules, and the tax id
+   * is validated against the NIF default there too (it used to skip validation entirely).
+   */
+  @Test
+  void testHandlePostInADataEnvelopeIsJudgedOnTheEnvelope() throws Exception {
+    JSONObject valid = new JSONObject().put("data", new JSONObject().put("name", "Empresa Test")
+        .put("searchKey", "EMP1").put("customer", true).put("taxID", VALID_NIF));
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(valid);
+
+    assertNull(handler.handle(ctx));
+
+    JSONObject invalid = new JSONObject().put("data", new JSONObject().put("name", "Empresa Test")
+        .put("taxID", INVALID_NIF_CHECK_DIGIT));
+    when(ctx.getRequestBody()).thenReturn(invalid);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_CHECK_DIGIT,
+        result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /**
    * ETP-6175: the NIF default applies to a create only. On PATCH with no key in the body the
    * persisted key dispatches: a stored "4" (foreign ID) lets a value no NIF rule would accept
    * through.
