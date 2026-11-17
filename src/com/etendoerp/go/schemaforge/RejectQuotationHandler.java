@@ -31,6 +31,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.RejectReason;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -156,6 +157,8 @@ public class RejectQuotationHandler implements NeoHandler {
 
         // The writes are shared with the customer portal's confirmed rejections (ETP-6209).
         QuotationDecisions.reject(quotation, reason);
+        // ETP-6209 KPI: an app rejection, sent once this write commits.
+        PortalKpiTelemetry.appQuotationDecided(false, quotation);
 
         return buildSuccessResponse(quotation);
       } finally {

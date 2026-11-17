@@ -175,6 +175,65 @@ public interface OcrLookups {
     }
   }
 
+  /** The currency a document is expressed in, with the decimals its amounts are rounded to. */
+  final class DocCurrency {
+    private final String id;
+    private final String isoCode;
+    private final String symbol;
+    private final int scale;
+
+    /**
+     * Describes a currency.
+     *
+     * @param id      the currency id
+     * @param isoCode the ISO code
+     * @param symbol  the symbol, may be {@code null}
+     * @param scale   the standard precision ({@code C_Currency.StdPrecision})
+     */
+    public DocCurrency(String id, String isoCode, String symbol, int scale) {
+      this.id = id;
+      this.isoCode = isoCode;
+      this.symbol = symbol;
+      this.scale = scale;
+    }
+
+    /**
+     * Returns the currency id.
+     *
+     * @return the currency id
+     */
+    public String id() {
+      return id;
+    }
+
+    /**
+     * Returns the ISO code.
+     *
+     * @return the ISO code
+     */
+    public String isoCode() {
+      return isoCode;
+    }
+
+    /**
+     * Returns the symbol, may be {@code null}.
+     *
+     * @return the symbol, may be {@code null}
+     */
+    public String symbol() {
+      return symbol;
+    }
+
+    /**
+     * Returns the decimals of the amounts in this currency.
+     *
+     * @return the decimals of the amounts in this currency
+     */
+    public int scale() {
+      return scale;
+    }
+  }
+
   /** Whether a partner has an address, told apart from "could not ask". */
   enum AddressState { PRESENT, MISSING, UNKNOWN }
 
@@ -467,6 +526,114 @@ public interface OcrLookups {
    * @return the product, empty when it does not exist, is inactive or is not the tenant's
    */
   default Optional<Party> productById(String id) {
+    return Optional.empty();
+  }
+
+  /**
+   * A product category the session can use, by id (ETP-6050), to create a new product with it. The
+   * name is the one of the session language.
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id the category id
+   * @return the category, empty when it does not exist, is inactive or is not the tenant's
+   */
+  default Optional<Party> productCategoryById(String id) {
+    return Optional.empty();
+  }
+
+  /**
+   * A tax a line of the document can be given, by id (ETP-6050): the very rule of the document
+   * line's tax selector (active, valid from the document date, for the document's side or both,
+   * the tenant's or the system's).
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id          the tax id
+   * @param invoiceDate the document date as {@code yyyy-MM-dd}, or {@code null} for today
+   * @return the tax with its rate, empty when it does not exist or does not pass the rule
+   */
+  default Optional<Tax> taxById(String id, String invoiceDate) {
+    return Optional.empty();
+  }
+
+  /**
+   * The currency a document of this vendor is expressed in (ETP-6050): the vendor's purchase price
+   * list currency, else the organization's, else the client's (what the purchase invoice header
+   * ends up with). {@code null} vendor: the organization's.
+   *
+   * <p>Default: unknown, so the amounts are rounded to two decimals.</p>
+   *
+   * @param vendorId the linked vendor, may be {@code null}
+   * @return the currency, empty when it cannot be established
+   */
+  default Optional<DocCurrency> documentCurrency(String vendorId) {
+    return Optional.empty();
+  }
+
+  /**
+   * As {@link #documentCurrency(String)}, with the organization of the document: the fallback after
+   * the vendor's price list is THAT organization's currency (the one the invoice created from the
+   * row will have), not the current one of the session.
+   *
+   * <p>Default: the one-argument answer.</p>
+   *
+   * @param vendorId       the linked vendor, may be {@code null}
+   * @param organizationId the organization of the inbox row, {@code null} for the session's
+   * @return the currency, empty when it cannot be established
+   */
+  default Optional<DocCurrency> documentCurrency(String vendorId, String organizationId) {
+    return documentCurrency(vendorId);
+  }
+
+  /**
+   * A currency by id, with its scale (ETP-6050).
+   *
+   * <p>Default: unknown.</p>
+   *
+   * @param currencyId the currency id
+   * @return the currency, empty when it does not exist or cannot be read
+   */
+  default Optional<DocCurrency> currencyById(String currencyId) {
+    return Optional.empty();
+  }
+
+  /**
+   * The rounding mode of the tax of each id (ETP-6050): {@code D} (Document based amount by rate)
+   * or {@code L} (Line based amount by rate), as {@code C_Tax.DocTaxAmount}.
+   *
+   * <p>Default: nothing known, which reads as {@code D}.</p>
+   *
+   * @param taxIds the tax ids
+   * @return the mode by tax id, empty when none or the lookup failed
+   */
+  default Map<String, String> taxDocAmountModes(Collection<String> taxIds) {
+    return Map.of();
+  }
+
+  /**
+   * The names, in the session language, of the taxes with these ids (ETP-6050), for display. No
+   * validity rule: a tax chosen yesterday keeps its name.
+   *
+   * <p>Default: nothing known. Ids that do not resolve for the session are absent from the map.</p>
+   *
+   * @param taxIds the tax ids
+   * @return the name by tax id, empty when none or the lookup failed
+   */
+  default Map<String, String> taxNames(Collection<String> taxIds) {
+    return Map.of();
+  }
+
+  /**
+   * A unit of measure the session can use, by id (ETP-6050), to create a new product with it. The
+   * name is the one of the session language.
+   *
+   * <p>Default: nothing is found, so an implementation that does not support it never resolves.</p>
+   *
+   * @param id the unit id
+   * @return the unit, empty when it does not exist, is inactive or is not the tenant's
+   */
+  default Optional<Party> uomById(String id) {
     return Optional.empty();
   }
 

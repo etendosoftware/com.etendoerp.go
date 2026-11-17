@@ -403,6 +403,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_VERIFY_EMAIL = "/verify-email";
   /** ETP-6081: the terms and conditions in force, public. */
   private static final String PATH_TERMS = "/terms";
+  /** ETP-6244: the Word document of a terms version, public like the terms themselves. */
+  private static final String PATH_TERMS_DOCUMENT = "/terms/document";
   private static final String FIELD_TERMS_VERSION = "termsVersion";
   /** ETP-6081: consent to promotional mail, asked in the terms dialog of the register screen. */
   private static final String FIELD_MARKETING_CONSENT = "marketingConsent";
@@ -665,6 +667,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, PATH_TERMS)) {
       handleTermsAndConditions(request, response);
+    } else if (isPath(path, PATH_TERMS_DOCUMENT)) {
+      handleTermsDocument(request, response);
     } else {
       return false;
     }
@@ -935,9 +939,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * second, public auth path for it would be a new surface to get wrong.
    *
    * <p>Returns {@code 200} with {@code { "plans": [ { planKey, name, description, displayPrice,
-   * currency, billingInterval } ] }}. An empty plan catalog is an empty array and a {@code 200}: "there
-   * is nothing on sale" is an answer, not a failure, and the caller has to render the same
-   * "checkout unavailable" state for it either way.
+   * currency, billingInterval, freeTrialDays, ... } ] }}. An empty plan catalog is an empty array
+   * and a {@code 200}: "there is nothing on sale" is an answer, not a failure, and the caller has
+   * to render the same "checkout unavailable" state for it either way.
    *
    * <p><b>Legacy price fallback.</b> While {@link PlanCatalogService#isLegacyFallbackActive()}
    * holds — a legacy price is configured and no plan carries a provider price — the list is exactly
@@ -958,8 +962,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           plans.put(item);
         }
       } else {
+        // Paid, provisioning or provisioned purchases only: the once-per-account free trial.
+        boolean accountHasPaid = !checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail()).isEmpty();
         for (Plan plan : planCatalogService.listPurchasablePlans()) {
-          JSONObject item = buildPlanJson(plan);
+          JSONObject item = buildPlanJson(plan, accountHasPaid);
           if (item != null) {
             plans.put(item);
           }
@@ -1023,10 +1030,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * client cannot quote it, so offering it would produce a purchase whose price the buyer was
    * never shown. That is a plan catalog data defect, hence the warning.
    *
+   * <p>{@code freeTrialDays} is what checkout would grant this account on the plan (ETP-6082:
+   * monthly plans, once per account), so the page never announces a trial checkout refuses.
+   *
    * @param plan an active, sellable plan catalog row
+   * @param accountHasPaid whether the requesting account already paid a purchase
    * @return the JSON view, or null when the row cannot be quoted and must not be offered
    */
-  private JSONObject buildPlanJson(Plan plan) throws JSONException {
+  private JSONObject buildPlanJson(Plan plan, boolean accountHasPaid) throws JSONException {
     BigDecimal displayPrice = plan.getDisplayPrice();
     String currency = plan.getCurrencyCode();
     if (displayPrice == null || StringUtils.isBlank(currency)) {
@@ -1043,7 +1054,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put(FIELD_DISPLAY_PRICE, displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
     item.put(FIELD_BILLING_INTERVAL, StringUtils.defaultString(plan.getBillingInterval()));
-    item.put("secondMonthFree", CheckoutPromotionTerms.isEligiblePlan(plan));
+    item.put("freeTrialDays", CheckoutPromotionTerms.isEligible(plan, accountHasPaid)
+        ? CheckoutPromotionTerms.FREE_TRIAL_DAYS : 0);
     item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
     item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
     item.put(FIELD_QUOTAS, buildPlanQuotasJson(plan));
@@ -3132,8 +3144,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * GET /sws/go/terms?language=es_ES (ETP-6081).
    *
    * <p>Deliberately unauthenticated: the register screen shows the terms before any account
-   * exists. Returns only the text in force and its identity ({@code version}, {@code language},
-   * {@code content}, {@code publishedAt}); 404 when no version is published.
+   * exists. Returns only the identity of the version in force ({@code version}, {@code language},
+   * {@code null} for a version of every language, and {@code publishedAt}); its text is the Word
+   * document {@code /terms/document} serves. 404 when no version with a document is published.
    */
   private void handleTermsAndConditions(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -3155,6 +3168,46 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * GET /sws/go/terms/document?language=es_ES&amp;version=1.0 (ETP-6244).
+   *
+   * <p>Unauthenticated like {@code /terms}: the Word document attached in Classic to that version,
+   * for the register screen to show the version {@code /terms} named; an empty or missing
+   * {@code language} reads a version of every language. Only the
+   * {@code .docx} of an active, published {@code ETGO_TERMS} row is ever served; anything else,
+   * a malformed parameter included, is a 404.
+   */
+  private void handleTermsDocument(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Optional<byte[]> document = termsService.findDocument(
+          request.getParameter(FIELD_LANGUAGE), request.getParameter("version"));
+      if (document.isPresent()) {
+        writeTermsDocument(response, document.get());
+      } else {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "TERMS_DOCUMENT_NOT_FOUND",
+            "No terms document for this version", "No terms document for this version");
+      }
+    } catch (RuntimeException e) {
+      log.error("Could not read the terms and conditions document", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Writes a terms Word document as the whole body of a 200. */
+  static void writeTermsDocument(HttpServletResponse response, byte[] bytes) throws IOException {
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType(TermsAndConditionsService.DOCUMENT_CONTENT_TYPE);
+    response.setHeader(HEADER_CACHE_CONTROL, "no-cache");
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
   }
 
   /** The terms version an SSO body carries besides the credential, or {@code null}. */

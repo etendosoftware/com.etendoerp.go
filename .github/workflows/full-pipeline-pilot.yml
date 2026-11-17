@@ -13,16 +13,16 @@ name: Full Pipeline Pilot
 #
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
-#   go-tests     the module's Java suite, both halves, and the JaCoCo report.
-#   sonar        after go-tests (ETP-6299): the SonarQube analysis with that coverage, a pull
-#                request analysis on a PR (the server then posts "SonarQube Code Analysis") and a
-#                branch analysis on a push to main, which is the base the next PRs compare
-#                against. On a PR it also runs the coverage gate against main
-#                (scripts/compare-sonar-coverage.py, thresholds from the organization variables
-#                COVERAGE_MINIMUM and COVERAGE_TOLERANCE, ETP-6298) and fails closed when the
-#                tests did not pass. Until the mini pipeline stops running on main (ETP-6300) it
-#                analyzes the same commit with the same tests, so the later analysis replaces an
-#                equivalent one.
+#   go-tests     the module's Java suite, both halves, the JaCoCo report and (ETP-6299), when every
+#                test passed, the SonarQube analysis with that coverage: a pull request analysis
+#                on a PR (the server then posts "SonarQube Code Analysis") and a branch analysis on
+#                a push to main, the base the next PRs compare against. On a PR it then runs the
+#                coverage gate against main (scripts/compare-sonar-coverage.py, thresholds from the
+#                organization variables COVERAGE_MINIMUM and COVERAGE_TOLERANCE, ETP-6298). One
+#                job: the analysis reads the report where the tests left it, and a failed test
+#                already turns the check red. Until the mini pipeline stops running on main
+#                (ETP-6300) both analyze the same commit with the same tests, so the later
+#                analysis replaces an equivalent one.
 #   integration  Tomcat, jsreport and E2E_SUITE=integration from schema_forge, the same 57 specs
 #                as Jenkins.
 #   cell-report  after both: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
@@ -73,7 +73,7 @@ env:
 
 jobs:
   go-tests:
-    name: 'Pilot: Go tests + coverage'
+    name: 'Pilot: Go tests + Sonar + coverage'
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
@@ -95,6 +95,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: etendo_core/modules/com.etendoerp.go
+          # The whole history: Sonar's blame and new-code detection need it.
+          fetch-depth: 0
 
       - name: Build the Etendo GO environment
         id: build-env
@@ -173,15 +175,6 @@ jobs:
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
-      # For the sonar job, only when every test passed: Sonar never gets the coverage of a partial run.
-      - name: Upload the coverage report
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-coverage
-          path: etendo_core/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
-          retention-days: ${{ env.RETENTION_DAYS }}
-
       # The JUnit XML of both halves, for cell-report: it lands as goTestUnit/ and goIsolatedDalTest/.
       - name: Upload the JUnit results
         if: always()
@@ -194,47 +187,29 @@ jobs:
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
-  # The mini pipeline's Sonar Build, fed with go-tests' coverage. A PR into main (mergeblock/*,
-  # hotfix/*) always runs it, so a failed go-tests turns this check red too; a push analyzes only
-  # with real coverage, so main's coverage on Sonar is never a partial one.
-  sonar:
-    name: 'Pilot: Sonar + coverage'
-    needs: go-tests
-    if: >-
-      ${{ !cancelled() && (github.event_name == 'pull_request'
-      && (startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/'))
-      || github.event_name != 'pull_request' && needs.go-tests.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      # As the mini pipeline does: without it the scanner treats the module as a Gradle build.
+      # The steps below run only when every step above passed, so Sonar never gets the coverage of
+      # a partial run, and a push to main never replaces main's analysis with one.
+      # As the mini pipeline does: without it the scanner treats the module as a Gradle build. The
+      # tests are over, so the environment no longer needs it.
       - name: Delete build.gradle
-        run: rm -f build.gradle
+        run: rm -f etendo_core/modules/com.etendoerp.go/build.gradle
 
-      - name: Download the coverage report
-        if: needs.go-tests.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: go-coverage
-          path: coverage
-
-      - uses: sonarsource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+      - name: Sonar analysis
+        uses: sonarsource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_SCANNER_OPTS: "-Xmx4096m"
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
-          args: ${{ needs.go-tests.result == 'success' && '-Dsonar.coverage.jacoco.xmlReportPaths=coverage/jacocoRootReport.xml' || '' }}
+          projectBaseDir: etendo_core/modules/com.etendoerp.go
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
 
-      # Fails this check when the coverage is below the minimum, more than the tolerance below main,
-      # or cannot be evaluated (--context ci).
+      # Fails the job when the coverage is below the minimum, more than the tolerance below main, or
+      # cannot be evaluated (--context ci), and when this analysis's quality gate failed
+      # (--check-quality-gate): the same gate "SonarQube Code Analysis" reports, read in the same wait.
       - name: Compare coverage with main
-        if: github.event_name == 'pull_request' && needs.go-tests.result == 'success'
+        if: github.event_name == 'pull_request'
+        working-directory: etendo_core/modules/com.etendoerp.go
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -244,18 +219,19 @@ jobs:
           COVERAGE_TOLERANCE: ${{ vars.COVERAGE_TOLERANCE }}
         run: |
           set -o pipefail
+          # This workflow comes from the merge ref but the script from the PR head, which can predate
+          # --check-quality-gate (ETP-6324): a main -> develop back-merge, or a hotfix cut from an older
+          # main. Then compare the coverage alone and say the gate was not read (ETP-6326).
+          gate=--check-quality-gate
+          if ! grep -q -- "--check-quality-gate" scripts/compare-sonar-coverage.py; then
+            gate=
+            msg="The checked-out compare-sonar-coverage.py predates --check-quality-gate: quality gate not read here."
+            echo "::warning::$msg"
+            echo "> $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
           python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
-            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt | tee -a "$GITHUB_STEP_SUMMARY"
-
-      # Fail closed: a PR whose tests failed (or did not finish) must not get a green check just
-      # because the coverage comparison was skipped.
-      - name: Fail when the tests did not succeed
-        if: github.event_name == 'pull_request' && needs.go-tests.result != 'success'
-        env:
-          TEST_RESULT: ${{ needs.go-tests.result }}
-        run: |
-          echo "::error title=Coverage gate::Go tests ended '$TEST_RESULT', so coverage was not evaluated. Fix the tests and push again."
-          exit 1
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt $gate \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   integration:
     name: 'Pilot: Integration (Tomcat + Playwright)'

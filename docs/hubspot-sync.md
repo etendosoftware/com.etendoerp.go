@@ -24,7 +24,7 @@ Marketing defined each stage of the Self-Serve pipeline (ETP-6082, 2026-11-05):
 | MQL — Alta la cuenta | `1471483196` | the account exists and its address is confirmed | `ACCOUNT_CREATED` |
 | SQL — Cuenta activada | `1471483197` | the owner used the ERP: the first qualification milestone | `MILESTONE` |
 | Oportunidad — Tarjeta añadida | `1471504904` | the demo became a productive on a monthly plan (a paid checkout) | `PAID` |
-| Cliente — Primer cobro pagado | `1471504905` | the first charge above zero was paid. A monthly plan's free first month is a zero invoice, which is never reported, so its first charge is the first renewal; an annual plan pays the year up front | `PAYMENT`, `PAID` (annual) |
+| Cliente — Primer cobro pagado | `1471504905` | the first charge above zero was paid. A monthly plan's 30-day free trial (`checkout-promotion.md`) opens with a zero invoice, which is never reported, so its first charge is the one at the end of the trial; an annual plan pays the year up front | `PAYMENT`, `PAID` (annual) |
 | Prueba vencida sin tarjeta | `1471504906` | 14 days passed and no productive was created | `DEMO_EXPIRED` |
 | Cliente perdido | `1471504907` | the subscription ended: cancelled or not renewed (paid before or not) | `CANCELED` |
 
@@ -109,7 +109,7 @@ are `yyyy-MM-dd`, UTC.
 
 | Event | Stripe event | Deal |
 |---|---|---|
-| `PAYMENT` | `invoice.paid` with an amount; a zero total (a free month, a full discount) is no payment and is not reported (ETP-6082) | `etendo_estado_suscripcion=active`, `etendo_fecha_ultimo_pago`, `amount`, `etendo_periodicidad` (`monthly`/`annual`). On a deal the sync moves, also `etendo_plan`, and Primer cobro pagado: every reported payment is a charge above zero, so the first one is the customer's first payment, whichever invoice it is. After the environment's `CANCELED`, also `etendo_es_reactivacion=true` and the re-subscription move above |
+| `PAYMENT` | `invoice.paid` with an amount; a zero total (the free trial, a free month, a full discount) is no payment and is not reported (ETP-6082) | `etendo_estado_suscripcion=active`, `etendo_fecha_ultimo_pago`, `amount`, `etendo_periodicidad` (`monthly`/`annual`). On a deal the sync moves, also `etendo_plan`, and Primer cobro pagado: every reported payment is a charge above zero, so the first one is the customer's first payment, whichever invoice it is. After the environment's `CANCELED`, also `etendo_es_reactivacion=true` and the re-subscription move above |
 | `PAYMENT_FAILED` | `invoice.payment_failed`, each attempt | `etendo_estado_suscripcion=suspended`, `etendo_fecha_cobro_fallido`. A failed **first** charge never provisions its productive: it lands on the account's deal instead of waiting for one |
 | `CANCEL_REQUESTED` | `customer.subscription.updated` that schedules a cancellation (`cancel_at_period_end` or `cancel_at`) | `etendo_estado_suscripcion=cancelled` from the moment it is asked, and `etendo_fecha_baja` = the day the owner loses access (`cancel_at`, else the end of the current period; the day asked if Stripe gives neither). The stage does not move yet: the owner keeps access until then |
 | `CANCEL_REVERTED` | `customer.subscription.updated` that withdraws it | `etendo_estado_suscripcion=active`, `etendo_fecha_baja` emptied; a deal in Cliente perdido goes back to Primer cobro pagado |
