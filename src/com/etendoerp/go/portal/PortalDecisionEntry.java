@@ -1,5 +1,6 @@
 package com.etendoerp.go.portal;
 
+import java.text.SimpleDateFormat;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -19,6 +20,7 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.order.Order;
 
 /**
  * The decision confirmation landing's answer, and its way into the portal (ETP-6209 Part C).
@@ -51,6 +53,8 @@ class PortalDecisionEntry {
   private static final String FIELD_STATE = "state";
   private static final String FIELD_TENANT_NAME = "tenantName";
   private static final Duration ONE_DAY = Duration.ofDays(1);
+  /** A calendar day as the portal API speaks it. */
+  private static final String CALENDAR_DAY = "yyyy-MM-dd";
 
   private final PortalLinkService linkService;
   private final Clock clock;
@@ -94,12 +98,33 @@ class PortalDecisionEntry {
     if (decision.getReasonText() != null) {
       body.put("reasonText", decision.getReasonText());
     }
-    body.put("documentNo", view.getQuotation() == null ? ""
-        : StringUtils.defaultString(view.getQuotation().getDocumentNo()));
+    Order quotation = view.getQuotation();
+    body.put("documentNo", quotation == null ? ""
+        : StringUtils.defaultString(quotation.getDocumentNo()));
+    putSummary(body, quotation);
     // The company's name only: the landing carries no portal token, so it cannot fetch /logo.
     body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
         .map(PortalLink::getClientName).orElse(""));
     return body;
+  }
+
+  /**
+   * The confirmation page's summary (ETP-6209 redesign): the quotation's issue date, total,
+   * currency and current status, so the page shows real figures. Additive; nothing without a
+   * quotation.
+   */
+  static void putSummary(JSONObject body, Order quotation) throws JSONException {
+    if (quotation == null) {
+      return;
+    }
+    Date date = quotation.getOrderDate();
+    body.put("date", date == null ? JSONObject.NULL
+        : new SimpleDateFormat(CALENDAR_DAY).format(date));
+    body.put("grandTotal", quotation.getGrandTotalAmount() == null ? JSONObject.NULL
+        : quotation.getGrandTotalAmount());
+    body.put("currency", quotation.getCurrency() == null ? JSONObject.NULL
+        : quotation.getCurrency().getISOCode());
+    body.put("documentStatus", StringUtils.defaultString(quotation.getDocumentStatus()));
   }
 
   /**

@@ -403,8 +403,11 @@ public class PortalDocumentsEndpointTest {
         mockStatic(AnonymousAttachmentStreamer.class)) {
       for (Object[] c : cases) {
         try (MockedConstruction<PortalDecisionService> decisions = mockConstruction(
-            PortalDecisionService.class, (service, context) -> when(service.blockedReason(any(),
-                any())).thenReturn((PortalDecisionService.Blocked) c[0]))) {
+            PortalDecisionService.class, (service, context) -> {
+              when(service.blockedReason(any(), any()))
+                  .thenReturn((PortalDecisionService.Blocked) c[0]);
+              when(service.confirmationRecipient(any())).thenReturn("juan@example.com");
+            })) {
 
           JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
               .getJSONObject("decision");
@@ -417,6 +420,12 @@ public class PortalDocumentsEndpointTest {
           }
           assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
               decision.getBoolean("acceptAvailable"));
+          // The popups name the masked recipient, and only when the customer can decide.
+          if (Boolean.TRUE.equals(c[1])) {
+            assertEquals("ju•••@example.com", decision.getString("maskedEmail"));
+          } else {
+            assertFalse(decision.has("maskedEmail"));
+          }
           verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
         }
       }

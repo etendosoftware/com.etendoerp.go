@@ -222,7 +222,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
   `expired` / `no_recipient` / `accept_unavailable`, 422 `invalid_reason`, 429 `cooldown`, 503.
 - **Recipient:** the confirmation goes to the **first To of the link's root send** only, never CC.
-  No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`.
+  No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`. When the
+  quotation can be decided, the detail's `decision` also carries `maskedEmail` (masked like the
+  request's answer), so the SPA's accept / reject popups name it before anything is sent.
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.
@@ -232,8 +234,10 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   **`POST /decisions/confirm`** on load and shows the result ("Has rechazado el presupuesto …",
   already applied, superseded, no longer pending, expired). **A bare GET of the link applies
   nothing:** a scanner that does not run the page's script never reaches the POST. The token
-  travels in **`X-Portal-Decision-Token`**. `GET /decisions/view` (read-only) is still served but
-  the SPA no longer calls it. Confirm answers `appliedNow: true` only on the call that applied the
+  travels in **`X-Portal-Decision-Token`**. The landing reads `GET /decisions/view` (read-only)
+  only as a fallback, when the confirm POST and its single automatic resend both lost their answer.
+  Both answers carry the quotation's summary for the confirmation page: `date` (yyyy-MM-dd),
+  `grandTotal`, `currency` (ISO) and `documentStatus`. Confirm answers `appliedNow: true` only on the call that applied the
   decision (a re-opened link answers `confirmed` with `appliedNow: false`, and sends no second
   notice or KPI event). **Accepted trade-off (PO, one-step flow):** a mail scanner that executes
   the page's JavaScript could confirm a pending decision. The token is single-use, and the email
@@ -244,8 +248,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   decision's link, 48 h from now, `LINK_ORIGIN = DECISION`, parent = the decision's link, root =
   its root, and usable at once (`SENT_AT`/`EXPIRES_AT` set on insert, committed): no email carries
   it. Its raw token is returned only in the confirm POST's answer (`portalToken`, plus
-  `quotationId`); only its hash is stored. The SPA then opens `/portal/<token>?view=doc&kind=
-  QUOTATION&id=<quotationId>` with a one-off notice carried in router state (never in the URL).
+  `quotationId`); only its hash is stored. The SPA shows its confirmation page and its "Portal de
+  clientes" button opens `/portal/<token>?view=doc&kind=QUOTATION&id=<quotationId>` with a one-off
+  notice carried in router state (never in the URL).
   Opening the portal records `portal.link.opened` as usual (with `origin: DECISION`). No link
   (the landing keeps its own card): invalid token, portal closed for the customer by the access
   checks, or minting failed. Bound: at most 10 `DECISION` links per decision link and day (by

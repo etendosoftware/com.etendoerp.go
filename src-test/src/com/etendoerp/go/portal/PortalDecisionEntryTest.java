@@ -285,6 +285,13 @@ public class PortalDecisionEntryTest {
   public void bodyCarriesTheDecisionTheQuotationAndTheTenantName() throws Exception {
     Order quotation = mock(Order.class);
     when(quotation.getDocumentNo()).thenReturn("PR-0042");
+    when(quotation.getOrderDate()).thenReturn(java.util.Date.from(NOW));
+    when(quotation.getGrandTotalAmount()).thenReturn(new java.math.BigDecimal("2450.00"));
+    org.openbravo.model.common.currency.Currency euro =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(euro.getISOCode()).thenReturn("EUR");
+    when(quotation.getCurrency()).thenReturn(euro);
+    when(quotation.getDocumentStatus()).thenReturn("CJ");
     PortalDecisionService.View confirmed = new PortalDecisionService.View(
         PortalDecisionService.State.CONFIRMED, decision("REJECT", "OTHER", "Plazo"), quotation,
         true);
@@ -298,6 +305,13 @@ public class PortalDecisionEntryTest {
     assertEquals("Plazo", body.getString("reasonText"));
     assertEquals("PR-0042", body.getString("documentNo"));
     assertEquals("Acme", body.getString("tenantName"));
+    // The confirmation page's summary.
+    assertEquals(new java.text.SimpleDateFormat("yyyy-MM-dd").format(java.util.Date.from(NOW)),
+        body.getString("date"));
+    assertEquals(0, new java.math.BigDecimal("2450.00")
+        .compareTo(new java.math.BigDecimal(body.getString("grandTotal"))));
+    assertEquals("EUR", body.getString("currency"));
+    assertEquals("CJ", body.getString("documentStatus"));
     assertFalse("the body alone never carries a portal token",
         body.has(PortalDecisionEntry.FIELD_PORTAL_TOKEN));
   }
@@ -314,6 +328,7 @@ public class PortalDecisionEntryTest {
     assertFalse(body.has("reasonText"));
     assertEquals("", body.getString("documentNo"));
     assertEquals("", body.getString("tenantName"));
+    assertFalse("no quotation, no summary", body.has("grandTotal"));
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────

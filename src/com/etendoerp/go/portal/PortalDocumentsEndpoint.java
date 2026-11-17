@@ -455,12 +455,18 @@ final class PortalDocumentsEndpoint {
    */
   private static JSONObject decisionOf(PortalSession session, Order quotation)
       throws JSONException {
-    PortalDecisionService.Blocked blocked =
-        new PortalDecisionService().blockedReason(session, quotation);
+    PortalDecisionService decisions = new PortalDecisionService();
+    PortalDecisionService.Blocked blocked = decisions.blockedReason(session, quotation);
     JSONObject decision = new JSONObject();
     decision.put("canDecide", blocked == null);
     decision.put("blockedReason", blocked == null ? JSONObject.NULL : blocked.getCode());
     decision.put("acceptAvailable", PortalDecisionService.ACCEPT_AVAILABLE);
+    if (blocked == null) {
+      // Where the confirmation will go, masked like the request's answer: the accept / reject
+      // popups name it before the customer sends anything (ETP-6209 redesign).
+      decision.put("maskedEmail",
+          PortalDecisionService.mask(decisions.confirmationRecipient(session.getRootLinkId())));
+    }
     return decision;
   }
 
