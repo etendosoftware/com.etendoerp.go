@@ -2812,8 +2812,10 @@ class BusinessPartnerHandlerTest {
    */
   @Test
   void testHandlePostWithSepaRemittancesOffDropsTheMandateKeys() throws Exception {
-    JSONObject data = new JSONObject().put(ContactSepaMandateDefaults.FIELD_MANDATE_DATE,
-        "2026-01-01");
+    // The name is in both places: the envelope is what is persisted (and what the identity rules
+    // judge), the top-level copy is what the searchKey placeholder reads.
+    JSONObject data = new JSONObject().put("name", "Cliente SL")
+        .put(ContactSepaMandateDefaults.FIELD_MANDATE_DATE, "2026-01-01");
     JSONObject body = new JSONObject();
     body.put("name", "Cliente SL");
     body.put(ContactSepaMandateDefaults.FIELD_MANDATE_ID, "MANDATE-1");
