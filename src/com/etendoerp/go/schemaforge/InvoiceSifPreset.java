@@ -631,10 +631,11 @@ final class InvoiceSifPreset {
     String direction = sales
         ? "A normal invoice gets the VERI*FACTU type and description of its document type (F1 "
             + "when it has none). A rectificative invoice needs a SII motive, TicketBAI code and "
-            + "VERI*FACTU type (R1-R5) for each active system: " + ACTION_SIF_DEFAULTS + " shows "
-            + "the preselected one (" + RETURN_RECTIFICATION_DEFAULT + " for the rectificative "
-            + "of a return), and when you send no " + PARAM_SIF_FIELDS + " at all they are set "
-            + "to " + RECTIFICATION_FALLBACK + ". Refused with 422 " + MSG_FIELD_INVALID + " for an "
+            + "VERI*FACTU type (R1-R5) for each active system. On the rectificative of a "
+            + "return, " + ACTION_SIF_DEFAULTS + " preselects " + RETURN_RECTIFICATION_DEFAULT
+            + " in each one; on any other rectificative it preselects nothing and you must "
+            + "send them. When you send no " + PARAM_SIF_FIELDS + " at all they are set to "
+            + RECTIFICATION_FALLBACK + ". Refused with 422 " + MSG_FIELD_INVALID + " for an "
             + "unknown field or code, and with 422 ETGO_InvoiceRectificationCodeRequired when "
             + "a rectificative invoice is left without a code for an active system."
         : "A purchase invoice only has SII fields: " + F_OPERATION_DATE + ", "
