@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +40,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -73,6 +75,8 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
+
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 
 /**
  * Unit tests for SalesQuotationHeaderHandler.handle() and afterHandle().
@@ -900,6 +904,44 @@ public class SalesQuotationHeaderHandlerTest {
   }
 
   /**
+   * ETP-6209 KPI — a conversion is an app acceptance when the quotation was Under Evaluation
+   * before it (its status is read before the conversion changes it); one the customer had already
+   * accepted from the portal ({@code ETGO_AC}) was counted then, and a conversion that fails
+   * records nothing.
+   */
+  @Test
+  public void testConvertQuotation_recordsAnAppAcceptanceOnlyForAnAcceptedUnderEvaluation()
+      throws Exception {
+    // Columns: quotation status before, reactivation throws, acceptances recorded.
+    Object[][] cases = { { "UE", false, 1 }, { "ETGO_AC", false, 0 }, { "UE", true, 0 } };
+    for (Object[] c : cases) {
+      Order order = orderWithStatus("CO", "DR");
+      Order quotation = mock(Order.class);
+      when(quotation.getDocumentStatus()).thenReturn((String) c[0], "CA");
+      try (MockedStatic<OrderDocActionSupport> docAction =
+               Mockito.mockStatic(OrderDocActionSupport.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        if ((Boolean) c[1]) {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE"))
+              .thenThrow(new java.sql.SQLException("statement timeout"));
+        } else {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+        }
+        kpi.when(() -> PortalKpiTelemetry.quotationOf("q-5528")).thenReturn(quotation);
+        kpi.when(() -> PortalKpiTelemetry.appQuotationConverted(any(), any()))
+            .thenCallRealMethod();
+
+        NeoResponse result = convertQuotation(order);
+
+        String label = Arrays.toString(c);
+        assertEquals(label, (Boolean) c[1] ? 500 : 200, result.getHttpStatus());
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(true, quotation),
+            times((Integer) c[2]));
+      }
+    }
+  }
+
+  /**
    * A failure the procedure REPORTS is best-effort: the conversion is kept, the order stays CO
    * and the response says so.
    */
@@ -1093,6 +1135,65 @@ public class SalesQuotationHeaderHandlerTest {
     ResultSet rs = mock(ResultSet.class);
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(false);
+  }
+
+  /**
+   * ETP-6209: a new quotation never gets a reject reason by default. The field is editable (the
+   * seller sets the tenant's internal reason on a rejected quotation), so the defaults would fill
+   * it with the first reason; the answer drops it and its identifier, and keeps every other value.
+   */
+  @Test
+  public void testAfterHandle_defaultsNeverCarryARejectReason() throws Exception {
+    JSONObject defaults = new JSONObject().put("rejectReason", "RR-1")
+        .put("rejectReason$_identifier", "Precio").put("currency", "EUR");
+    NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS).build();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+
+    NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+    JSONObject answered = result.getBody().getJSONObject("defaults");
+    assertFalse(answered.has("rejectReason"));
+    assertFalse(answered.has("rejectReason$_identifier"));
+    assertEquals("EUR", answered.getString("currency"));
+  }
+
+  /**
+   * ETP-6209: evaluate-display answers the Classic lock of the reject reason (read-only once
+   * rejected); the quotation drops that one key so the window's own readOnlyLogic decides. Every
+   * other read-only answer and the visibility are kept; with no such key nothing changes.
+   */
+  @Test
+  public void testAfterHandle_evaluateDisplayDropsOnlyTheClassicRejectReasonLock()
+      throws Exception {
+    // Columns: read-only answer of the AD, read-only answer expected.
+    String[][] cases = {
+        { "{\"rejectReason\":true,\"documentNo\":true,\"orderDate\":false}",
+            "{\"documentNo\":true,\"orderDate\":false}" },
+        { "{\"documentNo\":true}", "{\"documentNo\":true}" },
+    };
+    for (String[] c : cases) {
+      JSONObject body = new JSONObject().put("readOnly", new JSONObject(c[0]))
+          .put("visibility", new JSONObject("{\"rejectReason\":true,\"documentNo\":true}"));
+      NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.EVALUATE_DISPLAY).build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      JSONObject answered = (result != null ? result : ctx.getPreviousResult()).getBody();
+      JSONObject expected = new JSONObject(c[1]);
+      JSONObject readOnly = answered.getJSONObject("readOnly");
+      assertEquals(c[0], expected.length(), readOnly.length());
+      java.util.Iterator<?> keys = expected.keys();
+      while (keys.hasNext()) {
+        String key = (String) keys.next();
+        assertEquals(c[0] + " " + key, expected.getBoolean(key), readOnly.getBoolean(key));
+      }
+      JSONObject visibility = answered.getJSONObject("visibility");
+      assertEquals("visibility is untouched", 2, visibility.length());
+      assertTrue(visibility.getBoolean("rejectReason"));
+    }
   }
 
   @Test

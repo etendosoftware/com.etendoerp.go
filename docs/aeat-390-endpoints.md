@@ -16,6 +16,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 |---|---|---|
 | `GET` | `/fiscal390/boxes?year=&period=0A[&<input>=…]` | box preview (`Fiscal390BoxesHandler`) |
 | `GET` | `/fiscal390/generate?year=&period=0A[&<input>=…]` | TXT file (`Fiscal390GenerateSupport`) |
+| `POST` | `/fiscal390/generate-validated?year=&period=0A&id=[&<input>=…]` | TXT file + the AEAT validator's answer about it (`Fiscal390FileValidationSupport`) |
 | `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
 | `GET` | `/fiscal390/preload?year=&period=0A[&monthlyReturn=Y\|N]` | 303 preload + cuadre (`Fiscal390PreloadSupport`, `Fiscal390PreloadAggregator`) |
 | `POST` | `/fiscal390/submit?year=&period=0A&id=` | AEAT telematic filing (`Fiscal390SubmissionSupport`) |
@@ -31,9 +32,9 @@ Declarations use `model: "390"`, `period: "0A"`.
 | Status | When |
 |---|---|
 | `400` | `period` is not `0A`; an input is not a number (message names it); `sources` with a non-numeric `box`/`page`/`pageSize` or `pageSize` outside 0–500 |
-| `404` / `405` | unknown entity / wrong method (`generate` is GET-only, `submit` POST-only) |
-| `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
-| `409 BLOCKING_INCIDENTS` | `generate` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
+| `404` / `405` | unknown entity / wrong method (`generate` is GET-only; `generate-validated`, `submit` and `validate` POST-only) |
+| `409` | `generate` / `generate-validated` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
+| `409 BLOCKING_INCIDENTS` | `generate` / `generate-validated` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
 | `422 INCOMPLETE_FISCAL_YEAR` | the exercise has no period for some month 1–12 in the fiscal calendar (`boxes`, `sources`, `generate`; see "Annual period") — body `{ error: { status: 422, code, message, year, missingPeriods: [1..12] } }` |
 | `500` | no 390 tax report up to the year, classic validation errors (translated AD message, e.g. missing main IAE activity) |
@@ -262,7 +263,73 @@ returned temp file is deleted, and the content is served through the shared
 report name, which carries the layout year. Response headers `X-Fiscal-Tax-Report` and
 `X-Fiscal-Layout-Year` report the resolved report.
 
+## `POST /fiscal390/generate-validated` — the file, validated by the AEAT before download
+
+What "Generar fichero 390" calls (ETP-5716). Same guards and same file as `GET generate`
+(`409` submitted, `409 BLOCKING_INCIDENTS` — which is also how an incomplete fiscal year is
+answered, as the blocking incident `INCOMPLETE_FISCAL_YEAR` of the guard; a `422` only if the
+generation itself still fails on the calendar), plus `id` — the
+declaration (`400` missing, `404` not a 390 of this client/org/exercise). The generated file is
+sent to the AEAT validation service (`AEAT303SubmissionService.submitValidation`, MODELO 390 —
+the one `submit` uses in test mode; no certificate) and returned **whatever the validator says**:
+
+```json
+{ "fileName": "390_0A_2025.txt", "fileBase64": "<ISO-8859-1 bytes>", "taxReport": "AEAT390_2025_Y",
+  "layoutYear": 2025,
+  "validation": { "path": "download", "testMode": true,
+                  "outcome": "accepted | rejected | connection_failure | not_validated",
+                  "errorCodes": ["PAR016"],
+                  "errors": [{ "code": "PAR016", "message": "…" }], "warnings": [] } }
+```
+
+| `outcome` | Meaning | Incidents |
+|---|---|---|
+| `accepted` | the AEAT answered, no error | the AEAT incidents (`AEAT-<code>`) are cleared; its warnings (`avisos`) are stored as warning incidents |
+| `rejected` | the AEAT answered with errors | replaced by this answer's errors (block) and warnings (warn) |
+| `connection_failure` | an `IOException` reaching the validator (timeout, refused, unknown host) | untouched |
+| `not_validated` | any other failure (e.g. an answer that is not the validator's JSON, or one that is neither accepted nor carries an error) | untouched |
+
+**Validation PDF.** An `accepted` answer carries the validator's draft PDF. It is attached to
+the declaration as `VALIDACION-390-<year>-0A.pdf`, as proof that the file was validated — it is not a filing
+receipt. Each accepted validation replaces the previous `VALIDACION-` attachment (the new one
+is stored first; a failed upload leaves the previous one)
+(`FiscalAeatSubmissionSupport.replaceAttachedPdf`, exact name match — plus the earlier name
+`VALIDACION-justificante-390-<year>-0A.pdf`, so both never coexist; the `TEST-` attachment and
+the real justificante are never touched). Any other outcome, or an accepted answer without PDF,
+attaches nothing and leaves the existing one. Best-effort: a failure is logged and changes
+neither the outcome nor the download.
+
+The validation never fails the request and never delays it indefinitely: the classic service is
+used with `withTimeouts(10 s connect, 30 s read)` (its interactive defaults are 30 s / 120 s) and
+every exception becomes an unanswered outcome. `FiscalAeatValidationOutcome` is the single value
+of an attempt (path, test mode, outcome, AEAT error codes without free text) and
+`Fiscal390FileValidationSupport#recordOutcome` the single place it is handed to. Like every AEAT
+attempt, an answer REPLACES the previous AEAT incidents; every attempt, answered or not, also
+leaves a row in the append-only attempt log (`ETGO_Fiscal_AEAT_Attempt`, path `download` — see
+`aeat-attempt-log.md`).
+`GET generate` is unchanged: the file only, no validation, no write.
+
 ## `POST /fiscal390/submit` — AEAT telematic filing
+
+Every call that reaches the AEAT — an answer or a connection failure (`502 SUBMISSION_FAILED`) —
+leaves a row in the append-only attempt log (`ETGO_Fiscal_AEAT_Attempt`): path
+`direct_submission`, or `manual_validation` in test mode. The guards below write none. See
+`aeat-attempt-log.md`.
+
+**Validation before a real presentation (ETP-5716).** With `testMode = false`, once every guard
+has passed and the file is generated, the server first sends that same file to the validation
+service (`FiscalAeatSubmissionSupport.validateBeforeSubmission`, 10 s connect + 30 s read; the
+service's default timeouts are restored for the presentation):
+
+| Validator | What happens |
+|---|---|
+| no errors (warnings allowed) | the presentation goes ahead, as before |
+| errors (at least one) | **not presented**: `200` with the usual result shape, `status: "ERROR"`, `testMode: false`, `stage: "validation"`, the AEAT `errors`; they replace the declaration's AEAT incidents; nothing else changes (draft) |
+| no answer, or an answer with neither a PDF nor an error | `FiscalAeatSubmissionSupport.PRESENT_WHEN_VALIDATOR_UNANSWERED` (`true`): present anyway. When `false`: `502`, `errorCode: "VALIDATION_UNAVAILABLE"`, `stage: "validation"` |
+
+It writes its own attempt row (path `pre_submission_validation`); the presentation that follows
+writes its `direct_submission` row. No PDF is attached for this validation. `testMode = true` is
+unchanged.
 
 Request body (JSON): `{ testMode, idi, presenterNif, presenterName }` — the same shape as
 `/fiscal303/submit` (see `aeat-303-submit-endpoint.md`), without `nrc`: a 390 is informative (the
@@ -571,6 +638,45 @@ every `FiscalDeclCrudHandler` (`setSingleOrdinaryModel`). `POST /declarations` o
 
 `existingId` is the latest ordinary (highest `DECL_SEQ`). A substitute declaration
 (`type: "com"`) is still allowed. 303/349 are unchanged (rectificativa flow, ETP-5187).
+
+## Manual test against a stub (ETP-5716)
+
+Repeatable checks of the AEAT validation for QA. **Never against the real AEAT and never a real
+presentation:** a client with a fiscal certificate and `ETSG_ForceTestMode` off would file for
+real. Use a client without the SIF fiscal setup, or keep the presentation steps on the stub.
+
+1. **Stub.** Any local HTTP server on `POST /ServValiDos` that answers one fixed JSON body per run:
+
+   | Scenario | Body |
+   |---|---|
+   | accepted | `{"respuesta":{"pdf":["JVBERi0xLjQK"]}}` |
+   | accepted with warnings | `{"respuesta":{"avisos":["W123 - aviso de prueba"],"pdf":["JVBERi0xLjQK"]}}` |
+   | rejected | `{"respuesta":{"errores":["PAR016 - error de prueba","Error sin código"]}}` |
+   | not validated | `{"respuesta":{}}` (neither a PDF nor an error), or an HTML page |
+   | connection failure | stop the stub (refused), or let it sleep more than 30 s (read timeout) |
+
+2. **Point the validator at it.** Insert the `AEAT303_ValidationEndpoint` preference by SQL (it
+   cannot be created from the Preference window: it is read as a property-list preference but
+   not registered in the property list — SQL in "AEAT protocol summary" of
+   `modules/org.openbravo.module.aeat303.es/doc/aeat-303-electronic-submission.md`). Delete the
+   row when done.
+3. **390 download.** On a draft 390 with no blocking rule, "Generar fichero 390", once per
+   scenario. Expect: the file downloads every time; accepted → success toast and
+   `VALIDACION-390-<year>-0A.pdf` in the Justificante tab (a second accepted run replaces it,
+   never two); warnings → amber result step, warning rows in Incidencias; rejected → red result
+   step, `AEAT-PAR016` and the uncoded error as blocking rows, Incidencias banner red with
+   "Revísalas antes de presentar la declaración.", Generar/Presentar still enabled; not validated
+   / connection failure → amber "No se ha podido validar…", incidents unchanged; connection
+   failure by timeout returns in about 30 s.
+4. **Attempt log.** After each run:
+   `SELECT outcome, environment, aeat_host, error_codes, warning_codes FROM etgo_fiscal_aeat_attempt ORDER BY created DESC LIMIT 1;`
+   — path `download`, environment `override` (host `localhost`), rejected codes `PAR016,UNCODED`.
+5. **Validation before a presentation.** Only with "Validar sin presentar" checked is nothing
+   filed — a real presentation (unchecked) with the stub answering `rejected` stops at the
+   validation (`stage: "validation"`, "Declaración no presentada…", draft unchanged, one
+   `pre_submission_validation` row and no `direct_submission` row). Run the "accepted" or
+   "no answer" variants of this step only when the presentation endpoint is also a stub
+   (`AEAT303_ProdEndpoint`) or `ETSG_ForceTestMode` is on, since they proceed to present.
 
 ## Module dependencies
 

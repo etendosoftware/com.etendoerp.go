@@ -110,14 +110,19 @@ class UsageEventTypesTest {
     assertTrue(UsageEventTypes.isKnown("publicapi.request"));
   }
 
+  // The four portal types are facts about what a tenant's customers did (ETP-6209): only the
+  // backend records them. Being server-only also makes them KNOWN (everyServerOnlyTypeIsKnown).
   @ParameterizedTest
-  @ValueSource(strings = { "session.login", "publicapi.request", "ai.decision.execute" })
+  @ValueSource(strings = { "session.login", "publicapi.request", "ai.decision.execute",
+      "portal.link.sent", "portal.link.opened", "portal.link.renewed",
+      "portal.document.downloaded", "ai.tool.execute", "ai.support.message" })
   void serverOnlyTypesAreFlagged(String type) {
     assertTrue(UsageEventTypes.isServerOnly(type));
+    assertTrue(UsageEventTypes.isKnown(type));
   }
 
   @ParameterizedTest
-  @ValueSource(strings = { "ai.agent.message", "ai.support.message", "ai.tool.execute",
+  @ValueSource(strings = { "ai.agent.message",
       "nope.unknown", "", "PUBLICAPI.REQUEST" })
   void otherKnownAndUnknownTypesAreNotServerOnly(String type) {
     assertFalse(UsageEventTypes.isServerOnly(type));

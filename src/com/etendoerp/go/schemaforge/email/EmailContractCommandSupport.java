@@ -85,7 +85,10 @@ public final class EmailContractCommandSupport {
       return null;
     }
     JSONObject body = command.getBody();
-    return body == null ? null : StringUtils.trimToNull(body.optString(field));
+    // A JSON null is "no value": optString would hand back the literal "null" (jettison renders
+    // JSONObject.NULL as that string), which then reached an email as text (ETP-6209). isNull also
+    // covers an absent field.
+    return body == null || body.isNull(field) ? null : StringUtils.trimToNull(body.optString(field));
   }
 
   /**

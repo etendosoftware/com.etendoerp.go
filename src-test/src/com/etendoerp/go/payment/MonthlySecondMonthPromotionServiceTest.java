@@ -162,7 +162,7 @@ class MonthlySecondMonthPromotionServiceTest {
   }
 
   private static final class Fixture {
-    final JSONObject terms = CheckoutPromotionTerms.describe("req", "price_month", 1100, "EUR", "month", true);
+    final JSONObject terms = secondMonthFreeTerms("req", "price_month", 1100);
     final Ledger ledger = new Ledger();
     final Provider stripe;
     final MonthlySecondMonthPromotionService service = new MonthlySecondMonthPromotionService();
@@ -181,6 +181,29 @@ class MonthlySecondMonthPromotionServiceTest {
               .put("promotion_request_id", "req").put("promotion_version", CheckoutPromotionTerms.VERSION));
     }
   }
+  /**
+   * The terms ETP-6216 recorded for a monthly purchase. New purchases get the free trial instead
+   * (ETP-6082), but the purchases already recorded this way are still honoured.
+   */
+  static JSONObject secondMonthFreeTerms(String request, String price, long amount)
+      throws Exception {
+    return new JSONObject().put("version", CheckoutPromotionTerms.VERSION)
+        .put("requestId", request).put("priceId", price).put("initialAmountMinor", amount)
+        .put("currency", "EUR").put("billingInterval", "month").put("secondMonthFree", true)
+        .put("recurringFromMonth", 3).put("firstPaymentCoverageMonths", 2)
+        .put("yearlyDiscountAlreadyInPrice", false);
+  }
+
+  /** A free-trial purchase needs no schedule: Stripe applies the trial itself. */
+  @Test void aFreeTrialPurchaseInstallsNoSchedule() throws Exception {
+    Fixture f = new Fixture();
+    f.session.getJSONObject("metadata")
+        .put("promotion_version", CheckoutPromotionTerms.TRIAL_VERSION);
+    f.service.applyPaidCheckout(f.session);
+    assertEquals(0, f.stripe.reads);
+    assertEquals(0, f.stripe.updates);
+  }
+
   @Test void freeMonthIsOnlySecondPhaseAndUsesProviderCalendarBoundaries() throws Exception {
     JSONObject phase = new JSONObject().put("start_date", 1738281600L).put("end_date", 1740700800L)
         .put("items", new JSONArray().put(new JSONObject().put("price", "price_month").put("quantity", 1)));

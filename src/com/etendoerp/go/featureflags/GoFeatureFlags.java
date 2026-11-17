@@ -137,13 +137,14 @@ public final class GoFeatureFlags {
    * backend targets the account email. This flag targets the account email — the key the backend
    * targets on — and has no frontend end at all.
    *
-   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
-   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
-   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
-   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
-   * entry is gated, "because hiding the route would imply the flag was protecting something, which
-   * it is not". What protects the endpoints is the token. Revocation in particular must keep working
-   * whatever this flag says: it is the only kill switch for a link already out.
+   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the
+   * {@code /sws/portal/*} endpoints and the {@code etgo_portal_link} table ship unconditionally —
+   * the same pattern {@code docs/feature-flags.md} already documents as correct for
+   * {@code /upgrade}, where the route is registered unconditionally and only the menu entry is
+   * gated, "because hiding the route would imply the flag was protecting something, which it is
+   * not". What protects the endpoints is the token. Since ETP-6209 it gates the link of every
+   * sales document email (quotation, order, shipment, invoice), each link lives 48 hours, and the
+   * renewal of an expired link is not gated: it only replaces a link this flag already let out.
    */
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
@@ -520,6 +521,22 @@ public final class GoFeatureFlags {
    */
   public static final String FLAG_PSD2_STATEMENT_IMPORT_SETTINGS =
       "psd2-statement-import-settings";
+
+  /**
+   * ETP-6236 — whether the MCP offers {@code etendo_routine}: several tool calls in one call, and
+   * personal, versioned routines saved to run them again. <b>Positive polarity, off by default</b>:
+   * unset, unreachable or not a boolean reads {@code false}, and the tool is neither listed in
+   * {@code tools/list} nor routed (a call by name answers {@code tool_disabled}). Saved routines
+   * and executions stay in their tables while it is off.
+   *
+   * <p><b>Per account</b> on a hosted arm (Datadog or ConfigCat), evaluated for the
+   * {@code ETGO_ACCOUNT} email of the request user; locally {@code etendo.go.flags.mcp-routines} /
+   * {@code ETGO_FLAG_MCP_ROUTINES} is a plain per-environment boolean. Its only evaluator is
+   * {@code McpRoutinesFlag}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. TTL 2027-03-31 (placeholder).
+   */
+  public static final String FLAG_MCP_ROUTINES = "mcp-routines";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

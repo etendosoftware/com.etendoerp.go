@@ -282,6 +282,10 @@ public class McpToolRouter {
           // etendo-ai#53: the identity this call already runs under; reads only the context.
           case McpConstants.TOOL_NEO_WHOAMI:
             return McpWhoamiTool.handle(arguments, scopes);
+          // ETP-6236: every step is a call of this same router, under the same role and scopes.
+          case McpConstants.TOOL_NEO_ROUTINE:
+            return McpRoutineTool.route(arguments,
+                (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes));
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
@@ -1631,13 +1635,17 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
     Map<String, String> requiredWhenByField =
         McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
+    // CP-10b: resolved once and threaded through explicitly — the structured-address label
+    // translation must use the language THIS request wants, never Hibernate's ambient session
+    // language (see McpSchemaFieldBuilder#resolveSchemaFieldLabel).
+    String langCode = NeoLanguage.currentCode();
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
-        fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS, langCode);
     // ETP-5368: an entity whose caller-facing fields live in a second table gets them appended
     // here, before every projection below, so view:"create" and view:"full" cannot disagree about
     // whether an address has a country. Empty for every entity without a wrapper policy.
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
-        McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
+        McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS, langCode));
     // ETP-6148: the property-path fields, read-only, at the same point and for the same reason.
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
         McpPathFieldSchema.build(sfEntity, dalEntity));
@@ -1649,7 +1657,7 @@ public class McpToolRouter {
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
-        McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+        McpSchemaFieldBuilder.loadFieldLabels(adTab, langCode));
     // ETP-5558: MCP_CONFIG.actions shapes the buttons here, before any projection, so view:"full"
     // and its fields:[...] whitelist describe the same buttons view:"actions" does. Shaping only
     // the actions view let a blind agent read Void off the full view of a payment and offer it.
