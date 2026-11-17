@@ -219,8 +219,18 @@ jobs:
           COVERAGE_TOLERANCE: ${{ vars.COVERAGE_TOLERANCE }}
         run: |
           set -o pipefail
+          # This workflow comes from the merge ref but the script from the PR head, which can predate
+          # --check-quality-gate (ETP-6324): a main -> develop back-merge, or a hotfix cut from an older
+          # main. Then compare the coverage alone and say the gate was not read (ETP-6326).
+          gate=--check-quality-gate
+          if ! grep -q -- "--check-quality-gate" scripts/compare-sonar-coverage.py; then
+            gate=
+            msg="The checked-out compare-sonar-coverage.py predates --check-quality-gate: quality gate not read here."
+            echo "::warning::$msg"
+            echo "> $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
           python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
-            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt --check-quality-gate \
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt $gate \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
   integration:

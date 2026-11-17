@@ -381,6 +381,8 @@ class PlanChangeServiceTest {
     assertTrue(body.contains("phases%5B1%5D%5Bduration%5D%5Binterval%5D=month"), body);
     assertTrue(body.contains("phases%5B1%5D%5Bduration%5D%5Binterval_count%5D=1"), body);
     assertFalse(body.contains("iterations"), body);
+    // No trial to keep: the current phase is sent without one.
+    assertFalse(body.contains("trial_end"), body);
     assertTrue(body.contains("proration_behavior=none"), body);
     assertTrue(body.contains("end_behavior=release"), body);
     verify(subscriptionService).writePendingChange(open, core,
@@ -388,6 +390,33 @@ class PlanChangeServiceTest {
     // Nothing changes on the subscription itself until the boundary.
     verify(stripe, never()).postForm(startsWith("/v1/subscriptions/"), anyString(), any());
     verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
+  }
+
+  /**
+   * ETP-6216 — a phase sent without trial_end has no trial, so rewriting the current phase of a
+   * trialing subscription ended the free trial and charged the current plan at once (verified
+   * against Stripe test mode). The downgrade keeps the trial end on the current phase.
+   */
+  @Test
+  void aDowngradeDuringTheFreeTrialKeepsTheTrialOnTheCurrentPhase() throws Exception {
+    PlanChange rule6 = rule("period_end");
+    when(planChangeCatalog.findAllowed(pro, core)).thenReturn(Optional.of(rule6));
+    when(open.getPlan()).thenReturn(pro);
+    long trialEnd = NOW.plusSeconds(20L * 24 * 3600).getEpochSecond();
+    when(stripe.get(startsWith("/v1/subscriptions/"))).thenReturn(ok(liveSubscription(
+        "price_pro", null).replaceFirst("\\}$", ",\"trial_end\":" + trialEnd + "}")));
+    when(stripe.postForm(eq("/v1/subscription_schedules"), anyString(), anyString()))
+        .thenReturn(ok("{\"id\":\"sub_sched_9\"}"));
+    when(stripe.postForm(eq("/v1/subscription_schedules/sub_sched_9"), anyString()))
+        .thenReturn(ok("{\"id\":\"sub_sched_9\"}"));
+
+    assertEquals(PlanChangeTiming.PERIOD_END, service.requestChange(CLIENT_ID, "core").timing());
+
+    ArgumentCaptor<String> phases = ArgumentCaptor.forClass(String.class);
+    verify(stripe).postForm(eq("/v1/subscription_schedules/sub_sched_9"), phases.capture());
+    String body = phases.getValue();
+    assertTrue(body.contains("phases%5B0%5D%5Btrial_end%5D=" + trialEnd), body);
+    assertFalse(body.contains("phases%5B1%5D%5Btrial_end%5D"), body);
   }
 
   @Test

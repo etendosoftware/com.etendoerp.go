@@ -1090,6 +1090,111 @@ class PurchaseInvoiceOcrLookupsTest {
       assertTrue(lookups.productDetails(List.of("P1")).isEmpty());
     }
 
+    // ---- productCategoryById / uomById (ETP-6050)
+
+    private ProductCategory category(String id, String name, boolean active, boolean visible) {
+      ProductCategory category = mock(ProductCategory.class);
+      when(category.getId()).thenReturn(id);
+      when(category.get("name")).thenReturn(name);
+      when(category.isActive()).thenReturn(active);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(category))
+          .thenReturn(visible);
+      return category;
+    }
+
+    private void givenCategory(String id, String name, boolean active, boolean visible) {
+      ProductCategory made = category(id, name, active, visible);
+      when(dal.get(ProductCategory.class, id)).thenReturn(made);
+    }
+
+    private void givenUnit(String id, String name, boolean active, boolean visible) {
+      UOM made = unit(id, name, active, visible);
+      when(dal.get(UOM.class, id)).thenReturn(made);
+    }
+
+    private UOM unit(String id, String name, boolean active, boolean visible) {
+      UOM unit = mock(UOM.class);
+      when(unit.getId()).thenReturn(id);
+      when(unit.get("name")).thenReturn(name);
+      when(unit.isActive()).thenReturn(active);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(unit)).thenReturn(visible);
+      return unit;
+    }
+
+    @Test
+    @DisplayName("a category by id is returned only when active and visible to the tenant")
+    void productCategoryById() {
+      givenCategory("C1", "Office", true, true);
+      givenCategory("C2", "Other", true, false);
+      givenCategory("C3", "Gone", false, true);
+
+      Party found = lookups.productCategoryById("C1").orElseThrow();
+
+      assertEquals("C1", found.id());
+      assertEquals("Office", found.name());
+      assertTrue(lookups.productCategoryById("C2").isEmpty(), "another tenant's");
+      assertTrue(lookups.productCategoryById("C3").isEmpty(), "inactive");
+      assertTrue(lookups.productCategoryById("nope").isEmpty());
+      assertTrue(lookups.productCategoryById(" ").isEmpty());
+      assertTrue(lookups.productCategoryById(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a unit by id is returned only when active and visible to the tenant")
+    void uomById() {
+      givenUnit("U1", "Unit", true, true);
+      givenUnit("U2", "Other", true, false);
+      givenUnit("U3", "Gone", false, true);
+
+      Party found = lookups.uomById("U1").orElseThrow();
+
+      assertEquals("U1", found.id());
+      assertEquals("Unit", found.name());
+      assertTrue(lookups.uomById("U2").isEmpty());
+      assertTrue(lookups.uomById("U3").isEmpty());
+      assertTrue(lookups.uomById("nope").isEmpty());
+      assertTrue(lookups.uomById("").isEmpty());
+      assertTrue(lookups.uomById(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the category and unit names follow the session language and fall back to the base name")
+    void categoryAndUnitNamesAreTranslated() {
+      givenCategory("C1", "Office", true, true);
+      givenUnit("U1", "Unit", true, true);
+      givenUnit("U2", "Box", true, true);
+      trlMock.when(() -> NeoTrl.translatedNames(eq("ProductCategory"), any(), eq("es_ES")))
+          .thenReturn(Map.of("C1", "Oficina"));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("UOM"), any(), eq("es_ES")))
+          .thenReturn(Map.of("U1", "Unidad"));
+
+      assertEquals("Oficina", lookups.productCategoryById("C1").orElseThrow().name());
+      assertEquals("Unidad", lookups.uomById("U1").orElseThrow().name());
+      assertEquals("Box", lookups.uomById("U2").orElseThrow().name(),
+          "no translation: the base name");
+    }
+
+    @Test
+    @DisplayName("a DAL or translation failure on a category or unit is an empty answer, never a throw")
+    void categoryAndUnitFailures() {
+      when(dal.get(ProductCategory.class, "C1")).thenThrow(new IllegalStateException("db"));
+      givenUnit("U1", "Unit", true, true);
+      trlMock.when(() -> NeoTrl.translatedNames(eq("UOM"), any(), anyString()))
+          .thenThrow(new IllegalStateException("trl"));
+
+      assertTrue(lookups.productCategoryById("C1").isEmpty());
+      assertTrue(lookups.uomById("U1").isEmpty());
+    }
+
+    @Test
+    @DisplayName("the interface defaults of the category and unit lookups resolve nothing")
+    void categoryAndUnitDefaultsResolveNothing() {
+      OcrLookups bare = mock(OcrLookups.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+
+      assertTrue(bare.productCategoryById("C1").isEmpty());
+      assertTrue(bare.uomById("U1").isEmpty());
+    }
+
     // ---- the interface defaults
 
     @Test
@@ -1111,6 +1216,425 @@ class PurchaseInvoiceOcrLookupsTest {
       assertEquals("N|T|C", vendor.name() + "|" + vendor.taxId() + "|" + vendor.city());
       assertEquals("N|K|G|U", product.name() + "|" + product.searchKey() + "|"
           + product.category() + "|" + product.uom());
+    }
+  }
+
+  // ── tax by id, tax modes and the document currency (ETP-6050) ─────────────
+
+  @Nested
+  @DisplayName("tax by id, rounding modes, tax names and the document currency")
+  class TaxAndCurrency {
+
+    private MockedStatic<NeoTrl> trlMock;
+    private MockedStatic<NeoLanguage> languageMock;
+    private OBContext context;
+    private org.openbravo.model.ad.system.Client client;
+    private Organization organization;
+
+    @BeforeEach
+    void open() {
+      trlMock = mockStatic(NeoTrl.class);
+      trlMock.when(() -> NeoTrl.translatedNames(anyString(), any(), anyString()))
+          .thenReturn(Map.of());
+      trlMock.when(() -> NeoTrl.translatedNames(anyString(), anyString(), any(), anyString()))
+          .thenReturn(Map.of());
+      languageMock = mockStatic(NeoLanguage.class);
+      languageMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn("CLIENT1");
+      organization = mock(Organization.class);
+      context = mock(OBContext.class);
+      when(context.getCurrentClient()).thenReturn(client);
+      when(context.getCurrentOrganization()).thenReturn(organization);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    @AfterEach
+    void close() {
+      languageMock.close();
+      trlMock.close();
+    }
+
+    private org.openbravo.model.financialmgmt.tax.TaxRate tax(String id, String name,
+        String rate, String docTaxAmount, boolean visible) {
+      org.openbravo.model.financialmgmt.tax.TaxRate tax = mock(
+          org.openbravo.model.financialmgmt.tax.TaxRate.class);
+      when(tax.getId()).thenReturn(id);
+      when(tax.getName()).thenReturn(name);
+      when(tax.getRate()).thenReturn(rate == null ? null : new BigDecimal(rate));
+      when(tax.getDocTaxAmount()).thenReturn(docTaxAmount);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(tax)).thenReturn(visible);
+      return tax;
+    }
+
+    @SuppressWarnings("unchecked")
+    private OBQuery<org.openbravo.model.financialmgmt.tax.TaxRate> taxQuery(
+        org.openbravo.model.financialmgmt.tax.TaxRate... found) {
+      OBQuery<org.openbravo.model.financialmgmt.tax.TaxRate> query = mock(OBQuery.class);
+      when(query.uniqueResult()).thenReturn(found.length == 0 ? null : found[0]);
+      when(query.list()).thenReturn(List.of(found));
+      when(dal.createQuery(eq(org.openbravo.model.financialmgmt.tax.TaxRate.class), anyString()))
+          .thenReturn(query);
+      return query;
+    }
+
+    private org.openbravo.model.common.currency.Currency currency(String id, String iso,
+        String symbol, Long precision) {
+      org.openbravo.model.common.currency.Currency currency = mock(
+          org.openbravo.model.common.currency.Currency.class);
+      when(currency.getId()).thenReturn(id);
+      when(currency.getISOCode()).thenReturn(iso);
+      when(currency.getSymbol()).thenReturn(symbol);
+      when(currency.getStandardPrecision()).thenReturn(precision);
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, id)).thenReturn(currency);
+      return currency;
+    }
+
+    private BusinessPartner vendorWithPriceListCurrency(String vendorId, boolean visible,
+        org.openbravo.model.common.currency.Currency priceListCurrency) {
+      BusinessPartner vendor = mock(BusinessPartner.class);
+      org.openbravo.model.pricing.pricelist.PriceList priceList = priceListCurrency == null ? null
+          : mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+      if (priceList != null) {
+        when(priceList.getCurrency()).thenReturn(priceListCurrency);
+      }
+      when(vendor.getPurchasePricelist()).thenReturn(priceList);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(vendor)).thenReturn(visible);
+      when(dal.get(BusinessPartner.class, vendorId)).thenReturn(vendor);
+      return vendor;
+    }
+
+    // ---- taxById
+
+    @Test
+    @DisplayName("a tax by id is asked with the rule of the line selector: active, valid from the date, purchase or both, client or System")
+    void taxByIdQueryShape() {
+      OBQuery<org.openbravo.model.financialmgmt.tax.TaxRate> query = taxQuery(
+          tax("T10", "IVA 10", "10", "D", true));
+
+      OcrLookups.Tax found = lookups.taxById("T10", "2026-11-02").orElseThrow();
+
+      assertEquals("T10", found.id());
+      assertEquals(0, new BigDecimal("10").compareTo(found.rate()));
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(dal).createQuery(eq(org.openbravo.model.financialmgmt.tax.TaxRate.class),
+          hql.capture());
+      assertTrue(hql.getValue().contains("t.active = true"), hql.getValue());
+      assertTrue(hql.getValue().contains("t.validFromDate <= :date"), hql.getValue());
+      assertTrue(hql.getValue().contains("t.salesPurchaseType in ('P', 'B')"), hql.getValue());
+      assertFalse(hql.getValue().contains("'S'"), "a sales-only tax never passes");
+      verify(query).setNamedParameter("id", "T10");
+      verify(query).setNamedParameter("date", Date.from(
+          LocalDate.of(2026, 11, 2).atStartOfDay(ZoneId.systemDefault()).toInstant()));
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<List<String>> clients = ArgumentCaptor.forClass(List.class);
+      verify(query).setNamedParameter(eq("clients"), clients.capture());
+      assertEquals(List.of("CLIENT1", "0"), clients.getValue(),
+          "the session client and the System client, no other");
+    }
+
+    @Test
+    @DisplayName("the name of a tax found by id is the translated one, the base name when there is none")
+    void taxByIdNameIsTranslated() {
+      taxQuery(tax("T10", "IVA 10", "10", "D", true));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("FinancialMgmtTaxRate"), eq("FinancialMgmtTaxTrl"), any(),
+          eq("es_ES")))
+          .thenReturn(Map.of("T10", "IVA 10 %"));
+      assertEquals("IVA 10 %", lookups.taxById("T10", null).orElseThrow().name());
+
+      trlMock.when(() -> NeoTrl.translatedNames(eq("FinancialMgmtTaxRate"), eq("FinancialMgmtTaxTrl"), any(),
+          eq("es_ES")))
+          .thenReturn(Map.of());
+      assertEquals("IVA 10", lookups.taxById("T10", null).orElseThrow().name());
+    }
+
+    @Test
+    @DisplayName("an inactive, future, sales-only or other-client tax is not returned: the query finds nothing")
+    void taxByIdNothingFoundIsEmpty() {
+      taxQuery();
+
+      assertTrue(lookups.taxById("T-INACTIVE-FUTURE-SALES-OR-FOREIGN", "2026-11-02").isEmpty());
+    }
+
+    @Test
+    @DisplayName("a tax of another tenant is dropped even when the query returned it")
+    void taxByIdOfAnotherTenantIsEmpty() {
+      taxQuery(tax("T9", "Foreign", "9", "D", false));
+
+      assertTrue(lookups.taxById("T9", "2026-11-02").isEmpty());
+    }
+
+    @Test
+    @DisplayName("a blank or null id asks nothing; a failure is an empty answer logged without the id")
+    void taxByIdBlankAndFailure() {
+      assertTrue(lookups.taxById(null, null).isEmpty());
+      assertTrue(lookups.taxById("  ", "2026-11-02").isEmpty());
+      verify(dal, never()).createQuery(any(Class.class), anyString());
+
+      when(dal.createQuery(any(Class.class), anyString()))
+          .thenThrow(new IllegalStateException("SECRET T10"));
+      assertTrue(lookups.taxById("T10", null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("an unparseable or absent date is today, never a failure")
+    void taxByIdDateFallsBackToToday() {
+      OBQuery<org.openbravo.model.financialmgmt.tax.TaxRate> query = taxQuery(
+          tax("T10", "IVA 10", "10", "D", true));
+
+      assertTrue(lookups.taxById("T10", null).isPresent());
+      assertTrue(lookups.taxById("T10", "not-a-date").isPresent());
+      assertTrue(lookups.taxById("T10", "").isPresent());
+
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<Object> dates = ArgumentCaptor.forClass(Object.class);
+      verify(query, times(3)).setNamedParameter(eq("date"), dates.capture());
+      long now = System.currentTimeMillis();
+      for (Object date : dates.getAllValues()) {
+        assertTrue(Math.abs(((Date) date).getTime() - now) < 60_000, "today: " + date);
+      }
+    }
+
+    @Test
+    @DisplayName("a tax with no rate is returned with a null rate")
+    void taxByIdWithoutRate() {
+      taxQuery(tax("T0", "Exempt", null, "D", true));
+
+      assertNull(lookups.taxById("T0", null).orElseThrow().rate());
+    }
+
+    // ---- taxDocAmountModes
+
+    @Test
+    @DisplayName("the rounding mode is L only for DocTaxAmount L; D, null and anything else read as D")
+    void taxModes() {
+      taxQuery(tax("TL", "L", "21", "L", true), tax("TD", "D", "21", "D", true),
+          tax("TN", "N", "21", null, true), tax("TX", "X", "21", "l", true));
+
+      Map<String, String> modes = lookups.taxDocAmountModes(List.of("TL", "TD", "TN", "TX"));
+
+      assertEquals("L", modes.get("TL"));
+      assertEquals("D", modes.get("TD"));
+      assertEquals("D", modes.get("TN"));
+      assertEquals("D", modes.get("TX"), "case matters: only the stored L is line based");
+    }
+
+    @Test
+    @DisplayName("a tax of another tenant is absent from the modes, so it reads as D")
+    void taxModesOfAnotherTenantAreAbsent() {
+      taxQuery(tax("TL", "L", "21", "L", true), tax("TF", "Foreign", "21", "L", false));
+
+      Map<String, String> modes = lookups.taxDocAmountModes(List.of("TL", "TF"));
+
+      assertEquals(Map.of("TL", "L"), modes);
+    }
+
+    @Test
+    @DisplayName("no usable ids asks nothing; a failing query is an empty map")
+    void taxModesEmptyAndFailure() {
+      assertTrue(lookups.taxDocAmountModes(List.of()).isEmpty());
+      assertTrue(lookups.taxDocAmountModes(null).isEmpty());
+      assertTrue(lookups.taxDocAmountModes(java.util.Arrays.asList(" ", null)).isEmpty());
+      verify(dal, never()).createQuery(any(Class.class), anyString());
+
+      when(dal.createQuery(any(Class.class), anyString()))
+          .thenThrow(new IllegalStateException("db"));
+      assertTrue(lookups.taxDocAmountModes(List.of("TL")).isEmpty());
+    }
+
+    // ---- taxNames
+
+    @Test
+    @DisplayName("the names are translated, fall back to the base name and skip taxes of another tenant")
+    void taxNames() {
+      OBQuery<org.openbravo.model.financialmgmt.tax.TaxRate> query = taxQuery(
+          tax("T1", "Base 1", "21", "D", true), tax("T2", "Base 2", "10", "D", true),
+          tax("T3", "Foreign", "4", "D", false));
+      trlMock.when(() -> NeoTrl.translatedNames(eq("FinancialMgmtTaxRate"), eq("FinancialMgmtTaxTrl"), any(),
+          eq("es_ES")))
+          .thenReturn(Map.of("T1", "IVA 21"));
+
+      Map<String, String> names = lookups.taxNames(List.of("T1", "T2", "T3"));
+
+      assertEquals(Map.of("T1", "IVA 21", "T2", "Base 2"), names);
+      // a name is for display: an inactive or no-longer-valid tax keeps it (the tenant fence stays)
+      verify(query).setFilterOnActive(false);
+    }
+
+    @Test
+    @DisplayName("tax names: no ids asks nothing, and a failing translation or query is an empty map")
+    void taxNamesEmptyAndFailure() {
+      assertTrue(lookups.taxNames(List.of()).isEmpty());
+      verify(dal, never()).createQuery(any(Class.class), anyString());
+
+      taxQuery(tax("T1", "Base 1", "21", "D", true));
+      trlMock.when(() -> NeoTrl.translatedNames(anyString(), anyString(), any(), anyString()))
+          .thenThrow(new IllegalStateException("trl"));
+      assertTrue(lookups.taxNames(List.of("T1")).isEmpty());
+    }
+
+    // ---- documentCurrency
+
+    @Test
+    @DisplayName("the currency is the vendor's purchase price list one, with the scale of the currency")
+    void documentCurrencyFromTheVendorPriceList() {
+      vendorWithPriceListCurrency("V1", true, currency("USD", "USD", "$", 3L));
+
+      OcrLookups.DocCurrency found = lookups.documentCurrency("V1").orElseThrow();
+
+      assertEquals("USD", found.id());
+      assertEquals("USD", found.isoCode());
+      assertEquals("$", found.symbol());
+      assertEquals(3, found.scale());
+    }
+
+    @Test
+    @DisplayName("a currency with no standard precision is rounded to two decimals")
+    void documentCurrencyWithoutPrecisionIsTwoDecimals() {
+      vendorWithPriceListCurrency("V1", true, currency("USD", "USD", "$", null));
+
+      assertEquals(2, lookups.documentCurrency("V1").orElseThrow().scale());
+    }
+
+    @Test
+    @DisplayName("a scale of zero is kept as zero")
+    void documentCurrencyScaleZero() {
+      vendorWithPriceListCurrency("V1", true, currency("JPY", "JPY", "Y", 0L));
+
+      assertEquals(0, lookups.documentCurrency("V1").orElseThrow().scale());
+    }
+
+    @Test
+    @DisplayName("no vendor: the organization's currency")
+    void documentCurrencyWithoutVendorIsTheOrganizations() {
+      var c = currency("EUR", "EUR", "E", 2L);
+      when(organization.getCurrency()).thenReturn(c);
+
+      assertEquals("EUR", lookups.documentCurrency(null).orElseThrow().id());
+      assertEquals("EUR", lookups.documentCurrency(" ").orElseThrow().id());
+      verify(dal, never()).get(eq(BusinessPartner.class), anyString());
+    }
+
+    @Test
+    @DisplayName("the fallback is the DOCUMENT's organization currency, not the session's, when it differs")
+    void documentCurrencyUsesTheRowsOrganization() {
+      var session = currency("EUR", "EUR", "E", 2L);
+      when(organization.getCurrency()).thenReturn(session);
+      Organization rowOrganization = mock(Organization.class);
+      var jpy = currency("JPY", "JPY", "Y", 0L);
+      when(rowOrganization.getCurrency()).thenReturn(jpy);
+      when(dal.get(Organization.class, "ORG2")).thenReturn(rowOrganization);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(rowOrganization))
+          .thenReturn(true);
+
+      assertEquals("JPY", lookups.documentCurrency(null, "ORG2").orElseThrow().id());
+      assertEquals("EUR", lookups.documentCurrency(null, null).orElseThrow().id());
+
+      // an organization the tenant cannot see is not trusted: the session's one
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(rowOrganization))
+          .thenReturn(false);
+      assertEquals("EUR", lookups.documentCurrency(null, "ORG2").orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("a vendor without a purchase price list falls back to the organization's currency")
+    void documentCurrencyVendorWithoutPriceList() {
+      vendorWithPriceListCurrency("V1", true, null);
+      var c = currency("EUR", "EUR", "E", 2L);
+      when(organization.getCurrency()).thenReturn(c);
+
+      assertEquals("EUR", lookups.documentCurrency("V1").orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("a vendor of another tenant is not read: the organization's currency")
+    void documentCurrencyVendorOfAnotherTenant() {
+      vendorWithPriceListCurrency("V9", false, currency("USD", "USD", "$", 2L));
+      var c = currency("EUR", "EUR", "E", 2L);
+      when(organization.getCurrency()).thenReturn(c);
+
+      assertEquals("EUR", lookups.documentCurrency("V9").orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("an unknown vendor id falls back to the organization's currency")
+    void documentCurrencyUnknownVendor() {
+      var c = currency("EUR", "EUR", "E", 2L);
+      when(organization.getCurrency()).thenReturn(c);
+
+      assertEquals("EUR", lookups.documentCurrency("NOPE").orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("an organization without a currency falls back to the client's")
+    void documentCurrencyOrganizationWithoutCurrency() {
+      when(organization.getCurrency()).thenReturn(null);
+      var c = currency("GBP", "GBP", "P", 2L);
+      when(client.getCurrency()).thenReturn(c);
+
+      assertEquals("GBP", lookups.documentCurrency(null).orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("no organization in the session falls back to the client's currency")
+    void documentCurrencyWithoutOrganization() {
+      when(context.getCurrentOrganization()).thenReturn(null);
+      var c = currency("GBP", "GBP", "P", 2L);
+      when(client.getCurrency()).thenReturn(c);
+
+      assertEquals("GBP", lookups.documentCurrency(null).orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("no currency anywhere is empty, and a failing lookup is empty too")
+    void documentCurrencyNothingAndFailure() {
+      assertTrue(lookups.documentCurrency(null).isEmpty());
+
+      when(dal.get(eq(BusinessPartner.class), anyString()))
+          .thenThrow(new IllegalStateException("db"));
+      assertTrue(lookups.documentCurrency("V1").isEmpty());
+    }
+
+    // ---- currencyById
+
+    @Test
+    @DisplayName("a currency by id carries its scale; blank, unknown and failing ids are empty")
+    void currencyById() {
+      currency("JPY", "JPY", "Y", 0L);
+
+      OcrLookups.DocCurrency found = lookups.currencyById("JPY").orElseThrow();
+      assertEquals("JPY", found.isoCode());
+      assertEquals(0, found.scale());
+      assertTrue(lookups.currencyById("NOPE").isEmpty());
+      assertTrue(lookups.currencyById(" ").isEmpty());
+      assertTrue(lookups.currencyById(null).isEmpty());
+
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, "BOOM"))
+          .thenThrow(new IllegalStateException("db"));
+      assertTrue(lookups.currencyById("BOOM").isEmpty());
+    }
+
+    // ---- the interface defaults
+
+    @Test
+    @DisplayName("an implementation that does not support the new lookups resolves no tax and no currency and reads every tax as D")
+    void interfaceDefaultsOfTheTaxAndCurrencyLookups() {
+      OcrLookups bare = mock(OcrLookups.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+
+      assertTrue(bare.taxById("T1", "2026-11-02").isEmpty());
+      assertTrue(bare.documentCurrency("V1").isEmpty());
+      assertTrue(bare.currencyById("EUR").isEmpty());
+      assertTrue(bare.taxDocAmountModes(List.of("T1")).isEmpty());
+      assertTrue(bare.taxNames(List.of("T1")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the currency data class hands back what it was given")
+    void docCurrencyCarriesItsValues() {
+      OcrLookups.DocCurrency currency = new OcrLookups.DocCurrency("I", "ISO", "S", 3);
+
+      assertEquals("I|ISO|S|3", currency.id() + "|" + currency.isoCode() + "|"
+          + currency.symbol() + "|" + currency.scale());
     }
   }
 }
