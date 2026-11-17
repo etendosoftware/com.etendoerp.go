@@ -598,6 +598,100 @@ class ReportSelectorsServletTest {
   // doGet - internal error handling
   // ===========================================================================
 
+  // ===========================================================================
+  // ids lookup (ETP-6239): labels for a selection restored from a link
+  // ===========================================================================
+
+  @Nested
+  @DisplayName("ids lookup")
+  class IdsLookupTests {
+
+    private List<String> sqlRun() {
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      return sql.getAllValues();
+    }
+
+    @Test
+    @DisplayName("bpartner ids resolve exactly those rows: IN (:ids) under the client scope, q and paging ignored")
+    @SuppressWarnings("unchecked")
+    void resolvesExactlyTheRequestedRows() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      when(request.getParameter("ids")).thenReturn("AA11BB22, CC33DD44,bad'id");
+      when(request.getParameter("q")).thenReturn("ignored");
+      when(request.getParameter("limit")).thenReturn("1");
+      when(request.getParameter("offset")).thenReturn("50");
+      when(countQuery.uniqueResult()).thenReturn(2);
+      when(dataQuery.list()).thenReturn(Arrays.asList(new Object[]{ "AA11BB22", "A", "A" }, new Object[]{ "CC33DD44", "B", "B" }));
+
+      servlet.doGet(request, response);
+
+      for (String sql : sqlRun()) {
+        assertTrue(sql.contains("ad_client_id = :clientId"), sql);
+        assertTrue(sql.contains("c_bpartner_id IN (:ids)"), sql);
+      }
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22", "CC33DD44"));
+      verify(dataQuery).setParameter("search", "%%"); // q is not applied
+      verify(dataQuery).setMaxResults(2); // one row per id, not the request's limit
+      verify(dataQuery).setFirstResult(0);
+      assertEquals(2, new JSONObject(getResponseBody()).getJSONArray("items").length());
+    }
+
+    @Test
+    @DisplayName("product ids filter the product selector too")
+    void productIds() throws Exception {
+      configureAuthenticatedGet("product");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      assertTrue(sqlRun().get(0).contains("m_product_id IN (:ids)"));
+    }
+
+    @Test
+    @DisplayName("a blank or fully invalid ids list returns no rows and never runs the whole selector")
+    void blankOrInvalidIdsReturnNothing() throws Exception {
+      for (String ids : new String[] { "", "   ", ",", "x'; DROP TABLE y;--" }) {
+        configureAuthenticatedGet("bpartner");
+        when(request.getParameter("ids")).thenReturn(ids);
+        stringWriter.getBuffer().setLength(0);
+
+        servlet.doGet(request, response);
+
+        JSONObject json = new JSONObject(getResponseBody());
+        assertEquals(0, json.getJSONArray("items").length(), ids);
+        assertEquals(0, json.getInt("totalCount"), ids);
+      }
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("a selector without an ids lookup refuses it instead of listing everything")
+    void unsupportedSelectorRefusesIds() throws Exception {
+      configureAuthenticatedGet("org");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("without ids the normal list is unchanged: no ids predicate, the request's q and paging apply")
+    void normalPathUnchanged() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      when(request.getParameter("q")).thenReturn("acme");
+      when(request.getParameter("limit")).thenReturn("7");
+
+      servlet.doGet(request, response);
+
+      assertFalse(sqlRun().get(0).contains(":ids"));
+      verify(dataQuery).setParameter("search", "%acme%");
+      verify(dataQuery).setMaxResults(7);
+    }
+  }
+
   @Nested
   @DisplayName("doGet - internal errors")
   class DoGetInternalErrors {
