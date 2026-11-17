@@ -114,9 +114,12 @@ public final class UsageEventTypes {
    * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
    * ({@code NeoUsageEventEndpoint}, {@code POST /sws/neo/usage}) drops them, because a row of one of
    * these types is read as a fact about the tenant: a login, public API requests that are billed,
-   * or a decision whose cost counts in the tenant's AI spend. Each must also be in {@link #KNOWN}.
+   * or an AI turn or decision whose cost counts in the tenant's AI spend. Each must also be in
+   * {@link #KNOWN}.
    */
   private static final Set<String> SERVER_ONLY = Set.of(
+      AI_SUPPORT_MESSAGE,
+      AI_TOOL_EXECUTE,
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,
