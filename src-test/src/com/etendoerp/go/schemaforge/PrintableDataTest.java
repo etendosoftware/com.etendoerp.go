@@ -226,14 +226,15 @@ class PrintableDataTest {
     String portalEs = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
     String portalEn = "Rejected by the customer from the portal. Reason: Delivery too late.";
     // Columns: status, description (null: JSON null), tenant reason, expected notes, expected reason.
+    // The tenant's reason is never printed (internal; the PDF reaches the customer).
     String[][] cases = {
         { "CJ", "Gracias por la oferta\n" + portalEs, null, "Gracias por la oferta",
             "Precio demasiado alto" },
-        { "CJ", "Gracias\n" + portalEs, "Competencia", "Gracias", "Competencia" },
+        { "CJ", "Gracias\n" + portalEs, "Competencia", "Gracias", "Precio demasiado alto" },
         { "CJ", "Rechazado por el cliente desde el portal. Motivo: Otros: Ya no lo necesitamos.",
             null, null, "Otros: Ya no lo necesitamos" },
         { "CJ", portalEn, null, null, "Delivery too late" },
-        { "CJ", "Nota interna", "Competencia", "Nota interna", "Competencia" },
+        { "CJ", "Nota interna", "Competencia", "Nota interna", null },
         { "UE", portalEs, "Competencia", portalEs, null },
         { "CJ", "", null, null, null },
         { "CJ", null, null, null, null },

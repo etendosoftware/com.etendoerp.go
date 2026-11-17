@@ -160,15 +160,15 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
    * The quotation's notes and its printed reject reason — {@code quotationNotesAndRejectReason} of
    * {@code useQuotationPdf.js}, line for line (ETP-6209 Part C, Jira comment 149518 point 5).
    *
-   * <p>A rejected quotation ({@code CJ}) prints one observation line "Motivo: &lt;reason&gt;": the
-   * tenant's reject reason ({@code rejectReason$_identifier}) when the seller has set one, else the
-   * customer's portal reason (the "Otros" text included) read from the portal's line in the notes,
-   * which is taken out of the notes so the observations never say "Motivo" twice. Other statuses
+   * <p>A rejected quotation ({@code CJ}) prints one observation line "Motivo: &lt;reason&gt;" with
+   * the customer's own portal reason only (the "Otros" text included), read from the portal's line
+   * in the notes, which is taken out of the notes so the observations never say "Motivo" twice. A
+   * quotation rejected without a portal reason (e.g. in the app) prints no reason. Other statuses
    * keep their notes and print no reason.</p>
    *
-   * <p><b>The tenant's internal reason is visible to the customer:</b> this is the PDF the customer
-   * downloads from the portal and receives by email. The user accepted this explicitly
-   * (2026-11-16); do not change it without a product decision.</p>
+   * <p><b>The tenant's reject reason ({@code rejectReason$_identifier}) is never printed:</b> it can
+   * be internal, and this is the PDF the customer downloads from the portal and receives by email
+   * (ETP-6209 QA).</p>
    *
    * @return {@code {notes, rejectReason}}, either {@code null}
    */
@@ -179,9 +179,7 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
     if (!STATUS_REJECTED.equals(value(header, "documentStatus"))) {
       return new String[] { notes, null };
     }
-    String[] split = splitPortalNote(description);
-    String tenant = textOrNull(value(header, "rejectReason$_identifier"));
-    return new String[] { split[0], tenant != null ? tenant : split[1] };
+    return splitPortalNote(description);
   }
 
   /**
@@ -208,10 +206,6 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
     return new String[] { keptNotes.isEmpty() ? null : keptNotes, portalReason };
   }
 
-  /** A value as text, {@code null} when absent or empty. */
-  private static String textOrNull(Object raw) {
-    return raw == null || String.valueOf(raw).isEmpty() ? null : String.valueOf(raw);
-  }
 
   /** The reason inside a portal note line: what follows its marker, without the closing period. */
   private static String reasonOfPortalNote(String line) {
