@@ -216,12 +216,12 @@ public class PortalDecisionServiceTest {
   }
 
   @Test
-  public void theConfirmationGoesToTheFirstValidToMaskedAndNeverToCc() throws Exception {
+  public void theConfirmationGoesToTheFirstValidToInFullAndNeverToCc() throws Exception {
     PortalDecisionService.RequestResult result = service().request(session, QUOTATION_ID,
         "REJECT", "PRICE", null);
 
     assertEquals(PortalDecisionService.RequestOutcome.SENT, result.getOutcome());
-    assertEquals("fi•••@customer.test", result.getMaskedEmail());
+    assertEquals("first@customer.test", result.getEmail());
     assertEquals("first@customer.test", service().confirmationRecipient(ROOT_ID));
     JSONObject command = sentCommand(PortalDecisionService.CONFIRM_CONTRACT);
     assertEquals(QUOTATION_ID, command.getString("recordId"));
@@ -291,15 +291,6 @@ public class PortalDecisionServiceTest {
     emailStatus = TransactionalEmailService.STATUS_SENT;
     service().request(session, QUOTATION_ID, "ACCEPT", null, null);
     assertFalse(executed("SET isactive = 'N'"));
-  }
-
-  @Test
-  public void maskShowsTwoCharactersAtMost() {
-    assertEquals("ju•••@example.com", PortalDecisionService.mask("julia@example.com"));
-    assertEquals("j•••@example.com", PortalDecisionService.mask("jo@example.com"));
-    assertEquals("", PortalDecisionService.mask("@example.com"));
-    assertEquals("", PortalDecisionService.mask("not-an-address"));
-    assertEquals("", PortalDecisionService.mask(null));
   }
 
   // ── mint and view ───────────────────────────────────────────────────────────

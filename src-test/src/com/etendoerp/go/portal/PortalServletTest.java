@@ -520,7 +520,7 @@ public class PortalServletTest {
     for (Object[] c : cases) {
       PortalDecisionService.RequestResult result = new PortalDecisionService.RequestResult(
           (PortalDecisionService.RequestOutcome) c[0], (PortalDecisionService.Blocked) c[1],
-          "ju\u2022\u2022\u2022@example.com");
+          "julia@example.com");
       when(decisionService.request(any(), any(), any(), any(), any())).thenReturn(result);
       Call call = new Call();
 
@@ -531,7 +531,7 @@ public class PortalServletTest {
       JSONObject body = new JSONObject(call.body.toString());
       if (c[3] == null) {
         assertEquals("sent", body.getString("state"));
-        assertEquals("ju\u2022\u2022\u2022@example.com", body.getString("maskedEmail"));
+        assertEquals("julia@example.com", body.getString("email"));
       } else {
         assertEquals(c[3], body.getString("error"));
       }

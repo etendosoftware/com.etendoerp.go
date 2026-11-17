@@ -219,12 +219,13 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   rule). Decidable = `UE` only
   (`QuotationDecisions.isDecidable`, PO answer Q3) and not expired (no `ValidUntil` = not expired). Reject
   needs one of `PRICE`, `DELIVERY`, `PAYMENT_TERMS`, `OTHER_SUPPLIER`, `NOT_NEEDED`, `OTHER` (text
-  required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
+  required). Answers `{state:"sent", email}`, 404 out of scope, 409 `not_pending` /
   `expired` / `no_recipient` / `accept_unavailable`, 422 `invalid_reason`, 429 `cooldown`, 503.
 - **Recipient:** the confirmation goes to the **first To of the link's root send** only, never CC.
   No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`. When the
-  quotation can be decided, the detail's `decision` also carries `maskedEmail` (masked like the
-  request's answer), so the SPA's accept / reject popups name it before anything is sent.
+  quotation can be decided, the detail's `decision` also carries `email` (as the request's
+  answer), so the SPA's accept / reject popups name it before anything is sent. The address is
+  shown in full, not masked: a product decision following the Figma design.
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.

@@ -406,7 +406,7 @@ public class PortalDocumentsEndpointTest {
             PortalDecisionService.class, (service, context) -> {
               when(service.blockedReason(any(), any()))
                   .thenReturn((PortalDecisionService.Blocked) c[0]);
-              when(service.confirmationRecipient(any())).thenReturn("juan@example.com");
+              when(service.confirmationRecipient(any())).thenReturn(" juan@example.com ");
             })) {
 
           JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
@@ -420,11 +420,11 @@ public class PortalDocumentsEndpointTest {
           }
           assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
               decision.getBoolean("acceptAvailable"));
-          // The popups name the masked recipient, and only when the customer can decide.
+          // The popups name the recipient in full (trimmed), and only when the customer can decide.
           if (Boolean.TRUE.equals(c[1])) {
-            assertEquals("ju•••@example.com", decision.getString("maskedEmail"));
+            assertEquals("juan@example.com", decision.getString("email"));
           } else {
-            assertFalse(decision.has("maskedEmail"));
+            assertFalse(decision.has("email"));
           }
           verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
         }

@@ -462,10 +462,10 @@ final class PortalDocumentsEndpoint {
     decision.put("blockedReason", blocked == null ? JSONObject.NULL : blocked.getCode());
     decision.put("acceptAvailable", PortalDecisionService.ACCEPT_AVAILABLE);
     if (blocked == null) {
-      // Where the confirmation will go, masked like the request's answer: the accept / reject
-      // popups name it before the customer sends anything (ETP-6209 redesign).
-      decision.put("maskedEmail",
-          PortalDecisionService.mask(decisions.confirmationRecipient(session.getRootLinkId())));
+      // Where the confirmation will go, in full as in the request's answer: the accept / reject
+      // popups name it before the customer sends anything (ETP-6209 redesign, Figma).
+      decision.put("email", StringUtils.trimToEmpty(
+          decisions.confirmationRecipient(session.getRootLinkId())));
     }
     return decision;
   }

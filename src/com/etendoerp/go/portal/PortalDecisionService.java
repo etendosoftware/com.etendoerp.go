@@ -139,12 +139,12 @@ public class PortalDecisionService {
   public static final class RequestResult {
     private final RequestOutcome outcome;
     private final Blocked blocked;
-    private final String maskedEmail;
+    private final String email;
 
-    RequestResult(RequestOutcome outcome, Blocked blocked, String maskedEmail) {
+    RequestResult(RequestOutcome outcome, Blocked blocked, String email) {
       this.outcome = outcome;
       this.blocked = blocked;
-      this.maskedEmail = maskedEmail;
+      this.email = email;
     }
 
     public RequestOutcome getOutcome() {
@@ -155,8 +155,9 @@ public class PortalDecisionService {
       return blocked;
     }
 
-    public String getMaskedEmail() {
-      return maskedEmail;
+    /** The confirmation's recipient, in full (design decision, Figma). */
+    public String getEmail() {
+      return email;
     }
   }
 
@@ -357,7 +358,7 @@ public class PortalDecisionService {
    * @param decision {@code ACCEPT} or {@code REJECT}
    * @param reasonCode one of {@link #REASON_CODES} (reject only)
    * @param reasonText required for {@code OTHER}, at most {@value #MAX_REASON_TEXT} characters
-   * @return the outcome, with the masked recipient when the email left
+   * @return the outcome, with the recipient when the email left
    */
   public RequestResult request(PortalSession session, String quotationId, String decision,
       String reasonCode, String reasonText) {
@@ -416,7 +417,8 @@ public class PortalDecisionService {
     String status = sendConfirmation(session, quotation, normalizedDecision, reason, text);
     if (TransactionalEmailService.STATUS_SENT.equals(status)) {
       PortalDecisionEvents.requested(session, quotation.getId(), normalizedDecision);
-      return new RequestResult(RequestOutcome.SENT, null, mask(recipient));
+      return new RequestResult(RequestOutcome.SENT, null,
+          StringUtils.trimToEmpty(recipient));
     }
     // The email did not leave: its pending row must not count against the cool-down (Part A's
     // renewal rule), so a provider failure does not lock the customer out for the whole window.
@@ -889,17 +891,5 @@ public class PortalDecisionService {
           .executeUpdate();
     }
     return ids;
-  }
-
-  /** {@code ju•••@example.com}: enough for the customer to recognise it, not to read it. */
-  static String mask(String email) {
-    String value = StringUtils.trimToEmpty(email);
-    int at = value.indexOf('@');
-    if (at <= 0) {
-      return "";
-    }
-    String local = value.substring(0, at);
-    String shown = local.length() <= 2 ? local.substring(0, 1) : local.substring(0, 2);
-    return shown + "•••" + value.substring(at);
   }
 }

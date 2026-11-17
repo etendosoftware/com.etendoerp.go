@@ -474,7 +474,7 @@ public class PortalServlet extends HttpBaseServlet {
    * email to the first To of the link's root send.
    *
    * <pre>
-   * 200 {"state": "sent", "maskedEmail": "ju•••@example.com"}
+   * 200 {"state": "sent", "email": "julia@example.com"}
    * 404                                      not in scope (as every other read)
    * 409 {"error": "not_pending" | "expired" | "no_recipient" | "accept_unavailable"}
    * 422 {"error": "invalid_reason"}          a reject without a valid reason / "Otros" text
@@ -501,7 +501,7 @@ public class PortalServlet extends HttpBaseServlet {
       case SENT:
         JSONObject sent = new JSONObject();
         sent.put(FIELD_STATE, "sent");
-        sent.put("maskedEmail", StringUtils.defaultString(result.getMaskedEmail()));
+        sent.put("email", StringUtils.defaultString(result.getEmail()));
         sendJson(response, HttpServletResponse.SC_OK, sent);
         return;
       case NOT_FOUND:
