@@ -171,7 +171,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
     OBContext.setAdminMode(true);
     try {
       if (endpoint == NeoEndpointType.SELECTOR) {
-        return RemittanceHeaderSelectors.handle(this, context.getFieldName());
+        return RemittanceHeaderSelectors.handle(this, context.getFieldName(),
+            context.getQueryParams());
       }
       if (NeoEndpointTypes.isCrud(context)) {
         return RemittanceHeaderWrites.validate(this, context);
