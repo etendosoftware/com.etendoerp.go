@@ -217,6 +217,20 @@
                     "null"
                   ]
                 },
+                "discount_percent": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "Discount percentage printed for THIS line (for example 10 for 'Dto. 10%'). unit_price stays the price exactly as printed in the price column, before this discount. Null if the line prints no per-line discount. NOT a document-level discount."
+                },
+                "discount_amount": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "Discount amount printed for THIS line, in the document currency, when the discount is printed as an amount and not as a percentage. Null otherwise."
+                },
                 "tax_label": {
                   "type": [
                     "string",
@@ -235,6 +249,8 @@
                 "description",
                 "quantity",
                 "unit_price",
+                "discount_percent",
+                "discount_amount",
                 "tax_label",
                 "tax_rate"
               ],

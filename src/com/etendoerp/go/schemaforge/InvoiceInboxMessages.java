@@ -26,7 +26,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * ETP-6047 — the texts the invoice inbox upload (and, ETP-6049, the discard action) answer with. Each one is an {@code AD_MESSAGE}
  * (key below) translated through {@link OBMessageUtils#messageBD(String)}, with the English text
  * of the AD row as the fallback so an answer is never a bare key when the row is not installed yet.
- * The ETP-6049 discard keys and the ETP-6050 review key have no AD row on purpose: they resolve to
+ * The ETP-6049 discard keys and the ETP-6050 review, apply and mark-reviewed keys have no AD row on purpose: they resolve to
  * the English default here and the SPA translates by {@code error.code}.
  * {@code @name@} placeholders are replaced from the given values.
  */
@@ -46,6 +46,23 @@ final class InvoiceInboxMessages {
   static final String NOT_DISCARDABLE = "ETGO_InvoiceInboxNotDiscardable";
   static final String DISCARD_ORG_NOT_ALLOWED = "ETGO_InvoiceInboxDiscardOrgNotAllowed";
   static final String PROCESSING = "ETGO_InvoiceInboxProcessing";
+  static final String INVALID_REQUEST = "ETGO_InvoiceInboxInvalidRequest";
+  static final String MISSING_UPDATED = "ETGO_InvoiceInboxMissingUpdated";
+  static final String ACCESS_DENIED = "ETGO_InvoiceInboxAccessDenied";
+  static final String NOT_EDITABLE = "ETGO_InvoiceInboxNotEditable";
+  static final String NOT_REVIEWABLE = "ETGO_InvoiceInboxNotReviewable";
+  static final String STALE_DOCUMENT = "ETGO_InvoiceInboxStaleDocument";
+  static final String APPLY_TOO_LARGE = "ETGO_InvoiceInboxApplyTooLarge";
+  static final String DOCUMENT_TOO_LARGE = "ETGO_InvoiceInboxDocumentTooLarge";
+  static final String INVALID_VALUE = "ETGO_InvoiceInboxInvalidValue";
+  static final String LINE_NOT_FOUND = "ETGO_InvoiceInboxLineNotFound";
+  static final String TOO_MANY_LINES = "ETGO_InvoiceInboxTooManyLines";
+  static final String UNKNOWN_VENDOR = "ETGO_InvoiceInboxUnknownVendor";
+  static final String UNKNOWN_PRODUCT = "ETGO_InvoiceInboxUnknownProduct";
+  static final String UNKNOWN_CATEGORY = "ETGO_InvoiceInboxUnknownCategory";
+  static final String UNKNOWN_UOM = "ETGO_InvoiceInboxUnknownUom";
+  static final String UNKNOWN_TAX = "ETGO_InvoiceInboxUnknownTax";
+  static final String NOT_VALID = "ETGO_InvoiceInboxNotValid";
 
   private static final Map<String, String> DEFAULTS = Map.ofEntries(
       Map.entry(DISABLED, "The invoice inbox is not enabled for this user."),
@@ -68,7 +85,26 @@ final class InvoiceInboxMessages {
           + "documents pending review, with errors or ready to confirm can be discarded."),
       Map.entry(DISCARD_ORG_NOT_ALLOWED,
           "The document belongs to an organization you cannot write to."),
-      Map.entry(PROCESSING, "The document is still being read and cannot be opened yet."));
+      Map.entry(PROCESSING, "The document is still being read and cannot be opened yet."),
+      Map.entry(INVALID_REQUEST, "The request is not valid: it must carry the 'updated' token "
+          + "and between 1 and @max@ known operations."),
+      Map.entry(MISSING_UPDATED, "The 'updated' token of the document is required."),
+      Map.entry(ACCESS_DENIED, "You do not have write access to the invoice inbox."),
+      Map.entry(NOT_EDITABLE, "The document cannot be edited in status @status@."),
+      Map.entry(NOT_REVIEWABLE, "The document cannot be marked as reviewed in status @status@."),
+      Map.entry(STALE_DOCUMENT,
+          "The document was changed by someone else. Reload it and try again."),
+      Map.entry(APPLY_TOO_LARGE, "The request is too large."),
+      Map.entry(DOCUMENT_TOO_LARGE, "The document would be too large to store."),
+      Map.entry(INVALID_VALUE, "The value of '@field@' is not valid."),
+      Map.entry(LINE_NOT_FOUND, "The line does not exist."),
+      Map.entry(TOO_MANY_LINES, "A document can have at most @max@ lines."),
+      Map.entry(UNKNOWN_VENDOR, "The vendor does not exist or cannot be used."),
+      Map.entry(UNKNOWN_PRODUCT, "The product does not exist or cannot be used."),
+      Map.entry(UNKNOWN_CATEGORY, "The product category does not exist or cannot be used."),
+      Map.entry(UNKNOWN_UOM, "The unit of measure does not exist or cannot be used."),
+      Map.entry(UNKNOWN_TAX, "The tax does not exist or cannot be used on this document."),
+      Map.entry(NOT_VALID, "The document is not complete: @missing@."));
 
   private InvoiceInboxMessages() {
   }

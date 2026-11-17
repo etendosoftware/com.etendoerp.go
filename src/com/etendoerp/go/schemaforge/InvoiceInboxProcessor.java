@@ -17,19 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DUPLICATE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_HEADER;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INBOX;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NOTICES;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALIDATION;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MAX_DOCUMENT_NO;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
 
 import java.io.File;
 import java.io.IOException;
@@ -47,12 +35,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.InvoiceInboxWorkStore.Claimed;
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
@@ -64,7 +50,6 @@ import com.etendoerp.go.schemaforge.ocr.OcrExtractionService;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
 import com.etendoerp.go.schemaforge.ocr.OcrServiceClient;
 import com.etendoerp.go.schemaforge.ocr.OcrUnavailableException;
-import com.etendoerp.go.schemaforge.ocr.TaxIdNormalizer;
 
 /**
  * The background worker of the invoice inbox (ETP-6048): takes each {@code PROCESSING} row, reads its
@@ -96,8 +81,6 @@ public final class InvoiceInboxProcessor {
   static final int LEASE_MINUTES = 10;
   static final int RETRIES = 3;
   static final int SWEEP_BATCH = 50;
-  /** Shortest cleaned tax id worth identifying an issuer by (as the vendor match). */
-  private static final int MIN_ISSUER_TAX_ID = 5;
   /** Seconds to wait before each OCR attempt of a pass. */
   private static final long[] BACKOFF_SECONDS = { 0L, 15L, 45L };
   private static final String ERR_UNREADABLE = "UNREADABLE";
@@ -330,7 +313,7 @@ public final class InvoiceInboxProcessor {
       return;
     }
     IncomingDocument row = OBDal.getInstance().get(IncomingDocument.class, id);
-    addInboxDuplicates(row, document);
+    InvoiceInboxDuplicates.addInboxDuplicates(row, document);
     InvoiceInboxValidator.Result verdict = InvoiceInboxValidator.validate(document);
     document.put(K_VALIDATION, verdict.toJson());
     row.setCurrentData(document.toString());
@@ -342,62 +325,6 @@ public final class InvoiceInboxProcessor {
     row.setProcessedAt(new Date());
     OBDal.getInstance().save(row);
     OBDal.getInstance().commitAndClose();
-  }
-
-  /**
-   * Other live inbox rows with the same issuer and document number: a warning in the document
-   * (ETP-6048 D6). Best-effort for documents processed at the same time.
-   */
-  private static void addInboxDuplicates(IncomingDocument row, JSONObject document)
-      throws JSONException {
-    JSONObject header = document.getJSONObject(K_HEADER);
-    String documentNo = header.optString(K_DOCUMENT_NO, "").trim();
-    JSONArray found = new JSONArray();
-    if (!documentNo.isEmpty() && documentNo.length() <= MAX_DOCUMENT_NO) {
-      OBQuery<IncomingDocument> query = issuerQuery(header.optJSONObject(K_VENDOR));
-      if (query != null) {
-        query.setNamedParameter("client", row.getClient().getId());
-        query.setNamedParameter("reference", documentNo.toUpperCase(java.util.Locale.ROOT));
-        query.setNamedParameter("self", row.getId());
-        query.setMaxResult(SWEEP_BATCH);
-        for (IncomingDocument other : query.list()) {
-          found.put(new JSONObject().put(K_ID, other.getId()).put("fileName",
-              other.getFileName()));
-        }
-      }
-    }
-    header.getJSONObject(K_DUPLICATE).put(K_INBOX, found);
-    if (found.length() > 0) {
-      document.getJSONArray(K_NOTICES).put("duplicate_in_inbox");
-    }
-  }
-
-  /**
-   * The query for the rows of the same issuer, still missing the client, reference and self
-   * parameters: by vendor when it is linked, else by the extracted tax id (the common case of a
-   * vendor that does not exist yet). {@code null} when the issuer cannot be identified.
-   */
-  private static OBQuery<IncomingDocument> issuerQuery(JSONObject vendor) {
-    String common = " and upper(trim(d.orderReference)) = :reference and d.status <> 'DISCARDED'"
-        + " and d.id <> :self";
-    if (vendor != null && S_LINKED.equals(vendor.optString(K_STATE))) {
-      OBQuery<IncomingDocument> query = OBDal.getInstance().createQuery(IncomingDocument.class,
-          "as d where d.client.id = :client and d.businessPartner.id = :vendor" + common);
-      query.setNamedParameter("vendor", vendor.optString(K_ID));
-      return query;
-    }
-    JSONObject extracted = vendor == null ? null : vendor.optJSONObject(K_EXTRACTED);
-    String taxId = TaxIdNormalizer.clean(extracted == null ? "" : extracted.optString(K_TAX_ID));
-    if (taxId.length() < MIN_ISSUER_TAX_ID) {
-      return null;
-    }
-    // The stored value is the raw text read from the document: compare it the way
-    // PurchaseInvoiceOcrLookups.vendorsByTaxId does, cleaned and in every prefix spelling.
-    OBQuery<IncomingDocument> query = OBDal.getInstance().createQuery(IncomingDocument.class,
-        "as d where d.client.id = :client and upper(replace(replace(replace(replace("
-            + "d.extractedTaxID, '-', ''), ' ', ''), '.', ''), '/', '')) in (:spellings)" + common);
-    query.setNamedParameter("spellings", TaxIdNormalizer.variants(taxId));
-    return query;
   }
 
   private static void clearContext() {
