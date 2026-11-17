@@ -641,7 +641,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (50)
+# --- integración (BD) (51)
 com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
 com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
@@ -649,6 +649,7 @@ com.etendoerp.go.mcp.McpPropertyPathFilterIntegrationTest
 com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest
 com.etendoerp.go.oauth2.PublicApiKeyStoreIntegrationTest
 com.etendoerp.go.onboarding.BusinessPartnerTransactionalSequenceIntegrationTest
+com.etendoerp.go.onboarding.OnboardingInitialPeriodStateTenantContextIntegrationTest
 com.etendoerp.go.payment.BillingEventStoreIntegrationTest
 com.etendoerp.go.payment.CheckoutRequestStoreIntegrationTest
 com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest
