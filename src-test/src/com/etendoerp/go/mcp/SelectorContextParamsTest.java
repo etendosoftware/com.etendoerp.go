@@ -73,6 +73,19 @@ public class SelectorContextParamsTest {
   }
 
   @Test
+  public void testBuildSelectorContextParamsMapsFinancialAccount() throws Exception {
+    // ETP-6340: the remittance type selector reads the account the form holds
+    for (String key : new String[] { "financialAccount", "FIN_Financial_Account_ID" }) {
+      JSONObject args = new JSONObject();
+      args.put(McpConstants.PARAM_RECORD_CONTEXT, new JSONObject().put(key, "ACC-001"));
+
+      Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+      assertEquals(key, "ACC-001", result.get("FIN_Financial_Account_ID"));
+    }
+  }
+
+  @Test
   public void testBuildSelectorContextParamsMapsPriceList() throws Exception {
     JSONObject args = new JSONObject();
     JSONObject recordContext = new JSONObject();
