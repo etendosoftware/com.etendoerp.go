@@ -91,10 +91,57 @@ public class OnboardingInitialPeriodStateTenantContextIntegrationTest extends OB
         OBContext.getOBContext().getCurrentClient().getId());
   }
 
+  /**
+   * A productive onboarding also writes the calendar-review marker. Removing the pending marker as
+   * system, with the client filters off, must clear only that one: the review marker drives the
+   * "Primeros pasos" step and must survive.
+   */
+  @Test
+  public void testOnlyThePendingMarkerIsClearedForAProductiveTenant() {
+    setTestUserContext();
+    OnboardingInitialPeriodStateService service = new OnboardingInitialPeriodStateService(
+        mock(OnboardingPeriodControlService.class),
+        lifecycle(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE));
+
+    service.markPending(TEST_CLIENT_ID, TEST_ORG_ID, TEST_USER_ID, TEST_ROLE_ID, true);
+    OBDal.getInstance().flush();
+    assertTrue("The pending state must be applied", service.applyIfPending(TEST_CLIENT_ID));
+    OBDal.getInstance().flush();
+
+    assertFalse("The pending marker must be cleared", service.isPending(TEST_CLIENT_ID));
+    assertTrue("The calendar-review marker must survive", service.isReviewRequired(TEST_CLIENT_ID));
+  }
+
+  /**
+   * The environment-login retry already runs as system. Clearing the marker must still work there
+   * and leave the caller as system.
+   */
+  @Test
+  public void testThePendingMarkerIsClearedFromTheSystemLoginRetryContext() {
+    setTestUserContext();
+    OnboardingInitialPeriodStateService service = new OnboardingInitialPeriodStateService(
+        mock(OnboardingPeriodControlService.class), demoLifecycle());
+    service.markPending(TEST_CLIENT_ID, TEST_ORG_ID, TEST_USER_ID, TEST_ROLE_ID, false);
+    OBDal.getInstance().flush();
+
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    assertTrue("The pending state must be applied", service.applyIfPending(TEST_CLIENT_ID));
+    OBDal.getInstance().flush();
+
+    assertFalse("The marker must be cleared", service.isPending(TEST_CLIENT_ID));
+    assertEquals("The caller must still be system", ZERO,
+        OBContext.getOBContext().getCurrentClient().getId());
+  }
+
   private static TenantEnvironmentLifecycleService demoLifecycle() {
+    return lifecycle(EnvironmentAccessPolicy.EnvironmentType.DEMO);
+  }
+
+  private static TenantEnvironmentLifecycleService lifecycle(
+      EnvironmentAccessPolicy.EnvironmentType type) {
     TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
         mock(TenantEnvironmentLifecycleService.EnvironmentSnapshot.class);
-    when(snapshot.getType()).thenReturn(EnvironmentAccessPolicy.EnvironmentType.DEMO);
+    when(snapshot.getType()).thenReturn(type);
     when(snapshot.getTrialStartedAt()).thenReturn(Instant.now());
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     when(lifecycle.resolve(TEST_CLIENT_ID)).thenReturn(snapshot);
