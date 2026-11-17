@@ -219,9 +219,9 @@ public class PortalServlet extends HttpBaseServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    String path = StringUtils.defaultString(request.getPathInfo());
     try {
       OBContext.setAdminMode(true);
-      String path = StringUtils.defaultString(request.getPathInfo());
       if (path.equals(PATH_DECISION_CONFIRM)) {
         handleDecisionConfirm(request, response);
       } else if (path.startsWith(PATH_QUOTATIONS)) {
@@ -231,7 +231,7 @@ public class PortalServlet extends HttpBaseServlet {
         handleRenew(request, response);
       }
     } catch (Exception e) {
-      log.error("Portal renewal request failed", e);
+      log.error("Portal {} request failed", postOperation(path), e);
       if (!response.isCommitted()) {
         response.reset();
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -240,6 +240,14 @@ public class PortalServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** The POST route's operation, so a failure's log names it (it said "renewal" for all). */
+  static String postOperation(String path) {
+    if (PATH_DECISION_CONFIRM.equals(path)) {
+      return "decision confirmation";
+    }
+    return path.startsWith(PATH_QUOTATIONS) ? "decision request" : "renewal";
   }
 
   @Override

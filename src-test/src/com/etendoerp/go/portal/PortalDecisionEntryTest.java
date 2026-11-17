@@ -316,6 +316,37 @@ public class PortalDecisionEntryTest {
         body.has(PortalDecisionEntry.FIELD_PORTAL_TOKEN));
   }
 
+  /**
+   * An applying confirmation answers after commitAndClose, with the quotation detached: its lazy
+   * currency then throws. The summary read before the session closed must carry the body (it
+   * answered 500 to every first confirmation, ETP-6209 live test).
+   */
+  @Test
+  public void bodyOfAnAppliedConfirmationNeverReadsTheDetachedQuotation() throws Exception {
+    Order quotation = mock(Order.class);
+    org.openbravo.model.common.currency.Currency euro =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(quotation.getDocumentNo()).thenReturn("PR-0042");
+    when(quotation.getGrandTotalAmount()).thenReturn(new java.math.BigDecimal("2450.00"));
+    when(quotation.getDocumentStatus()).thenReturn("CO");
+    when(quotation.getCurrency()).thenReturn(euro);
+    when(euro.getISOCode()).thenReturn("EUR");
+    PortalDecisionService.View applied = PortalDecisionService.View.beforeSessionCloses(
+        PortalDecisionService.State.CONFIRMED, decision("ACCEPT", null, null), quotation, true);
+    // The session closes: the currency proxy can no longer load.
+    when(euro.getISOCode()).thenThrow(
+        new org.hibernate.LazyInitializationException("could not initialize proxy - no Session"));
+
+    JSONObject body = entry().body(applied);
+
+    assertEquals(true, body.getBoolean("appliedNow"));
+    assertEquals("PR-0042", body.getString("documentNo"));
+    assertEquals("EUR", body.getString("currency"));
+    assertEquals("CO", body.getString("documentStatus"));
+    assertEquals(0, new java.math.BigDecimal("2450.00")
+        .compareTo(new java.math.BigDecimal(body.getString("grandTotal"))));
+  }
+
   @Test
   public void bodyLeavesOutAbsentReasonsAndDefaultsTheQuotationAndTenant() throws Exception {
     when(linkService.findLink(DECISION_LINK_ID)).thenReturn(Optional.empty());

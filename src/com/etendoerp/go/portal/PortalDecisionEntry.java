@@ -20,7 +20,6 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.order.Order;
 
 /**
  * The decision confirmation landing's answer, and its way into the portal (ETP-6209 Part C).
@@ -98,10 +97,10 @@ class PortalDecisionEntry {
     if (decision.getReasonText() != null) {
       body.put("reasonText", decision.getReasonText());
     }
-    Order quotation = view.getQuotation();
-    body.put("documentNo", quotation == null ? ""
-        : StringUtils.defaultString(quotation.getDocumentNo()));
-    putSummary(body, quotation);
+    PortalDecisionService.Summary summary = view.getSummary();
+    body.put("documentNo", summary == null ? ""
+        : StringUtils.defaultString(summary.getDocumentNo()));
+    putSummary(body, summary);
     // The company's name only: the landing carries no portal token, so it cannot fetch /logo.
     body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
         .map(PortalLink::getClientName).orElse(""));
@@ -111,20 +110,22 @@ class PortalDecisionEntry {
   /**
    * The confirmation page's summary (ETP-6209 redesign): the quotation's issue date, total,
    * currency and current status, so the page shows real figures. Additive; nothing without a
-   * quotation.
+   * quotation. Reads the view's {@link PortalDecisionService.Summary}, never the quotation: after
+   * an applying confirmation the quotation is detached.
    */
-  static void putSummary(JSONObject body, Order quotation) throws JSONException {
-    if (quotation == null) {
+  static void putSummary(JSONObject body, PortalDecisionService.Summary summary)
+      throws JSONException {
+    if (summary == null) {
       return;
     }
-    Date date = quotation.getOrderDate();
+    Date date = summary.getDate();
     body.put("date", date == null ? JSONObject.NULL
         : new SimpleDateFormat(CALENDAR_DAY).format(date));
-    body.put("grandTotal", quotation.getGrandTotalAmount() == null ? JSONObject.NULL
-        : quotation.getGrandTotalAmount());
-    body.put("currency", quotation.getCurrency() == null ? JSONObject.NULL
-        : quotation.getCurrency().getISOCode());
-    body.put("documentStatus", StringUtils.defaultString(quotation.getDocumentStatus()));
+    body.put("grandTotal", summary.getGrandTotal() == null ? JSONObject.NULL
+        : summary.getGrandTotal());
+    body.put("currency", summary.getCurrency() == null ? JSONObject.NULL
+        : summary.getCurrency());
+    body.put("documentStatus", StringUtils.defaultString(summary.getDocumentStatus()));
   }
 
   /**
