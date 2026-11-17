@@ -221,6 +221,11 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          # ETP-6319: the snapshot cache Jenkins uses. This job publishes snapshots where Jenkins does
+          # (a push to main, a mergeblock/* cut), with the read-write keys; integration only reads.
+          localenv_s3_key: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_KEY || secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_SECRET || secrets.LOCALENV_CACHE_RO_SECRET }}
+          localenv_push: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && '1' || '0' }}
 
       # Jenkins runs `test --tests "com.etendoerp.go.*"` (the database-free half, finalized by
       # goIsolatedDalTest). Here both halves go in one Gradle invocation, as in the mini pipeline;
@@ -397,6 +402,8 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          localenv_s3_key: ${{ secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ secrets.LOCALENV_CACHE_RO_SECRET }}
 
       - name: Start Tomcat
         working-directory: etendo_core
