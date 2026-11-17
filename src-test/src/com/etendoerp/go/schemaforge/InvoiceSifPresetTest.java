@@ -417,6 +417,55 @@ public class InvoiceSifPresetTest {
     }
   }
 
+  /**
+   * A return's target (withRectificationDefault R1) previews R1 in the rectification code of each
+   * ACTIVE system only: with TicketBAI alone active, no SII motive or VERI*FACTU type appears.
+   */
+  @Test
+  public void aReturnPreviewPreselectsR1OnlyInTheActiveSystems() throws Exception {
+    DocumentType docType = mock(DocumentType.class);
+    InvoiceSifPreset.Target target = new InvoiceSifPreset.Target(org(), null, docType, true, null)
+        .withRectificationDefault(InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT);
+
+    try (Env env = new Env(true)) {
+      JSONObject all = InvoiceSifPreset.preview(target).getJSONObject("fields");
+      for (String key : RECTIFICATION_KEYS) {
+        assertEquals(key, "R1", all.getString(key));
+      }
+
+      env.defaultsMock.when(() -> SalesRectificativeFiscalDefaults.siiConfigActive(anyString()))
+          .thenReturn(false);
+      env.defaultsMock.when(
+          () -> SalesRectificativeFiscalDefaults.verifactuConfigActive(anyString()))
+          .thenReturn(false);
+      JSONObject tbaiOnly = InvoiceSifPreset.preview(target).getJSONObject("fields");
+
+      assertEquals("R1", tbaiOnly.getString(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+      assertFalse(tbaiOnly.has(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+      assertFalse(tbaiOnly.has(Invoice.PROPERTY_ETVFACINVTYPE));
+    }
+  }
+
+  /**
+   * Order / shipment / quotation previews and the 2-argument completion build their target with
+   * no rectification default, so their codes stay empty.
+   */
+  @Test
+  public void targetsWithoutARectificationDefaultPreselectNoCode() {
+    assertNull(new InvoiceSifPreset.Target(org(), null, null, true, null).rectificationDefault());
+    assertNull(InvoiceSifPreset.Target.of(invoice(true, "F1")).rectificationDefault());
+
+    try (Env env = new Env(true)) {
+      InvoiceSifPreset.Facts facts = InvoiceSifPreset.resolveFacts(
+          new InvoiceSifPreset.Target(org(), null, mock(DocumentType.class), true, null));
+      Map<String, Object> defaults = InvoiceSifPreset.defaults(facts);
+      for (String key : RECTIFICATION_KEYS) {
+        assertTrue(key, defaults.containsKey(key));
+        assertNull(key, defaults.get(key));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // The unattended fallback (no sifFields at all)
   // ---------------------------------------------------------------------------
@@ -622,6 +671,48 @@ public class InvoiceSifPresetTest {
     }
   }
 
+  /**
+   * A return's creation (3-argument path, R1 default) with a partial sifFields: the code the
+   * caller sent is kept, the omitted ones take R1 as the return's preview showed, and the real
+   * guard lets the completion through.
+   */
+  @Test
+  public void aReturnWithAPartialSifFieldsFillsTheOmittedCodesWithR1() throws Exception {
+    Invoice invoice = recordingInvoice();
+    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS,
+        new JSONObject().put(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R3"));
+
+    try (Env env = new Env(true, true)) {
+      InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+          InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT);
+
+      verify(invoice).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R3");
+      verify(invoice, never()).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1");
+      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R1");
+      verify(invoice).set(Invoice.PROPERTY_ETVFACINVTYPE, "R1");
+      verify(env.dal, never()).rollbackAndClose();
+    }
+  }
+
+  /**
+   * The same partial sifFields on the 2-argument path (no rectification default): nothing fills
+   * the omitted codes and the guard refuses them, as before the return default existed.
+   */
+  @Test
+  public void withoutARectificationDefaultAPartialSifFieldsIsStillRefused() throws Exception {
+    Invoice invoice = recordingInvoice();
+    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS,
+        new JSONObject().put(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R2"));
+
+    try (Env env = new Env(true, true)) {
+      InvoiceSifPreset.Refused refused = refusal(null,
+          () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body, null));
+
+      assertRectificationCodeRequired(refused, "SII", "Verifactu");
+      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R2");
+    }
+  }
+
   /** Explicit nulls for every code: no fallback, the guard names all three systems. */
   @Test
   public void explicitNullCodesAreRefusedByTheGuardInEverySystem() throws Exception {
@@ -799,20 +890,28 @@ public class InvoiceSifPresetTest {
     }
   }
 
-  /** A sifFields that is not a JSON object is refused before any fact is read. */
+  /**
+   * A sifFields that is not a JSON object (a string, an array) is refused before any fact is read,
+   * even on a return path that has a rectification default: it never falls back to R1.
+   */
   @Test
   public void sifFieldsThatIsNotAnObjectIsRefused() throws Exception {
-    Invoice invoice = invoice(true, "F1");
-    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, "R4");
+    for (Object sifFields : List.of("R4",
+        new JSONArray().put(Invoice.PROPERTY_AEATSIIMOTIVORECTIF))) {
+      Invoice invoice = invoice(true, "F1");
+      JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, sifFields);
 
-    try (Env env = new Env(true)) {
-      InvoiceSifPreset.Refused refused = refusal(null,
-          () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+      try (Env env = new Env(true)) {
+        InvoiceSifPreset.Refused refused = refusal(String.valueOf(sifFields),
+            () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+                InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
 
-      assertRefusedAs(InvoiceSifPreset.MSG_FIELD_INVALID, InvoiceSifPreset.PARAM_SIF_FIELDS,
-          refused);
-      env.defaultsMock.verify(() -> SalesRectificativeFiscalDefaults.siiConfigActive(anyString()),
-          never());
+        assertRefusedAs(InvoiceSifPreset.MSG_FIELD_INVALID, InvoiceSifPreset.PARAM_SIF_FIELDS,
+            refused);
+        env.defaultsMock.verify(
+            () -> SalesRectificativeFiscalDefaults.siiConfigActive(anyString()), never());
+        verify(invoice, never()).set(anyString(), any());
+      }
     }
   }
 }
