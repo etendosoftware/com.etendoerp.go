@@ -35,6 +35,7 @@ import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
@@ -323,7 +324,10 @@ final class McpQuerySupport {
       try {
         resolved = dalEntity.getProperty(key);
       } catch (Exception ignored) {
-        throw unknownFilterField(key, dalEntity, sfEntity);
+        resolved = resolveAddressPublishedNameFilter(dalEntity, key);
+        if (resolved == null) {
+          throw unknownFilterField(key, dalEntity, sfEntity);
+        }
       }
     }
     // IMP-39: resolving against the DAL model is not the same question as "may this be filtered".
@@ -335,6 +339,28 @@ final class McpQuerySupport {
       throw unknownFilterField(key, dalEntity, sfEntity);
     }
     return resolved;
+  }
+
+  /**
+   * The property behind a structured-address published field name (ETP-5806 CP-10b, QA finding).
+   *
+   * <p>{@code etendo_schema} advertises the 3 structured SEPA columns under
+   * {@link AddressVirtualSelectorPolicy#publishedNameOverride}'s names
+   * ({@code streetName}/{@code buildingNumber}/{@code buildingName}), but neither
+   * {@code getPropertyByColumnName} nor {@code getProperty} above ever resolves one of those
+   * names — the DAL property is {@code oBSEPAStreetName} and friends, a different spelling — so a
+   * filter on the exact name the caller was told to use 422'd, and only the undocumented DAL
+   * property name actually worked. Tried only after both resolve attempts above have already
+   * failed, so it costs nothing on the overwhelming majority of keys that are not one of these 3.
+   *
+   * @param dalEntity the DAL entity the filter is aimed at
+   * @param key       the filter key as the caller spelled it
+   * @return the resolved property, or {@code null} when {@code key} is not a published
+   *     structured-address name, or the entity carries no such column
+   */
+  private static Property resolveAddressPublishedNameFilter(Entity dalEntity, String key) {
+    String rawColumn = AddressVirtualSelectorPolicy.rawColumnNameForPublishedName(key);
+    return rawColumn == null ? null : dalEntity.getPropertyByColumnName(rawColumn, false);
   }
 
   /**

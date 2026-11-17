@@ -128,6 +128,16 @@ public final class StructuredAddressComposer {
    * between street+number and building name in Line 1. {@code append} only inserts a separator
    * when both sides are non-blank.
    *
+   * <p><b>Truncation is intentional and required (reverted CP-6).</b> {@code C_Location.Address1}/
+   * {@code Address2} are real {@code VARCHAR(60)} DB columns, while the source field {@code
+   * EM_OBSEPA_StrtNm} allows up to {@link #STREET_NAME_MAX_LENGTH} (70) characters. A street name
+   * between 61 and 70 chars passes {@link #fieldsExceedingMaxLength} (which validates against the
+   * source column's own 70-char limit) but cannot fit in the 60-char {@code Address1}/{@code
+   * Address2} on its own — it must be cut to fit the real DB column, or persistence fails with a
+   * data-truncation SQL exception instead of a clean value. This is the accepted tradeoff, and it
+   * matches Classic's {@code LocationSEPA.java::fillAddressLines} ({@code
+   * org.openbravo.sepa.iso20022}) exactly, which this method is a direct port of.
+   *
    * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
    * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
    * @param buildingName   Building Name ({@code EM_OBSEPA_BldgNm}), may be {@code null}/blank
@@ -255,6 +265,53 @@ public final class StructuredAddressComposer {
       tooLong.add("buildingName");
     }
     return tooLong;
+  }
+
+  /**
+   * ETP-5806 CP-12b (QA finding) — whether an update's write path should merge the stored record
+   * into the body before validating mandatory fields: always for a PATCH, and for a PUT whenever
+   * the body alone (with the flag on) cannot satisfy them on its own.
+   *
+   * <p>Kept here, not in the calling handler, specifically so the handler's own update method
+   * stays a straight sequence of calls with no extra branching of its own — {@code
+   * ContactsLocationAddressHandler#handleUpdate} already carries plenty of control flow, and
+   * every {@code &&}/{@code ||} added to it directly raises its own Cognitive Complexity. The
+   * branching that decides this one boolean belongs in a single-purpose method instead, the same
+   * way {@link #missingMandatoryFields} and {@link #fieldsExceedingMaxLength} already centralize
+   * the other mandatory-field decisions this composer owns.
+   *
+   * <p>MCP's {@code etendo_update} always maps to HTTP PUT ({@code McpToolRouter#handleUpdate}),
+   * so gating the merge purely on PATCH vs PUT meant a single-field MCP edit (e.g. only {@code
+   * buildingName}) reached validation with the rest of the structured fields genuinely absent
+   * from the body and a clean 400, even though they already existed on the stored record. A true
+   * full-replace PUT (the UI form, a REST client resending the complete address) is unaffected:
+   * it already satisfies every mandatory field, so this returns {@code false} and the merge is
+   * skipped exactly as before.
+   *
+   * @param httpMethod               the request's HTTP method
+   * @param structuredAddressEnabled whether {@code structured-address-for-sepa} is on for the
+   *                                 caller's account; with it off, only a PATCH merges
+   * @param streetName               the raw body value, before any merge — see
+   *                                 {@code ContactsLocationAddressHandler#readAlias}
+   * @param buildingNumber           the raw body value, before any merge
+   * @param cityName                 the raw body value, before any merge
+   * @param countryId                the raw body value, before any merge — NOT falling back to
+   *                                 the stored record's own country, unlike
+   *                                 {@code effectiveCountryForValidation}: this method asks
+   *                                 whether the body is self-sufficient, so a country the body
+   *                                 never mentions must count as missing here
+   * @return {@code true} when the stored record should be merged into the body first
+   */
+  public static boolean requiresMergeOnUpdate(String httpMethod, boolean structuredAddressEnabled,
+      String streetName, String buildingNumber, String cityName, String countryId) {
+    if ("PATCH".equals(httpMethod)) {
+      return true;
+    }
+    if (!structuredAddressEnabled) {
+      return false;
+    }
+    return !missingMandatoryFields(streetName, effectiveBuildingNumber(streetName, buildingNumber),
+        cityName, countryId).isEmpty();
   }
 
   private static String append(String base, String separator, String part) {

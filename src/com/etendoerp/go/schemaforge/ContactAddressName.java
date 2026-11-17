@@ -85,6 +85,40 @@ final class ContactAddressName {
   }
 
   /**
+   * The name to store on an update, or {@code null} to leave the stored name unchanged
+   * (ETP-5806 CP-12c, QA finding).
+   *
+   * <p>An explicit {@code sentName} always wins, capped the same as {@link #of}. Otherwise — the
+   * MCP {@code etendo_update} shape, which edits only the structured address fields and never
+   * sends {@code name} at all — the display name is recomputed from the post-write {@code geoLoc}
+   * rather than left stale, the same default the create path falls back to for MCP. Gated behind
+   * {@code structuredAddressEnabled} so the legacy behaviour (name only changes when explicitly
+   * sent) is unchanged while the flag is off for the caller's account: the UI pop-up that is the
+   * only other caller always sends a freshly computed {@code name} on save regardless, so it never
+   * depends on this fallback.
+   *
+   * @param sentName                 the caller's own {@code name}, already resolved to {@code null}
+   *                                 for blank/absent by the handler (its {@code nullIfEmpty})
+   * @param structuredAddressEnabled whether to recompute automatically when {@code sentName} is
+   *                                 {@code null}
+   * @param geoLoc                  the address's own (already updated) location
+   * @param displayName              the location's display name, {@code null} when it has none
+   * @return the name to store, capped at {@link #NAME_MAX_LENGTH}; {@code null} to leave the
+   *     stored name untouched
+   */
+  static String forUpdate(String sentName, boolean structuredAddressEnabled, Location geoLoc,
+      Function<Location, String> displayName) {
+    if (sentName != null) {
+      return capped(sentName);
+    }
+    if (!structuredAddressEnabled) {
+      return null;
+    }
+    String computed = displayName.apply(geoLoc);
+    return computed != null ? capped(computed) : null;
+  }
+
+  /**
    * {@code name} cut to {@link #NAME_MAX_LENGTH}, without the separators or spaces a cut can leave
    * at its end. A name that fits is returned unchanged.
    */

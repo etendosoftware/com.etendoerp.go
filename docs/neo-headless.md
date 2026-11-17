@@ -5593,6 +5593,34 @@ DB column name (upper-cased), consulted identically for any entity that happens 
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
 
+**Field label, wrong language (ETP-5806 / CP-10b).** The 3 structured columns have no `AD_Field`
+anywhere (Classic only ever surfaces them inside the Location/Address selector popup, by design —
+see the `AGENT_PROMPT` discussion above), so `etendo_schema`'s normal field-label fallback chain
+(§4.12.16, "Field labels and descriptions": `mcp_field_labels_<lang>` → `AD_FIELD_TRL` → `AD_FIELD`
+→ `AD_COLUMN.name`) never had an `AD_FIELD` row to read, and `McpSchemaFieldBuilder#buildSchemaField`
+fell all the way back to the raw, never-translated `AD_Column.Name` ("EM_Obsepa_Strtnm" instead of
+"Nombre de calle"). The column's `AD_Element` does carry the right translation, so
+`resolveSchemaFieldLabel` reads it there for exactly these 3 columns
+(`STRUCTURED_ADDRESS_COLUMNS = {EM_OBSEPA_STRTNM, EM_OBSEPA_BLDGNB, EM_OBSEPA_BLDGNM}`, matched
+structurally by DB column name, the same set `AddressVirtualSelectorPolicy` already special-cases
+for the published-name override above) — never a window- or entity-name check, consistent with the
+NeoHandler "structure yes, identity no" rule.
+
+`Element.getName()` resolves its translation through Hibernate's ambient `OBContext` session
+language, not through the language the specific MCP request actually wants, so a Spanish request
+made under an English/base session still got the English element name — the same class of bug
+§4.12.16's `AD_FIELD_TRL` direct-query fix already avoids for ordinary fields.
+`McpFieldLabels.elementTranslation(elementId, langCode)` applies the identical fix here: it queries
+`AD_ELEMENT_TRL` directly by element id + the request's `langCode` (admin mode, total — never
+throws, falls back to the base-language `AD_Element.Name` on no match), instead of trusting
+`getApplicationElement().getName()`. `langCode` is resolved once in `McpToolRouter` (via
+`NeoLanguage.currentCode()`) and threaded explicitly through `buildSchemaFieldsArray` →
+`buildVirtualFieldsArray` → `buildSchemaField` → `resolveSchemaFieldLabel`, rather than re-read
+ambiently at each layer. This is an `etendo_schema`-only fix: it corrects the field **label**
+returned to the agent, not any stored data, and does not change `missingFields[].label` on a write
+refusal (§4.12.16) for these 3 columns, since that path does not go through
+`resolveSchemaFieldLabel`.
+
 **Binding (ETP-6206).** `ContactsLocationAddressHandler` is bound by `@NeoExtension contacts/locationAddress` alone; its `@Named("contactsLocationAddressHandler")` and the row's `Java_Qualifier` were removed (the annotation already won on every channel since ETP-5806).
 
 **Update semantics and concurrency (ETP-6012).** `ContactsLocationAddressHandler` serves `PUT` and
