@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -87,7 +88,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   /** The `ids` lookup is capped: a label lookup, not a bulk read. */
   private static final int MAX_IDS = 100;
   /** Selectors that answer `ids`; any other one refuses it rather than ignore it and list everything. */
-  private static final java.util.Set<String> IDS_LOOKUP_TYPES = java.util.Set.of("bpartner", "product");
+  private static final Set<String> IDS_LOOKUP_TYPES = Set.of("bpartner", "product");
   private static final String ACTIVE_CLIENT_NAME_SEARCH = " AND ad_client_id = :"
       + PARAM_CLIENT_ID + " AND name ILIKE :" + PARAM_SEARCH;
 
@@ -325,11 +326,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildBpartnerQuery(SelectorRequest req) {
-    StringBuilder fromWhere = new StringBuilder("FROM c_bpartner WHERE isactive='Y'"
+    StringBuilder fromWhere = new StringBuilder("FROM c_bpartner WHERE " + activePredicate(req)
         + ACTIVE_CLIENT_NAME_SEARCH);
     appendIdsFilter(fromWhere, "c_bpartner_id", req);
     return new SelectorQuery(
         "SELECT c_bpartner_id AS id, name, name AS label", fromWhere, ORDER_BY_NAME, true);
+  }
+
+  /** An `ids` lookup labels a restored selection, so a since-deactivated record must still resolve. */
+  private static String activePredicate(SelectorRequest req) {
+    return req.idsRequested ? "1=1" : "isactive='Y'";
   }
 
   /** `ids` narrows the rows the normal scoping already allows (a foreign id never resolves). */
@@ -345,7 +351,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     // every other product selector in the app, applied directly in SQL since this servlet builds
     // its own queries independently of NeoSelectorService.
     StringBuilder fromWhere = new StringBuilder(
-        "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
+        "FROM m_product WHERE " + activePredicate(req) + " AND ad_client_id = :clientId"
         + " AND (name ILIKE :search OR value ILIKE :search)"
         + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
         + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"

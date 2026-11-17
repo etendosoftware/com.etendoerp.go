@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -635,6 +636,22 @@ class ReportSelectorsServletTest {
       verify(dataQuery).setMaxResults(2); // one row per id, not the request's limit
       verify(dataQuery).setFirstResult(0);
       assertEquals(2, new JSONObject(getResponseBody()).getJSONArray("items").length());
+    }
+
+    @Test
+    @DisplayName("ids resolve inactive records too; the normal list keeps isactive='Y'")
+    void idsIgnoreIsActiveButListKeepsIt() throws Exception {
+      for (String type : new String[] { "bpartner", "product" }) {
+        configureAuthenticatedGet(type);
+        when(request.getParameter("ids")).thenReturn("AA11BB22");
+        servlet.doGet(request, response);
+        assertFalse(sqlRun().get(0).contains("isactive"), type);
+        clearInvocations(session);
+        when(request.getParameter("ids")).thenReturn(null);
+        servlet.doGet(request, response);
+        assertTrue(sqlRun().get(0).contains("isactive='Y'"), type);
+        clearInvocations(session);
+      }
     }
 
     @Test
