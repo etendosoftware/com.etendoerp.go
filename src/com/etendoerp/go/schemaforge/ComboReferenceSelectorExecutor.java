@@ -65,6 +65,18 @@ final class ComboReferenceSelectorExecutor {
   static NeoResponse resolveClassicSelectorWithCoreCombo(SFEntity sourceEntity,
       Column column, String search, int limit, int offset, Map<String, String> contextParams)
       throws Exception {
+    return resolveClassicSelectorWithCoreCombo(sourceEntity, column, search, limit, offset,
+        contextParams, null);
+  }
+
+  /**
+   * As above, narrowed to one record id through core's {@code @ONLY_ONE_RECORD@} query, which keeps
+   * the whole validation rule. The answer holds only that record, or — when the rule excludes it —
+   * the ordinary page, so the caller checks the id of the rows it gets back.
+   */
+  static NeoResponse resolveClassicSelectorWithCoreCombo(SFEntity sourceEntity,
+      Column column, String search, int limit, int offset, Map<String, String> contextParams,
+      String restrictToId) throws Exception {
     Field field = resolveComboField(sourceEntity, column);
     if (field == null) {
       return NeoResponse.error(500,
@@ -95,6 +107,9 @@ final class ComboReferenceSelectorExecutor {
         null);
     log.info("[ComboSelector] resolvedParams={}", resolvedParams);
 
+    if (restrictToId != null) {
+      resolvedParams.put("@ONLY_ONE_RECORD@", restrictToId);
+    }
     if (StringUtils.isNotBlank(search)) {
       resolvedParams.put("FILTER_VALUE", "%" + search.toLowerCase() + "%");
     }

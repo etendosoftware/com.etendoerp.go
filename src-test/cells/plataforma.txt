@@ -407,6 +407,7 @@ com.etendoerp.go.schemaforge.NeoQuotaWriteGateTest
 com.etendoerp.go.schemaforge.NeoReadPredicatesTest
 com.etendoerp.go.schemaforge.NeoReferenceActivenessTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipTest
+com.etendoerp.go.schemaforge.NeoReferenceSelectorValidationTest
 com.etendoerp.go.schemaforge.NeoRequestBodyParserTest
 com.etendoerp.go.schemaforge.NeoRequestRouterTest
 com.etendoerp.go.schemaforge.NeoResponseTest
