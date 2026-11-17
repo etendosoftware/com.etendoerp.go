@@ -548,6 +548,8 @@ jobs:
       actions: read   # the run's job timings, for Datadog
     env:
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      EMAIL_BUILDS: ${{ secrets.EMAIL_BUILDS }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout the cell map and the report script
@@ -637,6 +639,49 @@ jobs:
           python3 go/scripts/full-pipeline-pilot-report.py datadog --cell-summary cell-report/summary.json \
             --jobs jobs.json --tag ci:github-actions --tag repo:com.etendoerp.go \
             --tag "event:$GITHUB_EVENT_NAME" --tag "kind:${MODULE_BRANCH%%/*}"
+
+      # ETP-6317: the mail Jenkins sends on a red build (postActions.groovy onFailure/onUnstable in
+      # com.etendoerp.jenkins.pipelines; it sends none on success), with the cell report's cause,
+      # cells to review and matrix, and the "[cell] " subject tag. Only when a test job failed, not
+      # when the run was cancelled. Inert until the secrets exist: SMTP_SERVER, SMTP_PORT,
+      # SMTP_USERNAME, SMTP_PASSWORD, MAIL_FROM and EMAIL_BUILDS (comma-separated recipients, the
+      # Jenkins email_builds list). While Jenkins still mails, leave them unset or point
+      # EMAIL_BUILDS at a test address, or every red build mails twice. Never turns the run red.
+      - name: Build the failure mail
+        id: mail
+        if: needs.go-tests.result == 'failure' || needs.integration.result == 'failure'
+        continue-on-error: true
+        env:
+          GO_RESULT: ${{ needs.go-tests.result }}
+          E2E_RESULT: ${{ needs.integration.result }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event.pull_request.user.login || github.event.pusher.name || github.actor }}
+          RUN_NAME: "${{ github.workflow }} #${{ github.run_number }}"
+        run: |
+          failed=()
+          [ "$GO_RESULT" = failure ] && failed+=(--failed-job "Go tests + Sonar + coverage")
+          [ "$E2E_RESULT" = failure ] && failed+=(--failed-job "Integration (Tomcat + Playwright)")
+          python3 go/scripts/full-pipeline-pilot-report.py mail --report-dir cell-report \
+            --repo "${GITHUB_REPOSITORY#*/}" --branch "$MODULE_BRANCH" --sha "$SHA" --pr-url "$PR_URL" \
+            --author "$AUTHOR" --run-url "$RUN_URL" --run-name "$RUN_NAME" "${failed[@]}" \
+            --out-html "$RUNNER_TEMP/mail.html" --out-subject "$RUNNER_TEMP/mail-subject.txt"
+          { echo 'subject<<EOF'; cat "$RUNNER_TEMP/mail-subject.txt"; echo; echo EOF; } >> "$GITHUB_OUTPUT"
+
+      - name: Send the failure mail
+        if: steps.mail.outcome == 'success' && env.SMTP_SERVER != '' && env.EMAIL_BUILDS != ''
+        continue-on-error: true
+        uses: dawidd6/action-send-mail@27bf7a883db6de205849f760badd38a1a3ce0dd0 # v24
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: ${{ secrets.SMTP_PORT == '465' }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.MAIL_FROM }}
+          to: ${{ secrets.EMAIL_BUILDS }}
+          subject: ${{ steps.mail.outputs.subject }}
+          html_body: file://${{ runner.temp }}/mail.html
 
       - name: Upload the per-cell report
         if: always()

@@ -255,6 +255,47 @@ class LoadTest(unittest.TestCase):
         self.assertIn('No vmstat samples', out.getvalue())
 
 
+class FailureMailTest(unittest.TestCase):
+
+    ARGS = ('com.etendoerp.go', 'mergeblock/auto-20261117-1608', 'abc123',
+            'https://github.com/o/r/actions/runs/9', 'Full Pipeline Pilot #9')
+
+    def test_tags_the_subject_and_puts_the_cell_report_on_top(self):
+        subject, body = report.failure_mail(
+            *self.ARGS, head='<p>HEAD</p>', fragment='<table>MATRIX</table>',
+            subject_tag='[compras] [ventas]\n', failed_jobs=['Go tests + Sonar + coverage'])
+        self.assertEqual(subject, "🚨 [compras] [ventas] Errors found in module 'com.etendoerp.go' on "
+                                  "branch 'mergeblock/auto-20261117-1608' - Full Pipeline Pilot #9")
+        self.assertLess(body.index('HEAD'), body.index('MATRIX'))
+        self.assertIn('Mensaje del pipeline: <em>Failed jobs: Go tests + Sonar + coverage</em>', body)
+        self.assertNotIn('one or more test suites failed', body)
+
+    def test_without_a_report_it_keeps_the_reason_and_escapes_the_values(self):
+        subject, body = report.failure_mail(*self.ARGS, author='<dev>', pr_url='https://x/pull/1')
+        self.assertTrue(subject.startswith("🚨 Errors found in module 'com.etendoerp.go'"))
+        self.assertIn('<strong>⇢ Reasons:</strong> <em>Build Failed</em>', body)
+        self.assertIn('one or more test suites failed', body)
+        self.assertIn('&lt;dev&gt;', body)
+        self.assertIn("<a href='https://x/pull/1'>", body)
+        self.assertIn("<a href='https://github.com/o/r/actions/runs/9'>Full Pipeline Pilot #9</a>", body)
+
+    def test_main_writes_the_files_and_a_missing_fragment_is_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, 'email-subject.txt'), 'w', encoding='utf-8') as fh:
+                fh.write('[almacenes]')
+            html, subj = os.path.join(tmp, 'mail.html'), os.path.join(tmp, 'subject.txt')
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = report.main(['mail', '--report-dir', tmp, '--repo', 'r', '--branch', 'b',
+                                    '--sha', 's', '--run-url', 'u', '--run-name', 'n',
+                                    '--failed-job', 'Integration', '--out-html', html,
+                                    '--out-subject', subj], {})
+            self.assertEqual(code, 0)
+            with open(subj, encoding='utf-8') as fh:
+                self.assertEqual(fh.read(), "🚨 [almacenes] Errors found in module 'r' on branch 'b' - n")
+            with open(html, encoding='utf-8') as fh:
+                self.assertIn('Failed jobs: Integration', fh.read())
+
+
 class PostSeriesTest(unittest.TestCase):
 
     def test_posts_the_payload_with_the_api_key_header(self):

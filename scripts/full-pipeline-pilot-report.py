@@ -10,6 +10,10 @@ built from.
            reporter writes, since summary.json only counts them).
   datadog  Posts the run as etendo.ci.pilot.* metrics. A namespace of its own: the board sums the
            etendo.qa.cell.* metrics of the Jenkins builds, and the shadow runs must not add to them.
+  mail     The failure mail Jenkins sends (postActions.groovy onFailure/onUnstable in
+           com.etendoerp.jenkins.pipelines, ETP-6317): subject with the "[cell] " tag, and an HTML
+           body with the cause, the cells to review and the per-cell matrix that cell-report.mjs
+           writes as mail fragments, the commit, and the link to the run.
   load     The runner load while the E2E suite ran, from `vmstat -n -t` samples: whether a spec
            that timed out did so on a saturated runner (run queue above the vCPUs, no idle CPU,
            swapping) or on an idle one, where the cause is the app or the test.
@@ -19,6 +23,9 @@ Usage:
   scripts/full-pipeline-pilot-report.py datadog --cell-summary FILE [--jobs FILE] [--tag k:v]...
                                         [--dry-run]
   scripts/full-pipeline-pilot-report.py load --vmstat FILE [--window FILE] [--cpus N]
+  scripts/full-pipeline-pilot-report.py mail --report-dir DIR --repo NAME --branch NAME --sha SHA
+                                        --run-url URL --run-name TEXT [--pr-url URL] [--author NAME]
+                                        [--failed-job NAME]... --out-html FILE --out-subject FILE
 
 --window holds two lines, the UTC start and end of the suite as "YYYY-mm-dd HH:MM:SS"; without it
 (or with only the start) every sample from the start on counts.
@@ -38,7 +45,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 SUITE_LABELS = {
     'go-mock': 'Go mocks',
@@ -268,6 +275,60 @@ def load_markdown(samples, start='', end='', cpus=4):
     return '\n'.join(out) + '\n'
 
 
+def _escape(text):
+    return (str(text or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;').replace("'", '&#39;'))
+
+
+def failure_mail(repo, branch, sha, run_url, run_name, head='', fragment='', subject_tag='',
+                 pr_url='', author='', failed_jobs=(), now=None):
+    """Subject and HTML body of the failure mail, as Jenkins' postActions.onFailure builds them.
+
+    head, fragment and subject_tag are cell-report.mjs's email-head.html, email.html (both already
+    escaped there) and email-subject.txt; each may be empty, and then the mail goes without it.
+    """
+    tag = ' '.join(subject_tag.split())
+    subject = (f"🚨 {tag + ' ' if tag else ''}Errors found in module '{repo}' on branch "
+               f"'{branch}' - {run_name}")
+    reason = 'Failed jobs: ' + ', '.join(failed_jobs) if failed_jobs else 'Build Failed'
+    # With the report's cause on top, the reason is context only, as in onFailure.
+    reason_line = (f"<p style='color:#656d76;font-size:12px;'>Mensaje del pipeline: "
+                   f"<em>{_escape(reason)}</em></p>" if head.strip()
+                   else f'<p><strong>⇢ Reasons:</strong> <em>{_escape(reason)}</em></p>')
+    details = '' if head.strip() else 'The build failed because one or more test suites failed.<br>'
+    commit = [f'<p><strong>Repository:</strong> {_escape(repo)}<br>',
+              f'<strong>Branch:</strong> {_escape(branch)}<br>',
+              f'<strong>Commit:</strong> {_escape(sha)}']
+    if author:
+        commit.append(f'<br><strong>Author:</strong> {_escape(author)}')
+    if pr_url:
+        commit.append(f"<br><strong>Pull request:</strong> <a href='{_escape(pr_url)}'>{_escape(pr_url)}</a>")
+    commit.append('</p>')
+    when = (now or datetime.now(timezone.utc)).strftime('%a %b %d %H:%M:%S UTC %Y')
+    body = f"""<html>
+  <head>
+    <style>
+      body {{ font-family: 'Arial', sans-serif; }}
+      .header {{ font-size: 16px; font-weight: bold; color: #cb2727ff; }}
+    </style>
+  </head>
+  <body>
+    <p><em>{when}</em></p>
+    <p>__________________________________________________________</p>
+    <h2 class='header'>🚫 BUILD FAILED 🚫</h2>
+    {head.strip()}
+    {fragment.strip()}
+    {''.join(commit)}
+    {reason_line}
+    <p>{details}For more information on the failing run, visit: <a href='{_escape(run_url)}'>{_escape(run_name)}</a></p>
+    <p class='footer'><em>Best regards,<br>#EtendoBot 🤖 </em></p>
+    <p>__________________________________________________________</p>
+  </body>
+</html>
+"""
+    return subject, body
+
+
 def _read_text(path):
     try:
         with open(path, encoding='utf-8') as fh:
@@ -292,6 +353,13 @@ def _parse(argv):
     load.add_argument('--vmstat', required=True)
     load.add_argument('--window', default='')
     load.add_argument('--cpus', type=int, default=4)
+    mail = sub.add_parser('mail')
+    mail.add_argument('--report-dir', default='')
+    for name in ('--repo', '--branch', '--sha', '--run-url', '--run-name', '--out-html', '--out-subject'):
+        mail.add_argument(name, required=True)
+    mail.add_argument('--pr-url', default='')
+    mail.add_argument('--author', default='')
+    mail.add_argument('--failed-job', action='append', default=[])
     return parser.parse_args(argv)
 
 
@@ -306,6 +374,20 @@ def main(argv=None, env=None):
         bounds = [line.strip() for line in (_read_text(args.window) or '').splitlines() if line.strip()]
         start, end = (bounds + ['', ''])[:2]
         sys.stdout.write(load_markdown(vmstat_samples(text), start, end, args.cpus))
+        return 0
+    if args.command == 'mail':
+        # A missing report fragment only leaves it out: the mail still goes, as in Jenkins.
+        fragment = lambda name: (_read_text(os.path.join(args.report_dir, name)) or '') if args.report_dir else ''
+        subject, body = failure_mail(
+            args.repo, args.branch, args.sha, args.run_url, args.run_name,
+            head=fragment('email-head.html'), fragment=fragment('email.html'),
+            subject_tag=fragment('email-subject.txt'), pr_url=args.pr_url, author=args.author,
+            failed_jobs=args.failed_job)
+        with open(args.out_html, 'w', encoding='utf-8') as fh:
+            fh.write(body)
+        with open(args.out_subject, 'w', encoding='utf-8') as fh:
+            fh.write(subject)
+        print(subject)
         return 0
     model = load_json(args.cell_summary)
     if model is None:
