@@ -128,19 +128,15 @@ public final class StructuredAddressComposer {
    * between street+number and building name in Line 1. {@code append} only inserts a separator
    * when both sides are non-blank.
    *
-   * <p><b>ETP-5806 CP-6 (QA finding) — lines split only on whole field/separator boundaries, never
-   * mid-value.</b> Before this, the overflow branch below cut the raw street with
-   * {@code StringUtils.left(street, ADDRESS_LINE_MAX_LENGTH)} — a hard {@code .substring(0, 60)}
-   * that truncates a street up to 70 chars ({@link #STREET_NAME_MAX_LENGTH}) mid-word rather than
-   * dropping the whole field to the next line. {@code Street} is the only one of the 3 fields that
-   * can exceed {@link #ADDRESS_LINE_MAX_LENGTH} on its own, so {@code address1} may legitimately
-   * come back longer than 60 chars in that case — that is the field kept whole, not lossily cut.
-   * The {@code name} truncation in the middle branch and the {@code " - name"} truncation in the
-   * overflow branch below were already unreachable in practice ({@link #BUILDING_NAME_MAX_LENGTH}
-   * is 35 and {@code "Number - Name"} is at most 16 + 3 + 35 = 54 chars, both under 60), so dropping
-   * them changes no real output — but they are gone on principle, matching
-   * {@code locationAddress.js::composeAddressLines} in {@code schema_forge_core}'s
-   * {@code app-shell-core}, which this method mirrors exactly and must stay in lockstep with.
+   * <p><b>Truncation is intentional and required (reverted CP-6).</b> {@code C_Location.Address1}/
+   * {@code Address2} are real {@code VARCHAR(60)} DB columns, while the source field {@code
+   * EM_OBSEPA_StrtNm} allows up to {@link #STREET_NAME_MAX_LENGTH} (70) characters. A street name
+   * between 61 and 70 chars passes {@link #fieldsExceedingMaxLength} (which validates against the
+   * source column's own 70-char limit) but cannot fit in the 60-char {@code Address1}/{@code
+   * Address2} on its own — it must be cut to fit the real DB column, or persistence fails with a
+   * data-truncation SQL exception instead of a clean value. This is the accepted tradeoff, and it
+   * matches Classic's {@code LocationSEPA.java::fillAddressLines} ({@code
+   * org.openbravo.sepa.iso20022}) exactly, which this method is a direct port of.
    *
    * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
    * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
@@ -161,10 +157,13 @@ public final class StructuredAddressComposer {
       return new ComposedAddress(emptyToNull(wholeAddress), null);
     }
     if (streetAndNumber.length() <= ADDRESS_LINE_MAX_LENGTH) {
-      return new ComposedAddress(emptyToNull(streetAndNumber), emptyToNull(name));
+      return new ComposedAddress(emptyToNull(streetAndNumber),
+          emptyToNull(StringUtils.left(name, ADDRESS_LINE_MAX_LENGTH)));
     }
-    // Only a street longer than the line itself overflows here — kept whole, never cut mid-value.
-    return new ComposedAddress(emptyToNull(street), emptyToNull(append(number, " - ", name)));
+    // Only a street longer than the line itself gets truncated here.
+    return new ComposedAddress(
+        emptyToNull(StringUtils.left(street, ADDRESS_LINE_MAX_LENGTH)),
+        emptyToNull(StringUtils.left(append(number, " - ", name), ADDRESS_LINE_MAX_LENGTH)));
   }
 
   /** The fallback value used for Building Number when it is blank and Street Name is present. */
