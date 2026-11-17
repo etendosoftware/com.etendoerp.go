@@ -17,31 +17,26 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.A_PRESENT;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.A_UNKNOWN;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_FOUND;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_NONE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_UNKNOWN;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ADDRESS_STATE;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.cleanText;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.isId;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.isIndex;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.isoDate;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.parseNumber;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.storedNumber;
+import static com.etendoerp.go.schemaforge.InvoiceInboxApplyValues.text;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CANDIDATES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CURRENCY_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DESCRIPTION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DISCOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DUPLICATE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_HEADER;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INBOX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INDEX;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICE_DATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LINES;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LOCATION_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_MATCHED_BY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NOTICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
@@ -50,37 +45,25 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_LABEL;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_SOURCE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALIDATION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MATCHED_MANUAL;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.N_DUPLICATE_CHECK_UNKNOWN;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.N_DUPLICATE_IN_INBOX;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.N_VENDOR_ADDRESS_MISSING;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_NONE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.TOTAL_PRINTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.T_PENDING_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.T_RESOLVED;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
-import java.time.LocalDate;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -90,14 +73,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
-import com.etendoerp.go.schemaforge.ocr.InboxLineMatcher;
-import com.etendoerp.go.schemaforge.ocr.InboxTaxModes;
-import com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotals;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
-import com.etendoerp.go.schemaforge.ocr.OcrLookups.Address;
-import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
-import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
-import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 import com.etendoerp.go.schemaforge.ocr.OcrSanitizer;
 
 /**
@@ -120,8 +96,8 @@ import com.etendoerp.go.schemaforge.ocr.OcrSanitizer;
  * ({@link InvoiceInboxAdjustedPolicy}) and the summary columns. A request whose operations change
  * nothing writes nothing and the {@code updated} token does not move.</p>
  *
- * <p>The line {@code index} is a stable id: never renumbered, a new line takes the highest index plus
- * one. Guards (access, tenant, organization, processing, editable, lock, token):
+ * <p>The line {@code index} is a stable id: never renumbered, a new line takes the highest index
+ * plus one. Guards (access, tenant, organization, processing, editable, lock, token):
  * {@link InvoiceInboxEditGate}. Stateless; called by {@link InvoiceInboxHeaderHandler}.</p>
  */
 final class InvoiceInboxApply {
@@ -162,26 +138,29 @@ final class InvoiceInboxApply {
   private static final String KEY_OP = "op";
   private static final String KEY_ID = "id";
   private static final String KEY_FIELDS = "fields";
-  private static final String KEY_FIELD = "field";
   private static final String KEY_TAX_ID = "taxId";
   private static final String KEY_MAX = "max";
   private static final String PENDING_REVIEW = "PENDING_REVIEW";
   private static final String STATUS_READY = "READY";
-  private static final int MAX_ID_LENGTH = 64;
   /** Decimals each editable number is rounded (HALF_UP) to and stored with. */
   static final int QUANTITY_SCALE = 4;
   static final int PRICE_SCALE = 6;
   static final int DISCOUNT_SCALE = 4;
-  private static final int RATE_SCALE = 2;
+  static final int RATE_SCALE = 2;
   private static final BigDecimal MAX_AMOUNT = new BigDecimal("1000000000");
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
-  private static final int MAX_NUMBER_DIGITS = 30;
-  private static final int MIN_YEAR = 1900;
-  private static final int MAX_YEAR = 2100;
-  private static final Pattern ISO_DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
+
+  /** The bounds and the decimals of an editable number. */
+  private record Range(BigDecimal min, BigDecimal max, int scale) {
+  }
+
+  private static final Range QUANTITY_RANGE = new Range(MAX_AMOUNT.negate(), MAX_AMOUNT,
+      QUANTITY_SCALE);
+  private static final Range PRICE_RANGE = new Range(MAX_AMOUNT.negate(), MAX_AMOUNT, PRICE_SCALE);
+  private static final Range RATE_RANGE = new Range(BigDecimal.ZERO, HUNDRED, RATE_SCALE);
 
   /** The keys the {@code newVendor.fields} patch accepts: the extracted vendor data. */
-  private static final Set<String> VENDOR_FIELDS = Set.of(K_NAME, "taxId", "address",
+  private static final Set<String> VENDOR_FIELDS = Set.of(K_NAME, KEY_TAX_ID, "address",
       "postalCode", "city", "countryName", "email", "phone");
 
   private static final Map<String, Set<String>> OP_KEYS = Map.of(
@@ -199,7 +178,7 @@ final class InvoiceInboxApply {
   }
 
   /** A refusal raised anywhere in the request; carries the answer. No stack trace on purpose. */
-  private static final class Refusal extends RuntimeException {
+  static final class Refusal extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final transient NeoResponse response;
 
@@ -210,17 +189,17 @@ final class InvoiceInboxApply {
   }
 
   /** The state of one request: the working copy and what the operations did to it. */
-  private static final class Edit {
-    private final JSONObject document;
-    private final OcrLookups lookups;
-    private final IncomingDocument row;
-    private boolean dirty;
-    private boolean marked;
-    private boolean vendorChanged;
-    private boolean docNoChanged;
-    private boolean dateChanged;
-    private final Set<Integer> taxLines = new LinkedHashSet<>();
-    private final Set<Integer> inheritRate = new LinkedHashSet<>();
+  static final class Edit {
+    final JSONObject document;
+    final OcrLookups lookups;
+    final IncomingDocument row;
+    boolean dirty;
+    boolean marked;
+    boolean vendorChanged;
+    boolean docNoChanged;
+    boolean dateChanged;
+    final Set<Integer> taxLines = new LinkedHashSet<>();
+    final Set<Integer> inheritRate = new LinkedHashSet<>();
 
     Edit(JSONObject document, OcrLookups lookups, IncomingDocument row) {
       this.document = document;
@@ -236,6 +215,10 @@ final class InvoiceInboxApply {
       return document.optJSONArray(K_LINES);
     }
 
+    JSONObject vendor() {
+      return header().optJSONObject(K_VENDOR);
+    }
+
     /** Records an effective change; {@code marks} is the verdict of the adjusted policy. */
     void changed(boolean marks) {
       dirty = true;
@@ -248,7 +231,8 @@ final class InvoiceInboxApply {
    *
    * @param recordId the id of the {@code ETGO_INCOMING_DOCUMENT} row
    * @param body     the request body, may be {@code null}
-   * @return 200 with the review body of the saved row; the refusal otherwise (see 9.2.6 of the plan)
+   * @return 200 with the review body of the saved row; the refusal otherwise (see 9.2.6 of the
+   *         plan)
    */
   static NeoResponse apply(String recordId, JSONObject body) {
     try {
@@ -326,7 +310,7 @@ final class InvoiceInboxApply {
     }
     Iterator<?> keys = op.keys();
     while (keys.hasNext()) {
-      if (!allowed.contains((String) keys.next())) {
+      if (!allowed.contains(keys.next())) {
         throw invalidRequest();
       }
     }
@@ -336,19 +320,18 @@ final class InvoiceInboxApply {
     if (allowed.contains(KEY_ID) && !isId(op.opt(KEY_ID))) {
       throw invalidRequest();
     }
-    Object taxId = op.opt(KEY_TAX_ID);
-    if (taxId != null && !JSONObject.NULL.equals(taxId) && !isId(taxId)) {
-      throw invalidRequest();
-    }
+    validateOptionalIds(op);
     if (OP_NEW_VENDOR.equals(op.optString(KEY_OP)) && op.has(KEY_FIELDS)) {
       validateVendorFields(op.opt(KEY_FIELDS));
     }
-    if (OP_NEW_PRODUCT.equals(op.optString(KEY_OP))) {
-      for (String key : new String[] { K_CATEGORY_ID, K_UOM_ID }) {
-        Object value = op.opt(key);
-        if (value != null && !JSONObject.NULL.equals(value) && !isId(value)) {
-          throw invalidRequest();
-        }
+  }
+
+  /** The ids an operation may carry as {@code null} or as a well-formed id: tax, category, unit. */
+  private static void validateOptionalIds(JSONObject op) {
+    for (String key : new String[] { KEY_TAX_ID, K_CATEGORY_ID, K_UOM_ID }) {
+      Object value = op.opt(key);
+      if (value != null && !JSONObject.NULL.equals(value) && !isId(value)) {
+        throw invalidRequest();
       }
     }
   }
@@ -359,20 +342,10 @@ final class InvoiceInboxApply {
     }
     Iterator<?> keys = ((JSONObject) fields).keys();
     while (keys.hasNext()) {
-      if (!VENDOR_FIELDS.contains((String) keys.next())) {
+      if (!VENDOR_FIELDS.contains(keys.next())) {
         throw invalidRequest();
       }
     }
-  }
-
-  private static boolean isIndex(Object value) {
-    return (value instanceof Integer || value instanceof Long) && ((Number) value).longValue() >= 0
-        && ((Number) value).longValue() <= Integer.MAX_VALUE;
-  }
-
-  private static boolean isId(Object value) {
-    return value instanceof String && !StringUtils.isBlank((String) value)
-        && ((String) value).length() <= MAX_ID_LENGTH;
   }
 
   // ── The edit ─────────────────────────────────────────────────────────────────────────────────
@@ -391,7 +364,7 @@ final class InvoiceInboxApply {
         run(edit, op);
       }
       if (edit.dirty) {
-        recompute(edit);
+        InvoiceInboxApplyRecompute.recompute(edit);
       }
     } finally {
       OBContext.restorePreviousMode();
@@ -479,19 +452,20 @@ final class InvoiceInboxApply {
     List<JSONObject> missing = new ArrayList<>();
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.optJSONObject(i);
-      if (line == null) {
-        continue;
+      if (line != null && !claimsItsIndex(line, used)) {
+        missing.add(line);
       }
-      Object index = line.opt(K_INDEX);
-      if (isIndex(index) && used.add(((Number) index).intValue())) {
-        continue;
-      }
-      missing.add(line);
     }
     int next = used.isEmpty() ? 0 : used.stream().mapToInt(Integer::intValue).max().getAsInt() + 1;
     for (JSONObject line : missing) {
       line.put(K_INDEX, next++);
     }
+  }
+
+  /** Whether the line has a numeric index no other line took: it keeps it. */
+  private static boolean claimsItsIndex(JSONObject line, Set<Integer> used) {
+    Object index = line.opt(K_INDEX);
+    return isIndex(index) && used.add(((Number) index).intValue());
   }
 
   private static void run(Edit edit, JSONObject op) throws JSONException {
@@ -509,16 +483,16 @@ final class InvoiceInboxApply {
         removeLine(edit, op);
         break;
       case OP_SELECT_VENDOR:
-        selectVendor(edit, op);
+        InvoiceInboxApplyResolution.selectVendor(edit, op);
         break;
       case OP_NEW_VENDOR:
-        newVendor(edit, op);
+        InvoiceInboxApplyResolution.newVendor(edit, op);
         break;
       case OP_SELECT_PRODUCT:
-        selectProduct(edit, op);
+        InvoiceInboxApplyResolution.selectProduct(edit, op);
         break;
       default:
-        newProduct(edit, op);
+        InvoiceInboxApplyResolution.newProduct(edit, op);
         break;
     }
   }
@@ -545,32 +519,6 @@ final class InvoiceInboxApply {
     }
   }
 
-  /** {@code yyyy-MM-dd} in 1900-2100, or empty for {@code null}/blank (clears the date). */
-  private static String isoDate(Object value) {
-    if (JSONObject.NULL.equals(value)) {
-      return "";
-    }
-    if (!(value instanceof String)) {
-      throw invalidValue(K_INVOICE_DATE, null);
-    }
-    String date = ((String) value).trim();
-    if (date.isEmpty()) {
-      return "";
-    }
-    try {
-      if (!ISO_DATE.matcher(date).matches()) {
-        throw invalidValue(K_INVOICE_DATE, null);
-      }
-      int year = LocalDate.parse(date).getYear();
-      if (year < MIN_YEAR || year > MAX_YEAR) {
-        throw invalidValue(K_INVOICE_DATE, null);
-      }
-    } catch (DateTimeParseException e) {
-      throw invalidValue(K_INVOICE_DATE, null);
-    }
-    return date;
-  }
-
   private static void setLine(Edit edit, JSONObject op) throws JSONException {
     int index = op.getInt(K_INDEX);
     JSONObject line = lineOf(edit, index);
@@ -582,17 +530,16 @@ final class InvoiceInboxApply {
       }
     }
     if (op.has(K_QUANTITY)) {
-      setNumber(edit, line, K_QUANTITY, op.get(K_QUANTITY), index, MAX_AMOUNT.negate(),
-          MAX_AMOUNT, QUANTITY_SCALE);
+      setNumber(edit, line, K_QUANTITY, op.get(K_QUANTITY), index, QUANTITY_RANGE);
     }
     if (op.has(K_UNIT_PRICE)) {
-      setNumber(edit, line, K_UNIT_PRICE, op.get(K_UNIT_PRICE), index, MAX_AMOUNT.negate(),
-          MAX_AMOUNT, PRICE_SCALE);
+      setNumber(edit, line, K_UNIT_PRICE, op.get(K_UNIT_PRICE), index, PRICE_RANGE);
     }
-    // The tax chosen by id wins over a rate typed in the same operation: the rate is not applied at all.
+    // The tax chosen by id wins over a rate typed in the same operation: the rate is not applied at
+    // all.
     boolean taxIdWins = op.has(KEY_TAX_ID) && !JSONObject.NULL.equals(op.get(KEY_TAX_ID));
-    if (op.has(K_TAX_RATE) && !taxIdWins && setNumber(edit, line, K_TAX_RATE, op.get(K_TAX_RATE), index,
-        BigDecimal.ZERO, HUNDRED, RATE_SCALE)) {
+    if (op.has(K_TAX_RATE) && !taxIdWins
+        && setNumber(edit, line, K_TAX_RATE, op.get(K_TAX_RATE), index, RATE_RANGE)) {
       // A typed rate (legacy way of choosing a tax) drops a chosen tax: the tax is resolved again.
       forgetChosenTax(line);
       edit.taxLines.add(index);
@@ -610,10 +557,10 @@ final class InvoiceInboxApply {
    * change. Returns whether the stored value changed.
    */
   private static boolean setNumber(Edit edit, JSONObject line, String field, Object value,
-      int index, BigDecimal min, BigDecimal max, int scale) throws JSONException {
+      int index, Range range) throws JSONException {
     BigDecimal parsed = JSONObject.NULL.equals(value) ? null
-        : parseNumber(value, field, index, min, max, scale);
-    BigDecimal stored = storedNumber(line, field, scale);
+        : parseNumber(value, field, index, range.min(), range.max(), range.scale());
+    BigDecimal stored = storedNumber(line, field, range.scale());
     if (parsed == null ? stored == null : (stored != null && parsed.compareTo(stored) == 0)) {
       return false;
     }
@@ -641,7 +588,7 @@ final class InvoiceInboxApply {
   }
 
   /** Whether the line's tax is one the user chose (as opposed to the one the server resolved). */
-  private static boolean isChosenTax(JSONObject line) {
+  static boolean isChosenTax(JSONObject line) {
     JSONObject tax = line.optJSONObject(K_TAX);
     return tax != null && MATCHED_MANUAL.equals(tax.optString(K_MATCHED_BY));
   }
@@ -680,35 +627,48 @@ final class InvoiceInboxApply {
       return;
     }
     if (sameId && T_RESOLVED.equals(tax.optString(K_STATE))) {
-      tax.put(K_MATCHED_BY, MATCHED_MANUAL);
-      edit.taxLines.remove(index);
-      // The line follows the tax it now pins: its rate is the tax's (the totals read it first). Only
-      // a rate that actually changes marks; the pin itself does not.
-      BigDecimal taxRate = storedNumber(tax, K_RATE, RATE_SCALE);
-      boolean rateChanged = taxRate != null
-          && (storedNumber(line, K_TAX_RATE, RATE_SCALE) == null
-              || taxRate.compareTo(storedNumber(line, K_TAX_RATE, RATE_SCALE)) != 0);
-      if (rateChanged) {
-        line.put(K_TAX_RATE, taxRate.doubleValue());
-      }
-      edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(rateChanged));
+      pinResolvedTax(edit, line, tax, index);
       return;
     }
+    chooseNewTax(edit, line, id, index);
+  }
+
+  /**
+   * Pins the tax the server had resolved: the line follows it, its rate is the tax's (the totals
+   * read it first). Only a rate that actually changes marks; the pin itself does not.
+   */
+  private static void pinResolvedTax(Edit edit, JSONObject line, JSONObject tax, int index)
+      throws JSONException {
+    tax.put(K_MATCHED_BY, MATCHED_MANUAL);
+    edit.taxLines.remove(index);
+    BigDecimal taxRate = storedNumber(tax, K_RATE, RATE_SCALE);
+    BigDecimal lineRate = storedNumber(line, K_TAX_RATE, RATE_SCALE);
+    boolean rateChanged = taxRate != null && (lineRate == null || taxRate.compareTo(lineRate) != 0);
+    if (rateChanged) {
+      line.put(K_TAX_RATE, taxRate.doubleValue());
+    }
+    edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(rateChanged));
+  }
+
+  /** Chooses a tax the line did not have: it must pass the tax rule for the document date. */
+  private static void chooseNewTax(Edit edit, JSONObject line, String id, int index)
+      throws JSONException {
     String date = text(edit.header(), K_INVOICE_DATE);
+    String dateOrToday = date.isEmpty() ? null : date;
     Optional<OcrLookups.Tax> found = edit.lookups == null ? Optional.empty()
-        : edit.lookups.taxById(id, date.isEmpty() ? null : date);
+        : edit.lookups.taxById(id, dateOrToday);
     if (found.isEmpty()) {
       throw new Refusal(InvoiceInboxEditGate.refuse(422, CODE_UNKNOWN_TAX,
           InvoiceInboxMessages.UNKNOWN_TAX, InvoiceInboxEditGate.details(K_INDEX, index)));
     }
     BigDecimal rate = found.get().rate() == null ? null
         : found.get().rate().setScale(RATE_SCALE, RoundingMode.HALF_UP);
+    Object rateValue = rate == null ? JSONObject.NULL : (Object) rate.doubleValue();
     line.put(K_TAX, new JSONObject().put(K_STATE, T_RESOLVED).put(K_MATCHED_BY, MATCHED_MANUAL)
-        .put(K_ID, found.get().id()).put(K_RATE, rate == null ? JSONObject.NULL
-            : (Object) rate.doubleValue()));
+        .put(K_ID, found.get().id()).put(K_RATE, rateValue));
     // On purpose: a chosen tax's rate goes to taxRate as it is (scale 2), WITHOUT the 0-100 clamp a
     // typed rate gets: withholding taxes can carry a negative rate in Etendo.
-    line.put(K_TAX_RATE, rate == null ? JSONObject.NULL : (Object) rate.doubleValue());
+    line.put(K_TAX_RATE, rateValue);
     edit.taxLines.remove(index);
     edit.inheritRate.remove(index);
     edit.changed(InvoiceInboxAdjustedPolicy.valueEdit(true));
@@ -763,7 +723,7 @@ final class InvoiceInboxApply {
     return max + 1;
   }
 
-  private static JSONObject lineOf(Edit edit, int index) {
+  static JSONObject lineOf(Edit edit, int index) {
     JSONArray lines = edit.lines();
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.optJSONObject(i);
@@ -773,381 +733,5 @@ final class InvoiceInboxApply {
     }
     throw new Refusal(InvoiceInboxEditGate.refuse(422, CODE_LINE_NOT_FOUND,
         InvoiceInboxMessages.LINE_NOT_FOUND, InvoiceInboxEditGate.details(K_INDEX, index)));
-  }
-
-  // ── Vendor ───────────────────────────────────────────────────────────────────────────────────
-
-  private static JSONObject vendorOf(Edit edit) {
-    return edit.header().optJSONObject(K_VENDOR);
-  }
-
-  private static void selectVendor(Edit edit, JSONObject op) throws JSONException {
-    String id = op.getString(KEY_ID);
-    JSONObject vendor = vendorOf(edit);
-    boolean alreadyLinked = S_LINKED.equals(vendor.optString(K_STATE)) && id.equals(
-        vendor.optString(K_ID));
-    if (alreadyLinked) {
-      return;
-    }
-    Optional<Party> found = edit.lookups == null ? Optional.empty() : edit.lookups.vendorById(id);
-    if (found.isEmpty()) {
-      throw new Refusal(InvoiceInboxEditGate.refuse(422, CODE_UNKNOWN_VENDOR,
-          InvoiceInboxMessages.UNKNOWN_VENDOR, null));
-    }
-    Address address = edit.lookups.vendorAddress(id);
-    boolean present = address.state() == OcrLookups.AddressState.PRESENT
-        && address.locationId() != null;
-    vendor.put(K_STATE, S_LINKED).put(K_MATCHED_BY, MATCHED_MANUAL).put(K_ID, found.get().id())
-        .put(K_NAME, found.get().name()).put(K_ADDRESS_STATE, address.state().name())
-        .put(K_LOCATION_ID, present ? address.locationId() : JSONObject.NULL);
-    vendor.remove("details");
-    edit.vendorChanged = true;
-    edit.changed(InvoiceInboxAdjustedPolicy.selection(false));
-  }
-
-  private static void newVendor(Edit edit, JSONObject op) throws JSONException {
-    JSONObject vendor = vendorOf(edit);
-    JSONObject extracted = vendor.optJSONObject(K_EXTRACTED);
-    if (extracted == null) {
-      extracted = new JSONObject();
-    }
-    boolean wasLinked = S_LINKED.equals(vendor.optString(K_STATE));
-    boolean wasNew = S_NEW.equals(vendor.optString(K_STATE));
-    JSONObject fields = op.optJSONObject(KEY_FIELDS);
-    boolean anyDiffers = false;
-    JSONObject merged = new JSONObject(extracted.toString());
-    Iterator<?> keys = fields == null ? new JSONObject().keys() : fields.keys();
-    while (keys.hasNext()) {
-      String key = (String) keys.next();
-      String cleaned = cleanText(fields.get(key), key, null);
-      if (!cleaned.equals(text(extracted, key))) {
-        merged.put(key, cleaned);
-        anyDiffers = true;
-      }
-    }
-    if (wasNew && !anyDiffers) {
-      return;
-    }
-    vendor.remove(K_ID);
-    vendor.remove(K_NAME);
-    vendor.remove(K_MATCHED_BY);
-    vendor.remove("details");
-    vendor.put(K_STATE, S_NEW).put(K_EXTRACTED, merged).put(K_ADDRESS_STATE, A_UNKNOWN)
-        .put(K_LOCATION_ID, JSONObject.NULL);
-    if (vendor.optJSONArray(K_CANDIDATES) == null) {
-      vendor.put(K_CANDIDATES, new JSONArray());
-    }
-    edit.vendorChanged = true;
-    edit.changed(InvoiceInboxAdjustedPolicy.newVendor(wasLinked, anyDiffers));
-  }
-
-  // ── Product ──────────────────────────────────────────────────────────────────────────────────
-
-  private static void selectProduct(Edit edit, JSONObject op) throws JSONException {
-    int index = op.getInt(K_INDEX);
-    JSONObject line = lineOf(edit, index);
-    String id = op.getString(KEY_ID);
-    JSONObject product = line.optJSONObject(K_PRODUCT);
-    boolean alreadyLinked = product != null && S_LINKED.equals(product.optString(K_STATE))
-        && id.equals(product.optString(K_ID));
-    if (alreadyLinked) {
-      return;
-    }
-    Optional<Party> found = edit.lookups == null ? Optional.empty()
-        : edit.lookups.productById(id);
-    if (found.isEmpty()) {
-      throw new Refusal(InvoiceInboxEditGate.refuse(422, CODE_UNKNOWN_PRODUCT,
-          InvoiceInboxMessages.UNKNOWN_PRODUCT, InvoiceInboxEditGate.details(K_INDEX, index)));
-    }
-    line.put(K_PRODUCT, new JSONObject().put(K_STATE, S_LINKED).put(K_MATCHED_BY, MATCHED_MANUAL)
-        .put(K_ID, found.get().id()).put(K_NAME, found.get().name())
-        .put(K_CANDIDATES, candidatesOf(product)));
-    edit.changed(InvoiceInboxAdjustedPolicy.selection(false));
-  }
-
-  private static void newProduct(Edit edit, JSONObject op) throws JSONException {
-    int index = op.getInt(K_INDEX);
-    JSONObject line = lineOf(edit, index);
-    JSONObject product = line.optJSONObject(K_PRODUCT);
-    boolean wasLinked = product != null && S_LINKED.equals(product.optString(K_STATE));
-    boolean wasNew = product != null && S_NEW.equals(product.optString(K_STATE));
-    JSONObject stored = product == null ? null : product.optJSONObject(K_NEW);
-    String name = op.has(K_NAME) ? cleanText(op.get(K_NAME), K_NAME, index)
-        : (stored != null && stored.has(K_NAME) ? text(stored, K_NAME)
-            : text(line, K_DESCRIPTION));
-    JSONObject draft = new JSONObject().put(K_NAME, name);
-    resolveChoice(edit, op, stored, draft, index, true);
-    resolveChoice(edit, op, stored, draft, index, false);
-    boolean nameDiffers = !name.equals(stored != null && stored.has(K_NAME)
-        ? text(stored, K_NAME) : text(line, K_DESCRIPTION));
-    boolean same = wasNew && stored != null && sameDraft(stored, draft);
-    if (same) {
-      return;
-    }
-    line.put(K_PRODUCT, new JSONObject().put(K_STATE, S_NEW).put(K_ID, JSONObject.NULL)
-        .put(K_CANDIDATES, candidatesOf(product)).put(K_NEW, draft));
-    edit.changed(InvoiceInboxAdjustedPolicy.newProduct(true, wasLinked, nameDiffers));
-  }
-
-  /**
-   * Resolves the category (or the unit) of the draft: the one asked for (its id is checked), the
-   * stored id when the operation does not mention it, none when {@code null}. Only the ID is stored:
-   * the name is a display value that {@link InvoiceInboxReview} adds at read time in the language of
-   * the request, so a stored copy can never be stale or in another language. A name stored by an
-   * earlier version is ignored here and dropped on the next write.
-   */
-  private static void resolveChoice(Edit edit, JSONObject op, JSONObject stored, JSONObject draft,
-      int index, boolean category) throws JSONException {
-    String idKey = category ? K_CATEGORY_ID : K_UOM_ID;
-    if (!op.has(idKey)) {
-      if (stored != null && !StringUtils.isBlank(text(stored, idKey))) {
-        draft.put(idKey, text(stored, idKey));
-      }
-      return;
-    }
-    Object value = op.get(idKey);
-    if (JSONObject.NULL.equals(value)) {
-      return;
-    }
-    Optional<Party> found = edit.lookups == null ? Optional.empty()
-        : (category ? edit.lookups.productCategoryById((String) value)
-            : edit.lookups.uomById((String) value));
-    if (found.isEmpty()) {
-      throw new Refusal(InvoiceInboxEditGate.refuse(422,
-          category ? CODE_UNKNOWN_CATEGORY : CODE_UNKNOWN_UOM,
-          category ? InvoiceInboxMessages.UNKNOWN_CATEGORY : InvoiceInboxMessages.UNKNOWN_UOM,
-          InvoiceInboxEditGate.details(K_INDEX, index)));
-    }
-    draft.put(idKey, found.get().id());
-  }
-
-  private static boolean sameDraft(JSONObject stored, JSONObject draft) {
-    return text(stored, K_NAME).equals(text(draft, K_NAME))
-        && text(stored, K_CATEGORY_ID).equals(text(draft, K_CATEGORY_ID))
-        && text(stored, K_UOM_ID).equals(text(draft, K_UOM_ID));
-  }
-
-  private static JSONArray candidatesOf(JSONObject product) throws JSONException {
-    JSONArray candidates = product == null ? null : product.optJSONArray(K_CANDIDATES);
-    return candidates == null ? new JSONArray() : new JSONArray(candidates.toString());
-  }
-
-  // ── Recompute ────────────────────────────────────────────────────────────────────────────────
-
-  private static void recompute(Edit edit) throws JSONException {
-    rebuildTaxes(edit);
-    if (edit.lookups != null) {
-      InboxTaxModes.stamp(edit.lines(), edit.lookups);
-    }
-    if (edit.docNoChanged || edit.vendorChanged) {
-      recheckDuplicates(edit);
-    }
-    if (edit.vendorChanged) {
-      JSONObject vendor = vendorOf(edit);
-      setNotice(edit, N_VENDOR_ADDRESS_MISSING, S_LINKED.equals(vendor.optString(K_STATE))
-          && OcrLookups.AddressState.MISSING.name().equals(vendor.optString(K_ADDRESS_STATE)));
-    }
-    refreshTotal(edit, ensureCurrency(edit));
-  }
-
-  /**
-   * The document currency: derived from the vendor (its purchase price list, else the
-   * organization's) and stored in the header when the document has none yet or the vendor changed,
-   * kept otherwise. Returns the decimals of its amounts, two when it cannot be known. The exchange
-   * rate and the currency picker of the invoice are not touched: this is the scale of the inbox's
-   * own amounts.
-   */
-  private static int ensureCurrency(Edit edit) throws JSONException {
-    if (edit.lookups == null) {
-      return InvoiceInboxTotals.AMOUNT_SCALE;
-    }
-    JSONObject header = edit.header();
-    String stored = text(header, K_CURRENCY_ID);
-    if (stored.isEmpty() || edit.vendorChanged) {
-      JSONObject vendor = vendorOf(edit);
-      String vendorId = S_LINKED.equals(vendor.optString(K_STATE)) ? vendor.optString(K_ID) : null;
-      Optional<OcrLookups.DocCurrency> derived = edit.lookups.documentCurrency(vendorId,
-          edit.row.getOrganization() == null ? null : edit.row.getOrganization().getId());
-      if (derived.isPresent()) {
-        header.put(K_CURRENCY_ID, derived.get().id());
-        return derived.get().scale();
-      }
-      header.remove(K_CURRENCY_ID);
-      return InvoiceInboxTotals.AMOUNT_SCALE;
-    }
-    return edit.lookups.currencyById(stored).map(OcrLookups.DocCurrency::scale)
-        .orElse(InvoiceInboxTotals.AMOUNT_SCALE);
-  }
-
-  /** The tax of the lines that depend on what changed, once per distinct rate. */
-  private static void rebuildTaxes(Edit edit) throws JSONException {
-    if (edit.lookups == null) {
-      return;
-    }
-    boolean all = edit.vendorChanged || edit.dateChanged;
-    String location = locationOf(vendorOf(edit));
-    String date = text(edit.header(), K_INVOICE_DATE);
-    Map<String, TaxAnswer> cache = new HashMap<>();
-    JSONArray lines = edit.lines();
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject line = lines.optJSONObject(i);
-      int index = line == null ? -1 : line.optInt(K_INDEX, -1);
-      if (line == null || !(all || edit.taxLines.contains(index))) {
-        continue;
-      }
-      if (isChosenTax(line) && stillValid(edit, line, date)) {
-        continue;
-      }
-      BigDecimal rate = storedNumber(line, K_TAX_RATE, RATE_SCALE);
-      JSONObject tax = InboxLineMatcher.taxState(edit.lookups, cache, rate, location,
-          date.isEmpty() ? null : date);
-      line.put(K_TAX, tax);
-      if (edit.inheritRate.contains(index) && rate == null
-          && T_RESOLVED.equals(tax.optString(K_STATE)) && !tax.isNull(K_RATE)) {
-        line.put(K_TAX_RATE, tax.get(K_RATE));
-      }
-    }
-  }
-
-  /** A tax the user chose survives a vendor or date change while it still passes the tax rule. */
-  private static boolean stillValid(Edit edit, JSONObject line, String date) {
-    return edit.lookups.taxById(line.optJSONObject(K_TAX).optString(K_ID),
-        date.isEmpty() ? null : date).isPresent();
-  }
-
-  /** The vendor's address when it is linked and has one, else {@code null} (taxes stay pending). */
-  private static String locationOf(JSONObject vendor) {
-    boolean usable = S_LINKED.equals(vendor.optString(K_STATE))
-        && A_PRESENT.equals(vendor.optString(K_ADDRESS_STATE)) && !vendor.isNull(K_LOCATION_ID);
-    return usable ? StringUtils.defaultIfBlank(vendor.optString(K_LOCATION_ID), null) : null;
-  }
-
-  /** The duplicate block and its notices, asked again because the number or the vendor changed. */
-  private static void recheckDuplicates(Edit edit) throws JSONException {
-    JSONObject header = edit.header();
-    JSONObject vendor = vendorOf(edit);
-    String documentNo = text(header, K_DOCUMENT_NO);
-    JSONObject duplicate = new JSONObject().put(K_STATE, D_NONE).put(K_INVOICES, new JSONArray());
-    boolean unknown = false;
-    if (edit.lookups != null && S_LINKED.equals(vendor.optString(K_STATE))
-        && !documentNo.isEmpty()) {
-      Duplicates found = edit.lookups.duplicates(vendor.optString(K_ID), documentNo);
-      if (!found.known()) {
-        unknown = true;
-        duplicate.put(K_STATE, D_UNKNOWN);
-      } else {
-        JSONArray invoices = new JSONArray();
-        for (OcrLookups.Duplicate document : found.documents()) {
-          invoices.put(new JSONObject().put(K_ID, document.id()).put(K_DOCUMENT_NO,
-              document.documentNo() == null ? "" : document.documentNo()));
-        }
-        duplicate.put(K_STATE, invoices.length() > 0 ? D_FOUND : D_NONE).put(K_INVOICES, invoices);
-      }
-    }
-    header.put(K_DUPLICATE, duplicate);
-    JSONArray inbox = InvoiceInboxDuplicates.find(edit.row, header,
-        java.util.Arrays.asList(OBContext.getOBContext().getReadableOrganizations()));
-    duplicate.put(K_INBOX, inbox);
-    setNotice(edit, N_DUPLICATE_CHECK_UNKNOWN, unknown);
-    setNotice(edit, N_DUPLICATE_IN_INBOX, inbox.length() > 0);
-  }
-
-  /** The total follows the lines unless the document printed one (which never changes). */
-  private static void refreshTotal(Edit edit, int scale) throws JSONException {
-    JSONObject header = edit.header();
-    if (TOTAL_PRINTED.equals(header.optString(K_TOTAL_SOURCE))) {
-      return;
-    }
-    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(edit.lines(), scale);
-    header.put(K_TOTAL_AMOUNT, totals == null ? 0 : totals.total().doubleValue());
-  }
-
-  private static void setNotice(Edit edit, String code, boolean present) throws JSONException {
-    JSONArray notices = edit.document.optJSONArray(K_NOTICES);
-    JSONArray out = new JSONArray();
-    boolean had = false;
-    for (int i = 0; notices != null && i < notices.length(); i++) {
-      if (code.equals(notices.optString(i))) {
-        had = true;
-        if (!present) {
-          continue;
-        }
-      }
-      out.put(notices.get(i));
-    }
-    if (present && !had) {
-      out.put(code);
-    }
-    edit.document.put(K_NOTICES, out);
-  }
-
-  // ── Values ───────────────────────────────────────────────────────────────────────────────────
-
-  private static Refusal invalidValue(String field, Integer index) {
-    JSONObject details = InvoiceInboxEditGate.details(KEY_FIELD, field);
-    try {
-      if (index != null) {
-        details.put(K_INDEX, index.intValue());
-      }
-    } catch (JSONException e) {
-      throw new IllegalStateException("Could not build the error details", e);
-    }
-    return new Refusal(InvoiceInboxEditGate.refuse(422, CODE_INVALID_VALUE,
-        InvoiceInboxMessages.INVALID_VALUE, details, KEY_FIELD, field));
-  }
-
-  /** A text of the request, cleaned like an extracted one; {@code null} reads as empty. */
-  private static String cleanText(Object value, String field, Integer index) {
-    if (JSONObject.NULL.equals(value)) {
-      return "";
-    }
-    if (!(value instanceof String)) {
-      throw invalidValue(field, index);
-    }
-    return OcrSanitizer.text((String) value);
-  }
-
-  /** A finite JSON number within bounds, rounded HALF_UP to the scale the document stores. */
-  private static BigDecimal parseNumber(Object value, String field, Integer index,
-      BigDecimal min, BigDecimal max, int scale) {
-    if (!(value instanceof Number)) {
-      throw invalidValue(field, index);
-    }
-    double asDouble = ((Number) value).doubleValue();
-    if (Double.isNaN(asDouble) || Double.isInfinite(asDouble)) {
-      throw invalidValue(field, index);
-    }
-    BigDecimal parsed;
-    try {
-      parsed = new BigDecimal(value.toString());
-    } catch (NumberFormatException e) {
-      throw invalidValue(field, index);
-    }
-    if (parsed.precision() > MAX_NUMBER_DIGITS || Math.abs(parsed.scale()) > MAX_NUMBER_DIGITS) {
-      throw invalidValue(field, index);
-    }
-    BigDecimal scaled = parsed.setScale(scale, RoundingMode.HALF_UP);
-    if (scaled.compareTo(min) < 0 || scaled.compareTo(max) > 0) {
-      throw invalidValue(field, index);
-    }
-    return scaled;
-  }
-
-  /** A stored number at the scale the document keeps, {@code null} when absent or null. */
-  private static BigDecimal storedNumber(JSONObject object, String key, int scale) {
-    Object value = object == null ? null : object.opt(key);
-    if (!(value instanceof Number)) {
-      return null;
-    }
-    try {
-      return new BigDecimal(value.toString()).setScale(scale, RoundingMode.HALF_UP);
-    } catch (NumberFormatException e) {
-      return null;
-    }
-  }
-
-  private static String text(JSONObject object, String key) {
-    Object value = object == null ? null : object.opt(key);
-    return value instanceof String ? ((String) value).trim() : "";
   }
 }
