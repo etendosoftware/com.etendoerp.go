@@ -197,6 +197,11 @@ final class ContactIdentityRules {
   /**
    * The part of the request body generic CRUD persists: the {@code data} envelope when present,
    * else the body itself. Also used by {@link BusinessPartnerHandler}'s tax id validation.
+   *
+   * @param requestBody the write request body, flat or a {@code {"data": {...}}} envelope; must
+   *     not be {@code null}
+   * @return the innermost section of {@link ContactSepaMandateDefaults#writeSections}: the
+   *     envelope's inner object, else {@code requestBody} itself (the live object, not a copy)
    */
   static JSONObject persistedSection(JSONObject requestBody) {
     List<JSONObject> sections = ContactSepaMandateDefaults.writeSections(requestBody);
