@@ -258,11 +258,12 @@ final class ReturnInvoiceSupport {
     try {
       OBDal.getInstance().save(invoice);
       OBDal.getInstance().flush();
-      // ETP-6179: the SIF fields the caller chose (R4 in every active system only when it sent
-      // no sifFields at all, InvoiceSifPreset#unattendedRectificationFallback) and the
+      // ETP-6179: the SIF fields the caller chose (a code it omits takes the return's preselected
+      // R1, InvoiceSifPreset#RETURN_RECTIFICATION_DEFAULT, as the preview showed) and the
       // rectification guard, which this one-step creation never reached before. Written on the
       // header now; the completion in finalizeReturnInvoice reads them after the lines.
-      InvoiceSifPreset.applyBeforeCompletion(invoice, body);
+      InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+          InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT);
       return finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler, rectifiedIds,
           obContext, returnDoc, previous);
     } catch (InvoiceSifPreset.Refused sifRefusal) {

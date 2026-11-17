@@ -69,15 +69,15 @@ public class InvoiceSifPresetTest {
   /**
    * A rectificative generated from a return used to complete as F1 with no SII motive and no
    * TicketBAI code. With no sifFields at all (nobody reviewed the step), every active system
-   * gets the R4 fallback.
+   * gets the R1 fallback.
    */
   @Test
-  public void aRectificativeWithNothingSentGetsR4InEveryActiveSystem() {
+  public void aRectificativeWithNothingSentGetsR1InEveryActiveSystem() {
     Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(true, "F1"), null);
 
-    assertEquals("R4", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
-    assertEquals("R4", values.get(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-    assertEquals("R4", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+    assertEquals("R1", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
+    assertEquals("R1", values.get(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+    assertEquals("R1", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
   }
 
   /**
@@ -127,9 +127,9 @@ public class InvoiceSifPresetTest {
     assertEquals(InvoiceSifPreset.defaults(facts).keySet(), values.keySet());
   }
 
-  /** End to end on the invoice: the rectificative is written R4 before the completion. */
+  /** End to end on the invoice: the rectificative is written R1 before the completion. */
   @Test
-  public void applyBeforeCompletionWritesR4OnARectificativeInvoice() throws Exception {
+  public void applyBeforeCompletionWritesR1OnARectificativeInvoice() throws Exception {
     Invoice invoice = mock(Invoice.class);
     Organization org = mock(Organization.class);
     when(org.getId()).thenReturn(ORG_ID);
@@ -158,8 +158,8 @@ public class InvoiceSifPresetTest {
 
       InvoiceSifPreset.applyBeforeCompletion(invoice, new JSONObject());
 
-      verify(invoice).set(Invoice.PROPERTY_ETVFACINVTYPE, "R4");
-      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R4");
+      verify(invoice).set(Invoice.PROPERTY_ETVFACINVTYPE, "R1");
+      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R1");
       guardMock.verify(() -> RectificationFiscalCodeGuard.evaluate(invoice));
     }
   }
@@ -367,8 +367,9 @@ public class InvoiceSifPresetTest {
       Invoice.PROPERTY_ETVFACINVTYPE);
 
   /**
-   * The defaults of a sales rectificative carry the three rectification codes as present keys with
-   * no value: never R4, and VERI*FACTU's type never F1, whatever the document type configures.
+   * The defaults of a sales rectificative whose source preselects nothing (not a return) carry the
+   * three rectification codes as present keys with no value, and VERI*FACTU's type never F1,
+   * whatever the document type configures.
    */
   @Test
   public void theDefaultsOfASalesRectificativeLeaveEveryRectificationCodeEmpty() {
@@ -383,8 +384,9 @@ public class InvoiceSifPresetTest {
   }
 
   /**
-   * The sifDefaults preview of a sales rectificative shows the three rectification codes as JSON
-   * null (not absent, not R4, not F1), while VERI*FACTU's type still offers R1-R5 only.
+   * The sifDefaults preview of a sales rectificative whose source preselects nothing shows the
+   * three rectification codes as JSON null (not absent, not F1), while VERI*FACTU's type still
+   * offers R1-R5 only.
    */
   @Test
   public void thePreviewOfASalesRectificativeShowsNoCodeButOffersR1ToR5() throws Exception {
@@ -419,13 +421,13 @@ public class InvoiceSifPresetTest {
   // The unattended fallback (no sifFields at all)
   // ---------------------------------------------------------------------------
 
-  /** An empty sifFields object is "nothing sent": the rectificative gets R4 in every system. */
+  /** An empty sifFields object is "nothing sent": the rectificative gets R1 in every system. */
   @Test
   public void anEmptySifFieldsObjectGetsTheUnattendedFallback() {
     Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(true, "F1"), new JSONObject());
 
     for (String key : RECTIFICATION_KEYS) {
-      assertEquals(key, "R4", values.get(key));
+      assertEquals(key, "R1", values.get(key));
     }
   }
 
@@ -437,23 +439,23 @@ public class InvoiceSifPresetTest {
 
     Map<String, Object> values = InvoiceSifPreset.merge(salesFacts(false, "F2"), null);
     assertEquals("F2", values.get(Invoice.PROPERTY_ETVFACINVTYPE));
-    assertFalse(values.containsValue("R4"));
+    assertFalse(values.containsValue("R1"));
   }
 
   /** The fallback names only the fiscal systems active for the invoice. */
   @Test
   public void theFallbackIsLimitedToTheActiveSystems() {
-    assertEquals(Map.of(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R4"),
+    assertEquals(Map.of(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1"),
         InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(true, false, false)));
-    assertEquals(Map.of(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R4"),
+    assertEquals(Map.of(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R1"),
         InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(false, true, false)));
-    assertEquals(Map.of(Invoice.PROPERTY_ETVFACINVTYPE, "R4"),
+    assertEquals(Map.of(Invoice.PROPERTY_ETVFACINVTYPE, "R1"),
         InvoiceSifPreset.unattendedRectificationFallback(rectificativeWith(false, false, true)));
     assertTrue(InvoiceSifPreset.unattendedRectificationFallback(
         rectificativeWith(false, false, false)).isEmpty());
 
     Map<String, Object> values = InvoiceSifPreset.merge(rectificativeWith(false, true, false), null);
-    assertEquals("R4", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+    assertEquals("R1", values.get(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
     assertFalse(values.containsKey(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
     assertFalse(values.containsKey(Invoice.PROPERTY_ETVFACINVTYPE));
   }
@@ -464,9 +466,9 @@ public class InvoiceSifPresetTest {
         null, null, "2026-11-11", null, null);
   }
 
-  /** sifFields {} on the request body is the same as sending none: R4 is written. */
+  /** sifFields {} on the request body is the same as sending none: R1 is written. */
   @Test
-  public void applyBeforeCompletionWithAnEmptyOrNullSifFieldsWritesR4() throws Exception {
+  public void applyBeforeCompletionWithAnEmptyOrNullSifFieldsWritesR1() throws Exception {
     for (Object sifFields : List.of(new JSONObject(), JSONObject.NULL)) {
       Invoice invoice = invoice(true, "F1");
 
@@ -475,28 +477,28 @@ public class InvoiceSifPresetTest {
             new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, sifFields));
 
         for (String key : RECTIFICATION_KEYS) {
-          verify(invoice).set(key, "R4");
+          verify(invoice).set(key, "R1");
         }
       }
     }
   }
 
   /**
-   * End to end on a sales rectificative with every system active and no sifFields: R4 is written
+   * End to end on a sales rectificative with every system active and no sifFields: R1 is written
    * (the unattended fallback) as SII motive,
    * TicketBAI code and VERI*FACTU type, the structural SII key R and type I are set, and the
    * TicketBAI / VERI*FACTU reverse types are computed.
    */
   @Test
-  public void aRectificativeGetsR4InEverySystemAndItsStructuralFields() throws Exception {
+  public void aRectificativeGetsR1InEverySystemAndItsStructuralFields() throws Exception {
     Invoice invoice = invoice(true, "F1");
 
     try (Env env = new Env(true)) {
       InvoiceSifPreset.applyBeforeCompletion(invoice, null);
 
-      verify(invoice).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R4");
-      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R4");
-      verify(invoice).set(Invoice.PROPERTY_ETVFACINVTYPE, "R4");
+      verify(invoice).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1");
+      verify(invoice).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, "R1");
+      verify(invoice).set(Invoice.PROPERTY_ETVFACINVTYPE, "R1");
       verify(invoice).setAeatsiiClaveTipo("R");
       verify(invoice).setAeatsiiTipoRectif("I");
       env.defaultsMock.verify(() -> SalesRectificativeFiscalDefaults.computeAndSet(invoice));
@@ -616,7 +618,7 @@ public class InvoiceSifPresetTest {
 
       assertRectificationCodeRequired(refused, "TicketBAI", "Verifactu");
       verify(invoice).set(Invoice.PROPERTY_AEATSIIMOTIVORECTIF, "R1");
-      verify(invoice, never()).set(anyString(), Mockito.eq("R4"));
+      verify(invoice, never()).set(Invoice.PROPERTY_TBAIREVERSEINVOICECODE, InvoiceSifPreset.RECTIFICATION_FALLBACK);
     }
   }
 
@@ -635,7 +637,7 @@ public class InvoiceSifPresetTest {
           () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
 
       assertRectificationCodeRequired(refused, "SII", "TicketBAI", "Verifactu");
-      verify(invoice, never()).set(anyString(), Mockito.eq("R4"));
+      verify(invoice, never()).set(anyString(), Mockito.eq(InvoiceSifPreset.RECTIFICATION_FALLBACK));
     }
   }
 

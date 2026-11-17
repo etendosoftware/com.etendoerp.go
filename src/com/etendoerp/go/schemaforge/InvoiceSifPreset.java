@@ -86,16 +86,18 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Normal invoice: VERI*FACTU type from the document type that will be used, {@code F1} when
  *   it configures none (or configures a rectificative code). SII key: the customer's own default
  *   key when it declares one ({@code AEATSII_INVOICE_TRG}'s rule), else {@code F1}.</li>
- *   <li>Rectificative invoice: the preview leaves SII's motive, TicketBAI's code and
- *   VERI*FACTU's type EMPTY, so the user has to choose each one in the step — the ETP-5745 CP-14
- *   stance (a rectification code is a fiscal judgement, never preselected) holds on the screen
- *   of these creation flows too. A {@code sifFields} that leaves one blank is refused by
+ *   <li>Rectificative invoice built from a RETURN document ({@code createReturnInvoice}): the
+ *   preview preselects {@link #RETURN_RECTIFICATION_DEFAULT} ({@code R1}) for SII's motive,
+ *   TicketBAI's code and VERI*FACTU's type, all editable. The return routes say so structurally,
+ *   through {@link Target#withRectificationDefault}, never by naming a spec.</li>
+ *   <li>Any other rectificative (one an order or shipment would produce under an unusual
+ *   document-type setup): the preview leaves the three codes EMPTY, so the user has to choose
+ *   each one (the ETP-5745 CP-14 stance). A {@code sifFields} that leaves one blank is refused by
  *   {@link RectificationFiscalCodeGuard} with its 422.</li>
  *   <li>Rectificative invoice, <b>no {@code sifFields} at all</b> (an MCP/API caller, or the SPA
- *   when the preview could not be read and the step failed open): {@code R4} in the three
- *   systems, so the creation is not refused for a code nobody was asked for. This is the one
- *   place where what is applied differs from what the preview shows; it lives in
- *   {@link #unattendedRectificationFallback} alone.</li>
+ *   when the preview could not be read and the step failed open): {@code R1} in the three
+ *   systems, so the creation is not refused for a code nobody was asked for, and a return gets
+ *   exactly what its preview shows. It lives in {@link #unattendedRectificationFallback} alone.</li>
  * </ul>
  *
  * <p>A key the caller did not send takes its previewed value, so the invoice ends up with
@@ -143,8 +145,15 @@ final class InvoiceSifPreset {
   static final String F_VF_NO_RECIPIENT_61D = Invoice.PROPERTY_ETVFACINVNOIDART61D;
   static final String F_TBAI_CODE = Invoice.PROPERTY_TBAIREVERSEINVOICECODE;
 
-  /** The code {@link #unattendedRectificationFallback} applies; never shown by the preview. */
-  static final String RECTIFICATION_FALLBACK = "R4";
+  /** The code {@link #unattendedRectificationFallback} applies (ETP-6179, decided by the user). */
+  static final String RECTIFICATION_FALLBACK = "R1";
+
+  /**
+   * The rectification code the preview of a rectificative built from a RETURN document
+   * preselects in every active system (ETP-6179, decided by the user). Same as the fallback, so a
+   * return's preview and what an unattended caller gets agree.
+   */
+  static final String RETURN_RECTIFICATION_DEFAULT = "R1";
   static final String DEFAULT_INV_TYPE = "F1";
   private static final String CLAVE_TIPO_RECTIFICATIVA = "R";
   private static final String TIPO_RECTIF_DEFAULT = "I";
@@ -182,14 +191,29 @@ final class InvoiceSifPreset {
    * @param docType the document type the action will use, may be {@code null}
    * @param sales its direction ({@code IsSOTrx})
    * @param order the order it comes from, may be {@code null}
+   * @param rectificationDefault the rectification code the preview preselects on a rectificative,
+   *     {@code null} for none (see {@link #withRectificationDefault})
    */
   record Target(Organization org, BusinessPartner partner, DocumentType docType, boolean sales,
-      Order order) {
+      Order order, String rectificationDefault) {
+
+    Target(Organization org, BusinessPartner partner, DocumentType docType, boolean sales,
+        Order order) {
+      this(org, partner, docType, sales, order, null);
+    }
 
     static Target of(Invoice invoice) {
       return new Target(invoice.getOrganization(), invoice.getBusinessPartner(),
           invoice.getTransactionDocument(), Boolean.TRUE.equals(invoice.isSalesTransaction()),
           invoice.getSalesOrder());
+    }
+
+    /**
+     * The same invoice, with a preselected rectification code: the caller knows, by the source it
+     * builds the invoice from (a return document), what a rectificative of it defaults to.
+     */
+    Target withRectificationDefault(String code) {
+      return new Target(org, partner, docType, sales, order, code);
     }
   }
 
@@ -200,7 +224,18 @@ final class InvoiceSifPreset {
   record Facts(boolean sales, boolean rectificative, boolean siiActive, boolean tbaiActive,
       boolean verifactuActive, String docInvType, String docVerifacDesc, boolean docSimplified7273,
       boolean docNoRecipient61d, String partnerSiiKey, String siiDescription, String operationDate,
-      String accountingRegDate, String authorizationNo) {
+      String accountingRegDate, String authorizationNo, String rectificationDefault) {
+
+    /** Facts with no preselected rectification code. */
+    Facts(boolean sales, boolean rectificative, boolean siiActive, boolean tbaiActive,
+        boolean verifactuActive, String docInvType, String docVerifacDesc,
+        boolean docSimplified7273, boolean docNoRecipient61d, String partnerSiiKey,
+        String siiDescription, String operationDate, String accountingRegDate,
+        String authorizationNo) {
+      this(sales, rectificative, siiActive, tbaiActive, verifactuActive, docInvType,
+          docVerifacDesc, docSimplified7273, docNoRecipient61d, partnerSiiKey, siiDescription,
+          operationDate, accountingRegDate, authorizationNo, null);
+    }
   }
 
   /** One editable field of the step: its type and, for a code, the codes it accepts. */
@@ -229,7 +264,8 @@ final class InvoiceSifPreset {
         siiActive ? siiDescription(target) : null,
         operationDate(target.order(), today),
         siiConfig != null && Boolean.TRUE.equals(siiConfig.isPostedInvoices()) ? null : today,
-        siiConfig != null ? StringUtils.trimToNull(siiConfig.getAuthorizationno()) : null);
+        siiConfig != null ? StringUtils.trimToNull(siiConfig.getAuthorizationno()) : null,
+        target.rectificationDefault());
   }
 
   // ---------------------------------------------------------------------------
@@ -300,7 +336,8 @@ final class InvoiceSifPreset {
 
   /**
    * The value each editable field shows in the preview and gets when the caller's
-   * {@code sifFields} omits it. A rectification code has none: it is the user's choice.
+   * {@code sifFields} omits it. A rectification code has the target's preselected one
+   * ({@link Facts#rectificationDefault}, {@code R1} on a return), else none.
    */
   static Map<String, Object> defaults(Facts f) {
     Map<String, Object> values = new LinkedHashMap<>();
@@ -320,8 +357,8 @@ final class InvoiceSifPreset {
         return DEFAULT_INV_TYPE;
       case F_SII_MOTIVE:
       case F_TBAI_CODE:
-        // Never preselected: the user chooses it in the step.
-        return null;
+        // Preselected only when the source says so (a return); otherwise the user chooses it.
+        return f.rectificationDefault();
       case F_SII_DESCRIPTION:
         return f.siiDescription();
       case F_SII_AUTHORIZATION:
@@ -342,13 +379,14 @@ final class InvoiceSifPreset {
   }
 
   /**
-   * VERI*FACTU type: none on a rectificative (the field carries the rectification code there, so
-   * it is the user's choice and must not read as an ordinary {@code F1}); otherwise the document
-   * type's own type when it is a normal ({@code F*}) one the step offers, else {@code F1}.
+   * VERI*FACTU type: on a rectificative the field carries the rectification code, so it gets the
+   * target's preselected code ({@code R1} on a return) or none, never an ordinary {@code F1};
+   * otherwise the document type's own type when it is a normal ({@code F*}) one the step offers,
+   * else {@code F1}.
    */
   static String defaultVerifactuInvType(Facts f) {
     if (f.rectificative()) {
-      return null;
+      return f.rectificationDefault();
     }
     String docInvType = StringUtils.trimToNull(f.docInvType());
     return docInvType != null && VF_NORMAL_TYPES.contains(docInvType) ? docInvType
@@ -356,13 +394,15 @@ final class InvoiceSifPreset {
   }
 
   /**
-   * The rectification codes applied when the caller sent NO {@code sifFields} at all: {@code R4}
+   * The rectification codes applied when the caller sent NO {@code sifFields} at all: {@code R1}
    * for each rectification field the invoice has ({@link #fields} lists them on a sales
    * rectificative, for its active systems only). Nobody reviewed the step in that case — an
    * MCP/API caller, or the SPA after a preview it could not read — and without this the
    * completion would be refused for a code nobody was asked for.
    *
-   * <p><b>This is the only place where the applied values differ from the preview.</b> To drop
+   * <p><b>The only place where the applied values can differ from the preview</b> (a
+   * rectificative whose preview preselects nothing; a return's preview already shows {@code R1}).
+   * To drop
    * the fallback (so that such a caller gets {@link RectificationFiscalCodeGuard}'s 422 instead),
    * return an empty map here; nothing else changes.
    */
@@ -500,6 +540,18 @@ final class InvoiceSifPreset {
    *     rectification code; the caller answers {@link Refused#toResponse()}, which rolls back
    */
   static void applyBeforeCompletion(Invoice invoice, JSONObject body) throws JSONException {
+    applyBeforeCompletion(invoice, body, null);
+  }
+
+  /**
+   * {@link #applyBeforeCompletion(Invoice, JSONObject)} for a source whose preview preselects a
+   * rectification code (a return: {@link #RETURN_RECTIFICATION_DEFAULT}), so a key the caller
+   * omits gets exactly what that preview showed.
+   *
+   * @param rectificationDefault the code the source's preview preselects, {@code null} for none
+   */
+  static void applyBeforeCompletion(Invoice invoice, JSONObject body, String rectificationDefault)
+      throws JSONException {
     if (invoice == null) {
       return;
     }
@@ -508,7 +560,7 @@ final class InvoiceSifPreset {
         && !JSONObject.NULL.equals(body.opt(PARAM_SIF_FIELDS))) {
       throw invalid(PARAM_SIF_FIELDS, "must be a JSON object");
     }
-    Facts f = resolveFacts(Target.of(invoice));
+    Facts f = resolveFacts(Target.of(invoice).withRectificationDefault(rectificationDefault));
     Map<String, Object> values = merge(f, requested);
     for (Map.Entry<String, Object> e : values.entrySet()) {
       write(invoice, e.getKey(), e.getValue(), f);
@@ -578,10 +630,11 @@ final class InvoiceSifPreset {
         + ACTION_SIF_DEFAULTS + " shows for it. ";
     String direction = sales
         ? "A normal invoice gets the VERI*FACTU type and description of its document type (F1 "
-            + "when it has none). On a rectificative invoice " + ACTION_SIF_DEFAULTS + " shows "
-            + "no SII motive, TicketBAI code or VERI*FACTU type: choose each one (R1-R5) and "
-            + "send it; only when you send no " + PARAM_SIF_FIELDS + " at all are they set to "
-            + RECTIFICATION_FALLBACK + ". Refused with 422 " + MSG_FIELD_INVALID + " for an "
+            + "when it has none). A rectificative invoice needs a SII motive, TicketBAI code and "
+            + "VERI*FACTU type (R1-R5) for each active system: " + ACTION_SIF_DEFAULTS + " shows "
+            + "the preselected one (" + RETURN_RECTIFICATION_DEFAULT + " for the rectificative "
+            + "of a return), and when you send no " + PARAM_SIF_FIELDS + " at all they are set "
+            + "to " + RECTIFICATION_FALLBACK + ". Refused with 422 " + MSG_FIELD_INVALID + " for an "
             + "unknown field or code, and with 422 ETGO_InvoiceRectificationCodeRequired when "
             + "a rectificative invoice is left without a code for an active system."
         : "A purchase invoice only has SII fields: " + F_OPERATION_DATE + ", "

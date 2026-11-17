@@ -189,8 +189,8 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         InvoiceSifPreset.sifFieldsParam(true))
         .withIdDescription("The id of the completed return receipt.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
-    // ETP-6179: the SIF fields the factura rectificativa would get (no rectification code
-    // preselected: the caller chooses one per active system).
+    // ETP-6179: the SIF fields the factura rectificativa would get (R1 preselected as the
+    // rectification code of every active system, editable).
     contracts.put(InvoiceSifPreset.ACTION_SIF_DEFAULTS, InvoiceSifPreset.defaultsContract(
         ACTION_CREATE_RETURN_INVOICE, "The id of the return receipt."));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);

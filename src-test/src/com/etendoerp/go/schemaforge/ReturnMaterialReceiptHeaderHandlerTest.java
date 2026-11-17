@@ -2054,11 +2054,11 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
   /**
    * sifDefaults on a customer return previews the factura rectificativa createReturnInvoice would
-   * create: every active system, with SII's motive, TicketBAI's code and VERI*FACTU's type left
-   * empty for the user to choose.
+   * create: every active system, with R1 preselected (editable) as SII's motive, TicketBAI's code
+   * and VERI*FACTU's type.
    */
   @Test
-  public void handle_sifDefaultsPreviewsNoRectificationCodeInAnyActiveSystem() throws Exception {
+  public void handle_sifDefaultsPreselectsR1InEveryActiveSystem() throws Exception {
     try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
         new InvoiceSifPreviewTestSupport.PreviewMocks(true)) {
       ShipmentInOut returnDoc = mock(ShipmentInOut.class);
@@ -2079,12 +2079,10 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertTrue(data.getBoolean("sales"));
       assertTrue(data.getBoolean("rectificative"));
       JSONObject fields = data.getJSONObject("fields");
-      assertTrue(fields.isNull(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-      assertTrue(fields.has(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-      assertTrue(fields.isNull(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
-      assertTrue(fields.has(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
-      assertTrue(fields.isNull(Invoice.PROPERTY_ETVFACINVTYPE));
-      assertTrue(fields.has(Invoice.PROPERTY_ETVFACINVTYPE));
+      // ETP-6179 (decided by the user): a return's rectificative preselects R1 in every system.
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_ETVFACINVTYPE));
       Mockito.verify(mocks.dal, Mockito.never()).save(any());
     }
   }
@@ -2148,7 +2146,8 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
             .fieldName("createReturnInvoice").recordId("rec-1").requestBody(body).build());
 
         assertEquals(200, result.getHttpStatus());
-        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+            InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
         Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
             .process(eq("ret-inv-sif"), eq("CO"), anyString(), anyString(), anyString(), any(),
                 any());

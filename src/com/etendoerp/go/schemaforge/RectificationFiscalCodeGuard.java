@@ -108,8 +108,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * own rectificative flag, the invoice's own {@code IsSOTrx}, and each system's own active
  * configuration. The actions that create AND complete an invoice in one call reach the same rule
  * through {@link #evaluate}, called by {@link InvoiceSifPreset#applyBeforeCompletion} (ETP-6179);
- * there the preview preselects no code either, and {@code InvoiceSifPreset} writes {@code R4}
- * before this guard runs only for a caller that sent no {@code sifFields} at all.
+ * there the preview of a RETURN's rectificative preselects {@code R1} (decided by the user), any
+ * other preselects nothing, and {@code InvoiceSifPreset} writes {@code R1} before this guard runs
+ * for a caller that sent no {@code sifFields} at all. Manual rectificatives keep CP-14.
  */
 final class RectificationFiscalCodeGuard {
 
