@@ -1076,7 +1076,7 @@ fi
 # (pp, default 1) below the base branch's, or below the absolute COVERAGE_MINIMUM
 # (default 70). Mirrors the Jenkins sonarUtils.compareCoverage gate. Current and
 # base coverage are queried live from Sonar by scripts/compare-sonar-coverage.py, the
-# same gate the CI's "Sonar Build" job runs (in --context ci, where it fails closed).
+# same gate the CI's "Go tests + Sonar + coverage" job runs (in --context ci, where it fails closed).
 CMP_RC=0
 if [[ "$COMPARE_COVERAGE" == "true" ]]; then
   CMP_BRANCH="${BASE_REF#origin/}"
