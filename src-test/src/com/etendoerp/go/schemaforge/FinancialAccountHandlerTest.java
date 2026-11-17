@@ -28,6 +28,8 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -102,9 +104,19 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *       rule matrix lives in {@link FinancialAccountHandlerCountryTest}.</li>
  *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
  *       account → 404 (ETP-5474).</li>
+ *   <li>SEPA remittances (ETP-6148): a Bank create with the {@code sepa-remittances} flag on
+ *       provisions the client in the pre-hook ({@link FinancialAccountRemittanceSupport}, flag and
+ *       DAL seams stubbed) and links the account in the post-hook; Cash, flag off and updates do
+ *       nothing; a provisioning conflict answers 409.</li>
+ *   <li>update of the PSD2 import keys (ETP-6151): {@code pSD2StatementFrequency} must be one of
+ *       1BD/1BW/1BM/1BE (written back trimmed), and {@code pSD2ImportFromDate} cannot be cleared
+ *       on a bank-connected account — both a 400 with the same texts as the bank-connection
+ *       actions, before the generic CRUD runs; a body without those keys loads nothing.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountRemittanceSupport
+ * @covers com.etendoerp.go.schemaforge.BankImportSettingsRules
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerTest {
@@ -120,18 +132,28 @@ public class FinancialAccountHandlerTest {
 
   private FinancialAccountHandler handler;
 
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
+
   /**
    * Initializes a Mockito spy of the handler before each test so individual
    * methods can stub the DB-bound seams without touching the real DAL layer.
    */
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new FinancialAccountHandler());
     // Stub the OBContext/OBDal seams so tests run without a live Etendo
     // session (CI has no initialized OBContext on the thread).
     org.mockito.Mockito.doNothing().when(handler).enterAdminMode();
     org.mockito.Mockito.doNothing().when(handler).exitAdminMode();
     org.mockito.Mockito.doNothing().when(handler).doRollbackAndClose();
+    // ETP-6148: a Bank create reads the sepa-remittances flag, which a developer may have on
+    // locally (etendo.go.flags.sepa-remittances); pin it off so these tests never provision.
+    handler.remittanceSupport = org.mockito.Mockito.spy(new FinancialAccountRemittanceSupport());
+    org.mockito.Mockito.doReturn(false).when(handler.remittanceSupport).isFlagEnabled();
   }
 
   /**
@@ -142,7 +164,17 @@ public class FinancialAccountHandlerTest {
    */
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Switches the ETP-6151 gate OFF for the rest of the test: the pre-ETP-6151 behaviour.
+   */
+  private void flagOff() {
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(false);
   }
 
   private NeoContext contextFor(String method, JSONObject body, String recordId) {
@@ -587,6 +619,229 @@ public class FinancialAccountHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     assertTrue(errorMessage(response).contains("France"));
+  }
+
+  // ── update: PSD2 import keys (pSD2StatementFrequency / pSD2ImportFromDate) ──
+
+  /**
+   * A mock account whose PSD2 connection status is {@code status} and whose stored import settings
+   * are both null, returned by the {@code loadAccount} seam for {@link #ACC_ID}.
+   *
+   * @param status the connection status ({@code "CO"} = connected), possibly {@code null}
+   * @return the account
+   */
+  private FIN_FinancialAccount stubStoredPsd2Account(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    // A real stored configuration: clearing it is what the connected-account rule protects.
+    when(account.getPSD2StatementFrequency()).thenReturn("1BD");
+    when(account.getPSD2ImportFromDate()).thenReturn(new java.util.Date(0L));
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
+  /**
+   * A bank-connected account linked before the import settings were required: both stored values
+   * are null, so sending them null again changes nothing.
+   *
+   * @return the account
+   */
+  private FIN_FinancialAccount stubConnectedAccountWithNullSettings() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn("CO");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
+  /**
+   * Runs a PATCH of {@link #ACC_ID} with {@code body} through {@code handle} and asserts it is
+   * refused with a 400 carrying {@code expectedMessage}: the pre-hook short-circuits, so the
+   * generic CRUD never runs, and the transaction is rolled back.
+   *
+   * @param body            the PATCH body
+   * @param expectedMessage the exact error text
+   */
+  private void assertPatchRejected(JSONObject body, String expectedMessage) throws Exception {
+    NeoResponse response = handler.handle(contextFor("PATCH", body, ACC_ID));
+
+    assertNotNull(body.toString(), response);
+    assertEquals(body.toString(), 400, response.getHttpStatus());
+    assertEquals(expectedMessage, response.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /** Each of the four PSD2 groupings passes and is written back trimmed; nothing is loaded. */
+  @Test
+  public void testUpdateAcceptsEveryPsd2GroupingTrimmed() throws Exception {
+    for (String grouping : List.of("1BD", "1BW", "1BM", "1BE")) {
+      JSONObject body = new JSONObject().put("pSD2StatementFrequency", " " + grouping + " ");
+
+      assertNull(grouping, handler.validateAndEnrichUpdate(ACC_ID, body));
+      assertEquals(grouping, body.getString("pSD2StatementFrequency"));
+    }
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** An update touching neither PSD2 import key never evaluates the flag (no account lookup). */
+  @Test
+  public void testUpdateWithoutImportKeysDoesNotEvaluateTheFlag() throws Exception {
+    JSONObject body = new JSONObject().put("description", "Notes");
+
+    handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    flagMock.verify(Psd2ImportSettingsFlag::isEnabled, never());
+  }
+
+  /** A body carrying a PSD2 import key evaluates the flag exactly once. */
+  @Test
+  public void testUpdateWithImportKeyEvaluatesTheFlagOnce() throws Exception {
+    handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("pSD2ImportFromDate", "2026-01-01"));
+    flagMock.verify(Psd2ImportSettingsFlag::isEnabled, org.mockito.Mockito.times(1));
+  }
+
+  /**
+   * Flag {@code psd2-statement-import-settings} OFF — the PUT/PATCH pre-hook does not validate the
+   * PSD2 import keys: an invalid grouping passes untouched (not trimmed, not refused) and no stored
+   * account is loaded.
+   */
+  @Test
+  public void testUpdateFlagOffDoesNotValidateTheImportKeys() throws Exception {
+    flagOff();
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", " MONTHLY ");
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+
+    assertEquals(" MONTHLY ", body.getString("pSD2StatementFrequency"));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * Flag OFF — clearing the import-from date and the grouping of a bank-connected account is not
+   * refused (the pre-ETP-6151 behaviour).
+   */
+  @Test
+  public void testUpdateFlagOffAllowsClearingTheImportKeysOfAConnectedAccount() throws Exception {
+    flagOff();
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)
+        .put("pSD2ImportFromDate", JSONObject.NULL);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A grouping outside the four codes is a 400 with the shared text, and is rolled back. */
+  @Test
+  public void testUpdateInvalidGroupingReturns400() throws Exception {
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "MONTHLY"),
+        "The statement grouping must be one of 1BD, 1BW, 1BM, 1BE");
+    verify(handler).doRollbackAndClose();
+  }
+
+  /**
+   * Clearing a stored grouping (JSON null or blank) of a bank-connected account is a 400: a
+   * connected account's saved configuration needs one.
+   */
+  @Test
+  public void testUpdateClearedGroupingOnConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("CO");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL),
+        "The statement grouping is required");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "  "),
+        "The statement grouping is required");
+    verify(handler, times(2)).doRollbackAndClose();
+  }
+
+  /**
+   * Echoing null/blank over an already null stored value passes on a connected account, for both
+   * keys: nothing real is cleared. The account is loaded once per request.
+   */
+  @Test
+  public void testUpdateEchoingNullOverNullStoredValuesPassesOnConnectedAccount()
+      throws Exception {
+    stubConnectedAccountWithNullSettings();
+    JSONObject body = new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)
+        .put("pSD2ImportFromDate", JSONObject.NULL);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    verify(handler, times(1)).loadAccount(ACC_ID);
+  }
+
+  /** On an account with no bank connection clearing the grouping stays allowed. */
+  @Test
+  public void testUpdateClearedGroupingOnNotConnectedAccountPasses() throws Exception {
+    for (String status : new String[] {"DC", null}) {
+      stubStoredPsd2Account(status);
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID,
+          new JSONObject().put("pSD2StatementFrequency", JSONObject.NULL)));
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID,
+          new JSONObject().put("pSD2StatementFrequency", "  ")));
+    }
+  }
+
+  /** A non-null grouping outside the four codes stays a 400 on an account with no connection. */
+  @Test
+  public void testUpdateInvalidGroupingOnNotConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("DC");
+    assertPatchRejected(new JSONObject().put("pSD2StatementFrequency", "MONTHLY"),
+        "The statement grouping must be one of 1BD, 1BW, 1BM, 1BE");
+  }
+
+  /**
+   * Clearing a stored import-from date (JSON null or blank) of a bank-connected account is a 400:
+   * a connected account always knows from which day its movements are imported.
+   */
+  @Test
+  public void testUpdateClearingImportFromOnConnectedAccountReturns400() throws Exception {
+    stubStoredPsd2Account("CO");
+
+    assertPatchRejected(new JSONObject().put("pSD2ImportFromDate", JSONObject.NULL),
+        "The import from date is required");
+    assertPatchRejected(new JSONObject().put("pSD2ImportFromDate", ""),
+        "The import from date is required");
+    verify(handler, times(2)).doRollbackAndClose();
+  }
+
+  /**
+   * On an account with no bank connection (the "disconnected" default, or no status) clearing the
+   * import-from date stays allowed.
+   */
+  @Test
+  public void testUpdateClearingImportFromOnNotConnectedAccountPasses() throws Exception {
+    for (String status : new String[] {"DC", null}) {
+      stubStoredPsd2Account(status);
+      JSONObject body = new JSONObject().put("pSD2ImportFromDate", JSONObject.NULL);
+
+      assertNull(String.valueOf(status), handler.validateAndEnrichUpdate(ACC_ID, body));
+    }
+  }
+
+  /**
+   * Setting the import-from date to a value needs no account: it is never loaded (the date's
+   * format is left to the generic CRUD).
+   */
+  @Test
+  public void testUpdateSettingImportFromNeverLoadsTheAccount() throws Exception {
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("pSD2ImportFromDate", "2026-01-01");
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * A body touching neither key is never checked: a connected account whose stored settings are
+   * null (linked before they were required) keeps accepting unrelated edits, and is not even
+   * loaded for them.
+   */
+  @Test
+  public void testUpdateWithoutImportKeysIsNotCheckedOnAConnectedAccount() throws Exception {
+    stubStoredPsd2Account("CO");
+    JSONObject body = new JSONObject().put("swiftCode", "BBVAESMM");
+
+    assertNull(handler.handle(contextFor("PATCH", body, ACC_ID)));
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).doRollbackAndClose();
   }
 
   /** Neither IBAN nor country touched: a no-op, mirroring the trigger's own re-validate guard —
@@ -2537,6 +2792,462 @@ public class FinancialAccountHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
     assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+
+  // ── SEPA remittances (ETP-6148): FinancialAccountRemittanceSupport through the hooks ─────────
+
+  /**
+   * Swaps in a remittance support whose flag and DAL seams are stubbed: the flag answers
+   * {@code flagOn}, and provisioning and linking are recorded instead of run.
+   */
+  private FinancialAccountRemittanceSupport stubRemittance(boolean flagOn) {
+    FinancialAccountRemittanceSupport support = spy(new FinancialAccountRemittanceSupport());
+    doReturn(flagOn).when(support).isFlagEnabled();
+    org.mockito.Mockito.doNothing().when(support).ensureClient(any());
+    org.mockito.Mockito.doNothing().when(support).ensureAccountLinks(any());
+    doReturn(mock(Client.class)).when(support).currentClient();
+    handler.remittanceSupport = support;
+    return support;
+  }
+
+  private static String messageKey(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0);
+  }
+
+  /** A POST create context whose generic CRUD answered 201 for {@link #ACC_ID}. */
+  private NeoContext createdContext() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    return ctx;
+  }
+
+  /**
+   * A valid Bank create with the flag on provisions the current client in the pre-hook — in the
+   * transaction that will insert the account — and leaves the links to the post-hook.
+   */
+  @Test
+  public void testRemittanceBankCreateWithFlagOnProvisionsTheClientBeforeTheSave()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    Client client = mock(Client.class);
+    doReturn(client).when(support).currentClient();
+    stubValidCreate();
+
+    assertNull(handler.handle(contextFor("POST", validCreateBody().put("iBAN", ES_IBAN), null)));
+
+    verify(support).ensureClient(client);
+    verify(support, never()).ensureAccountLinks(any());
+  }
+
+  /** With the flag off a Bank create provisions nothing. */
+  @Test
+  public void testRemittanceBankCreateWithFlagOffSkipsTheProvisioning() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false);
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(validCreateBody()));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** A Cash account never gets the remittance methods, flag on or off. */
+  @Test
+  public void testRemittanceCashCreateSkipsTheProvisioning() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(validCreateBody().put("type", "C")));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /**
+   * A unique violation while provisioning (a document type inserted at the same instant by a writer
+   * outside RemittanceSepaProvisioning) leaves the transaction unusable: it is rolled back and
+   * answered 409 ETGO_RemittanceProvisioningConflict, never a 500. SQLState 23505 is found whether
+   * it sits in the cause chain (Hibernate's ConstraintViolationException) or in the JDBC
+   * next-exception chain of a batch failure.
+   */
+  @Test
+  public void testRemittanceProvisioningUniqueViolationIsRolledBackAndAnswered409()
+      throws Exception {
+    java.sql.SQLException duplicate = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_doctype_name\"", "23505");
+    java.sql.SQLException batch = new java.sql.SQLException("Batch entry 0 was aborted", "HY000");
+    batch.setNextException(
+        new java.sql.SQLException("duplicate key value violates unique constraint", "23505"));
+    List<RuntimeException> failures = Arrays.asList(
+        new org.openbravo.base.exception.OBException("flush failed",
+            new org.hibernate.exception.ConstraintViolationException("could not insert", duplicate,
+                "c_doctype_name")),
+        new javax.persistence.PersistenceException("flush failed",
+            new org.hibernate.exception.GenericJDBCException("could not execute batch", batch)));
+    stubValidCreate();
+
+    for (RuntimeException failure : failures) {
+      FinancialAccountRemittanceSupport support = stubRemittance(true);
+      org.mockito.Mockito.doNothing().when(support).rollback();
+      doThrow(failure).when(support).ensureClient(any());
+
+      NeoResponse response = handler.validateAndEnrichCreate(validCreateBody());
+
+      assertEquals(failure.toString(), 409, response.getHttpStatus());
+      assertEquals(FinancialAccountRemittanceSupport.MSG_PROVISIONING_CONFLICT,
+          messageKey(response));
+      verify(support).rollback();
+    }
+  }
+
+  /** Any other provisioning failure, a non-unique SQLState included, is rethrown unanswered. */
+  @Test
+  public void testRemittanceProvisioningOtherFailuresAreRethrownWithoutRollback() throws Exception {
+    List<RuntimeException> failures = Arrays.asList(
+        new IllegalStateException("boom"),
+        new org.openbravo.base.exception.OBException("fk",
+            new java.sql.SQLException("violates foreign key constraint", "23503")));
+    stubValidCreate();
+
+    for (RuntimeException failure : failures) {
+      FinancialAccountRemittanceSupport support = stubRemittance(true);
+      org.mockito.Mockito.doNothing().when(support).rollback();
+      doThrow(failure).when(support).ensureClient(any());
+
+      // try/fail/catch rather than Assert.assertThrows: the root build resolves junit-4.12 first.
+      try {
+        handler.validateAndEnrichCreate(validCreateBody());
+        org.junit.Assert.fail("expected the provisioning failure to be rethrown: " + failure);
+      } catch (RuntimeException thrown) {
+        assertSame(failure, thrown);
+      }
+      verify(support, never()).rollback();
+    }
+  }
+
+  /** isUniqueViolation walks both chains and stops on a self-referencing cause. */
+  @Test
+  public void testRemittanceIsUniqueViolationReadsTheCauseAndNextExceptionChains() {
+    java.sql.SQLException batch = new java.sql.SQLException("batch", "HY000");
+    batch.setNextException(new java.sql.SQLException("dup", "23505"));
+
+    assertTrue(FinancialAccountRemittanceSupport.isUniqueViolation(
+        new RuntimeException(new RuntimeException(new java.sql.SQLException("dup", "23505")))));
+    assertTrue(FinancialAccountRemittanceSupport.isUniqueViolation(new RuntimeException(batch)));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(
+        new RuntimeException(new java.sql.SQLException("fk", "23503"))));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(new RuntimeException("x")));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(null));
+  }
+
+  /**
+   * A Bank account with open remittances cannot leave Bank: changing its type is refused with 422
+   * ETGO_RemittanceAccountTypeChangeBlocked, carrying the count. Not gated by the flag: the open
+   * remittances exist whatever the flag says now.
+   */
+  @Test
+  public void testRemittanceTypeChangeAwayFromBankWithOpenRemittancesIsRefused() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false);
+    FIN_FinancialAccount stored = stubStoredBankAccount(ES_IBAN, stubSpainWithIbanMeta());
+    doReturn(2L).when(support).countOpenRemittances(stored);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put("type", "C"));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_TYPE_CHANGE_BLOCKED, messageKey(response));
+    assertTrue(response.getBody().toString(), response.getBody().toString().contains("2"));
+  }
+
+  /** With no open remittances, or keeping the type Bank, the update passes without refusal. */
+  @Test
+  public void testRemittanceTypeChangeWithoutOpenRemittancesOrStayingBankPasses() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    FIN_FinancialAccount stored = stubStoredBankAccount(ES_IBAN, stubSpainWithIbanMeta());
+    doReturn(0L).when(support).countOpenRemittances(stored);
+    doReturn(false).when(handler).nameExists("x", ACC_ID);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("type", "CA")));
+
+    doReturn(3L).when(support).countOpenRemittances(stored);
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("type", "B")));
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("name", "x")));
+    verify(support, org.mockito.Mockito.times(1)).countOpenRemittances(any());
+  }
+
+  /** An update never provisions nor links: the remittance methods are a creation-time matter. */
+  @Test
+  public void testRemittanceUpdateNeverTouchesTheRemittanceMethods() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    stubStoredBankAccount(ES_IBAN, stubSpainWithIbanMeta());
+    doReturn(false).when(handler).nameExists("x", ACC_ID);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("name", "x")));
+    assertNull(handler.afterHandle(putContext("{\"name\": \"x\"}", false, new JSONObject())));
+
+    verify(support, never()).ensureClient(any());
+    verify(support, never()).ensureAccountLinks(any());
+  }
+
+  /** After a Bank create with the flag on, the new account is provisioned and then linked. */
+  @Test
+  public void testRemittanceAfterCreateLinksTheNewBankAccountAfterProvisioning()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    NeoContext ctx = createdContext();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("B");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountSupport> accountSupport =
+        mockStatic(FinancialAccountSupport.class)) {
+      assertNull(handler.afterHandle(ctx));
+
+      accountSupport.verify(() -> FinancialAccountSupport.provisionNewAccount(account));
+      verify(support).ensureAccountLinks(account);
+    }
+  }
+
+  /** No links for a Cash account, or with the flag off. */
+  @Test
+  public void testRemittanceAfterCreateSkipsCashAccountsAndFlagOff() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    NeoContext ctx = createdContext();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountSupport> ignored =
+        mockStatic(FinancialAccountSupport.class)) {
+      assertNull(handler.afterHandle(ctx));
+      when(account.getType()).thenReturn("B");
+      doReturn(false).when(support).isFlagEnabled();
+      assertNull(handler.afterHandle(ctx));
+    }
+    verify(support, never()).ensureAccountLinks(any());
+  }
+
+  /** A link failure after the create is logged, not answered: the account is already saved. */
+  @Test
+  public void testRemittanceAfterCreateSwallowsALinkFailure() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true);
+    NeoContext ctx = createdContext();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("B");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doThrow(new IllegalStateException("link boom")).when(support).ensureAccountLinks(any());
+
+    try (MockedStatic<FinancialAccountSupport> ignored =
+        mockStatic(FinancialAccountSupport.class)) {
+      assertNull(handler.afterHandle(ctx));
+    }
+    verify(support).ensureAccountLinks(account);
+    verify(handler, org.mockito.Mockito.atLeastOnce()).exitAdminMode();
+  }
+
+  // ── FinancialAccountRemittanceSupport rules, called directly ──────────────────────────────
+
+  /** A remittance support whose flag answers {@code flagOn}; nothing else stubbed. */
+  private static FinancialAccountRemittanceSupport supportWithFlag(boolean flagOn) {
+    FinancialAccountRemittanceSupport support = spy(new FinancialAccountRemittanceSupport());
+    doReturn(flagOn).when(support).isFlagEnabled();
+    return support;
+  }
+
+  private static FIN_FinancialAccount accountOfType(String type) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(type);
+    return account;
+  }
+
+  /**
+   * Only a Bank account with the flag on is a remittance account: Cash and Card never are, and
+   * nothing applies with the flag off, whatever the type.
+   */
+  @Test
+  public void testRemittanceAppliesToOnlyBankAccountsWithTheFlagOn() {
+    for (boolean flagOn : new boolean[] { true, false }) {
+      FinancialAccountRemittanceSupport support = supportWithFlag(flagOn);
+      for (String type : new String[] { "B", "C", "CA", null }) {
+        assertEquals("type " + type + ", flag " + flagOn, flagOn && "B".equals(type),
+            support.appliesTo(type));
+      }
+    }
+  }
+
+  /**
+   * The bank-connection flow's one-shot provisioning: a Bank account with the flag on is
+   * provisioned (setup and links) and answers null; a Card or Cash account, the flag off, or no
+   * account at all answer null without provisioning.
+   */
+  @Test
+  public void testRemittanceProvisionNewAccountProvisionsOnlyABankAccountWithTheFlagOn() {
+    FinancialAccountRemittanceSupport on = supportWithFlag(true);
+    doNothing().when(on).provisionAccount(any());
+    FIN_FinancialAccount bank = accountOfType("B");
+
+    assertNull(on.provisionNewAccount(bank));
+    verify(on).provisionAccount(bank);
+
+    for (FIN_FinancialAccount other : Arrays.asList(accountOfType("CA"), accountOfType("C"),
+        null)) {
+      assertNull(on.provisionNewAccount(other));
+    }
+    FinancialAccountRemittanceSupport off = supportWithFlag(false);
+    assertNull(off.provisionNewAccount(bank));
+
+    verify(on, times(1)).provisionAccount(any());
+    verify(off, never()).provisionAccount(any());
+  }
+
+  /**
+   * A unique violation while provisioning the new account rolls back and answers 409
+   * ETGO_RemittanceProvisioningConflict; any other failure is rethrown without a rollback.
+   */
+  @Test
+  public void testRemittanceProvisionNewAccountAnswers409OnAUniqueViolationAndRollsBack()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = supportWithFlag(true);
+    doNothing().when(support).rollback();
+    RuntimeException duplicate = new org.openbravo.base.exception.OBException("flush failed",
+        new java.sql.SQLException("duplicate key value violates unique constraint", "23505"));
+    doThrow(duplicate).when(support).provisionAccount(any());
+
+    NeoResponse response = support.provisionNewAccount(accountOfType("B"));
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_PROVISIONING_CONFLICT, messageKey(response));
+    verify(support).rollback();
+
+    FinancialAccountRemittanceSupport failing = supportWithFlag(true);
+    doNothing().when(failing).rollback();
+    IllegalStateException boom = new IllegalStateException("boom");
+    doThrow(boom).when(failing).provisionAccount(any());
+    try {
+      failing.provisionNewAccount(accountOfType("B"));
+      org.junit.Assert.fail("expected the provisioning failure to be rethrown");
+    } catch (IllegalStateException thrown) {
+      assertSame(boom, thrown);
+    }
+    verify(failing, never()).rollback();
+  }
+
+  /** linkNewAccount ignores a missing account without reading the flag. */
+  @Test
+  public void testRemittanceLinkNewAccountIgnoresANullAccount() {
+    FinancialAccountRemittanceSupport support = supportWithFlag(true);
+
+    support.linkNewAccount(null);
+
+    verify(support, never()).isFlagEnabled();
+    verify(support, never()).ensureAccountLinks(any());
+  }
+
+  /**
+   * A Bank account with open remittances cannot move to Cash or Card, flag off included: 422
+   * ETGO_RemittanceAccountTypeChangeBlocked with the count. Only a type that really leaves Bank is
+   * counted: an unknown stored account, a non-Bank one and Bank to Bank never query.
+   */
+  @Test
+  public void testRemittanceCheckTypeChangeCountsOnlyWhenTheTypeLeavesBank() throws Exception {
+    FinancialAccountRemittanceSupport support = supportWithFlag(false);
+    FIN_FinancialAccount bank = accountOfType("B");
+    doReturn(4L).when(support).countOpenRemittances(bank);
+
+    for (String target : new String[] { "C", "CA" }) {
+      NeoResponse response = support.checkTypeChange(bank, target);
+
+      assertEquals(target, 422, response.getHttpStatus());
+      assertEquals(FinancialAccountRemittanceSupport.MSG_TYPE_CHANGE_BLOCKED, messageKey(response));
+      assertTrue(response.getBody().toString(), response.getBody().getJSONObject("error")
+          .getString("message").contains("4"));
+    }
+    assertNull(support.checkTypeChange(null, "C"));
+    assertNull(support.checkTypeChange(accountOfType("C"), "CA"));
+    assertNull(support.checkTypeChange(bank, "B"));
+    verify(support, times(2)).countOpenRemittances(any());
+
+    doReturn(0L).when(support).countOpenRemittances(bank);
+    assertNull("no open remittance: the type may change", support.checkTypeChange(bank, "C"));
+    verify(support, never()).deactivateAccountLinks(any());
+  }
+
+  /**
+   * ETP-6148 W1: the links are deactivated by the post-hook, only for an account that really left
+   * Bank; the pre-hook check never writes, and becoming Bank again reactivates nothing.
+   */
+  @Test
+  public void testRemittanceDeactivateAfterLeavingBankOnlyForANonBankAccount() throws Exception {
+    FinancialAccountRemittanceSupport support = supportWithFlag(false);
+    doNothing().when(support).deactivateAccountLinks(any());
+    FIN_FinancialAccount bank = accountOfType("B");
+    doReturn(0L).when(support).countOpenRemittances(bank);
+
+    for (String target : new String[] { "C", "CA" }) {
+      assertNull(target, support.checkTypeChange(bank, target));
+      assertTrue(target, support.leavesBank(bank, target));
+    }
+    assertFalse(support.leavesBank(bank, "B"));
+    assertFalse(support.leavesBank(accountOfType("C"), "B"));
+    assertFalse(support.leavesBank(null, "C"));
+    verify(support, never()).deactivateAccountLinks(any());
+
+    FIN_FinancialAccount nowCash = accountOfType("C");
+    support.deactivateAfterLeavingBank(nowCash);
+    support.deactivateAfterLeavingBank(accountOfType("B"));
+    support.deactivateAfterLeavingBank(null);
+    verify(support).deactivateAccountLinks(nowCash);
+    verify(support, times(1)).deactivateAccountLinks(any());
+    verify(support, never()).ensureAccountLinks(any());
+  }
+
+  /**
+   * ETP-6148 W1 (repro of the tester-go finding): the update pre-hook only MARKS a change that
+   * leaves Bank; the post-hook deactivates the links only when the update answered 2xx. A refused
+   * update (missing_updated, stale record) never reaches the post-hook's deactivation, so the
+   * account keeps its links.
+   */
+  @Test
+  public void testRemittanceLinksAreDeactivatedOnlyAfterASuccessfulUpdate() throws Exception {
+    FIN_FinancialAccount stored = accountOfType("B");
+    doReturn(stored).when(handler).loadAccount(ACC_ID);
+    doReturn(0L).when(handler.remittanceSupport).countOpenRemittances(stored);
+    doNothing().when(handler.remittanceSupport).deactivateAccountLinks(any());
+    Map<String, Object> attributes = new java.util.HashMap<>();
+    NeoContext pre = contextFor("PATCH", new JSONObject().put("type", "C"), ACC_ID);
+    doAnswer(inv -> attributes.put(inv.getArgument(0), inv.getArgument(1))).when(pre)
+        .setAttribute(anyString(), any());
+
+    assertNull(handler.handle(pre));
+    assertEquals(Boolean.TRUE, attributes.get(FinancialAccountHandler.ATTR_LEAVING_BANK));
+    verify(handler.remittanceSupport, never()).deactivateAccountLinks(any());
+
+    FIN_FinancialAccount afterUpdate = accountOfType("C");
+    for (int status : new int[] { 400, 409 }) {
+      handler.afterHandle(postUpdate(attributes, status));
+    }
+    verify(handler.remittanceSupport, never()).deactivateAccountLinks(any());
+
+    doReturn(afterUpdate).when(handler).loadAccount(ACC_ID);
+    doNothing().when(handler).refreshAccount(afterUpdate);
+    handler.afterHandle(postUpdate(attributes, 200));
+    verify(handler.remittanceSupport).deactivateAccountLinks(afterUpdate);
+  }
+
+  private static NeoContext postUpdate(Map<String, Object> attributes, int status) {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn("financial-account");
+    when(ctx.getEntityName()).thenReturn("account");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getRecordId()).thenReturn(ACC_ID);
+    when(ctx.getRequestBody()).thenReturn(null);
+    when(ctx.getAttribute(anyString())).thenAnswer(inv -> attributes.get(inv.getArgument(0)));
+    when(ctx.getPreviousResult()).thenReturn(status < 300
+        ? NeoResponse.ok(new JSONObject()) : NeoResponse.error(status, "refused"));
+    return ctx;
   }
 
 }

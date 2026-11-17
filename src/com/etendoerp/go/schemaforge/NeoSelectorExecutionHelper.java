@@ -79,9 +79,7 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    // upper() on both sides is case-insensitive like lower(), and a trigram index on upper(col) can
-    // serve it; only tables that have one speed up (locally just c_bpartner).
-    hql.append("upper(e.").append(displayProperty).append(") LIKE upper(:search)");
+    hql.append(SelectorOrgFilter.searchLike("e." + displayProperty));
   }
 
   /**
@@ -96,10 +94,10 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    hql.append("(upper(e.").append(displayProperty).append(") LIKE upper(:search) OR exists (from ")
+    hql.append('(').append(SelectorOrgFilter.searchLike("e." + displayProperty)).append(" OR exists (from ")
         .append(trl.trlEntityName).append(" t2 where t2.").append(trl.backRefProperty)
-        .append(" = e and t2.language.language = :searchLang and upper(t2.")
-        .append(trl.nameProperty).append(") LIKE upper(:search)))");
+        .append(" = e and t2.language.language = :searchLang and ")
+        .append(SelectorOrgFilter.searchLike("t2." + trl.nameProperty)).append("))");
   }
 
   /**

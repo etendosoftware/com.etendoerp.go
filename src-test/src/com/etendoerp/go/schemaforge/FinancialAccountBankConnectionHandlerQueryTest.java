@@ -27,6 +27,7 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARA
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.getContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.singleParam;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubProviderLookup;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -35,10 +36,14 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -48,14 +53,17 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
@@ -66,6 +74,14 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * <p>The Salt Edge calls are delegated to static helpers, all mocked here. The provider catalog is
  * cached in a static map keyed by client+country, so each provider test uses a distinct country to
  * keep the cache hits/misses isolated across the suite.
+ *
+ * <p>ETP-6151: a non-empty {@code accounts} answer carries {@code maxFetchInterval}, the days of
+ * history the bank serves, as an int: the registered {@code PSD2_PROVIDER} limit when it declares
+ * one, otherwise the {@code max_fetch_interval} of the same single Salt Edge {@code providers/{code}}
+ * call that serves the logo, and omitted when neither declares one or the lookups fail.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerQueryTest {
@@ -88,6 +104,10 @@ public class FinancialAccountBankConnectionHandlerQueryTest {
   private static final String REASON_ALL_LINKED = "allLinked";
   private static final String REASON_CURRENCY_MISMATCH = "currencyMismatch";
   private static final String USD = "USD";
+  // ETP-6151 — the bank's history limit on a non-empty accounts response.
+  private static final String KEY_MAX_FETCH_INTERVAL = "maxFetchInterval";
+  private static final String PROVIDER_CODE = "bbva";
+  private static final String LOGO_URL = "https://cdn.saltedge.com/bank_icons/bbva.png";
   private static final String NO_CURRENCY_WITHOUT_MISMATCH =
       "accountCurrency is only reported for a currency mismatch";
 
@@ -98,16 +118,31 @@ public class FinancialAccountBankConnectionHandlerQueryTest {
 
   @Mock
   private Currency usdCurrency;
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
 
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Switches the ETP-6151 gate OFF for the rest of the test: the pre-ETP-6151 behaviour.
+   */
+  private void flagOff() {
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(false);
   }
 
   /** accounts without a connection id is rejected with a 400. */
@@ -191,6 +226,9 @@ public class FinancialAccountBankConnectionHandlerQueryTest {
       JSONObject data = dataOf(response);
       assertEquals(0, data.getJSONArray(ACTION_ACCOUNTS).length());
       assertFalse("no provider resolved for an empty result", data.has("providerName"));
+      assertFalse("no history limit for an empty result", data.has(KEY_MAX_FETCH_INTERVAL));
+      utils.verify(() -> BankIntegrationUtils.makeSaltEdgeRequest(any(), any(), any(), any()),
+          never());
     }
   }
 
@@ -468,6 +506,134 @@ public class FinancialAccountBankConnectionHandlerQueryTest {
     }
   }
 
+  // ── ETP-6151: maxFetchInterval on GET accounts ─────────────────────────────
+
+  /**
+   * The registered {@code PSD2_PROVIDER} limit wins over Salt Edge's: it is the number the
+   * {@code status} action and the synchronization's own warning name. Logo and limit both come
+   * from ONE Salt Edge call, and the limit goes on the wire as an int.
+   */
+  @Test
+  public void testAccountsRegisteredLimitWinsOverSaltEdge() throws Exception {
+    JSONObject data = accountsWithProvider(registered(BigDecimal.valueOf(90)),
+        saltEdgeProvider(365), PROVIDER_CODE);
+
+    assertEquals(90, data.get(KEY_MAX_FETCH_INTERVAL));
+    assertEquals(LOGO_URL, data.getString("providerLogoUrl"));
+  }
+
+  /**
+   * A bank never linked on this instance has no {@code PSD2_PROVIDER} row yet: the limit comes from
+   * the Salt Edge answer's {@code max_fetch_interval}.
+   */
+  @Test
+  public void testAccountsFallsBackToSaltEdgeWhenProviderNotRegistered() throws Exception {
+    JSONObject data = accountsWithProvider(null, saltEdgeProvider(180), PROVIDER_CODE);
+
+    assertEquals(180, data.get(KEY_MAX_FETCH_INTERVAL));
+  }
+
+  /** A registered row that declares no limit (0) falls back to Salt Edge too. */
+  @Test
+  public void testAccountsFallsBackToSaltEdgeWhenRegisteredLimitIsZero() throws Exception {
+    JSONObject data = accountsWithProvider(registered(BigDecimal.ZERO), saltEdgeProvider(180),
+        PROVIDER_CODE);
+
+    assertEquals(180, data.get(KEY_MAX_FETCH_INTERVAL));
+  }
+
+  /**
+   * When neither source declares a limit (Salt Edge answers 0 or no {@code max_fetch_interval}),
+   * the field is OMITTED, not null, so the SPA reads {@code undefined} and stays silent.
+   */
+  @Test
+  public void testAccountsOmitsTheLimitWhenNoSourceDeclaresIt() throws Exception {
+    JSONObject withoutField = new JSONObject()
+        .put(KEY_DATA, new JSONObject().put("logo_url", LOGO_URL));
+    for (JSONObject saltEdge : new JSONObject[] {saltEdgeProvider(0), withoutField}) {
+      JSONObject data = accountsWithProvider(registered(BigDecimal.ZERO), saltEdge, PROVIDER_CODE);
+
+      assertFalse(saltEdge.toString(), data.has(KEY_MAX_FETCH_INTERVAL));
+      assertEquals(LOGO_URL, data.getString("providerLogoUrl"));
+    }
+  }
+
+  /**
+   * A failing Salt Edge call leaves the logo empty and, with no registered row, the limit unknown;
+   * the account list itself is still answered.
+   */
+  @Test
+  public void testAccountsSurvivesASaltEdgeProviderFailure() throws Exception {
+    JSONObject data = accountsWithProvider(null, null, PROVIDER_CODE);
+
+    assertEquals(1, data.getJSONArray(ACTION_ACCOUNTS).length());
+    assertEquals("", data.getString("providerLogoUrl"));
+    assertFalse(data.has(KEY_MAX_FETCH_INTERVAL));
+  }
+
+  /**
+   * The provider lookup throwing is not a failure of the list either: it is treated as "not
+   * registered" and the Salt Edge value is used.
+   */
+  @Test
+  public void testAccountsFallsBackToSaltEdgeWhenTheProviderLookupThrows() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
+
+      JSONObject data = accountsData(saltEdgeProvider(120), PROVIDER_CODE);
+
+      assertEquals(1, data.getJSONArray(ACTION_ACCOUNTS).length());
+      assertEquals(120, data.get(KEY_MAX_FETCH_INTERVAL));
+    }
+  }
+
+  /**
+   * Flag {@code psd2-statement-import-settings} OFF — {@code GET accounts} answers the logo through
+   * the one plain {@code providers/{code}} call it always made, with no {@code maxFetchInterval}
+   * (neither the registered limit nor the Salt Edge one) and without the AIS-fields query.
+   */
+  @Test
+  public void testAccountsFlagOffAnswersTheLogoOnlyThroughTheOldCall() throws Exception {
+    flagOff();
+    ArgumentCaptor<String> endpoint = ArgumentCaptor.forClass(String.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+      stubProviderLookup(obDal, registered(new BigDecimal("90")));
+
+      JSONObject data = accountsData(utils, saltEdgeProvider(90), "fake_bank");
+
+      assertFalse(data.has(KEY_MAX_FETCH_INTERVAL));
+      assertEquals(LOGO_URL, data.getString("providerLogoUrl"));
+      utils.verify(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq(GET), any(),
+          endpoint.capture(), eq(API_KEY)), times(1));
+    }
+    assertTrue(endpoint.getValue(), endpoint.getValue().endsWith("providers/fake_bank"));
+  }
+
+  /**
+   * Exactly ONE Salt Edge request serves logo and limit, to {@code providers/{code}} with the code
+   * URL-encoded and {@code include_ais_fields=true} — {@code max_fetch_interval} is an AIS field,
+   * so without that flag the fallback would silently find nothing.
+   */
+  @Test
+  public void testAccountsAsksSaltEdgeOnceWithAisFieldsAndAnEncodedCode() throws Exception {
+    String code = "fake bank & co/es";
+    ArgumentCaptor<String> endpoint = ArgumentCaptor.forClass(String.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+      stubProviderLookup(obDal, null);
+
+      JSONObject data = accountsData(utils, saltEdgeProvider(90), code);
+
+      assertEquals(90, data.get(KEY_MAX_FETCH_INTERVAL));
+      utils.verify(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq(GET), any(),
+          endpoint.capture(), eq(API_KEY)), times(1));
+    }
+    String url = endpoint.getValue();
+    assertTrue(url, url.contains("providers/fake+bank+%26+co%2Fes?"));
+    assertTrue(url, url.contains("include_ais_fields=true"));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   /** Query params for the {@code accounts} action, optionally scoped to a Financial Account. */
@@ -523,5 +689,96 @@ public class FinancialAccountBankConnectionHandlerQueryTest {
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * A Salt Edge {@code providers/{code}} answer carrying {@link #LOGO_URL} and the given limit.
+   *
+   * @param maxFetchInterval the {@code max_fetch_interval} the answer declares
+   * @return the answer
+   */
+  private static JSONObject saltEdgeProvider(int maxFetchInterval) throws Exception {
+    return new JSONObject().put(KEY_DATA, new JSONObject()
+        .put("logo_url", LOGO_URL).put("max_fetch_interval", maxFetchInterval));
+  }
+
+  /**
+   * A registered {@code PSD2_PROVIDER} row declaring {@code maxFetchInterval}.
+   *
+   * @param maxFetchInterval the stored limit, possibly zero
+   * @return the provider
+   */
+  private static Provider registered(BigDecimal maxFetchInterval) {
+    Provider provider = mock(Provider.class);
+    when(provider.getMaxFetchInterval()).thenReturn(maxFetchInterval);
+    return provider;
+  }
+
+  /**
+   * Runs {@code GET accounts} (one EUR account to select) with the provider lookup resolving to
+   * {@code registeredRow} and Salt Edge answering {@code saltEdgeAnswer}.
+   *
+   * @param registeredRow  the {@code PSD2_PROVIDER} row, or {@code null} when not registered
+   * @param saltEdgeAnswer the {@code providers/{code}} answer, or {@code null} to make it throw
+   * @param providerCode   the connection's provider code
+   * @return the {@code response.data} of the 200 answer
+   */
+  private JSONObject accountsWithProvider(Provider registeredRow, JSONObject saltEdgeAnswer,
+      String providerCode) throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubProviderLookup(obDal, registeredRow);
+      return accountsData(saltEdgeAnswer, providerCode);
+    }
+  }
+
+  /**
+   * Same as {@link #accountsData(MockedStatic, JSONObject, String)}, with its own
+   * {@link BankIntegrationUtils} mock. The provider lookup must already be stubbed.
+   */
+  private JSONObject accountsData(JSONObject saltEdgeAnswer, String providerCode)
+      throws Exception {
+    try (MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+      return accountsData(utils, saltEdgeAnswer, providerCode);
+    }
+  }
+
+  /**
+   * Runs {@code GET accounts} for one EUR account of a connection whose provider code is
+   * {@code providerCode}, with Salt Edge's {@code providers/{code}} answering
+   * {@code saltEdgeAnswer}. The provider lookup must already be stubbed.
+   *
+   * @param utils          the open MockedStatic over {@link BankIntegrationUtils}
+   * @param saltEdgeAnswer the answer, or {@code null} to make the call throw
+   * @param providerCode   the connection's provider code
+   * @return the {@code response.data} of the answer, after checking it is a 200
+   */
+  private JSONObject accountsData(MockedStatic<BankIntegrationUtils> utils,
+      JSONObject saltEdgeAnswer, String providerCode) throws Exception {
+    JSONArray raw = eurNodes();
+    JSONObject details = new JSONObject().put("provider_name", BBVA)
+        .put("provider_code", providerCode);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(raw);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      if (saltEdgeAnswer == null) {
+        utils.when(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq(GET), any(), anyString(),
+            eq(API_KEY))).thenThrow(new IllegalStateException("Salt Edge down"));
+      } else {
+        utils.when(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq(GET), any(), anyString(),
+            eq(API_KEY))).thenReturn(saltEdgeAnswer);
+      }
+      stubFilters(linkHelper, raw, raw, raw);
+
+      NeoResponse response = handler.handle(getContext(accountsParams(null)));
+
+      assertEquals(200, response.getHttpStatus());
+      return dataOf(response);
+    }
   }
 }

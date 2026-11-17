@@ -106,7 +106,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@link RectificationTotalGuard}. Applies identically to any invoice spec built on
  * {@code C_Invoice} — nothing here branches on a spec or table name, only on the document type's
  * own rectificative flag, the invoice's own {@code IsSOTrx}, and each system's own active
- * configuration.
+ * configuration. The actions that create AND complete an invoice in one call reach the same rule
+ * through {@link #evaluate}, called by {@link InvoiceSifPreset#applyBeforeCompletion} (ETP-6179);
+ * for those flows only, {@code InvoiceSifPreset} preselects {@code R4} before this guard runs.
  */
 final class RectificationFiscalCodeGuard {
 
@@ -147,49 +149,63 @@ final class RectificationFiscalCodeGuard {
       return null;
     }
     try {
-      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-      if (invoice == null || !Boolean.TRUE.equals(invoice.isSalesTransaction())) {
-        return null;
-      }
-      DocumentType docType = invoice.getTransactionDocument();
-      if (!RectificativeSupport.isRectificative(docType)) {
-        // ETP-5745 CP-26: not rectificative, but still BLOCKS completion when VERI*FACTU's
-        // etvfacInvType is a stray R1-R5 — reverted from the earlier CP-20 behavior, which
-        // silently corrected it to "F1" instead. That was wrong for a guard whose whole job is
-        // to be the backstop for whatever state the user already brought to "Confirm": silently
-        // overwriting a value the user may have set on purpose (by mistake or not) hides the
-        // problem instead of surfacing it. The UI callout
-        // (InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType) may still auto-clear it the
-        // instant the user reverts the document type in the SAME gesture — that is immediate,
-        // visible feedback, not something hidden from them; this guard runs later, on
-        // already-persisted state, where silence is the wrong call.
-        if (isRectificativeVerifactuCode(invoice.getEtvfacInvType())) {
-          return rejectVerifactuInvTypeNotRectificative();
-        }
-        return null;
-      }
-      String orgId = invoice.getOrganization() != null ? invoice.getOrganization().getId() : null;
-      List<String> missing = missingSystems(invoice, orgId);
-      if (!missing.isEmpty()) {
-        return reject(missing);
-      }
-      // ETP-5745 CP-24: only correct SII's structural fields when SII actually applies to this
-      // org — see missingSystems' matching gate just below for why (an org that never enrolled
-      // in SII must never have aeatsiiClaveTipo stamped "R": the DB check constraint fires on
-      // ClaveTipo alone, with no awareness of whether the org even uses SII).
-      boolean changed = StringUtils.isNotBlank(orgId)
-          && SalesRectificativeFiscalDefaults.siiConfigActive(orgId)
-          && (correctClaveTipo(invoice) | defaultTipoRectif(invoice));
-      if (changed) {
-        OBDal.getInstance().save(invoice);
-        OBDal.getInstance().flush();
-      }
-      return null;
+      return evaluate(OBDal.getInstance().get(Invoice.class, invoiceId));
     } catch (RuntimeException | JSONException e) {
       log.warn("Could not evaluate the rectification fiscal-code guard for invoice {}: {}",
           invoiceId, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * The rule of {@link #checkAndApply} on an invoice already in hand (ETP-6179): the creation
+   * handlers that build AND complete an invoice in one call (order, quotation, shipment, receipt,
+   * return) never go through the header's completion PATCH, so they ask this directly, right
+   * before {@code InvoiceCompletionService#completeInvoiceOrThrow}. Same per-system rule, same
+   * 422 bodies and message keys, same structural correction of the SII fields.
+   *
+   * @param invoice the invoice about to be completed; {@code null} or a purchase invoice is a no-op
+   * @return the 422 refusal, or {@code null} to let the completion proceed
+   * @throws JSONException when the refusal body cannot be built
+   */
+  static NeoResponse evaluate(Invoice invoice) throws JSONException {
+    if (invoice == null || !Boolean.TRUE.equals(invoice.isSalesTransaction())) {
+      return null;
+    }
+    DocumentType docType = invoice.getTransactionDocument();
+    if (!RectificativeSupport.isRectificative(docType)) {
+      // ETP-5745 CP-26: not rectificative, but still BLOCKS completion when VERI*FACTU's
+      // etvfacInvType is a stray R1-R5 — reverted from the earlier CP-20 behavior, which
+      // silently corrected it to "F1" instead. That was wrong for a guard whose whole job is
+      // to be the backstop for whatever state the user already brought to "Confirm": silently
+      // overwriting a value the user may have set on purpose (by mistake or not) hides the
+      // problem instead of surfacing it. The UI callout
+      // (InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType) may still auto-clear it the
+      // instant the user reverts the document type in the SAME gesture — that is immediate,
+      // visible feedback, not something hidden from them; this guard runs later, on
+      // already-persisted state, where silence is the wrong call.
+      if (isRectificativeVerifactuCode(invoice.getEtvfacInvType())) {
+        return rejectVerifactuInvTypeNotRectificative();
+      }
+      return null;
+    }
+    String orgId = invoice.getOrganization() != null ? invoice.getOrganization().getId() : null;
+    List<String> missing = missingSystems(invoice, orgId);
+    if (!missing.isEmpty()) {
+      return reject(missing);
+    }
+    // ETP-5745 CP-24: only correct SII's structural fields when SII actually applies to this
+    // org — see missingSystems' matching gate just below for why (an org that never enrolled
+    // in SII must never have aeatsiiClaveTipo stamped "R": the DB check constraint fires on
+    // ClaveTipo alone, with no awareness of whether the org even uses SII).
+    boolean changed = StringUtils.isNotBlank(orgId)
+        && SalesRectificativeFiscalDefaults.siiConfigActive(orgId)
+        && (correctClaveTipo(invoice) | defaultTipoRectif(invoice));
+    if (changed) {
+      OBDal.getInstance().save(invoice);
+      OBDal.getInstance().flush();
+    }
+    return null;
   }
 
   /**

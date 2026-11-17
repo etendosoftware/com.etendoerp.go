@@ -98,7 +98,9 @@ final class ValuePagedRichQuery {
       params.putAll(extraFilterParams);
     }
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      params.put(SelectorQueryExecutor.PARAM_SEARCH, "%" + search + "%");
+      params.put(SelectorQueryExecutor.PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));
+      params.put(SelectorQueryExecutor.PARAM_SEARCH_LOOSE,
+          SelectorOrgFilter.searchLoosePattern(search));
     }
     return params;
   }

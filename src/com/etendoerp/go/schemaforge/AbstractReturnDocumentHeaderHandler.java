@@ -19,8 +19,15 @@ package com.etendoerp.go.schemaforge;
 import java.util.Map;
 
 import javax.inject.Inject;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -40,6 +47,8 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  */
 public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler {
 
+  private static final Logger LOG = LogManager.getLogger(AbstractReturnDocumentHeaderHandler.class);
+
   @Inject
   private DocumentPostingService postingService;
 
@@ -56,7 +65,46 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
     if (unpostRefusal != null) {
       return unpostRefusal;
     }
+    // ETP-6179: the SIF fields createReturnInvoice would give the factura rectificativa.
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && InvoiceSifPreset.ACTION_SIF_DEFAULTS.equals(context.getFieldName())
+        && "POST".equals(context.getHttpMethod())) {
+      return handleSifDefaults(context);
+    }
     return NeoHandlerUtils.delegateToPostingServiceOrElse(context, postingService, this::continueHandling);
+  }
+
+  /**
+   * ETP-6179: answers {@code sifDefaults} for the factura rectificativa
+   * {@code createReturnInvoice} would create from this return, creating nothing. Shared by both
+   * return headers: the direction comes from the return's own {@code IsSOTrx}.
+   */
+  private static NeoResponse handleSifDefaults(NeoContext context) {
+    String returnId = context.getRecordId();
+    if (returnId == null || returnId.isBlank()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut returnDoc = OBDal.getInstance().get(ShipmentInOut.class, returnId);
+        if (returnDoc == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+              "Return document not found");
+        }
+        return InvoiceSifPreset.previewResponse(new InvoiceSifPreset.Target(
+            returnDoc.getOrganization(), returnDoc.getBusinessPartner(),
+            ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc),
+            Boolean.TRUE.equals(returnDoc.isSalesTransaction()), null));
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      LOG.error("Error previewing the SIF fields for return {}: {}", returnId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while previewing the invoice's fiscal data");
+    }
   }
 
   /**

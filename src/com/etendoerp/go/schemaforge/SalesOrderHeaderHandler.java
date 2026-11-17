@@ -160,6 +160,9 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     contracts.put(CreateShipmentHandler.CONTRACT.getName(), CreateShipmentHandler.CONTRACT);
     contracts.put(CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(),
         CreateDraftInvoiceHandler.ORDER_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.ORDER_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.ORDER_SIF_DEFAULTS_CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
     return contracts;
   }

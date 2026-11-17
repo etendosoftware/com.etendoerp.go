@@ -35,6 +35,12 @@ public final class EmailProviderRequest {
   private final String template;
   private final JSONObject data;
   private final String replyTo;
+  /**
+   * Internal correlation id a contract attaches to the send so it can recognise it again in
+   * {@link EmailContract#onDelivered}. Never part of {@link #toProviderPayload()}: it identifies a
+   * row of ours and has no business leaving the server.
+   */
+  private final String sendCorrelationId;
 
   /**
    * Creates a single-recipient provider request resolved by a trusted email contract.
@@ -69,6 +75,34 @@ public final class EmailProviderRequest {
         "Template identifier is mandatory");
     this.data = data;
     this.replyTo = StringUtils.trimToNull(replyTo);
+    this.sendCorrelationId = null;
+  }
+
+  private EmailProviderRequest(EmailProviderRequest source, String sendCorrelationId) {
+    this.recipients = source.recipients;
+    this.recipient = source.recipient;
+    this.template = source.template;
+    this.data = source.data;
+    this.replyTo = source.replyTo;
+    this.sendCorrelationId = StringUtils.trimToNull(sendCorrelationId);
+  }
+
+  /**
+   * Returns a copy of this request carrying an internal correlation id.
+   *
+   * @param correlationId id the contract will read back in {@link EmailContract#onDelivered}, or
+   *     {@code null} for none
+   * @return a new request, identical except for the correlation id
+   */
+  public EmailProviderRequest withSendCorrelationId(String correlationId) {
+    return new EmailProviderRequest(this, correlationId);
+  }
+
+  /**
+   * @return the internal correlation id, or {@code null}; never sent to the provider
+   */
+  public String getSendCorrelationId() {
+    return sendCorrelationId;
   }
 
   public String getRecipient() {

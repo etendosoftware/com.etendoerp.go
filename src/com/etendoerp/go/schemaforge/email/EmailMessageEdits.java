@@ -69,6 +69,21 @@ public final class EmailMessageEdits {
   }
 
   /**
+   * As {@link #fromBody}, for a caller that already rejected malformed payloads (the send's
+   * resolve answers them with a 400): a parse failure degrades to "no edits".
+   *
+   * @param body command body, may be {@code null}
+   * @return parsed edits, or empty when absent or malformed
+   */
+  public static Optional<EmailMessageEdits> fromBodyQuietly(JSONObject body) {
+    try {
+      return fromBody(body);
+    } catch (InvalidMessageEditsException e) {
+      return Optional.empty();
+    }
+  }
+
+  /**
    * Parses and validates {@code messageEdits} from a command body.
    *
    * @param body command body, may be {@code null}

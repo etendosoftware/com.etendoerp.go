@@ -402,6 +402,28 @@ class BankStatementAgentActionsContractTest {
         contract.getDescription() == null || contract.getDescription().isBlank(), name));
   }
 
+  /**
+   * The {@code deleteStatement} description is what an agent reads to decide whether to reactivate
+   * first. Since ETP-6151 a processed statement of a bank-connected account is deleted directly, so
+   * the text must say so, keep the posted and matched-lines refusals, and no longer announce the
+   * old blanket 409 on connected accounts.
+   */
+  @Test
+  @DisplayName("deleteStatement describes the connected-account rule for both flag states")
+  void testDeleteStatementDescribesTheConnectedAccountRule() {
+    String description = BankStatementAgentActions.CONTRACTS.get(DELETE).getDescription();
+
+    // The static contract cannot know the account's rollout, so it states both rules.
+    assertTrue(description.contains("psd2-statement-import-settings"), description);
+    assertTrue(description.contains("(409 otherwise)"), description);
+    assertTrue(description.contains("only a DRAFT can be deleted"), description);
+    assertTrue(description.contains("a processed statement is deleted directly"), description);
+    assertTrue(description.contains("reactivated and deleted in one step"), description);
+    assertTrue(description.contains("posted (unpost it first)"), description);
+    assertTrue(description.contains("lines matched to transactions"), description);
+    assertTrue(description.contains("import-from date"), description);
+  }
+
   @Test
   @DisplayName("the declaration is immutable")
   void testContractsAreUnmodifiable() {

@@ -313,11 +313,18 @@ final class BankStatementAgentActions {
                 + "statement is a draft or is posted.")
             .withIdDescription(STATEMENT_ID_DESC),
         NeoActionContract.write(DELETE_STATEMENT,
-            "Permanently deletes a DRAFT bank statement and its lines (reactivateStatement a "
-                + "processed one first). Answers 409 when the account is connected to the bank "
-                + "(PSD2) — its statements come from the bank feed — and 400 when the statement "
-                + "still has lines matched to transactions (undo those reconciliations first) or "
-                + "is processed.")
+            "Permanently deletes a bank statement and its lines. On an account not connected "
+                + "to the bank only a DRAFT can be deleted (reactivateStatement a processed one "
+                + "first; a processed one answers 400). On an account connected to the bank (PSD2) "
+                + "a statement is deleted only when the psd2-statement-import-settings behaviour "
+                + "is enabled for the account (409 otherwise); when enabled, a processed "
+                + "statement is deleted directly: it is reactivated and "
+                + "deleted in one step, and refused with 400 when it is posted (unpost it "
+                + "first). Either way it answers 400 when the statement still has lines matched "
+                + "to transactions (undo those reconciliations first). On a connected account, "
+                + "movements dated on or after the account's import-from date come back on the "
+                + "next bank synchronization, while the bank still provides them (within the "
+                + "bank's history window).")
             .withIdDescription(STATEMENT_ID_DESC));
   }
 

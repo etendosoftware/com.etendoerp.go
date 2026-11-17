@@ -435,7 +435,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     return Collections.singletonList(FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT,
         new InvoicePendingResolver(InOutTargetBuilder.Direction.SALES,
             this::isStandardInvoiceDocType),
-        new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES, InvoiceInOutMapping::map,
+        new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES,
+            InvoiceInOutMapping::mapDeliverableOrders,
             InvoiceInOutMapping.linker(InOutTargetBuilder.Direction.SALES))));
   }
 

@@ -358,10 +358,22 @@ public class NeoDefaultsService {
     // number, and a reference whose rows were never given one falls back to an arbitrary row
     // ordering. A nullable column is, by definition, one where having no value yet is a valid and
     // meaningful state; only a column that cannot be null needs some value to avoid breaking the
-    // save, and that is the one case this fallback exists for. The gate is purely structural,
-    // keyed on the column's own not-null flag and never on which specific column it is.
+    // save, and that is the one case this fallback exists for.
+    //
+    // Regression fix (merge-block cut): the mandatory gate above was written to stop a List-reference
+    // (AD_Reference_ID = 17 — a fixed, pre-defined set of judgment-call codes) from being
+    // silently guessed, but the condition as written applied to EVERY combo, including
+    // TABLE/TABLEDIR-reference FKs (e.g. FIN_Paymentmethod_ID, ISMANDATORY='N') that DO have a
+    // sane "first option" default and were resolved here unconditionally before ETP-5745. Gating
+    // those too broke sales-order/sales-quotation defaults: the third-party callout only fills
+    // paymentMethod when the business partner has one configured, so for partners without one the
+    // field came back null, the document saved with no payment method, and completion failed with
+    // APRM_PAYMENTMETHOD_MISSING. The gate is purely structural (isListReference reads the
+    // column's own AD_Reference_ID, never a table/column/entity name): a List-reference column
+    // keeps the mandatory-only restriction, a TABLE/TABLEDIR-reference column goes back to always
+    // receiving the first-option fallback, same as pre-ETP-5745.
     if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
-        && Boolean.TRUE.equals(adColumn.isMandatory())) {
+        && (!isListReference(adColumn) || Boolean.TRUE.equals(adColumn.isMandatory()))) {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {

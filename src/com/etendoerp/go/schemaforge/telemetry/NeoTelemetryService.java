@@ -91,6 +91,8 @@ public class NeoTelemetryService {
    * already sends; no record id of any kind (contact, category, organization) is ever allowed.
    */
   private static final String PROP_ACCOUNT_ID = "account_id";
+  /** ETP-6230: tenant owner is on an internal e-mail domain (a boolean, never the address). */
+  private static final String PROP_INTERNAL = "internal";
   private static final String PROP_IS_CUSTOMER = "is_customer";
   private static final String PROP_IS_VENDOR = "is_vendor";
   private static final String PROP_PREVIOUS_IS_CUSTOMER = "previous_is_customer";
@@ -137,6 +139,7 @@ public class NeoTelemetryService {
       PROP_TOOL,
       PROP_VERB,
       PROP_ACCOUNT_ID,
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -188,6 +191,7 @@ public class NeoTelemetryService {
   private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       PROP_CRITICAL,
       "supportRequested",
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,

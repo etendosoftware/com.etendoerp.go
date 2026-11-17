@@ -135,7 +135,31 @@ public final class TenantQuotas {
     Plan plan = subscription.getPlan();
     return new TenantQuotas(clientId, plan == null ? null : plan.getBillingInterval(),
         subscription.getCurrentPeriodStart(), subscription.getCurrentPeriodEnd(),
-        subscription.getEndDate() != null, subscription.getStartDate(), definitions);
+        subscription.getEndDate() != null, quotaYearAnchorOf(subscription), definitions);
+  }
+
+  /**
+   * ETP-5053 — the anniversary the subscription year is counted from: {@code QUOTA_YEAR_START}
+   * when the row carries one, else {@code START_DATE}.
+   *
+   * <p>{@code START_DATE} is the moment the row was opened, and a plan change opens a successor
+   * row, so anchoring on it alone would restart the quota year — and wipe an exhausted yearly
+   * quota — on every upgrade or downgrade. The successor therefore inherits its predecessor's
+   * anchor in {@code QUOTA_YEAR_START}; a row that never went through a plan change (and every row
+   * written before ETP-5053) has none and keeps counting from its own start, so no data fix is
+   * needed. An anchor later than the row's own start is clamped to the start: the year can never
+   * begin after the row it is counted for.
+   *
+   * @param subscription a subscription row, never null
+   * @return the anchor, or null when the row has neither column
+   */
+  public static Date quotaYearAnchorOf(Subscription subscription) {
+    Date anchor = subscription.getQuotaYearStart();
+    Date start = subscription.getStartDate();
+    if (anchor == null) {
+      return start;
+    }
+    return start != null && anchor.after(start) ? start : anchor;
   }
 
   /**

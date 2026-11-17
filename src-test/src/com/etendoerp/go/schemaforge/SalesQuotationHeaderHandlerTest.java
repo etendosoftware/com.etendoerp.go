@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +40,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -74,6 +76,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
+
 /**
  * Unit tests for SalesQuotationHeaderHandler.handle() and afterHandle().
  *
@@ -102,7 +106,7 @@ import org.openbravo.model.common.order.Order;
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
- * @covers com.etendoerp.go.schemaforge.QuotationShipmentLinks
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -900,6 +904,44 @@ public class SalesQuotationHeaderHandlerTest {
   }
 
   /**
+   * ETP-6209 KPI — a conversion is an app acceptance when the quotation was Under Evaluation
+   * before it (its status is read before the conversion changes it); one the customer had already
+   * accepted from the portal ({@code ETGO_AC}) was counted then, and a conversion that fails
+   * records nothing.
+   */
+  @Test
+  public void testConvertQuotation_recordsAnAppAcceptanceOnlyForAnAcceptedUnderEvaluation()
+      throws Exception {
+    // Columns: quotation status before, reactivation throws, acceptances recorded.
+    Object[][] cases = { { "UE", false, 1 }, { "ETGO_AC", false, 0 }, { "UE", true, 0 } };
+    for (Object[] c : cases) {
+      Order order = orderWithStatus("CO", "DR");
+      Order quotation = mock(Order.class);
+      when(quotation.getDocumentStatus()).thenReturn((String) c[0], "CA");
+      try (MockedStatic<OrderDocActionSupport> docAction =
+               Mockito.mockStatic(OrderDocActionSupport.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        if ((Boolean) c[1]) {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE"))
+              .thenThrow(new java.sql.SQLException("statement timeout"));
+        } else {
+          docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+        }
+        kpi.when(() -> PortalKpiTelemetry.quotationOf("q-5528")).thenReturn(quotation);
+        kpi.when(() -> PortalKpiTelemetry.appQuotationConverted(any(), any()))
+            .thenCallRealMethod();
+
+        NeoResponse result = convertQuotation(order);
+
+        String label = Arrays.toString(c);
+        assertEquals(label, (Boolean) c[1] ? 500 : 200, result.getHttpStatus());
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(true, quotation),
+            times((Integer) c[2]));
+      }
+    }
+  }
+
+  /**
    * A failure the procedure REPORTS is best-effort: the conversion is kept, the order stays CO
    * and the response says so.
    */
@@ -936,6 +978,37 @@ public class SalesQuotationHeaderHandlerTest {
       assertEquals(500, result.getHttpStatus());
       assertFalse(result.getBody().has("salesOrderId"));
     }
+  }
+
+  /**
+   * ETP-5848: a refusal core RAISEs while converting — a quotation with no payment method — is the
+   * caller's to fix, so it is a 422 naming the message key, not a 500 with the raw exception.
+   */
+  @Test
+  public void testConvertQuotation_coreRefusal_isA422WithItsMessageKey() throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenThrow(new IllegalStateException(
+        new java.sql.SQLException("ERROR: @APRM_PAYMENTMETHOD_MISSING@", "P0001")));
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createOrder").recordId("q-5528").build());
+    }
+
+    assertEquals(422, result.getHttpStatus());
+    JSONObject error = result.getBody().getJSONObject("error");
+    assertEquals("APRM_PAYMENTMETHOD_MISSING", error.getJSONArray("messageKeys").getString(0));
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
   }
 
   /** An order core did not leave in CO is not reactivated. */
@@ -1030,9 +1103,7 @@ public class SalesQuotationHeaderHandlerTest {
 
   // ── afterHandle GET — total discount adjustment (ETP-4029 follow-up) ─────
   //
-  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path, which this
-  // handler's override runs first (ETP-6002 only adds linkedShipments on the detail GET; the
-  // reader's failure on these unstubbed read-only connections is logged and leaves the key out).
+  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path.
 
   private static SalesQuotationHeaderHandler handlerWithTotalDiscountMock(
       TotalDiscountService svc) throws Exception {
@@ -1064,6 +1135,65 @@ public class SalesQuotationHeaderHandlerTest {
     ResultSet rs = mock(ResultSet.class);
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(false);
+  }
+
+  /**
+   * ETP-6209: a new quotation never gets a reject reason by default. The field is editable (the
+   * seller sets the tenant's internal reason on a rejected quotation), so the defaults would fill
+   * it with the first reason; the answer drops it and its identifier, and keeps every other value.
+   */
+  @Test
+  public void testAfterHandle_defaultsNeverCarryARejectReason() throws Exception {
+    JSONObject defaults = new JSONObject().put("rejectReason", "RR-1")
+        .put("rejectReason$_identifier", "Precio").put("currency", "EUR");
+    NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS).build();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+
+    NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+    JSONObject answered = result.getBody().getJSONObject("defaults");
+    assertFalse(answered.has("rejectReason"));
+    assertFalse(answered.has("rejectReason$_identifier"));
+    assertEquals("EUR", answered.getString("currency"));
+  }
+
+  /**
+   * ETP-6209: evaluate-display answers the Classic lock of the reject reason (read-only once
+   * rejected); the quotation drops that one key so the window's own readOnlyLogic decides. Every
+   * other read-only answer and the visibility are kept; with no such key nothing changes.
+   */
+  @Test
+  public void testAfterHandle_evaluateDisplayDropsOnlyTheClassicRejectReasonLock()
+      throws Exception {
+    // Columns: read-only answer of the AD, read-only answer expected.
+    String[][] cases = {
+        { "{\"rejectReason\":true,\"documentNo\":true,\"orderDate\":false}",
+            "{\"documentNo\":true,\"orderDate\":false}" },
+        { "{\"documentNo\":true}", "{\"documentNo\":true}" },
+    };
+    for (String[] c : cases) {
+      JSONObject body = new JSONObject().put("readOnly", new JSONObject(c[0]))
+          .put("visibility", new JSONObject("{\"rejectReason\":true,\"documentNo\":true}"));
+      NeoContext ctx = NeoContext.builder().specName("sales-quotation").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.EVALUATE_DISPLAY).build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      JSONObject answered = (result != null ? result : ctx.getPreviousResult()).getBody();
+      JSONObject expected = new JSONObject(c[1]);
+      JSONObject readOnly = answered.getJSONObject("readOnly");
+      assertEquals(c[0], expected.length(), readOnly.length());
+      java.util.Iterator<?> keys = expected.keys();
+      while (keys.hasNext()) {
+        String key = (String) keys.next();
+        assertEquals(c[0] + " " + key, expected.getBoolean(key), readOnly.getBoolean(key));
+      }
+      JSONObject visibility = answered.getJSONObject("visibility");
+      assertEquals("visibility is untouched", 2, visibility.length());
+      assertTrue(visibility.getBoolean("rejectReason"));
+    }
   }
 
   @Test
@@ -1152,85 +1282,30 @@ public class SalesQuotationHeaderHandlerTest {
     }
   }
 
-  // ── afterHandle GET — linkedShipments (QuotationShipmentLinks) ────────────
+  // ── afterHandle GET — no goods movement among the related documents (ETP-6002 CP-14) ──
 
   /**
-   * {@code linkedShipments} — the shipments whose header or lines point at the quotation — is read
-   * on the detail GET only: never on the list, and a failed read leaves the key out without
-   * failing the GET. One row per case: {@code label, recordId, readFails, expectedShipments}
-   * ({@code -1} = key absent).
+   * ETP-6002 CP-14 (QA criterion): a quotation's related documents are its orders and invoices
+   * only. A shipment made from an invoice that came straight from the quotation relates to the
+   * invoice, never to the quotation, so the detail GET injects no {@code linkedShipments} and the
+   * key is not declared as a response field. The first IMP-3 version listed those shipments.
    */
   @Test
-  public void testAfterHandle_linkedShipmentsOnDetailGetOnly() throws Exception {
-    Object[][] cases = {
-        { "detail GET", "quot-ship-1", false, 1 },
-        { "list GET", null, false, -1 },
-        { "detail GET with a failed read", "quot-ship-1", true, -1 },
-    };
-    for (Object[] row : cases) {
-      String label = (String) row[0];
-      String recordId = (String) row[1];
-      boolean readFails = (Boolean) row[2];
-      int expected = (Integer) row[3];
-      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-        stubNoLinkedDocuments(obDalMock);
-        ResultSet emptyRs = mock(ResultSet.class);
-        when(emptyRs.next()).thenReturn(false);
-        PreparedStatement otherPs = mock(PreparedStatement.class);
-        when(otherPs.executeQuery()).thenReturn(emptyRs);
-        ResultSet shipmentsRs = mock(ResultSet.class);
-        when(shipmentsRs.next()).thenReturn(true, false);
-        when(shipmentsRs.getString(1)).thenReturn("ship-1");
-        when(shipmentsRs.getString(2)).thenReturn("SH-1");
-        when(shipmentsRs.getString(3)).thenReturn("CO");
-        when(shipmentsRs.getString(4)).thenReturn("N");
-        PreparedStatement shipmentsPs = mock(PreparedStatement.class);
-        when(shipmentsPs.executeQuery()).thenReturn(shipmentsRs);
-        Connection readOnlyConn = mock(Connection.class);
-        when(readOnlyConn.prepareStatement(anyString())).thenReturn(otherPs);
-        if (readFails) {
-          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL))
-              .thenThrow(new java.sql.SQLException("read failed"));
-        } else {
-          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL)).thenReturn(shipmentsPs);
-        }
-        OBDal readOnlyDal = mock(OBDal.class);
-        when(readOnlyDal.getConnection()).thenReturn(readOnlyConn);
-        obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+  public void testAfterHandle_quotationDetailListsNoShipment() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
+          new JSONArray().put(quotationRecordWithDiscount(true, 0.0, 100.0))));
+      NeoContext ctx = getCtx("quot-ship-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
 
-        JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
-            new JSONArray().put(quotationRecordWithDiscount(true, 0.0, 100.0))));
-        NeoContext ctx = getCtx(recordId);
-        ctx.setPreviousResult(NeoResponse.ok(body));
+      new SalesQuotationHeaderHandler().afterHandle(ctx);
 
-        NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
-
-        JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
-        if (expected < 0) {
-          assertFalse(label, rec.has(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
-        } else {
-          assertNotNull(label, result);
-          JSONArray shipments = result.getBody().getJSONObject("response").getJSONArray("data")
-              .getJSONObject(0).getJSONArray(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
-          assertEquals(label, expected, shipments.length());
-          assertEquals(label, "ship-1", shipments.getJSONObject(0).getString("id"));
-          assertEquals(label, "SH-1", shipments.getJSONObject(0).getString("documentNo"));
-          assertFalse(label, shipments.getJSONObject(0).getBoolean("isReturn"));
-        }
-        if (recordId == null) {
-          verify(readOnlyConn, never()).prepareStatement(QuotationShipmentLinks.SQL);
-        } else if (readFails) {
-          assertNotNull(label + ": a failed read must not fail the GET", result);
-        }
-      }
+      JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(rec.has("linkedShipments"));
     }
-  }
-
-  /** The injected key is declared, so the response field filter keeps it. */
-  @Test
-  public void testResponseEnrichedFields_declaresLinkedShipments() {
-    assertTrue(new SalesQuotationHeaderHandler().responseEnrichedFields()
-        .contains(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
+    assertFalse(new SalesQuotationHeaderHandler().responseEnrichedFields()
+        .contains("linkedShipments"));
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
@@ -1407,11 +1482,15 @@ public class SalesQuotationHeaderHandlerTest {
     Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
         new SalesQuotationHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createDraftInvoice", "rejectQuotation", "createRejectReason"),
+    assertEquals(List.of("createDraftInvoice", "sifDefaults", "rejectQuotation",
+            "createRejectReason"),
         List.copyOf(contracts.keySet()));
     com.etendoerp.go.schemaforge.util.NeoActionContract invoice = contracts.get("createDraftInvoice");
     assertSame(CreateDraftInvoiceHandler.QUOTATION_CONTRACT, invoice);
-    assertTrue("a quotation is invoiced in full: no parameters", invoice.getParams().isEmpty());
+    // a quotation is invoiced in full: its only parameter is the SIF fields (ETP-6179)
+    assertEquals(List.of("sifFields"), invoice.getParams().stream()
+        .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName)
+        .collect(java.util.stream.Collectors.toList()));
     String description = invoice.getDescription();
     assertTrue("must warn the invoice is completed despite the name",
         description.contains("COMPLETES") && description.contains("despite the name"));
@@ -1435,5 +1514,53 @@ public class SalesQuotationHeaderHandlerTest {
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
         com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
             "createDraftInvoice", new JSONObject().put("priceListId", "P1")).getHttpStatus());
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a quotation previews the invoice createDraftInvoice would create from it: SII
+   * and VERI*FACTU, the VERI*FACTU type of the invoice document type the quotation links (F2)
+   * and the quotation's SII description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheQuotation() throws Exception {
+    SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+    java.lang.reflect.Field field =
+        SalesQuotationHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order quotation =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      org.mockito.Mockito.when(mocks.dal.get(org.openbravo.model.common.order.Order.class, "sq-1"))
+          .thenReturn(quotation);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("sales-quotation", "sq-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
+    }
   }
 }

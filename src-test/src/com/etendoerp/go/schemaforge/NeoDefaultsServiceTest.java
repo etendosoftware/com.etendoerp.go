@@ -5900,6 +5900,12 @@ public class NeoDefaultsServiceTest {
     SFField sfField = mock(SFField.class);
     when(sfField.isReadOnly()).thenReturn(false);
     Column adColumn = mockColumn("EM_Aeatsii_Motivo_Rectif", false, false, true);
+    // Regression fix: the mandatory gate is now scoped to List-reference columns (AD_Reference_ID =
+    // "17") only — this field's real-world reference IS a List (a fixed set of rectification
+    // reason codes), so it must stay excluded as an optional column.
+    Reference reference = mock(Reference.class);
+    when(reference.getId()).thenReturn("17");
+    when(adColumn.getReference()).thenReturn(reference);
     Entity dalEntity = mock(Entity.class);
     JSONObject defaults = new JSONObject();
 
@@ -5909,12 +5915,57 @@ public class NeoDefaultsServiceTest {
               JSONObject.class, String.class, Entity.class },
           null, sfField, null, adColumn, defaults, "aeatsiiMotivoRectif", dalEntity);
 
-      assertFalse("an OPTIONAL column with no genuine default must stay absent from /defaults — "
-              + "never an arbitrarily-ordered 'first' AD_Ref_List row",
+      assertFalse("an OPTIONAL List-reference column with no genuine default must stay absent "
+              + "from /defaults — never an arbitrarily-ordered 'first' AD_Ref_List row",
           defaults.has("aeatsiiMotivoRectif"));
       // Proves the short-circuit happens BEFORE resolveFirstComboOption's own selector query —
       // not merely that the selector happened to answer empty.
       selectorMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testApplyDefaultWithComboFallbackStillAppliesForOptionalTableReferenceColumn()
+      throws Exception {
+    // Regression repro: ETP-5745's mandatory gate over-applied to TABLE/TABLEDIR
+    // reference combos too, which broke sales-order/sales-quotation defaults for
+    // FIN_Paymentmethod_ID (ISMANDATORY = 'N') — the field came back absent from /defaults
+    // whenever the third-party callout had nothing to fill it with, and the order/quotation
+    // later failed to complete with APRM_PAYMENTMETHOD_MISSING. A non-mandatory TABLE-reference
+    // column must still receive the first-option fallback, exactly as it did before ETP-5745.
+    SFField sfField = mock(SFField.class);
+    when(sfField.isReadOnly()).thenReturn(false);
+    Column adColumn = mockColumn("FIN_Paymentmethod_ID", false, false, true);
+    Reference reference = mock(Reference.class);
+    when(reference.getId()).thenReturn(NeoSelectorService.REF_TABLE);
+    when(adColumn.getReference()).thenReturn(reference);
+    Entity dalEntity = mock(Entity.class);
+    JSONObject defaults = new JSONObject();
+
+    JSONObject item = new JSONObject();
+    item.put("id", "FIRST-PAYMENTMETHOD-ID");
+    JSONArray items = new JSONArray();
+    items.put(item);
+    JSONObject selectorBody = new JSONObject();
+    selectorBody.put("items", items);
+    NeoResponse selectorResp = NeoResponse.ok(selectorBody);
+
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(adColumn))
+          .thenReturn(NeoSelectorService.REF_TABLE);
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(adColumn)).thenReturn(false);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+          eq(adColumn), eq("FIN_Paymentmethod_ID"), eq(null), eq(1), eq(0), any()))
+          .thenReturn(selectorResp);
+
+      invokePrivate("applyDefaultWithComboFallback",
+          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+              JSONObject.class, String.class, Entity.class },
+          null, sfField, null, adColumn, defaults, "paymentMethod", dalEntity);
+
+      assertEquals("an OPTIONAL TABLE-reference column must still fall back to the first combo "
+              + "option — the mandatory gate only applies to List-reference columns",
+          "FIRST-PAYMENTMETHOD-ID", defaults.getString("paymentMethod"));
     }
   }
 

@@ -226,6 +226,20 @@ public final class NeoDocumentPdf {
     return renderOnRequest(target, entity, stored, NeoPrintAfterComplete::renderAndWait);
   }
 
+  /**
+   * Whether the document's stored main PDF is a rendered cache older than the document (or the
+   * branding): {@link #resolveStored}'s {@code STALE}. Never renders. For a caller outside this
+   * package that serves the stored file itself and must not serve an outdated one (the customer
+   * portal after a confirmed decision changed the quotation, ETP-6209).
+   *
+   * @param target the document, already authorized for reading
+   * @param entity the spec's document entity
+   * @return {@code true} only for a stale rendered cache
+   */
+  public static boolean isStoredStale(NeoAttachmentTarget target, SFEntity entity) {
+    return resolveStored(target, entity).getStatus() == Status.STALE;
+  }
+
   /** A per-call render budget scope; closing it restores the previous one. Never throws. */
   @FunctionalInterface
   public interface RenderBudget extends AutoCloseable {

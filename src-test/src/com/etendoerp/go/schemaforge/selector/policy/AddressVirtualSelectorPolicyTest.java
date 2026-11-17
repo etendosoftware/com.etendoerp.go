@@ -55,12 +55,10 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 /**
  * Unit tests for {@link AddressVirtualSelectorPolicy} (ETP-5368).
  *
- * <p>{@code locationColumns()} is the only method that touches the DAL. Every case whose entity is
- * NOT an address wrapper stops before reaching it — that is the point, and a guard that stopped
- * working would let one of those reach OBDal and fail outright, which is exactly the regression
- * signal we want. The cases that ARE about a wrapper have to get past the guard by definition, so
- * they stub that one query through {@link #stubLocationColumns}; they must never be rewritten to
- * avoid it, because what they assert only means anything once the column really resolved.</p>
+ * <p>The wrapper guard reads model metadata to recognize an optional location pointer. Unrelated
+ * entity cases provide metadata without that pointer and verify that no location-column query
+ * reaches OBDal. Wrapper cases stub that query through {@link #stubLocationColumns}: their
+ * assertions only mean anything once the backing column really resolves.</p>
  *
  * <p>Also the ETP-5806 {@code structured-address-for-sepa} flag-OFF branch of
  * {@link AddressVirtualSelectorPolicy#resolveVirtualColumns}, with
@@ -82,6 +80,15 @@ public class AddressVirtualSelectorPolicyTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getADTab()).thenReturn(tab);
     return entity;
+  }
+
+  /** Model metadata for an unrelated table with no optional address pointer. */
+  private static void stubUnrelatedOrderMetadata(MockedStatic<ModelProvider> models) {
+    Entity order = mock(Entity.class);
+    when(order.getProperty("locationAddress", false)).thenReturn(null);
+    ModelProvider provider = mock(ModelProvider.class);
+    when(provider.getEntityByTableName("C_Order")).thenReturn(order);
+    models.when(ModelProvider::getInstance).thenReturn(provider);
   }
 
   /** A {@code C_Location} AD_Column as {@code locationColumns()} reads one. */
@@ -156,7 +163,12 @@ public class AddressVirtualSelectorPolicyTest {
 
   @Test
   public void unrelatedEntityIsNotAnAddressWrapper() {
-    assertFalse(AddressVirtualSelectorPolicy.isAddressWrapper(entityOnTable("C_Order")));
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      stubUnrelatedOrderMetadata(models);
+      assertFalse(AddressVirtualSelectorPolicy.isAddressWrapper(entityOnTable("C_Order")));
+      dal.verifyNoInteractions();
+    }
   }
 
   @Test
@@ -287,17 +299,27 @@ public class AddressVirtualSelectorPolicyTest {
 
   @Test
   public void unrelatedEntityResolvesNoSelectorColumn() {
-    assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
-        entityOnTable("C_Order"), "C_Region_ID"));
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      stubUnrelatedOrderMetadata(models);
+      assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable("C_Order"), "C_Region_ID"));
+      dal.verifyNoInteractions();
+    }
   }
 
   // ── resolveVirtualColumns ─────────────────────────────────────────────
 
   @Test
   public void unrelatedEntityExposesNoVirtualColumns() {
-    // Empty, never null: callers append the result unconditionally.
-    assertEquals(0, AddressVirtualSelectorPolicy.resolveVirtualColumns(entityOnTable("C_Order"))
-        .size());
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      stubUnrelatedOrderMetadata(models);
+      // Empty, never null: callers append the result unconditionally.
+      assertEquals(0, AddressVirtualSelectorPolicy.resolveVirtualColumns(entityOnTable("C_Order"))
+          .size());
+      dal.verifyNoInteractions();
+    }
   }
 
   @Test
@@ -426,8 +448,13 @@ public class AddressVirtualSelectorPolicyTest {
 
   @Test
   public void unrelatedEntityReportsNoServerResolvedField() {
-    assertTrue(AddressVirtualSelectorPolicy.serverResolvedFieldNames(entityOnTable("C_Order"))
-        .isEmpty());
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      stubUnrelatedOrderMetadata(models);
+      assertTrue(AddressVirtualSelectorPolicy.serverResolvedFieldNames(entityOnTable("C_Order"))
+          .isEmpty());
+      dal.verifyNoInteractions();
+    }
   }
 
   @Test

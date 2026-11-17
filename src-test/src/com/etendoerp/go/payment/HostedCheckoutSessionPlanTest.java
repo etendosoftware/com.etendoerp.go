@@ -6,18 +6,22 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -30,6 +34,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
 
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
@@ -44,6 +49,8 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * <p>Two refusals must stay distinguishable, because they mean opposite things to the person on
  * the other end — "your request named something that is not for sale" versus "this deployment has
  * nothing to sell yet".
+ *
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
  */
 class HostedCheckoutSessionPlanTest {
 
@@ -81,6 +88,7 @@ class HostedCheckoutSessionPlanTest {
     stripeApiClient = mock(StripeApiClient.class);
     stripePriceService = mock(StripePriceService.class);
     service = new HostedCheckoutService();
+    service.promotionTerms = mock(CheckoutPromotionTerms.class);
     service.stripePriceService = stripePriceService;
     service.planCatalogService = planCatalogService;
     service.checkoutRequestStore = checkoutRequestStore;
@@ -98,6 +106,9 @@ class HostedCheckoutSessionPlanTest {
     Plan plan = mock(Plan.class);
     when(plan.getSearchKey()).thenReturn(PLAN_KEY);
     when(plan.getProviderPriceID()).thenReturn(priceId);
+    when(plan.getDisplayPrice()).thenReturn(new java.math.BigDecimal("29.00"));
+    when(plan.getCurrencyCode()).thenReturn("EUR");
+    when(plan.getBillingInterval()).thenReturn("month");
     return plan;
   }
 
@@ -216,5 +227,39 @@ class HostedCheckoutSessionPlanTest {
 
     assertThrows(IllegalStateException.class,
         () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY));
+  }
+
+  /**
+   * ETP-6082: the monthly plan's free trial is offered once per account. A new account's session
+   * asks Stripe for the trial and, since nothing is due today, for the card explicitly; once the
+   * account has paid a purchase, the next session charges from the first month.
+   */
+  @Test
+  void aNewAccountGetsTheFreeTrialAndAnAccountThatAlreadyPaidDoesNot() throws Exception {
+    Plan plan = planWith(PRICE_ID);
+    when(planCatalogService.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(plan));
+    when(planCatalogService.hasProviderPrice(plan)).thenReturn(true);
+    givenTheProviderAccepts();
+    when(service.promotionTerms.recordIntent(anyString(), any(), anyBoolean(), any()))
+        .thenAnswer(call -> CheckoutPromotionTerms.describe(call.getArgument(0), PRICE_ID, 2900,
+            "EUR", "month", call.getArgument(2)));
+    when(checkoutRequestStore.findForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(List.of(), List.of(mock(CheckoutRequest.class)));
+
+    service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY);
+    service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY);
+
+    ArgumentCaptor<String> forms = ArgumentCaptor.forClass(String.class);
+    verify(stripeApiClient, times(2)).postForm(anyString(), forms.capture(), anyString());
+    String trial = forms.getAllValues().get(0);
+    assertTrue(trial.contains("subscription_data%5Btrial_period_days%5D=30"), trial);
+    assertTrue(trial.contains("payment_method_collection=always"), trial);
+    assertTrue(trial.contains("subscription_data%5Btrial_settings%5D%5Bend_behavior%5D"
+        + "%5Bmissing_payment_method%5D=cancel"), trial);
+    assertTrue(trial.contains("promotion_version%5D=" + CheckoutPromotionTerms.TRIAL_VERSION),
+        trial);
+    String paying = forms.getAllValues().get(1);
+    assertFalse(paying.contains("trial_period_days"), paying);
+    assertTrue(paying.contains("payment_method_collection=if_required"), paying);
   }
 }

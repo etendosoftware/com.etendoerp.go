@@ -164,6 +164,11 @@ public class DocTypeResolver {
    * {@link #reapplyDocTypeFromTabFilter}; this is the same rule for the callout endpoint:
    * the offending value is dropped so the form keeps its current, valid doc type.
    *
+   * <p>Both {@code C_DocTypeTarget_ID} and {@code C_DocType_ID} are checked, each only when the
+   * table has it: a table with just the effective column (e.g. goods receipts and shipments)
+   * is checked on that one. The same correction reaches {@code /defaults} and MCP
+   * {@code etendo_defaults}, whose callout cascade runs through this same callout service.
+   *
    * <p>The filter is read from the tab's HQL where clause exactly as
    * {@link #resolveDefaultDocTypeId} reads it (sub-type LIKE / NOT LIKE, return flag). A tab
    * without such a filter is never touched, and a proposed doc type that satisfies the filter
@@ -190,7 +195,11 @@ public class DocTypeResolver {
         return;
       }
       for (String columnName : new String[] { COL_DOC_TYPE_TARGET_ID, COL_DOC_TYPE_ID }) {
-        Property prop = dalEntity.getPropertyByColumnName(columnName);
+        // Non-throwing lookup: a table may carry only C_DocType_ID (M_InOut has no target
+        // column). The one-argument form throws CheckException for a missing column, which
+        // the catch below swallowed — so the effective doc type was never checked there and a
+        // return receipt took the shipment doc type and number from the BP callout (ETP-5837).
+        Property prop = dalEntity.getPropertyByColumnName(columnName, false);
         if (prop != null) {
           dropIfOutsideFilter(calloutResponse.optJSONObject("updates"), prop.getName(),
               "value", filters);

@@ -307,6 +307,21 @@ final class ReturnShipmentUtils {
     return candidates.isEmpty() ? null : candidates.get(0);
   }
 
+  /**
+   * The document type {@code createReturnInvoice} gives the factura rectificativa of a return,
+   * by the return's own direction: the rectificative ARI of a customer return, the rectificative
+   * API of a return to a vendor — the same lookup each return header runs (ETP-4737). Used by the
+   * {@code sifDefaults} preview (ETP-6179), which must not guess another type.
+   *
+   * @param returnDoc the return document
+   * @return the document type, or {@code null} when the organization has none
+   */
+  static DocumentType findReturnInvoiceDocType(ShipmentInOut returnDoc) {
+    boolean isSales = Boolean.TRUE.equals(returnDoc.isSalesTransaction());
+    return findReturnDocTypeForOrg(returnDoc.getClient(), returnDoc.getOrganization().getId(),
+        isSales ? "ARI" : "API", isSales, false, true);
+  }
+
   // ---------------------------------------------------------------------------
   // Return invoice header – shared between both return header handlers
   // ---------------------------------------------------------------------------

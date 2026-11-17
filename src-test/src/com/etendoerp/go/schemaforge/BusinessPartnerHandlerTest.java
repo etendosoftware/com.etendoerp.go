@@ -66,6 +66,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
@@ -81,7 +82,9 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  *
  * <p>The contact-type rules themselves (the explicit/inherited matrix, the default category) are
  * specified in {@code ContactTypeRulesTest}; this class only pins that {@code handle()} and
- * {@code afterHandle()} apply them.
+ * {@code afterHandle()} apply them. Likewise the customer's SEPA mandate rules (ETP-6148) are
+ * specified in {@code ContactSepaMandateDefaultsTest}; here only that {@code handle()} applies
+ * them, behind the {@code sepa-remittances} flag.
  *
  * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  */
@@ -1921,9 +1924,13 @@ class BusinessPartnerHandlerTest {
   @Test
   void attachesPrimaryAddressAndContactToEachListRow() throws Exception {
     JSONObject body = buildListBody("BP1", "BP2");
+    // Positional with LOCATION_COLUMNS: address1, street, buildingnumber, city, postal, country,
+    // region. BP1 is a structured address; BP2 a legacy one whose number column comes back blank.
     Map<String, String[]> locations = new HashMap<>();
-    locations.put("BP1", new String[] { "Calle Mayor 12", "Madrid", "28013", "Spain", "Madrid" });
-    locations.put("BP2", new String[] { "Av. Industria 45", "Barcelona", "08018", "Spain", "Barcelona" });
+    locations.put("BP1", new String[] { "Calle Mayor, 12", "Calle Mayor", "12",
+        "Madrid", "28013", "Spain", "Madrid" });
+    locations.put("BP2", new String[] { "Av. Industria 45", "Av. Industria 45", "   ",
+        "Barcelona", "08018", "Spain", "Barcelona" });
     Map<String, String[]> contacts = new HashMap<>();
     contacts.put("BP1", new String[] { "Lucía", "Fernández", "lucia@example.com", "610000101", "Compras" });
     contacts.put("BP2", new String[] { "Andrés", "Molina", "andres@example.com", "610000102", "Taller" });
@@ -1933,7 +1940,9 @@ class BusinessPartnerHandlerTest {
     assertNotNull(result);
     JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
     JSONObject child = row.getJSONObject("etgoChildData");
-    assertEquals("Calle Mayor 12", child.getString("address"));
+    assertEquals("Calle Mayor, 12", child.getString("address"));
+    assertEquals("Calle Mayor", child.getString("street"));
+    assertEquals("12", child.getString("buildingNumber"));
     assertEquals("Madrid", child.getString("city"));
     assertEquals("28013", child.getString("postal"));
     assertEquals("Spain", child.getString("country"));
@@ -1945,7 +1954,11 @@ class BusinessPartnerHandlerTest {
     assertEquals("Compras", child.getString("position"));
 
     JSONObject second = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(1);
-    assertEquals("Barcelona", second.getJSONObject("etgoChildData").getString("city"));
+    JSONObject secondChild = second.getJSONObject("etgoChildData");
+    assertEquals("Barcelona", secondChild.getString("city"));
+    assertEquals("Av. Industria 45", secondChild.getString("street"));
+    // A blank column leaves its key out — never "" or "null", which a re-import would write.
+    assertFalse(secondChild.has("buildingNumber"));
   }
 
   /**
@@ -2513,5 +2526,66 @@ class BusinessPartnerHandlerTest {
         ArgumentCaptor.forClass(org.hibernate.criterion.Criterion.class);
     verify(criteria, org.mockito.Mockito.atLeastOnce()).add(captor.capture());
     return (List<Object>) (List<?>) captor.getAllValues();
+  }
+
+  // ── handle() — the customer's SEPA mandate (ETP-6148) ─────────────────────────────────────────
+
+  /**
+   * Flag off: the mandate keys a stale client or an agent sent are dropped from the body, at the
+   * top level and inside {@code data}, and the rest of the pre-save hook still runs.
+   */
+  @Test
+  void testHandlePostWithSepaRemittancesOffDropsTheMandateKeys() throws Exception {
+    JSONObject data = new JSONObject().put(ContactSepaMandateDefaults.FIELD_MANDATE_DATE,
+        "2026-01-01");
+    JSONObject body = new JSONObject();
+    body.put("name", "Cliente SL");
+    body.put(ContactSepaMandateDefaults.FIELD_MANDATE_ID, "MANDATE-1");
+    body.put("EM_Obsepad_Mandate_Date", "2026-01-01");
+    body.put("data", data);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<SepaRemittancesFlag> flag = mockStatic(SepaRemittancesFlag.class)) {
+      flag.when(SepaRemittancesFlag::isEnabled).thenReturn(false);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertFalse(body.has(ContactSepaMandateDefaults.FIELD_MANDATE_ID));
+    assertFalse(body.has("EM_Obsepad_Mandate_Date"));
+    assertFalse(data.has(ContactSepaMandateDefaults.FIELD_MANDATE_DATE));
+    assertEquals("Cliente SL", body.getString("searchKey"), "the rest of the hook ran");
+  }
+
+  /**
+   * Flag on: a customer created with a tax ID and no mandate gets the tax ID as its mandate
+   * identifier and today as its signature date.
+   */
+  @Test
+  void testHandlePostWithSepaRemittancesOnDefaultsTheCustomerMandate() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Cliente SL");
+    body.put("taxID", "B12345678");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    org.openbravo.base.model.Entity bpEntity = mock(org.openbravo.base.model.Entity.class);
+    when(bpEntity.hasProperty(anyString())).thenReturn(true);
+    org.openbravo.base.model.ModelProvider model =
+        mock(org.openbravo.base.model.ModelProvider.class);
+    when(model.getEntity("BusinessPartner", false)).thenReturn(bpEntity);
+
+    try (MockedStatic<SepaRemittancesFlag> flag = mockStatic(SepaRemittancesFlag.class);
+        MockedStatic<org.openbravo.base.model.ModelProvider> models =
+            mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+      flag.when(SepaRemittancesFlag::isEnabled).thenReturn(true);
+      models.when(org.openbravo.base.model.ModelProvider::getInstance).thenReturn(model);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals("B12345678", body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_ID));
+    assertEquals(java.time.LocalDate.now().toString(),
+        body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_DATE));
   }
 }

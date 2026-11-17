@@ -147,33 +147,34 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String DEFAULT_REFERENCE = "**";
   static final String MSG_MISSING_FIELD = "Missing required field: ";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
-  private static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
+  // Package-private (not private): BankStatementDeletion#load and #prepare apply the delete rule
+  // with the same messages this class answers everywhere else (ETP-6151).
+  static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
-  private static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
+  static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
   private static final String MSG_NOT_PROCESSED = "Only processed statements can be reactivated";
   private static final String MSG_POSTED = "The statement is posted and cannot be reactivated";
   // Only ?action=delete guards on this now — ?action=reactivate does not (ETP-4921, see
   // handleReactivate's javadoc). Deleting the WHOLE statement removes its matched lines along
   // with it, which core's own APRM_FIN_BNKSTM_LINE_CHECK_TRG trigger never allows regardless of
   // caller; this check turns that into a clean 400 instead of a raw DB trigger exception.
-  private static final String MSG_HAS_MATCHED_LINES =
+  static final String MSG_HAS_MATCHED_LINES =
       "The statement has matched lines; unreconcile them before deleting";
   /**
-   * Business rejection for {@code ?action=delete} on a statement whose financial account is
-   * connected to the bank through PSD2 / Salt Edge (see {@link #handleDelete}). Statements on such
-   * an account are re-fetched from the bank, so deleting one locally desynchronises the account.
-   * Kept in ENGLISH and byte-for-byte in sync with the frontend's {@code BACKEND_ERROR_MAP} key
-   * {@code backendError.statementBankConnectedNotDeletable} (lib/backendErrors.js), which matches
-   * it by EXACT text after {@code .trim()} — rewording this string silently drops users back to
-   * English.
+   * Business rejection for {@code ?action=delete} on a PROCESSED statement of a bank-connected
+   * account that is already posted (ETP-6151, see {@link BankStatementDeletion#prepare}). Deleting
+   * it would first reactivate it, which a posted statement never allows. Kept in ENGLISH and
+   * byte-for-byte in sync with the frontend's {@code BACKEND_ERROR_MAP} (lib/backendErrors.js),
+   * which matches it by EXACT text after {@code .trim()} — rewording this string silently drops
+   * users back to English.
    */
-  static final String MSG_STATEMENT_BANK_CONNECTED =
-      "Statements from a bank-connected account cannot be deleted.";
+  static final String MSG_STATEMENT_POSTED_NOT_DELETABLE =
+      "The statement is posted. Unpost it before deleting it.";
   /**
    * Business rejection for creating or importing a statement on a bank-connected account
    * (ETP-5471): its statements arrive from the bank sync, which writes them through OBDal and never
-   * reaches this check. Same text contract as {@link #MSG_STATEMENT_BANK_CONNECTED} — matched by
-   * EXACT text against {@code backendError.statementBankConnectedNotCreatable} in the frontend's
+   * reaches this check. Kept in ENGLISH and matched by EXACT text against
+   * {@code backendError.statementBankConnectedNotCreatable} in the frontend's
    * {@code BACKEND_ERROR_MAP}. Covers the REST actions and the MCP named actions alike
    * ({@code createStatement}, {@code importStatement}, {@code previewStatement}), which dispatch to
    * the same methods.
@@ -810,16 +811,29 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * {@code ?action=delete} — permanently removes a draft statement and its
-   * lines. Only drafts can be deleted; processed statements are protected.
+   * {@code ?action=delete} — permanently removes a statement and its lines.
    * Body: {@code { "id": "..." }}.
    *
-   * <p>A statement whose account is bank-connected (PSD2 / Salt Edge) is rejected with a 409
-   * ({@link #MSG_STATEMENT_BANK_CONNECTED}): those statements are owned by the bank feed, so
-   * deleting one locally only desynchronises the account. This is the server-side enforcement for
-   * the bulk path, the REST API and MCP — the UI no longer disables the delete affordance, it lets
-   * the attempt through and explains the failure (ETP-5111). Note this also covers an old manual
-   * statement on an account that has since been connected.
+   * <p>On an account that is not bank-connected only a draft can be deleted; a processed statement
+   * answers 400 ({@link #MSG_NOT_DRAFT}). On a bank-connected account (PSD2 / Salt Edge) a processed
+   * statement can be deleted too (ETP-6151, replacing the ETP-5111 409): it is refused with a 400
+   * when it is posted ({@link #MSG_STATEMENT_POSTED_NOT_DELETABLE}), and otherwise reactivated with
+   * {@link #reactivateStatement} and deleted in the same transaction. On both, a statement with
+   * matched lines answers 400 ({@link #MSG_HAS_MATCHED_LINES}). The rule lives in
+   * {@link BankStatementDeletion}. Same behaviour for the UI (row and bulk), the REST API and the
+   * MCP {@code deleteStatement} action, which all land here.
+   *
+   * <p><b>Flag {@code psd2-statement-import-settings}</b> ({@link Psd2ImportSettingsFlag}, per
+   * account): with it off, the rule is the one before ETP-6151 — only drafts can be deleted and a
+   * statement of a bank-connected account answers 409
+   * ({@link BankStatementDeletion#MSG_STATEMENT_BANK_CONNECTED}).
+   *
+   * <p>Deleting a bank statement records nothing: whether its movements come back is decided by the
+   * account's "import from" date on the next synchronization.
+   *
+   * @param context the request; its body carries the statement {@code id}
+   * @return 200 with the deleted id, 400 on a rejected or invalid request, 500 on an unexpected
+   *     failure
    */
   NeoResponse handleDelete(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -829,17 +843,14 @@ public class BankStatementsHandler implements NeoHandler {
       // suppress the per-line observer so deleting its lines doesn't try to update
       // a statement that is about to vanish.
       BankStatementLineAggregateHandler.suppress();
-      FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
-      // Same predicate as every other PSD2 connection check in this module (see isBankConnected).
-      if (BankStatementsSupport.isBankConnected(statement.getAccount())) {
-        return NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED);
-      }
-      // A reactivated draft can still carry matched lines (ETP-4921 — reactivation no longer
-      // requires them to be unreconciled first). Deleting the whole statement would delete
-      // those lines too, which the core trigger never allows — reject up front with a clear
-      // reason instead of surfacing whatever the trigger raises mid-delete.
-      if (hasMatchedLines(statement)) {
-        return NeoResponse.error(400, MSG_HAS_MATCHED_LINES);
+      FIN_BankStatement statement = BankStatementDeletion.load(body.optString(FIELD_ID, null));
+      // Draft / processed / posted / matched-lines rule, and the reactivation of a processed
+      // statement of a bank-connected account (ETP-6151).
+      // Evaluated once per request; with the flag off it is the pre-ETP-6151 rule (409 on connected).
+      NeoResponse rejection = BankStatementDeletion.prepare(this, statement,
+          Psd2ImportSettingsFlag.isEnabled());
+      if (rejection != null) {
+        return rejection;
       }
       String id = statement.getId();
       BankStatementLineSet.deleteAll(statement);
@@ -863,12 +874,6 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * Loads a statement by id and guards that it is an editable draft. Throws
-   * {@link OBException} (mapped to 400 by the callers) when the id is blank, the
-   * statement does not exist, or it has already been processed. Centralises the
-   * checks shared by the process, update and delete actions.
-   */
-  /**
    * True when the row named by {@code id} belongs to the current tenant.
    *
    * <p>One seam for both the account and the statement rather than two: this class sits on Sonar's
@@ -879,6 +884,17 @@ public class BankStatementsHandler implements NeoHandler {
     return TenantOwnership.loadOwned(entityClass, id) != null;
   }
 
+  /**
+   * Loads a statement by id and guards that it is an editable draft. Centralises the checks shared
+   * by the process and update actions. The delete action no longer uses it: whether a processed
+   * statement may be deleted depends on its account's bank connection, see
+   * {@link BankStatementDeletion} (ETP-6151).
+   *
+   * @param id the statement id from the request body, possibly blank
+   * @return the draft statement, never {@code null}
+   * @throws OBException (mapped to 400 by the callers) when the id is blank, the statement does not
+   *     exist or belongs to another tenant, or it has already been processed
+   */
   private FIN_BankStatement requireDraft(String id) {
     if (StringUtils.isBlank(id)) {
       throw new OBException(MSG_MISSING_FIELD + FIELD_ID);
@@ -930,8 +946,12 @@ public class BankStatementsHandler implements NeoHandler {
   /**
    * Returns a processed statement to draft, mirroring the core "Reactivate"
    * action: clears the Processed flag and flips the APRM process selector back to
-   * "P". Callers must have already validated it is processed, not posted and has
-   * no reconciled lines.
+   * "P". Callers must have already validated it is processed and not posted.
+   * Two callers: {@code ?action=reactivate} and, for a processed statement of a
+   * bank-connected account, {@code ?action=delete} through
+   * {@link BankStatementDeletion#prepare} (ETP-6151), which also rules out matched lines.
+   *
+   * @param statement the processed statement to return to draft
    */
   void reactivateStatement(FIN_BankStatement statement) {
     statement.setProcessNow(true);

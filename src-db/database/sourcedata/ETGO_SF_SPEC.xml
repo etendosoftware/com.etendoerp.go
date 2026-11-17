@@ -832,6 +832,20 @@ The contact itself is the `businessPartner` entity: its name, tax ID, email (`et
 <!--E1455D14AE184D8CBA3091978FBE9045-->  <SHOWINMCP><![CDATA[Y]]></SHOWINMCP>
 <!--E1455D14AE184D8CBA3091978FBE9045--></ETGO_SF_SPEC>
 
+<!--E90B933DDF96460F8536F03DDC8B6726--><ETGO_SF_SPEC>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <NAME><![CDATA[remittance]]></NAME>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <AD_WINDOW_ID><![CDATA[FF8080812E71F7C7012E71FD0499001B]]></AD_WINDOW_ID>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <POPULATE><![CDATA[N]]></POPULATE>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <SPEC_TYPE><![CDATA[W]]></SPEC_TYPE>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <AGENT_PROMPT><![CDATA[SEPA remittances (Etendo table REM_Remittance): a batch of customer collections (SEPA CORE direct debit) or vendor payments (SEPA credit transfer) that the company sends to its bank in one file. Only available when the account has the sepa-remittances feature enabled; otherwise every call answers 403 feature_disabled. The `remittance` entity is the header: create it with name (max 60 characters), financialAccount (only accounts with "Allow Remittances" are accepted), remittanceType (its name says whether it is a collection or a payment remittance; only types whose SEPA scheme is enabled on the chosen account are accepted) and dueDate (the date the bank charges or credits the remittance). documentNo, transactionDate and the document type are assigned by the server, and remittanceStatus (PE Pending, PR Processed, CT/PT Collected/Paid, CP/PP partially, AN Voided) is set by the remittance processes and never written. A processed remittance cannot be edited. The `lines` entity is read-only: each line is one due item (paymentScheduleDetail, whose identifier shows the invoice, due date and amount) or payment (payment) of the remittance with its amount; lines cannot be created, edited or deleted through this spec yet, and the Classic remittance processes (select payments, process remittance, create remittance file) are not exposed.]]></AGENT_PROMPT>
+<!--E90B933DDF96460F8536F03DDC8B6726-->  <SHOWINMCP><![CDATA[Y]]></SHOWINMCP>
+<!--E90B933DDF96460F8536F03DDC8B6726--></ETGO_SF_SPEC>
+
 <!--EB6BD6D721284B77B299F618A62A1600--><ETGO_SF_SPEC>
 <!--EB6BD6D721284B77B299F618A62A1600-->  <ETGO_SF_SPEC_ID><![CDATA[EB6BD6D721284B77B299F618A62A1600]]></ETGO_SF_SPEC_ID>
 <!--EB6BD6D721284B77B299F618A62A1600-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
