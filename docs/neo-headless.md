@@ -14652,8 +14652,12 @@ rectificative was computed either on the detail GET or by the header callout whe
   Any other value already set is never overwritten. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
   and answered as "nothing applied", but a DB-level failure on the flush aborts the write, as for
-  `persistSiiAuthorizationno` (so this needs the SII module version carrying the relaxed
-  `EM_AEATSII_C_INV_RECT_CHK`). An invoice created with the rectificative type already
+  `persistSiiAuthorizationno`.
+  **Deployment coupling:** this change requires the `org.openbravo.module.sii` version carrying the
+  relaxed `EM_AEATSII_C_INV_RECT_CHK` (`PROCESSED = 'N' OR ...`, ETP-5747). No `AD_MODULE_DEPENDENCY`
+  of this module enforces it, so deploy both together: against an older SII module, storing `R`
+  with no motivo violates the constraint on the flush and the header write of a draft sales
+  rectificative fails for every SII-enrolled organization. An invoice created with the rectificative type already
   set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
   so without these defaults it kept SII `F1` and VERI*FACTU `F1` while in draft. The written keys
   (`etvfacInvType` as JSON `null`) are echoed in the write response.
