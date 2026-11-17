@@ -9228,6 +9228,66 @@ after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_so
 `change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
 `account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
+**Contact identity: person or company.** Since ETP-6175, `contacts/businessPartner` writes are
+judged by `ContactIdentityRules` (an entity util called only from `BusinessPartnerHandler.handle()`, after the
+tax-id and format checks and before the contact-type rules), so the rule is the same on REST single,
+REST batch and MCP. Not behind a flag. Blank (`""`, JSON `null`, whitespace) counts as absent
+everywhere: the Contacts form clears the other type's fields with `""` when the type toggles, and
+sends `etgoIsperson` in the same request as the name fields.
+
+| Type (`etgoIsperson`) | Required | Refused when non-blank | `name` |
+|---|---|---|---|
+| person (`Y` / `true`) | `etgoFirstname` and `etgoLastname` (`MISSING_REQUIRED_FIELDS`, `fields` lists the missing ones, `messageKeys:["ETGO_BPartnerPersonNamesRequired"]`) | `name` (`FIELD_NOT_ALLOWED`, `field:"name"`, `ETGO_BPartnerPersonNameNotAllowed`) — unless it equals the derivation of first + last, which is redundant, not a conflict (the contacts CSV import sends it, and so does the MCP create pre-pass) | always written as `first + " " + last` |
+| company (`N` / `false`, and an omitted type on create: the AD default) | `name` (`MISSING_REQUIRED_FIELDS`, `ETGO_BPartnerCompanyNameRequired`) | `etgoFirstname`, `etgoLastname` (`FIELD_NOT_ALLOWED`, `field` names it, `ETGO_BPartnerCompanyPersonNamesNotAllowed`, whose text tells the caller to send `etgoIsperson=true` — `is_person: true` in the public API — to create a person) | as sent; on an update, stored first/last names the body omits are cleared |
+
+On **create** every rule applies. On **update** (PATCH/PUT) nothing is judged unless the body carries
+`etgoIsperson`, `name`, `etgoFirstname` or `etgoLastname`; when it does, the persisted row supplies
+every key the body omits, and a requirement is enforced only for what the request touches — the part
+it sends, or every part of the target type when it switches the type. A legacy person with a null last
+name can still have its first name corrected, and an unrelated PATCH never trips on it. A person whose
+two parts are both empty keeps its stored name (the blank `name` the form may send is dropped). Both
+refusals carry `error.fields` (the shape the SPA already reads to mark fields) and `error.messageKeys`;
+the text is in the request language (`NeoMessageText`, catalog `neo_hints_<lang>.properties`).
+
+The type is never guessed: a **create that sends `etgoFirstname`/`etgoLastname` without
+`etgoIsperson` is a company and is refused** with `FIELD_NOT_ALLOWED` (strict, decided for ETP-6175).
+Because a caller cannot fix that from the field name alone, the message itself is the instruction
+(first and last name are for a person; send `etgoIsperson=true` with both names). That text is what
+reaches an agent on every MCP path: `etendo_create`/`etendo_update` return the pre-hook's response
+through `McpHookExecutor.servedRecordResult` → `neoResponseToMcpResult` →
+`McpToolRouterSupport.toMcpHandlerError`, which
+flattens `error.message` into `detail` and lifts `code`, `field`, `fields` and `messageKeys` to the top
+level (`error` becomes `validation_error`); `etendo_batch` reports the failing operation's
+`error.message` (`McpSupportInternals.extractDalMessage`), and lifts `MISSING_REQUIRED_FIELDS` into
+`missingFields` (`extractMissingFields`). No separate `hint` key is added: the batch path forwards
+only the message, so a hint would not reach the agent there. The MCP
+create pre-pass (`resolveServerCreateFields`) derives `name` only for a person body, so a company
+without `name` is reported by the mandatory pre-check, not given a name made of a first/last pair. A
+company update clears first/last names still stored for any part the body omits (writes `""`), so
+an API caller that only sends `etgoIsperson:false` gets the same row as the app, which sends `""`
+itself; it also cleans a company left with parts by an earlier switch, once the request touches an
+identity key.
+`ContactNameSyncHandler` (DAL observer, updates only) still rebuilds `name` when a person's first or
+last name changes, so a Classic edit stays consistent; on NEO writes it recomputes the value the pre-hook
+already wrote.
+
+**Tax id on create.** Before ETP-6175, `BusinessPartnerHandler.validateTaxId` dispatched on the
+request's `oBTIKTaxIDKey` only; a create that omitted it skipped the check, because the AD default
+(`'1'`, NIF) is injected by the mandatory-defaults pass after the pre-hook — so an invalid NIF was
+stored through the API. A create without a key is now validated as NIF,
+on every channel. Updates are unchanged (body key, else the persisted one).
+
+**`{"data": {...}}` envelope.** `NeoFieldFilter#filterBody` unwraps a write body sent as
+`{"data": {...}}` and persists only the inner object, so the identity rules and the tax id check
+judge (and the identity rules write `name` / the cleared parts into) that inner object
+(`ContactIdentityRules.persistedSection`, built on `ContactSepaMandateDefaults.writeSections`, the
+helper the SEPA mandate rule of the same handler uses). A key sent beside the envelope never reaches
+the row and is not judged. Judging only the top level refused every envelope create as a company
+without `name` (caught by `ContactSepaMandateIntegrationTest.aCreateInADataEnvelopeStoresTheMandate`)
+and let an envelope create skip the tax id check. Still top level only, unchanged by ETP-6175: the
+`searchKey` placeholder (an envelope create must send `searchKey`), the email/web/phone format checks
+and the contact-type rules.
+
 **KPI telemetry (ETP-5908), goods shipment.** `GoodsShipmentHeaderHandler` emits
 `backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
 after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
@@ -14473,8 +14533,9 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
 - **Body key `sifFields`** (optional object, declared in every one of those contracts through
   `InvoiceSifPreset.sifFieldsParam(sales)`): `{field: value}` with the DAL property names of the SIF tab.
   The contract text is worded per direction: the sales actions (`createDraftInvoice`, the customer
-  return's `createReturnInvoice`) describe the `R4` rectificative default, the VERI\*FACTU type of
-  the document type and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
+  return's `createReturnInvoice`) describe the VERI\*FACTU type of the document type, the
+  rectification codes a rectificative needs (`R1` preselected on a return's rectificative, and `R1`
+  when no `sifFields` is sent at all) and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
   (`createPurchaseInvoice`, the return to vendor's `createReturnInvoice`) list the five SII fields
   only and state that there is no rectification code, not even on a purchase rectificative.
   Only the editable fields of the systems active for the invoice's organization are accepted — SII
@@ -14488,14 +14549,26 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   `ETGO_InvoiceSiiAuthorizationUnavailable`.
 - **A field not sent takes its previewed value** (MCP, REST, and the SPA alike): the invoice ends up
   with exactly what `sifDefaults` shows for every editable field of the active systems, and only the
-  fields sent override it — a caller that sends nothing gets the preview as it is. The preview
+  fields sent override it. The preview
   values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
   when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
   customer's own default key, else `F1`; on a purchase always `F1`), the SII description (the
   order's, else the organization's default one for the direction, `aeatsii_description`), the
   operation date (the order's, else today), the SII authorization unticked, on a purchase the
-  accounting registration date (today, empty when the SII configuration declares posted invoices),
-  and on a sales rectificative `R4` for SII's motive, TicketBAI's code and VERI\*FACTU's type.
+  accounting registration date (today, empty when the SII configuration declares posted invoices).
+  **On the rectificative of a RETURN (`createReturnInvoice` of the customer return) the three
+  rectification codes are previewed as `R1`** — SII's motive (`aeatsiiMotivoRectif`), TicketBAI's
+  code (`tbaiReverseinvoicecode`) and VERI\*FACTU's type (`etvfacInvType`, which there only accepts
+  `R1`–`R5` and is never previewed as an ordinary `F1`), for the systems active for the
+  organization; all editable, all mandatory (decided by the user, ETP-6179). The return routes say
+  so structurally — `AbstractReturnDocumentHeaderHandler` builds its preview `Target` with
+  `withRectificationDefault(InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT)` and
+  `ReturnInvoiceSupport` passes the same code to `applyBeforeCompletion`, so a code the caller omits
+  gets what the preview showed; no shared code names a spec. **Any other sales rectificative**
+  (an order or shipment flow under an unusual document-type setup) is previewed with the three codes
+  EMPTY: the user has to choose each one, and the SPA step keeps its primary button disabled until
+  they are. Manual rectificatives of the sales-invoice window are unaffected
+  (`SalesRectificativeFiscalDefaults`, ETP-5745 CP-14: no code preselected).
   **The order is part of the preview only when the invoice header will carry it** (ETP-6179 review
   W2): the order route and a single shipment/receipt with an order build the header from the order,
   while several shipments/receipts invoiced together (and a receipt without an order) build it from
@@ -14506,9 +14579,17 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   corrective ones — type and rectification codes — so a factura rectificativa created without
   `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
   document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
-  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes,
-  for these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
-  mandatory step before anything is confirmed (decided by the user, ETP-6179).
+  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`).
+- **No `sifFields` at all → the unattended fallback.** A caller that sends no `sifFields` (the key
+  absent, `null` or an empty object: an MCP/REST caller, or the SPA when the preview could not be
+  read and the step failed open) gets the preview plus `R1` in each rectification field the invoice
+  has, so the creation is not refused for a code nobody was asked for. On a return it is exactly
+  what `sifDefaults` showed; on any other rectificative it is the ONE place where the applied values
+  differ from the preview. Same on every channel (no §4.12.9 divergence). It lives in `InvoiceSifPreset.unattendedRectificationFallback` alone:
+  returning an empty map there removes it, and such a caller then gets the guard's 422. As soon as
+  `sifFields` carries any key, the fallback is off: a rectification code left out takes its preview
+  value (`R1` on a return, empty otherwise) and one sent blank stays empty; an empty one makes the
+  guard refuse the creation naming the systems that need a code.
 - **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
   the header completion (`ETGO_InvoiceRectificationCodeRequired`,
   `ETGO_InvoiceVerifactuInvTypeNotRectificative`). A refusal rolls the whole creation back
@@ -14641,13 +14722,19 @@ rectificative was computed either on the detail GET or by the header callout whe
   - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
     the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
     rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
-    `tbaiReverseinvoicetype = I` only when blank;
+    `tbaiReverseinvoicetype = I` only when blank. `tbaiReverseinvoicecode` is **never** defaulted
+    (ETP-5745 CP-14 reverted the ETP-5747 `R4` auto-pick): it stays empty until the user chooses it;
   - with an active VERI*FACTU config in the system for the legal entity (the
     `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): a non-rectificative `F*` `etvfacInvType` (in practice the AD
     default `F1` an insert stamps) or a blank one is **cleared to null** (ETP-5747 CP-5/CP-11), matching
     the empty "Tipo de Factura" the doc-type callout and the SIF tab show; an `R*` value is kept and the
     document type's own code is never copied. When the type is `R*` and `etvfacReverseinvtype` is blank,
     the document type's reverse type, or `I` when it has none.
+
+  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive, the TicketBAI
+  code and the VERI*FACTU `R1`-`R5` type stay empty, and `RectificationFiscalCodeGuard` blocks
+  completion until the user chooses them. (A customer return is different: its "Datos fiscales" step
+  preselects `R1`, see ETP-6179.)
 
   Any other value already set is never overwritten. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
