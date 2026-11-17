@@ -41,8 +41,10 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  *
  * <p>{@link #composeAddressLines} is an exact port of Classic's
  * {@code LocationSEPA.java::fillAddressLines}: these tests pin that algorithm (everything fits
- * on line 1, overflow to line 2 with a truncated building name, a street alone longer than the
- * line gets truncated, separators), not a reinterpretation of the ticket's simplified wording.
+ * on line 1, overflow to line 2, a street alone longer than the line overflows onto line 1
+ * unsplit, separators), not a reinterpretation of the ticket's simplified wording. ETP-5806 CP-6
+ * (QA finding): a line never cuts a field mid-value — a field that cannot fit is dropped to the
+ * next line whole, not truncated, mirroring {@code locationAddress.js} in {@code schema_forge_core}.
  * Also {@link StructuredAddressComposer#isEnabled(String)}, which mirrors
  * {@code GoFeatureFlags.isEnabled} for {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA}, stubbed directly
  * so the assertion is independent of the local {@code Openbravo.properties} toggle. Since the
@@ -95,20 +97,21 @@ class StructuredAddressComposerTest {
     }
 
     @Test
-    void streetAndNumberFitButWholeAddressOverflowsToLine2WithBuildingNameTruncated() {
+    void streetAndNumberFitButWholeAddressOverflowsToLine2WithBuildingNameKeptWhole() {
       String street = StringUtils.repeat('A', 50);
       String buildingName = StringUtils.repeat('C', 70);
       // streetAndNumber = 50 + ", " + 3 digits = 55 chars, fits on line 1 alone.
-      // wholeAddress = 55 + " - " + 70 = 128 chars, overflows: line 2 gets the (truncated to 60)
-      // building name.
+      // wholeAddress = 55 + " - " + 70 = 128 chars, overflows: line 2 gets the full building name
+      // (ETP-5806 CP-6 — never cut mid-value, even past the field's own 35-char DB limit, which
+      // this low-level composer does not itself enforce — see fieldsExceedingMaxLength for that).
       ComposedAddress composed = StructuredAddressComposer.composeAddressLines(
           street, "123", buildingName);
 
       String expectedLine1 = street + ", 123";
       assertEquals(55, expectedLine1.length());
       assertEquals(expectedLine1, composed.getAddress1());
-      assertEquals(StringUtils.left(buildingName, 60), composed.getAddress2());
-      assertEquals(60, composed.getAddress2().length());
+      assertEquals(buildingName, composed.getAddress2());
+      assertEquals(70, composed.getAddress2().length());
     }
 
     @Test
@@ -123,28 +126,33 @@ class StructuredAddressComposerTest {
       assertEquals(buildingName, composed.getAddress2());
     }
 
+    /**
+     * ETP-5806 CP-6 (QA finding) — before the fix, a street this long was cut mid-value with
+     * {@code StringUtils.left(street, 60)}. It is now kept whole on line 1, even past 60 chars:
+     * street is the only field that can exceed the line length on its own.
+     */
     @Test
-    void streetAloneLongerThan60IsTruncatedOnLine1AndNumberAndNameGoOnLine2() {
+    void streetAloneLongerThan60StaysWholeOnLine1AndNumberAndNameGoOnLine2() {
       String street = StringUtils.repeat('D', 70);
       ComposedAddress composed = StructuredAddressComposer.composeAddressLines(
           street, "123", "E");
 
-      assertEquals(StringUtils.left(street, 60), composed.getAddress1());
-      assertEquals(60, composed.getAddress1().length());
+      assertEquals(street, composed.getAddress1());
+      assertEquals(70, composed.getAddress1().length());
       assertEquals("123 - E", composed.getAddress2());
     }
 
+    /** Same as above, and line 2's "Number - Name" tail is also kept whole, never cut. */
     @Test
-    void streetAloneLongerThan60WithOversizedTailAlsoTruncatesLine2() {
+    void streetAloneLongerThan60WithOversizedTailKeepsBothWhole() {
       String street = StringUtils.repeat('D', 70);
       String buildingName = StringUtils.repeat('E', 70);
       ComposedAddress composed = StructuredAddressComposer.composeAddressLines(
           street, "123", buildingName);
 
-      assertEquals(StringUtils.left(street, 60), composed.getAddress1());
+      assertEquals(street, composed.getAddress1());
       String expectedTail = "123 - " + buildingName;
-      assertEquals(StringUtils.left(expectedTail, 60), composed.getAddress2());
-      assertEquals(60, composed.getAddress2().length());
+      assertEquals(expectedTail, composed.getAddress2());
     }
 
     @Test
