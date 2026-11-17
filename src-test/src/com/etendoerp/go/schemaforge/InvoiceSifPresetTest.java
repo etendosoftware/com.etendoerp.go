@@ -713,6 +713,30 @@ public class InvoiceSifPresetTest {
     }
   }
 
+  /**
+   * On a return (3-argument path, R1 default) an explicit null clears the code: it does not take
+   * R1, and the real guard refuses the completion naming every system left without one.
+   */
+  @Test
+  public void aReturnWithExplicitNullCodesIsRefusedAndGetsNoR1() throws Exception {
+    Invoice invoice = recordingInvoice();
+    JSONObject nulls = new JSONObject();
+    for (String key : RECTIFICATION_KEYS) {
+      nulls.put(key, JSONObject.NULL);
+    }
+    JSONObject body = new JSONObject().put(InvoiceSifPreset.PARAM_SIF_FIELDS, nulls);
+
+    try (Env env = new Env(true, true)) {
+      InvoiceSifPreset.Refused refused = refusal(null,
+          () -> InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+              InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
+
+      assertRectificationCodeRequired(refused, "SII", "TicketBAI", "Verifactu");
+      verify(invoice, never()).set(anyString(),
+          Mockito.eq(InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
+    }
+  }
+
   /** Explicit nulls for every code: no fallback, the guard names all three systems. */
   @Test
   public void explicitNullCodesAreRefusedByTheGuardInEverySystem() throws Exception {
