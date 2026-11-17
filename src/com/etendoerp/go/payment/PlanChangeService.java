@@ -542,6 +542,14 @@ public class PlanChangeService {
     add(phases, "phases[0][items][0][price]", currentPrice);
     add(phases, "phases[0][start_date]", String.valueOf(periodStart.getEpochSecond()));
     add(phases, "phases[0][end_date]", String.valueOf(periodEnd.getEpochSecond()));
+    // A phase sent without trial_end has no trial: rewriting the current phase of a trialing
+    // subscription would end its free trial at once and charge the current plan now (ETP-6216).
+    // Keeping it makes a downgrade during the trial what it is after it: the target price from
+    // the period end, which is the trial end.
+    long trialEnd = live.isNull("trial_end") ? 0L : live.optLong("trial_end", 0L);
+    if (trialEnd > clock.instant().getEpochSecond()) {
+      add(phases, "phases[0][trial_end]", String.valueOf(trialEnd));
+    }
     add(phases, "phases[1][items][0][price]", target.getProviderPriceID());
     // One billing cycle of the target plan. Stripe removed phases[].iterations in API
     // 2025-09-30.clover and answers 400 parameter_unknown to it; duration replaces it. The

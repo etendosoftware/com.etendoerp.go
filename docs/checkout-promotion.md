@@ -1,9 +1,50 @@
 # Checkout promotion contract
 
-ETP-6216: new catalog monthly purchases pay the first monthly installment at checkout,
-receive the second calendar month free, and resume ordinary monthly billing in month three.
-Yearly prices already charge ten monthly installments for twelve months: no second discount.
-Reactivations and historical purchases without a promotion snapshot are not enrolled.
+## Current offer: 30-day free trial (ETP-6082)
+
+A monthly catalog plan with a price above zero starts with a **30-day free trial** (fixed days,
+not a calendar month), once per account:
+
+- **Who gets it.** An account that has never paid a purchase (`CheckoutRequestStore.findForAccount`:
+  no `PAID`, `PROVISIONING` or `PROVISIONED` request). A second environment of the same account,
+  a re-subscription and the legacy plan pay from the first month. Yearly prices already charge ten
+  installments for twelve months: no trial.
+- **Checkout.** The session sends `subscription_data[trial_period_days]=30`. Nothing is due today,
+  so it also sends `payment_method_collection=always`: with the default `if_required` Stripe would
+  skip the card and the trial would end with nothing to charge. Should that still happen,
+  `trial_settings[end_behavior][missing_payment_method]=cancel` ends the subscription instead of
+  leaving it unpaid. The hosted page explains the offer (`custom_text[submit][message]`).
+- **During the trial.** The subscription is `trialing`, which the lifecycle treats as current: the
+  environment is provisioned and usable. Stripe issues a zero invoice at the start; it is not a
+  payment (HubSpot leaves the deal in Tarjeta añadida, see `hubspot-sync.md`).
+- **Cancelling.** The customer portal cancels at period end, and during the trial the period ends
+  with the trial: nothing is ever charged, and `customer.subscription.deleted` at that moment
+  closes the environment through the ordinary cancellation path.
+- **After the trial.** The first installment is charged on day 30 and the plan recurs monthly. A
+  failed charge follows the ordinary `past_due` path, now for an environment that already exists.
+- **Plan changes during the trial** (decided with the business, ETP-6216). The trial is the
+  account's, not the plan's: a plan change neither ends nor restarts it, and the first charge is
+  the plan active when the trial ends. `PlanChangeService` produces it: an upgrade updates the
+  price at once and its proration is zero while `trialing`; a downgrade is scheduled at the period
+  end, which is the trial end, and resends the trial end on the current phase (a schedule phase
+  sent without `trial_end` has no trial, so Stripe ended it and charged at once). A switch from
+  monthly to yearly also keeps the trial, so the yearly price is charged when the trial ends.
+  Verified in Stripe test mode on 2026-11-16 (upgrade, monthly to yearly, downgrade).
+  After the trial, monthly-to-yearly charges the yearly price minus the unused part of the month,
+  with no extra discount.
+- **Catalog.** `GET /sws/go/plans` returns `freeTrialDays` per plan for the requesting account (30
+  or 0), so the upgrade page announces the trial only when checkout will grant it.
+
+The terms are recorded as `promotion.intent` with version `monthly-free-trial-v1`
+(`freeTrialDays`, `amountDueTodayMinor`). Nothing runs after payment: the trial is the provider's.
+
+## Previous offer: second month free (ETP-6216, no longer sold)
+
+Monthly purchases recorded under `monthly-second-month-v1` paid the first monthly installment at
+checkout, received the second calendar month free, and resumed ordinary monthly billing in month
+three. Those purchases keep their terms: the rest of this document describes how they are still
+applied and recovered. Reactivations and historical purchases without a promotion snapshot are
+not enrolled.
 
 ## Durable execution
 
@@ -18,6 +59,12 @@ then one normal month and release the schedule to normal recurrence. No fixed 30
 The 100-percent coupon is confined to the second phase. Annual purchases never use it.
 Empty `add_invoice_items` lists are omitted from the phase update because Stripe rejects
 attempts to unset this parameter; existing invoice items remain confined to the first phase.
+The appended phases last one month each through `duration[interval]=month` and
+`duration[interval_count]=1`. They never send `iterations`: Stripe removed it in API
+`2025-09-30.clover` and answers `400 parameter_unknown`, which made every promoted checkout
+webhook fail and retry until the provider gave up (etendo-ai#141, from the 2026-11-12 release).
+Recovery replays those intents only while the first phase is open; after it ends the promotion
+fails for review ("installation window has elapsed").
 
 The provider schedule is tagged with request/version metadata; retries recognize completion
 before making changes. Deterministic coupon and request-scoped idempotency keys fence POSTs.

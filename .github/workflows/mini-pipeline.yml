@@ -270,7 +270,8 @@ jobs:
           args: ${{ needs.go-test.result == 'success' && '-Dsonar.coverage.jacoco.xmlReportPaths=coverage/jacocoRootReport.xml' || '' }}
 
       # Same rule as Jenkins' Compare Coverage Results; fails this check on a drop, or when the
-      # coverage cannot be evaluated (--context ci). The thresholds are organization variables
+      # coverage cannot be evaluated (--context ci), and when this analysis's quality gate failed
+      # (--check-quality-gate): the gate "SonarQube Code Analysis" reports, read in the same wait. The thresholds are organization variables
       # (ETP-6298), so they can be raised without a PR; unset, the script falls back to 70 and 1.
       - name: Compare coverage with the base branch
         if: github.event_name == 'pull_request' && needs.go-test.result == 'success'
@@ -283,8 +284,19 @@ jobs:
           COVERAGE_TOLERANCE: ${{ vars.COVERAGE_TOLERANCE }}
         run: |
           set -o pipefail
+          # This workflow comes from the merge ref but the script from the PR head, which can predate
+          # --check-quality-gate (ETP-6324): a main -> develop back-merge, or a hotfix cut from an older
+          # main. Then compare the coverage alone and say the gate was not read (ETP-6326).
+          gate=--check-quality-gate
+          if ! grep -q -- "--check-quality-gate" scripts/compare-sonar-coverage.py; then
+            gate=
+            msg="The checked-out compare-sonar-coverage.py predates --check-quality-gate: quality gate not read here."
+            echo "::warning::$msg"
+            echo "> $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
           python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
-            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt | tee -a "$GITHUB_STEP_SUMMARY"
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt $gate \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Fail closed: a PR whose tests failed (or did not finish) must not get a green required
       # check just because the coverage comparison was skipped.

@@ -233,7 +233,11 @@ public class MonthlySecondMonthPromotionService {
           copy.remove("end_date");
           copy.remove(ADD_INVOICE_ITEMS);
           copy.remove("trial_end");
-          copy.put("iterations", 1); // Compatible with the existing unversioned API contract.
+          // One month per phase. Stripe removed phases[].iterations in API 2025-09-30.clover and
+          // answers 400 parameter_unknown to it, which failed every promoted checkout webhook
+          // (etendo-ai#141); duration replaces it, as in PlanChangeService.
+          copy.remove("iterations");
+          copy.put("duration", new JSONObject().put("interval", "month").put("interval_count", 1));
         }
         copy.put("proration_behavior", "none");
         normalizeDiscounts(copy);
