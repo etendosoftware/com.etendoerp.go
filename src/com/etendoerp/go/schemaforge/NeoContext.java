@@ -88,9 +88,11 @@ public class NeoContext {
   /**
    * ETP-5791 — {@link #getAttribute attribute} holding the {@code Set<String>} of body keys the
    * caller itself sent on a create, when the channel has already filled defaults into the body
-   * before the pre-hook runs. Only MCP {@code etendo_create} sets it: REST single, REST batch and
-   * {@code etendo_batch} hand the pre-hook the body as sent, so there key presence already answers
-   * "did the caller choose this field". Absent means: presence in the body is the answer.
+   * before the pre-hook runs. MCP {@code etendo_create} sets it; since ETP-6177 {@code etendo_batch}
+   * sets it too (its preprocessor injects prices before the op's pre-hook), on a context that is
+   * NOT {@link #isMcpOrigin()}, so the readers that gate on MCP origin keep ignoring it there. REST
+   * single and REST batch hand the pre-hook the body as sent, so there key presence already
+   * answers "did the caller choose this field". Absent means: presence in the body is the answer.
    */
   public static final String ATTR_CLIENT_PROVIDED_FIELDS = "neo.clientProvidedFields";
 

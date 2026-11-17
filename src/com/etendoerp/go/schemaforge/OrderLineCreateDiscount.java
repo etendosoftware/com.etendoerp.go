@@ -155,19 +155,22 @@ final class OrderLineCreateDiscount {
   }
 
   /**
-   * Whether an {@code etendo_create} agent left the price of the new line to the server: an MCP
-   * create carrying {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} (set only by
-   * {@code etendo_create}) whose agent sent none of {@code unitPrice}, {@code listPrice} or
-   * {@code grossUnitPrice}. The prices in such a body are the ones {@code McpLinePriceInjector}
-   * took from the price list, so {@link OrderLineCurrencyConversion} may convert them (ETP-6177).
-   * {@code false} on every other request — there the body is what the caller sent.
+   * Whether an MCP agent left the price of the new line to the server: a create carrying
+   * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — set by {@code etendo_create} and, on a non-MCP
+   * context, by {@code etendo_batch}'s preprocessor; never by REST — whose agent sent none of
+   * {@code unitPrice}, {@code listPrice} or {@code grossUnitPrice}. The prices in such a body are
+   * the ones {@code McpLinePriceInjector} took from the price list, so
+   * {@link OrderLineCurrencyConversion} may convert them (ETP-6177). {@code false} on every other
+   * request — there the body is what the caller sent.
    */
   static boolean agentLeftPriceToServer(NeoContext ctx) {
-    if (ctx == null || !ctx.isMcpOrigin()
-        || ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS) == null) {
+    Object provided = ctx == null ? null
+        : ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    if (!(provided instanceof Collection) || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
       return false;
     }
-    Collection<?> sent = agentSentKeys(ctx);
+    Collection<?> sent = (Collection<?>) provided;
     return !sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
         && !sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
         && !sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE);

@@ -220,7 +220,8 @@ final class OrderLineDiscountSupport {
    *
    * <p><b>A line of a foreign-currency order</b> (ETP-6177) gets the order's currency, and the
    * price-list prices written here — {@code unitPrice}, {@code listPrice}, {@code standardPrice},
-   * and on {@code etendo_create} the {@code priceLimit} {@code McpLinePriceInjector} wrote — are
+   * and on {@code etendo_create} / {@code etendo_batch} the raw {@code unitPrice},
+   * {@code listPrice} and {@code priceLimit} {@code McpLinePriceInjector} wrote — are
    * converted by the order's org→document rate ({@link OrderLineCurrencyConversion}), as the form
    * converts the price of a product picked into a line. A price the caller sent is never converted.
    *
@@ -263,15 +264,17 @@ final class OrderLineDiscountSupport {
       // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
       boolean clientPriced = LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE,
           FIELD_LIST_PRICE, FIELD_DISCOUNT);
+      // ETP-6177: the line is in its order's currency — whether or not the product has a price
+      // in the list — and the price list's prices are converted into it by the order's rate when
+      // the order is in a foreign currency, as the form does.
+      String orderId = parentOrderId(body);
+      OrderLineCurrencyConversion conversion = OrderLineCurrencyConversion.forOrder(
+          StringUtils.isBlank(orderId) ? null : OBDal.getInstance().get(Order.class, orderId));
+      conversion.applyLineCurrency(body);
       ProductPrice productPrice = resolveProductPrice(body);
       if (productPrice == null) {
         return;
       }
-      // ETP-6177: the line is in its order's currency, and the price list's prices are converted
-      // into it by the order's rate when the order is in a foreign currency, as the form does.
-      OrderLineCurrencyConversion conversion = OrderLineCurrencyConversion.forOrder(
-          OBDal.getInstance().get(Order.class, parentOrderId(body)));
-      conversion.applyLineCurrency(body);
       BigDecimal standardPrice = conversion.convert(productPrice.getStandardPrice());
       BigDecimal catalogList = conversion.convert(productPrice.getListPrice());
       // A line sent without a price takes the price list's (ETP-5881); a price the caller sent stays.
@@ -280,7 +283,7 @@ final class OrderLineDiscountSupport {
       if (!clientPriced && !LinePriceListSupport.applyCatalogPrice(body, standardPrice,
           catalogList, FIELD_UNIT_PRICE, FIELD_LIST_PRICE)
           && OrderLineCreateDiscount.agentLeftPriceToServer(ctx)) {
-        // etendo_create: McpLinePriceInjector already wrote the raw price-list prices.
+        // etendo_create / etendo_batch: McpLinePriceInjector already wrote the raw list prices.
         conversion.convertRawPrices(body, RAW_CATALOG_FIELDS, new BigDecimal[] {
             productPrice.getStandardPrice(), productPrice.getListPrice(),
             productPrice.getPriceLimit() });

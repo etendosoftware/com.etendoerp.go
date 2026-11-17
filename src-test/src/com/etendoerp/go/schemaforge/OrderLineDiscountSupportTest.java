@@ -1284,6 +1284,10 @@ class OrderLineDiscountSupportTest {
         Arguments.of("etendo_create, price left to the server: injector's prices converted",
             injected, true, "product,orderedQuantity", "USD", "1.47", "17.64", "17.64", "17.64",
             "USD"),
+        // etendo_batch: not MCP-origin, but its preprocessor hands the agent's keys over.
+        Arguments.of("etendo_batch, price left to the server: injector's prices converted",
+            injected.replace("\"salesOrder\"", "\"parentId\""), false,
+            "product,orderedQuantity", "USD", "1.47", "17.64", "17.64", "17.64", "USD"),
         Arguments.of("etendo_create, the agent's own price: kept",
             injected, true, "product,orderedQuantity,unitPrice", "USD", "1.47", "12", "12",
             "17.64", "USD"),
@@ -1345,9 +1349,42 @@ class OrderLineDiscountSupportTest {
     assertAmount(label, expectedStd, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
     assertEquals(expectedCurrency, json.optString(OrderLineDiscountSupport.FIELD_CURRENCY, null),
         label);
-    if (mcp && "17.64".equals(expectedUnit)) {
+    if (agentSent != null && "17.64".equals(expectedUnit)) {
       assertAmount(label, "14.70", json, OrderLine.PROPERTY_PRICELIMIT);
     }
+  }
+
+  /** W3: the line takes the order's currency even when the product has no price in the list. */
+  @Test
+  void setStandardPriceOnCreateSetsTheOrderCurrencyWithoutACatalogPrice() throws Exception {
+    JSONObject json = new JSONObject(
+        "{\"product\":\"P1\",\"parentId\":\"O1\",\"listPrice\":20}");
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    Currency usd = currency("USD");
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.getCurrency()).thenReturn(usd);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(priceList.getCurrency()).thenReturn(usd);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(any(), any(), anyBoolean(), any(),
+          anyBoolean())).thenReturn(null);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertEquals("USD", json.optString(OrderLineDiscountSupport.FIELD_CURRENCY, null));
+    assertAmount("no catalog entry", "20", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("no catalog entry", null, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
   }
 
   private static Currency currency(String id) {
