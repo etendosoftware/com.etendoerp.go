@@ -228,6 +228,28 @@ public class SalesRectificativeFiscalDefaultsTest {
     verify(none, never()).setEtvfacInvType(any());
   }
 
+  /**
+   * ETP-5747 CP-5: not only the AD default {@code F1} — any non-rectificative {@code F*} code
+   * (F2, F3) on a rectificative draft is cleared to null and reported with a null value.
+   */
+  @Test
+  public void verifactuAnyNonRectificativeCodeIsClearedToNull() throws Exception {
+    configActive(verifactuStatement, true);
+    for (String code : new String[] { "F2", "F3" }) {
+      Invoice invoice = draftInvoice(docType(true, null, null));
+      when(invoice.getEtvfacInvType()).thenReturn(code);
+
+      Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+      verify(invoice).setEtvfacInvType(null);
+      verify(invoice, never()).setEtvfacInvType(anyString());
+      verify(invoice, never()).setEtvfacReverseinvtype(anyString());
+      assertTrue(code, applied.containsKey(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+      assertEquals(code, JSONObject.NULL,
+          applied.get(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+    }
+  }
+
   @Test
   public void rectificativeInvoice_verifactuInactive_reverseTypeNeverTouchedEvenWithRectifCode()
       throws Exception {
@@ -238,6 +260,25 @@ public class SalesRectificativeFiscalDefaultsTest {
     SalesRectificativeFiscalDefaults.computeAndSet(invoice);
 
     verify(invoice, never()).setEtvfacReverseinvtype(anyString());
+  }
+
+  /**
+   * VERI*FACTU not active for the org: {@code etvfacInvType} is never written either — the AD
+   * default {@code F1} (or any other code) is not cleared, and nothing is reported for it.
+   */
+  @Test
+  public void verifactuInactiveNeverWritesEtvfacInvType() throws Exception {
+    // verifactuStatement inactive by default (setUp)
+    for (String code : new String[] { "F1", "F2", " ", "R1" }) {
+      Invoice invoice = draftInvoice(docType(true, "R1", null));
+      when(invoice.getEtvfacInvType()).thenReturn(code);
+
+      Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+      verify(invoice, never()).setEtvfacInvType(any());
+      verify(invoice, never()).setEtvfacReverseinvtype(any());
+      assertFalse(code, applied.containsKey(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+    }
   }
 
   /** An R code the user picked (R4) is kept even if the doc type says R1 — not copied, not replaced. */
