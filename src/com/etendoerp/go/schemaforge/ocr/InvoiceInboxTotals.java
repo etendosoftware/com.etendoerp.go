@@ -84,22 +84,38 @@ public final class InvoiceInboxTotals {
       this.amount = amount;
     }
 
-    /** Returns the rate in percent. */
+    /**
+     * Returns the rate in percent.
+     *
+     * @return the rate in percent
+     */
     public BigDecimal rate() {
       return rate;
     }
 
-    /** Returns whether the tax is rounded per line ({@code L}) instead of on the sum ({@code D}). */
+    /**
+     * Returns whether the tax is rounded per line ({@code L}) instead of on the sum ({@code D}).
+     *
+     * @return whether the tax is rounded per line ({@code L}) instead of on the sum ({@code D})
+     */
     public boolean lineBased() {
       return lineBased;
     }
 
-    /** Returns the sum of the nets of the row. */
+    /**
+     * Returns the sum of the nets of the row.
+     *
+     * @return the sum of the nets of the row
+     */
     public BigDecimal base() {
       return base;
     }
 
-    /** Returns the tax of the row. */
+    /**
+     * Returns the tax of the row.
+     *
+     * @return the tax of the row
+     */
     public BigDecimal amount() {
       return amount;
     }
@@ -117,22 +133,38 @@ public final class InvoiceInboxTotals {
       this.rows = rows;
     }
 
-    /** Returns the sum of the line nets. */
+    /**
+     * Returns the sum of the line nets.
+     *
+     * @return the sum of the line nets
+     */
     public BigDecimal base() {
       return base;
     }
 
-    /** Returns the sum of the tax of each row. */
+    /**
+     * Returns the sum of the tax of each row.
+     *
+     * @return the sum of the tax of each row
+     */
     public BigDecimal tax() {
       return tax;
     }
 
-    /** Returns the base plus the tax. */
+    /**
+     * Returns the base plus the tax.
+     *
+     * @return the base plus the tax
+     */
     public BigDecimal total() {
       return base.add(tax);
     }
 
-    /** Returns the tax rows, by rate ascending, the sum-rounded row before the line-rounded one. */
+    /**
+     * Returns the tax rows, by rate ascending, the sum-rounded row before the line-rounded one.
+     *
+     * @return the tax rows, by rate ascending, the sum-rounded row before the line-rounded one
+     */
     public List<TaxRow> rows() {
       return rows;
     }

@@ -183,18 +183,23 @@ public final class InvoiceInboxValidator {
       JSONObject line = lines.optJSONObject(i);
       int id = line == null || line.isNull(K_INDEX) ? i : line.optInt(K_INDEX, i);
       if (line == null || !taxComplete(line)) {
-        missing.add("line[" + id + "].tax");
+        missing.add(lineCode(id, "tax"));
       }
       if (line == null || !productComplete(line)) {
-        missing.add("line[" + id + "].product");
+        missing.add(lineCode(id, "product"));
       }
       if (line == null || !(line.opt(K_QUANTITY) instanceof Number)) {
-        missing.add("line[" + id + "].quantity");
+        missing.add(lineCode(id, "quantity"));
       }
       if (line == null || !(line.opt(K_UNIT_PRICE) instanceof Number)) {
-        missing.add("line[" + id + "].unitPrice");
+        missing.add(lineCode(id, "unitPrice"));
       }
     }
+  }
+
+  /** The code of a missing line field: {@code line[<id>].<field>}. */
+  private static String lineCode(int id, String field) {
+    return "line[" + id + "]." + field;
   }
 
   /** Resolved, or pending the vendor's address while the line prints a rate. */

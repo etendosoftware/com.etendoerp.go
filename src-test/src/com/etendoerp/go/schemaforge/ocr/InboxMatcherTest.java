@@ -540,8 +540,9 @@ class InboxMatcherTest {
   @DisplayName("ETP-6050: the lines carry the rounding mode of their tax and the computed total follows it")
   void theLinesAreStampedAndTheTotalFollowsALineBasedTax() throws Exception {
     lookups.taxModes.put("T21", "L");
-    // two lines of net 0.13 (0.125 half up) at 21 %: per line 0.0273 -> 0.03, summed 0.06;
-    // on the sum 0.26 x 21 % = 0.0546 -> 0.05
+    // Two lines of net 0.13 (0.125 rounded half up) at 21 %. Per line the tax is 0.0273, which
+    // rounds to 0.03, so the lines add up to 0.06. On the sum, 0.26 at 21 % is 0.0546, which rounds
+    // to 0.05.
     lookups.products = List.of(List.of(), List.of());
 
     JSONObject document = build(withoutPrintedTotal(extraction(),

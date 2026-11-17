@@ -246,9 +246,10 @@ final class InvoiceInboxReview {
       try {
         JSONObject header = document.optJSONObject(K_HEADER);
         String stored = header == null ? "" : header.optString(K_CURRENCY_ID, "");
+        String organizationId = row.getOrganization() == null ? null
+            : row.getOrganization().getId();
         Optional<OcrLookups.DocCurrency> found = stored.isEmpty()
-            ? lookups.get().documentCurrency(linkedVendorId(header),
-                row.getOrganization() == null ? null : row.getOrganization().getId())
+            ? lookups.get().documentCurrency(linkedVendorId(header), organizationId)
             : lookups.get().currencyById(stored);
         if (found.isPresent()) {
           return new JSONObject().put("id", found.get().id())

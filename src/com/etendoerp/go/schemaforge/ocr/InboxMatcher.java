@@ -220,14 +220,17 @@ public final class InboxMatcher {
       header.put(K_CURRENCY_ID, currency.get().id());
     }
     BigDecimal total = usePrinted ? printed : totalOfLines(lines, scale);
+    BigDecimal storedTotal = total;
+    if (total != null && !usePrinted) {
+      storedTotal = total.setScale(scale, RoundingMode.HALF_UP);
+    }
     String date = isoDate(extraction);
     header.put(K_DOCUMENT_NO, OcrJson.str(extraction, "document_no"))
         .put(K_INVOICE_DATE, date == null ? JSONObject.NULL : date)
         .put(K_INVOICE_DATE_RAW, OcrJson.str(extraction, "invoice_date"))
         // The PRINTED total is kept exactly as read (a mismatch with the lines is shown, not hidden by
         // rounding); only the computed one is rounded to the currency's scale.
-        .put(K_TOTAL_AMOUNT, InboxLineMatcher.number(total == null ? null
-            : usePrinted ? total : total.setScale(scale, RoundingMode.HALF_UP)))
+        .put(K_TOTAL_AMOUNT, InboxLineMatcher.number(storedTotal))
         .put(K_TOTAL_SOURCE, usePrinted ? TOTAL_PRINTED : TOTAL_LINES);
     if (!header.has(K_DUPLICATE)) {
       header.put(K_DUPLICATE, new JSONObject().put(K_STATE, D_NONE)

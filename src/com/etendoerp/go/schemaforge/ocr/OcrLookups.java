@@ -197,22 +197,38 @@ public interface OcrLookups {
       this.scale = scale;
     }
 
-    /** Returns the currency id. */
+    /**
+     * Returns the currency id.
+     *
+     * @return the currency id
+     */
     public String id() {
       return id;
     }
 
-    /** Returns the ISO code. */
+    /**
+     * Returns the ISO code.
+     *
+     * @return the ISO code
+     */
     public String isoCode() {
       return isoCode;
     }
 
-    /** Returns the symbol, may be {@code null}. */
+    /**
+     * Returns the symbol, may be {@code null}.
+     *
+     * @return the symbol, may be {@code null}
+     */
     public String symbol() {
       return symbol;
     }
 
-    /** Returns the decimals of the amounts in this currency. */
+    /**
+     * Returns the decimals of the amounts in this currency.
+     *
+     * @return the decimals of the amounts in this currency
+     */
     public int scale() {
       return scale;
     }

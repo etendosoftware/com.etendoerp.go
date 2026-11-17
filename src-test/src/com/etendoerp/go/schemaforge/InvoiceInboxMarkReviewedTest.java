@@ -84,6 +84,7 @@ class InvoiceInboxMarkReviewedTest {
     messages = mockStatic(OBMessageUtils.class);
     row = mock(IncomingDocument.class);
     when(row.getStatus()).thenAnswer(i -> status);
+    when(row.getErrorCode()).thenAnswer(i -> errorCode);
     when(row.getCurrentData()).thenAnswer(i -> currentData);
     org.mockito.Mockito.doAnswer(i -> {
       status = i.getArgument(0);
