@@ -380,4 +380,66 @@ class InvoiceInboxSummaryTest {
     verify(row).setTotalMismatch(false);
     verify(row).setNewProducts(0L);
   }
+
+  /** Runs syncFrom and returns what it stored in the list total column. */
+  private BigDecimal storedTotal(JSONObject document, Currency currency) {
+    if (currency != null) {
+      when(dal.get(Currency.class, "CUR")).thenReturn(currency);
+      try {
+        document.getJSONObject(HEADER).put("currencyId", "CUR");
+      } catch (JSONException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+    IncomingDocument target = mock(IncomingDocument.class);
+    InvoiceInboxSummary.syncFrom(document, target);
+    ArgumentCaptor<BigDecimal> total = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(target).setGrandTotalAmount(total.capture());
+    return total.getValue();
+  }
+
+  @Test
+  @DisplayName("the list total is the LINES total, not the printed one, and the header keeps the printed")
+  void theLinesTotalWinsOverThePrinted() throws Exception {
+    JSONObject document = printed("printed", 130);
+
+    assertEquals(0, new BigDecimal("121.00").compareTo(storedTotal(document, null)));
+    assertEquals(130, document.getJSONObject(HEADER).getInt("totalAmount"));
+  }
+
+  @Test
+  @DisplayName("a lines-sourced document stores its lines total too, and a null printed total changes nothing")
+  void linesSourceAndNullPrinted() throws Exception {
+    assertEquals(0, new BigDecimal("121.00").compareTo(storedTotal(printed("lines", 999), null)));
+    assertEquals(0, new BigDecimal("121.00")
+        .compareTo(storedTotal(printed("printed", JSONObject.NULL), null)));
+  }
+
+  @Test
+  @DisplayName("a document with no lines keeps the header total, or null")
+  void noLinesFallBackToTheHeaderTotal() throws Exception {
+    JSONObject noLines = new JSONObject().put(HEADER, new JSONObject()
+        .put("totalSource", "printed").put("totalAmount", 77.5));
+    assertEquals(0, new BigDecimal("77.5").compareTo(storedTotal(noLines, null)));
+
+    JSONObject none = new JSONObject().put(HEADER, new JSONObject().put("totalSource", "printed"));
+    assertEquals(null, storedTotal(none, null));
+  }
+
+  @Test
+  @DisplayName("the list total is rounded to the currency scale: 0 and 3 decimals")
+  void theListTotalFollowsTheCurrencyScale() throws Exception {
+    assertEquals(new BigDecimal("121"), storedTotal(printed("printed", 130), currency(0)));
+    assertEquals(new BigDecimal("121.000"), storedTotal(printed("printed", 130), currency(3)));
+  }
+
+  @Test
+  @DisplayName("a credit note stores a negative lines total")
+  void aCreditStoresANegativeTotal() throws Exception {
+    JSONObject credit = new JSONObject().put(HEADER, new JSONObject().put("totalSource", "printed")
+        .put("totalAmount", -130)).put("lines", new JSONArray().put(
+            new JSONObject().put("quantity", -1).put("unitPrice", 100).put("taxRate", 21)));
+
+    assertEquals(0, new BigDecimal("-121.00").compareTo(storedTotal(credit, null)));
+  }
 }

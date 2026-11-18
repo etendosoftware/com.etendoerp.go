@@ -209,6 +209,9 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
         + "c_invoice_id = :id", invoiceId));
     assertTrue("model " + model + " vs engine " + engine,
         model.subtract(engine).abs().compareTo(new BigDecimal("0.02")) <= 0);
+    // the list total of the confirmed row is the created invoice's grand total, not the printed one
+    assertEquals(0, new BigDecimal(text("SELECT grandtotal FROM etgo_incoming_document WHERE "
+        + "etgo_incoming_document_id = :id", id)).compareTo(engine));
     assertEquals(0, new BigDecimal(text("SELECT totallines FROM c_invoice WHERE c_invoice_id = :id",
         invoiceId)).compareTo(new BigDecimal("20.00").multiply(new BigDecimal("0.875"))
             .add(new BigDecimal("22.00")).add(new BigDecimal("100.10"))));
@@ -263,6 +266,8 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
       JSONObject error = response.getBody().getJSONObject("error");
       assertEquals("confirm_failed", error.getString("code"));
       assertEquals("The period is closed", error.getString("detail"));
+      assertEquals("refused", error.getString("detailCode"));
+      assertEquals("The period is closed", error.getJSONObject("detailParams").getString("message"));
       // nothing the unit created survived: the whole rollback, the sequence included
       assertEquals(0L, scalar("SELECT count(*) FROM c_bpartner WHERE name LIKE '" + marker
           + "%'"));
@@ -279,8 +284,9 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
           + "etgo_incoming_document_id = :id", id));
       assertEquals("CONFIRM_FAILED", text("SELECT error_code FROM etgo_incoming_document WHERE "
           + "etgo_incoming_document_id = :id", id));
-      assertNotNull(text("SELECT error_detail FROM etgo_incoming_document WHERE "
-          + "etgo_incoming_document_id = :id", id));
+      // an identifier, not text: the JSON the SPA translates by code
+      assertNotNull(InvoiceInboxFailureDetail.parse(text("SELECT error_detail FROM "
+          + "etgo_incoming_document WHERE etgo_incoming_document_id = :id", id)).orElse(null));
       // the retry the user asks for works on the same row, and consumes the SAME product keys
       completion.reset();
       NeoResponse retry = InvoiceInboxConfirm.confirm(id, null);

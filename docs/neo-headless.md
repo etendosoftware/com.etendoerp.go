@@ -2562,7 +2562,14 @@ invoice, decide the cents:
   the invoice are untouched: this is only the scale of the inbox's own amounts.
 - **Input scales** (HALF_UP, stored): `quantity` 4, `unitPrice` 6 (the price scale of GO), `discount` 4,
   `taxRate` 2; the price after the discount `unit6` stays at 6 decimals.
-The shared fixture `invoice-inbox-totals.json` carries optional `scale` per case and `tax.docTaxAmount`
+The rule exists in three copies (SPA `invoiceInboxReviewModel.js`, `InvoiceInboxTotals`, the Etendo engine). Each
+repo owns its own cases: here `src-test/resources/com/etendoerp/go/schemaforge/ocr/invoice-inbox-totals-cases.json`,
+read from the classpath by `InvoiceInboxTotalsTest`; the SPA keeps `invoice-inbox-totals.json` for its Vitest.
+The Java test no longer reads the SPA's file (the flag `ETGO_REQUIRE_SPA_FIXTURE` is gone). The two case files are
+independent copies that nothing keeps in sync automatically: a change to the rounding rule must update both. What
+still guards agreement is each repo's own cases, the DB-backed engine-vs-model integration tests
+(`InvoiceInboxConfirmIntegrationTest`) and the check at confirm time (`InvoiceInboxConfirmVerify`: refuses beyond
+one minimal unit per distinct tax). Cases carry optional `scale` per case and `tax.docTaxAmount`
 per line, and `docTaxAmount` on the expected tax rows of a line-based tax.
 
 **`ADJUSTED`** is sticky (only ever set) and decided in ONE place, `InvoiceInboxAdjustedPolicy`. An
@@ -2721,16 +2728,33 @@ failure never touches its neighbours. Hidden from MCP like the other four action
   `InvoiceCompletionService.completeInvoiceOrThrow`. A failure anywhere rolls ALL of it back (no half-created
   invoice, vendor or product; the bytes of the attachment are on disk, which is not transactional, so an
   orphan file can remain, as in the intake). Then, in a NEW transaction, the row becomes `ERROR` /
-  `CONFIRM_FAILED` with the translated reason in `ERROR_DETAIL`, and the answer is 422 `confirm_failed` with
-  `error.detail`. A `block` plan quota is a 403 `QUOTA_EXCEEDED` and records nothing. Editing the row
+  `CONFIRM_FAILED` with the reason in `ERROR_DETAIL`, and the answer is 422 `confirm_failed` with
+  `error.detail` (the English text), `error.detailCode` and `error.detailParams` (`error.code` stays the
+  envelope's `confirm_failed`). A `block` plan quota is a 403 `QUOTA_EXCEEDED` and records nothing. Editing the row
   (`apply`) re-validates the edited document: a valid one moves a `CONFIRM_FAILED` row back to
   `PENDING_REVIEW`, an invalid one makes it `ERROR` with the validation code (`MISSING_FIELDS`, ...); either
-  way the detail is cleared. `ERROR_DETAIL` is stored as the reason was produced, in English today (the
-  inbox message keys have no `AD_MESSAGE` rows yet, so the English defaults of `InvoiceInboxMessages` apply)
-  and the SPA shows it as it is; it never carries SQL, file paths or stack frames (exceptions are classified
-  and sanitized as any NEO failure, completion refusals are the translated business message, and a batch
-  failure is prefixed with its step: new vendor, new vendor address, new product 'X', invoice header, line N,
-  plus the missing field names when the pipeline reports them).
+  way the detail is cleared.
+
+  **`ERROR_DETAIL` stores an identifier, not translated text** (`InvoiceInboxFailureDetail`; same column,
+  varchar 2000, no model or AD change): the compact JSON
+  `{"v":1,"code":"<code>","params":{...},"text":"<English default>"}`, so the SPA translates by `code` with
+  `params` in the user's language. Codes: `no_lookups`, `completion_error`, `no_vendor_category`,
+  `no_product_sequence`, `no_file`, `attach_failed`, `currency_mismatch`, `total_mismatch {invoice, document}`,
+  `step_failed {step, n?, name?, reason, missing?[]}` (`step` is `vendor`, `vendorAddress`, `header`, `line`,
+  `product` or `creation`; `n` is the 1-based line, `name` the new product, `reason` the pipeline's own
+  message, `missing` the field names it reports), `search_key_exists {step, n?, name?}` and the catch-all
+  `refused {message}` for text that arrives already built from outside (the `OBException` message of the
+  completion, an SIF preset refusal, a classified NEO failure): that one cannot be an identifier, the raw
+  message is kept in `params.message`. If the value would exceed 2000 characters, only `text` and the string
+  values of `params` are shortened (with `...`), never the JSON itself: the stored value always parses.
+  Rows written before this change hold legacy free text (a value that does not start with `{` or lacks `v` and
+  `code`): readers return it as it is. The review answer returns `errorDetail` as the raw stored string (back
+  compatible) and adds `errorInfo {code, params}` only when the value parses as this JSON. MCP, the list and
+  `etendo_get` return the raw JSON string, which includes the English `text`. Our own confirm messages have no
+  `AD_MESSAGE` row, so they are always English: the language leak seen before came only from outside text
+  (the completion's `OBException`, the pipeline's message, user data), now carried in `refused.message` /
+  `step_failed.reason`. It never carries SQL, file paths or stack frames (exceptions are classified and
+  sanitized as any NEO failure, and a batch failure names its step).
 - **After the commit nothing fails the confirm.** Once `completeInvoiceOrThrow` returns, the telemetry is
   emitted and the answer is built in its own guard; if building it fails the answer is the idempotent shape
   (`alreadyConfirmed: true`, `invoice.id` only), never 422 for an invoice that exists.
@@ -2785,9 +2809,25 @@ failure never touches its neighbours. Hidden from MCP like the other four action
   currency scale (the rule of the SPA banner, `InvoiceInboxSummary.totalMismatch`; the currency is the
   stored one, else the one derived as the worker does: vendor purchase price list, organization, client;
   a missing, null, non-numeric or non-finite printed total never warns, and amounts round HALF_UP). The review answer gains
-  `errorDetail` (when set) and `totalMismatch`; it already carried `currency`. The confirm answer carries
+  `errorDetail` (when set, the raw stored string; see the identifier format above), `errorInfo` (when it parses) and `totalMismatch`; it already carried `currency`. The confirm answer carries
   `totalMismatch` too (computed from the stored document at confirm time) so the toast can mention it.
   Rows saved before this change have them empty until their next save.
+- **Totals of a confirmed row (2026-11-18, owner decision).** The review panel's big Total is always the
+  total computed from the lines (never the printed one, which only drives the non-blocking mismatch
+  banner); the stored `GRANDTOTAL` column of a PENDING row is also the LINES total (owner decision "the lines always
+  win", 2026-11-18): `InvoiceInboxSummary.syncFrom` stores `InvoiceInboxTotals.totals(lines, scale)` at the
+  decimals of the document currency (HALF_UP), on every worker persist and every review edit, whatever the
+  `totalSource`; only a document with no usable line falls back to `header.totalAmount` (printed, or empty).
+  `header.totalAmount`, `totalSource` and the `TOTAL_MISMATCH` rule are unchanged. Rows already stored keep
+  their old value until their next save (no data-fix: the feature is unreleased, behind the flag). The batch
+  confirm dialog's "Importe total" sums these list values, so it sums what will really be created. For a CONFIRMED row the Total is the grand total of the
+  created invoice: (1) the `review` answer's `invoice` block carries `grandTotal` (`C_Invoice.GrandTotal`
+  read at read time, `null` when the engine set none), so rows confirmed before this change also show it;
+  (2) `InvoiceInboxConfirmWork.link()` sets the row's `GRANDTOTAL` to the invoice's grand total in the same
+  transaction, and nothing rewrites it afterwards (`InvoiceInboxSummary.syncFrom` only runs for rows being
+  processed or edited, never for a confirmed one). `TOTAL_MISMATCH` is left as it was at confirm (it records
+  that the document diverged; nothing reads it for a confirmed row). Rows confirmed BEFORE this change keep
+  their old list value (the feature is unreleased behind the flag, no data-fix); their panel is already right.
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).

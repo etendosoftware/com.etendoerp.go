@@ -85,14 +85,19 @@ class InvoiceInboxConfirmFailureTest {
   @Test
   @DisplayName("the row becomes ERROR / CONFIRM_FAILED with the reason, scoped to the readable clients, and commits")
   void recordsTheFailureAndCommits() {
-    InvoiceInboxConfirmFailure.recordFailure("ROW-1", "The invoice could not be created: x");
+    InvoiceInboxFailureDetail.Detail reason = InvoiceInboxFailureDetail.refused(
+        "The invoice could not be created: x");
+    InvoiceInboxConfirmFailure.recordFailure("ROW-1", reason);
 
     ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
     verify(dal.getSession()).createNativeQuery(sql.capture());
     assertEquals(true, sql.getValue().contains("status = 'ERROR'"));
     assertEquals(true, sql.getValue().contains("error_code = 'CONFIRM_FAILED'"));
     assertEquals(true, sql.getValue().contains("status IN ('PENDING_REVIEW', 'READY', 'ERROR')"));
-    verify(query).setParameter("detail", "The invoice could not be created: x");
+    verify(query).setParameter("detail", reason.stored());
+    assertEquals("{\"v\":1,\"code\":\"refused\",\"params\":{\"message\":"
+        + "\"The invoice could not be created: x\"},\"text\":\"The invoice could not be created: x\"}",
+        reason.stored());
     verify(query).setParameter("user", "USER-1");
     verify(query).setParameter("id", "ROW-1");
     verify(query).setParameterList(eq("clients"), eq(new String[] { "C1", "0" }));
@@ -102,16 +107,22 @@ class InvoiceInboxConfirmFailureTest {
   }
 
   @Test
-  @DisplayName("a reason longer than the 2000-character column is abbreviated to fit, null is empty")
-  void theReasonIsCapped() {
-    InvoiceInboxConfirmFailure.recordFailure("ROW-1", "x".repeat(5000));
-    InvoiceInboxConfirmFailure.recordFailure("ROW-2", null);
+  @DisplayName("a reason longer than the 2000-character column is shortened in its text and params, never cut as JSON; null is an empty message")
+  void theReasonIsCappedWithoutBreakingTheJson() throws Exception {
+    InvoiceInboxConfirmFailure.recordFailure("ROW-1",
+        InvoiceInboxFailureDetail.refused("x".repeat(5000)));
+    InvoiceInboxConfirmFailure.recordFailure("ROW-2", InvoiceInboxFailureDetail.refused(null));
 
     ArgumentCaptor<Object> detail = ArgumentCaptor.forClass(Object.class);
     verify(query, org.mockito.Mockito.atLeastOnce()).setParameter(eq("detail"), detail.capture());
-    assertEquals(2000, ((String) detail.getAllValues().get(0)).length());
-    assertEquals(true, ((String) detail.getAllValues().get(0)).endsWith("..."));
-    assertEquals("", detail.getAllValues().get(1));
+    String first = (String) detail.getAllValues().get(0);
+    assertEquals(true, first.length() <= 2000, "length " + first.length());
+    org.codehaus.jettison.json.JSONObject parsed = new org.codehaus.jettison.json.JSONObject(first);
+    assertEquals("refused", parsed.getString("code"));
+    assertEquals(true, parsed.getString("text").endsWith("..."));
+    assertEquals(true, parsed.getJSONObject("params").getString("message").endsWith("..."));
+    String second = (String) detail.getAllValues().get(1);
+    assertEquals("", new org.codehaus.jettison.json.JSONObject(second).getString("text"));
   }
 
   @Test
@@ -119,7 +130,8 @@ class InvoiceInboxConfirmFailureTest {
   void itNeverThrows() {
     when(query.executeUpdate()).thenThrow(new IllegalStateException("db down"));
 
-    assertDoesNotThrow(() -> InvoiceInboxConfirmFailure.recordFailure("ROW-1", "reason"));
+    assertDoesNotThrow(() -> InvoiceInboxConfirmFailure.recordFailure("ROW-1",
+        InvoiceInboxFailureDetail.refused("reason")));
 
     verify(dal).rollbackAndClose();
     verify(dal, never()).commitAndClose();

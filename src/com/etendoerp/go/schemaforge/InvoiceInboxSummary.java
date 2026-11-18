@@ -91,13 +91,31 @@ public final class InvoiceInboxSummary {
     String documentNo = text(header, K_DOCUMENT_NO);
     row.setOrderReference(documentNo.length() > MAX_DOCUMENT_NO ? null : emptyToNull(documentNo));
     row.setInvoiceDate(dateOf(text(header, K_INVOICE_DATE)));
-    row.setGrandTotalAmount(header.isNull(K_TOTAL_AMOUNT) || !header.has(K_TOTAL_AMOUNT) ? null
-        : BigDecimal.valueOf(header.optDouble(K_TOTAL_AMOUNT)));
-    row.setDuplicateOfInvoice(firstDuplicate(header.optJSONObject(K_DUPLICATE)));
     Currency currency = InvoiceInboxLiveChecks.documentCurrency(document, row);
+    row.setGrandTotalAmount(listTotal(document, header, currency));
+    row.setDuplicateOfInvoice(firstDuplicate(header.optJSONObject(K_DUPLICATE)));
     row.setCurrency(currency);
     row.setTotalMismatch(totalMismatch(document, currency));
     row.setNewProducts(newProducts(document.optJSONArray(K_LINES)));
+  }
+
+  /**
+   * The list total of a pending row: THE LINES ALWAYS WIN (owner decision 2026-11-18). It is the
+   * total of the lines computed by the shared model ({@link InvoiceInboxTotals}) at the decimals of
+   * the document currency, i.e. what confirming would create, whatever the {@code totalSource}.
+   * Only a document with no usable line falls back to the header's {@code totalAmount} (the printed
+   * one, or {@code null}). {@code header.totalAmount} itself is never changed here.
+   */
+  private static BigDecimal listTotal(JSONObject document, JSONObject header, Currency currency) {
+    int scale = currency == null || currency.getStandardPrecision() == null ? 2
+        : currency.getStandardPrecision().intValue();
+    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(document.optJSONArray(K_LINES),
+        scale);
+    if (totals != null && totals.total() != null) {
+      return totals.total().setScale(scale, RoundingMode.HALF_UP);
+    }
+    return header.isNull(K_TOTAL_AMOUNT) || !header.has(K_TOTAL_AMOUNT) ? null
+        : BigDecimal.valueOf(header.optDouble(K_TOTAL_AMOUNT));
   }
 
   /**

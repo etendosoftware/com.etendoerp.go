@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -140,6 +141,9 @@ class InvoiceInboxConfirmVerifyTest {
         () -> verify(invoice(currency("EUR", 2L), "121.02", "T1"), header, ONE_LINE));
     assertTrue(stop.getMessage().contains("121.02") && stop.getMessage().contains("121.00"),
         stop.getMessage());
+    assertEquals("total_mismatch", stop.detail().code());
+    assertEquals("121.02", stop.detail().params().get("invoice"));
+    assertEquals("121.00", stop.detail().params().get("document"));
   }
 
   @Test
