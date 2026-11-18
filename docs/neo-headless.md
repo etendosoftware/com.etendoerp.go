@@ -10263,6 +10263,24 @@ real effect (the opposite of Balance Sheet): P&L is a period-activity total of p
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
 
+**`generate_profit_loss`: dates without a year, and month/quarter columns (ETP-5850).** Two
+P&L-only parameters, so an agent can answer "how did we do this quarter" and "each month of the
+quarter" the way the SPA's interactive report shows them (ETP-6239's Total / Month / Quarter views):
+- `yearId` is optional when BOTH `dateFrom` and `dateTo` are given: the dates alone bound the
+  range (no year bind in the SQL). An agent often cannot pick the year id itself: a tenant can have
+  two years with the same name, one per calendar. With one date or none, `year_id_required` (400)
+  as before. Balance Sheet keeps `yearId` required (its only bound).
+- `breakdown` = `none` (default) | `month` | `quarter`. Every row gains `byPeriod` (period key ->
+  amount) and `meta` gains `breakdown` and `periods` (`key`, `dateFrom`, `dateTo`, in order). Keys
+  are `2026-07` for a month and `2026-07/2026-09` for a quarter. Periods are counted from the
+  range's first month (`dateFrom`, or the year's first period start), so a July-June year's first
+  quarter is July-September; the first and last slices are clipped to the range. Each slice is the
+  same query over its dates with every row kept, so every row of the total has a value per column.
+  Refused with 400: an unknown value (`breakdown_invalid`), with `compareTo`
+  (`breakdown_with_compare`), more than 24 periods (`breakdown_too_many_periods`, each period is
+  one more query), or an inverted or empty range (`breakdown_range_invalid`).
+- The SPA's Node report engines are untouched: the breakdown is computed in Java for this tool.
+
 **Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
 bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
 `yearId`/`referenceYearId` (balance sheet and P&L) and `glId` (aging) are resolved through

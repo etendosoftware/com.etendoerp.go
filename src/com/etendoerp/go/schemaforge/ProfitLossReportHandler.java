@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -112,12 +113,19 @@ public class ProfitLossReportHandler extends AbstractAccountTreeReportHandler {
   // Report contract
   // -------------------------------------------------------------------------
 
+  /**
+   * The shared account-tree parameters, with two P&amp;L-only changes (ETP-5850): {@code yearId}
+   * is optional when both dates are given, and {@code breakdown} adds month or quarter columns.
+   */
   @Override
   public Optional<List<NeoReportParam>> reportParameters() {
-    return accountTreeParameters(
+    List<NeoReportParam> params = new ArrayList<>();
+    for (NeoReportParam param : accountTreeParameters(
         "C_Year id whose fiscal period range bounds the report — Profit & Loss is a "
             + "PERIOD-ACTIVITY total of postings within that year (further narrowed by "
-            + "dateFrom/dateTo, if given), unlike Balance Sheet's cumulative snapshot.",
+            + "dateFrom/dateTo, if given), unlike Balance Sheet's cumulative snapshot. Optional "
+            + "when both dateFrom and dateTo are given: the dates alone then bound the report "
+            + "(e.g. a quarter: dateFrom 2026-07-01, dateTo 2026-09-30, no yearId).",
         "Lower bound (inclusive) on the posting date, narrowing yearId's own fiscal "
             + "year-start bound. Default: no narrowing (the full fiscal year from yearId's "
             + "first period start).",
@@ -134,7 +142,20 @@ public class ProfitLossReportHandler extends AbstractAccountTreeReportHandler {
             + "is true.",
         "Upper bound (inclusive) on the comparison posting date, narrowing "
             + "referenceYearId's own fiscal year-end bound. Only meaningful when compareTo "
-            + "is true.");
+            + "is true.").orElseThrow()) {
+      params.add(PARAM_YEAR_ID.equals(param.getName())
+          ? NeoReportParam.optional(PARAM_YEAR_ID, param.getType(), param.getDescription())
+          : param);
+    }
+    params.add(NeoReportParam.options(PARAM_BREAKDOWN,
+        "Amount columns per period, as the app's Month / Quarter views: 'month' or 'quarter' "
+            + "adds byPeriod to every row (period key -> amount) and lists the columns in "
+            + "meta.periods (key, dateFrom, dateTo). Periods are counted from the range's first "
+            + "month (dateFrom, or yearId's first period), so the quarters of a July-June year "
+            + "start in July. At most " + MAX_BREAKDOWN_PERIODS + " periods; not with compareTo. "
+            + "Default: none (the total only).",
+        BREAKDOWNS));
+    return Optional.of(params);
   }
 
   @Override
@@ -156,7 +177,8 @@ public class ProfitLossReportHandler extends AbstractAccountTreeReportHandler {
 
   @Override
   String yearIdRequiredHint() {
-    return "Pass the C_Year id whose fiscal period range the P&L should be reported over.";
+    return "Pass the C_Year id whose fiscal period range the P&L should be reported over, or "
+        + "leave yearId out and pass both dateFrom and dateTo.";
   }
 
   @Override
@@ -182,7 +204,7 @@ public class ProfitLossReportHandler extends AbstractAccountTreeReportHandler {
   @Override
   String amountCase(String yearParam, boolean hasFrom, String fromParam, boolean hasTo,
       String toParam) {
-    return buildPeriodCase(true, yearParam, hasFrom, fromParam, hasTo, toParam);
+    return buildPeriodCase(yearParam != null, yearParam, hasFrom, fromParam, hasTo, toParam);
   }
 
   /**
