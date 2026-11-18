@@ -59,6 +59,7 @@ import com.etendoerp.go.schemaforge.data.IncomingDocument;
 import com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotals;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
 
 /**
  * Real-database specs of the {@code confirm} action of the invoice inbox: the whole chain (new
@@ -106,6 +107,12 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
 
   @Before
   public void prepareContext() {
+    // NeoExtensionIndex is JVM-static and is built from the first Weld container that asks for it.
+    // goIsolatedDalTest runs every DAL class in one JVM, each with its own container, so an index
+    // left by an earlier class holds beans of a dead container: resolving the header handler (which
+    // has @Inject fields) from it fails silently and the invoice is created without the header
+    // pre-hook (no accounting date, no exchange rate). Rebuild it for this class's container.
+    NeoExtensionIndex.invalidate();
     OBContext.clearAdminModeStack();
     OBContext.setOBContext(USER_ID, ROLE_ID, CLIENT_ID, ORG_ID);
     before = snapshot();
@@ -122,6 +129,7 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
 
   @After
   public void cleanUp() {
+    NeoExtensionIndex.invalidate();
     telemetry.close();
     attachment.close();
     completion.close();
