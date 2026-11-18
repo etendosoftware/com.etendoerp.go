@@ -36,13 +36,13 @@ import com.etendoerp.go.session.GoSessionRecord;
  */
 public class EtendoGoJwtServletSessionEnvironmentTest {
 
-  private static GoSessionRecord record(String clientId) {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setUserId("U1");
-    record.setRoleId("R1");
-    record.setCtxClientId(clientId);
-    record.setCtxOrgId("O1");
-    return record;
+  private static GoSessionRecord sessionOf(String clientId) {
+    GoSessionRecord session = new GoSessionRecord();
+    session.setUserId("U1");
+    session.setRoleId("R1");
+    session.setCtxClientId(clientId);
+    session.setCtxOrgId("O1");
+    return session;
   }
 
   @Test
@@ -50,7 +50,7 @@ public class EtendoGoJwtServletSessionEnvironmentTest {
     try (MockedStatic<OwnerAccountResolver> owner = Mockito.mockStatic(OwnerAccountResolver.class)) {
       owner.when(() -> OwnerAccountResolver.findOwnerAccountId("C1")).thenReturn("ACCOUNT-OWNER");
 
-      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(record("C1"));
+      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(sessionOf("C1"));
 
       assertEquals("ACCOUNT-OWNER", env.getString("etgoAccountId"));
       assertEquals("U1", env.getString("userId"));
@@ -63,7 +63,7 @@ public class EtendoGoJwtServletSessionEnvironmentTest {
     try (MockedStatic<OwnerAccountResolver> owner = Mockito.mockStatic(OwnerAccountResolver.class)) {
       owner.when(() -> OwnerAccountResolver.findOwnerAccountId("C1")).thenReturn(null);
 
-      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(record("C1"));
+      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(sessionOf("C1"));
 
       assertFalse(env.has("etgoAccountId"));
     }
@@ -75,7 +75,7 @@ public class EtendoGoJwtServletSessionEnvironmentTest {
       owner.when(() -> OwnerAccountResolver.findOwnerAccountId("C1"))
           .thenThrow(new IllegalStateException("db down"));
 
-      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(record("C1"));
+      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(sessionOf("C1"));
 
       assertFalse(env.has("etgoAccountId"));
       assertTrue(env.has("clientId"));
@@ -85,7 +85,7 @@ public class EtendoGoJwtServletSessionEnvironmentTest {
   @Test
   public void theSystemClientHasNoOwnerAccount() throws Exception {
     try (MockedStatic<OwnerAccountResolver> owner = Mockito.mockStatic(OwnerAccountResolver.class)) {
-      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(record("0"));
+      JSONObject env = (JSONObject) EtendoGoJwtServlet.buildSessionEnvironment(sessionOf("0"));
 
       assertFalse(env.has("etgoAccountId"));
       owner.verifyNoInteractions();
