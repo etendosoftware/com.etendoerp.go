@@ -33,6 +33,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.FieldTrl;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.ElementTrl;
 
 /**
  * Versioned field labels and descriptions for agents, in the user's language (ETP-5840, QA CP-12c).
@@ -186,6 +187,44 @@ final class McpFieldLabels {
       }
     }
     return byId;
+  }
+
+  /**
+   * ETP-5806 / CP-10b correction — the {@code AD_ELEMENT_TRL} name of one {@code AD_Element} in
+   * {@code langCode}. {@code Element.getName()} resolves its translation through Hibernate's
+   * ambient {@code OBContext} session language, not through the language this specific request
+   * actually wants, which is exactly the problem {@link #loadFieldTranslations} already avoids for
+   * {@code AD_Field} by querying {@code FieldTrl} directly. Same pattern here: admin mode
+   * ({@code ElementTrl} is not readable under a restricted NEO role) and total — never throws, and
+   * an absent translation row answers {@code null} so the caller falls back to the base-language
+   * {@code AD_Element.Name}.
+   *
+   * @param elementId the {@code AD_Element.AD_Element_ID}
+   * @param langCode  the target language, e.g. {@code es_ES}; blank answers {@code null}
+   * @return the translated name, or {@code null} when no row matches
+   */
+  static String elementTranslation(String elementId, String langCode) {
+    if (StringUtils.isAnyBlank(elementId, langCode)) {
+      return null;
+    }
+    boolean adminMode = false;
+    try {
+      adminMode = true;
+      OBContext.setAdminMode(true);
+      OBCriteria<ElementTrl> crit = OBDal.getInstance().createCriteria(ElementTrl.class);
+      crit.add(Restrictions.eq(ElementTrl.PROPERTY_APPLICATIONELEMENT + ".id", elementId));
+      crit.add(Restrictions.eq(ElementTrl.PROPERTY_LANGUAGE + ".language", langCode));
+      crit.setMaxResults(1);
+      ElementTrl trl = (ElementTrl) crit.uniqueResult();
+      return trl != null ? StringUtils.trimToNull(trl.getName()) : null;
+    } catch (Exception e) {
+      // Translation table not readable / language missing → fall back to the base-language name.
+      return null;
+    } finally {
+      if (adminMode) {
+        OBContext.restorePreviousMode();
+      }
+    }
   }
 
   /**

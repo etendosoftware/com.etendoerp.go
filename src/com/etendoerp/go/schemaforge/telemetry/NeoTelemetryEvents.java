@@ -176,6 +176,15 @@ public final class NeoTelemetryEvents {
   public static final String BACKEND_PERIOD_REFUSED = "backend_period_refused";
 
   /**
+   * ETP-6051 — an invoice inbox document was confirmed into a completed purchase invoice, once, on
+   * the first transition only (an idempotent or failed confirm sends nothing). Properties
+   * {@code adjusted} (the KPI flag the document carried, never changed by the confirm) and
+   * {@code account_id}. Never a record identifier.
+   */
+  public static final String BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED =
+      "backend_invoice_inbox_document_confirmed";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

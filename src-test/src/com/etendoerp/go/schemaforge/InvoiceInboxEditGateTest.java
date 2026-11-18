@@ -215,6 +215,14 @@ class InvoiceInboxEditGateTest {
   }
 
   @Test
+  void anErrorRowWithoutACodeIsEditable() {
+    unlockedRow = new Object[] { "ERROR", "ORG1", null };
+    lockedRow = unlockedRow;
+
+    assertNull(InvoiceInboxEditGate.open("R1", currentToken()).refusal());
+  }
+
+  @Test
   void everyEditableStatusIsOpened() {
     for (String[] state : new String[][] { { "PENDING_REVIEW", null }, { "READY", null },
         { "ERROR", "UNREADABLE" }, { "ERROR", "MISSING_FIELDS" } }) {

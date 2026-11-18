@@ -1147,6 +1147,9 @@ class NeoCrudHandler {
     // consumed); the real number is materialized on completion.
     DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange(
         filteredBody, context, dalEntityName, clientSentDocumentNo);
+    // ETP-6176: a reference the update changes brings the callout effects the form gives it (a new
+    // product's tax, unit and price), for every field the caller did not send.
+    NeoUpdateCalloutRefire.apply(context, filteredBody, dalEntityName);
     // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
     // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
     NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);

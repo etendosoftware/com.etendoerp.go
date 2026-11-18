@@ -147,7 +147,7 @@ final class InvoiceInboxReview {
    * @return {@code true} when the document is editable
    */
   static boolean isEditable(String status, String errorCode) {
-    return EDITABLE.contains(status) && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode);
+    return status != null && EDITABLE.contains(status) && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(errorCode);
   }
 
   /**
@@ -173,6 +173,9 @@ final class InvoiceInboxReview {
     out.put("id", row.getId());
     out.put("status", status);
     out.put("errorCode", errorCode == null ? JSONObject.NULL : errorCode);
+    if (!StringUtils.isBlank(row.getErrorDetail())) {
+      out.put("errorDetail", row.getErrorDetail());
+    }
     out.put("reviewed", Boolean.TRUE.equals(row.isReviewed()));
     out.put("adjusted", Boolean.TRUE.equals(row.isAdjusted()));
     out.put("updated", orNull(NeoDateFormat.toAuditToken(row.getUpdated())));
@@ -188,6 +191,8 @@ final class InvoiceInboxReview {
     out.put("attachment", attachment(row.getId()));
     JSONObject document = document(row);
     out.put("currency", currency(row, document));
+    out.put("totalMismatch", InvoiceInboxSummary.totalMismatch(document,
+        InvoiceInboxLiveChecks.documentCurrency(document, row)));
     out.put("document", document);
     return out;
   }
@@ -298,7 +303,7 @@ final class InvoiceInboxReview {
     if (document == null) {
       document = skeleton();
     }
-    document.put(K_VALIDATION, InvoiceInboxValidator.validate(document).toJson());
+    document.put(K_VALIDATION, InvoiceInboxLiveChecks.verdict(document, row).toJson());
     enrich(document, lookupsFor(row.getTargetType()));
     return document;
   }

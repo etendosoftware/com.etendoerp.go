@@ -85,6 +85,8 @@ public final class InvoiceInboxStatusPolicy {
         || (code == null ? row.getErrorCode() != null : !code.equals(row.getErrorCode()));
     row.setStatus(status);
     row.setErrorCode(code);
+    // The reason of a failed confirmation belongs to the attempt, not to the edited document.
+    row.setErrorDetail(null);
     return changed;
   }
 

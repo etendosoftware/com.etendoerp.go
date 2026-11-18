@@ -725,4 +725,21 @@ class NeoSelectorServiceTest {
     assertFalse(original.containsKey(NeoSelectorService.SOURCE_ENTITY_NAME_PARAM));
     assertNotEquals(original, result);
   }
+
+  @Test
+  void offersValue_blankIdCannotBeVerified() {
+    assertTrue(
+        NeoSelectorService.offersValue(null, mock(Column.class), "field", " ", Map.of()).isEmpty());
+  }
+
+  @Test
+  void offersValue_missingColumnCannotBeVerified() {
+    assertTrue(NeoSelectorService.offersValue(null, null, "field", "ID1", Map.of()).isEmpty());
+  }
+
+  @Test
+  void offersValue_malformedIdIsNotOffered() {
+    assertEquals(java.util.Optional.of(Boolean.FALSE),
+        NeoSelectorService.offersValue(null, mock(Column.class), "field", "x' OR '1'='1", Map.of()));
+  }
 }
