@@ -564,14 +564,26 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
           continue;
         }
         candidates.add(new Candidate(row.optString(KEY_ID), row.optString(KEY_NAME,
-            row.optString("_identifier", row.optString(KEY_ID))),
-            row.has("similarity_percent") ? row.optString("similarity_percent").replaceAll("%\\s*$",
-                "") : null));
+            row.optString("_identifier", row.optString(KEY_ID))), percentOf(row, "similarity_percent"),
+            percentOf(row, "text_similarity_percent"), matchTypeOf(row)));
       }
     } catch (JSONException | ClassNotFoundException | RuntimeException e) {
       log.warn("OCR product similarity search failed: {}", e.getClass().getSimpleName());
     }
     return candidates;
+  }
+
+  /** The percentage field without its trailing "%", {@code null} when the row lacks it. */
+  private static String percentOf(JSONObject row, String key) {
+    return row.has(key) ? row.optString(key).replaceAll("%\\s*$", "") : null;
+  }
+
+  /** match_type, or "exact" from exact_match for a search that predates it, else {@code null}. */
+  private static String matchTypeOf(JSONObject row) {
+    if (row.has("match_type")) {
+      return row.optString("match_type");
+    }
+    return row.optBoolean("exact_match", false) ? "exact" : null;
   }
 
   @Override

@@ -364,6 +364,30 @@ class PurchaseInvoiceOcrLookupsTest {
     }
 
     @Test
+    @DisplayName("ETP-5895: the whole-string similarity and the match type travel with each candidate")
+    void wholeStringSimilarityAndMatchTypeAreRead() throws Exception {
+      simMock.when(() -> NeoSimSearchEndpoint.searchTerm(anyString(), anyString(), anyInt(),
+          anyString())).thenReturn(new JSONObject().put("data", new JSONArray()
+              .put(new JSONObject().put("id", "P1").put("name", "Meter")
+                  .put("similarity_percent", "100.0000%").put("text_similarity_percent", "100.0000%")
+                  .put("exact_match", true).put("match_type", "exact"))
+              .put(new JSONObject().put("id", "P2").put("name", "Cubic Meter")
+                  .put("similarity_percent", "100.0000%").put("text_similarity_percent", "50.0000%")
+                  .put("exact_match", false))
+              .put(new JSONObject().put("id", "P3").put("name", "Metre")
+                  .put("similarity_percent", "60.0000%").put("exact_match", true))));
+
+      List<Candidate> found = lookups.productCandidates(List.of("Meter")).get(0);
+
+      assertEquals("100.0000", found.get(0).textSimilarity());
+      assertEquals("exact", found.get(0).matchType());
+      assertEquals("50.0000", found.get(1).textSimilarity());
+      assertNull(found.get(1).matchType());
+      assertNull(found.get(2).textSimilarity());
+      assertEquals("exact", found.get(2).matchType(), "exact_match alone, from a search before match_type");
+    }
+
+    @Test
     @DisplayName("a row without an id is not a candidate, and a checked failure is per line too")
     void blankIdsAreFilteredAndCheckedFailuresAreCaught() throws Exception {
       simMock.when(() -> NeoSimSearchEndpoint.searchTerm(eq("Product"), eq("a"), anyInt(),
@@ -433,15 +457,23 @@ class PurchaseInvoiceOcrLookupsTest {
     }
 
     @Test
-    @DisplayName("the % of a real 96.7000% row is stripped, so the single top >= 90 is auto-matched")
+    @DisplayName("ETP-5895: the % of real rows is stripped; the single top whole-string similarity >= 85 is auto-matched")
     void percentSuffixIsStrippedAndSingleTopAutoMatches() throws Exception {
-      JSONArray rows = new JSONArray().put(simRow("P1", "Servicio webs", "96.7000%"));
+      JSONArray rows = new JSONArray().put(simRow("P1", "Servicio webs", "96.7000%")
+          .put("text_similarity_percent", "87.5000%"));
 
       assertEquals("96.7000", stripped(rows));
 
       JSONObject product = reviewedProduct(rows);
       assertEquals("auto_matched", product.getString("state"));
       assertEquals("P1", product.getJSONObject("match").getString("id"));
+    }
+
+    @Test
+    @DisplayName("ETP-5895: a score of 96.7 % with a whole-string similarity of 80 % is only suggested")
+    void highScoreLowWholeStringSimilarityIsSuggested() throws Exception {
+      JSONObject product = reviewedProduct(new JSONArray().put(simRow("P1", "Servicio webs", "96.7000%")));
+      assertEquals("suggested", product.getString("state"));
     }
 
     @Test

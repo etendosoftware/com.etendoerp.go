@@ -347,18 +347,36 @@ public interface OcrLookups {
     private final String id;
     private final String name;
     private final String similarity;
+    private final String textSimilarity;
+    private final String matchType;
 
     /**
-     * Describes a candidate.
+     * Describes a candidate from a search that reports only the score.
      *
      * @param id         the product id
      * @param name       the product name
      * @param similarity the similarity as the search reports it, may be {@code null}
      */
     public Candidate(String id, String name, String similarity) {
+      this(id, name, similarity, null, null);
+    }
+
+    /**
+     * Describes a candidate.
+     *
+     * @param id             the product id
+     * @param name           the product name
+     * @param similarity     the score as the search reports it, may be {@code null}
+     * @param textSimilarity the whole-string similarity, may be {@code null}
+     * @param matchType      "exact", "normalized" or "fuzzy" (ETP-5895), may be {@code null}
+     */
+    public Candidate(String id, String name, String similarity, String textSimilarity,
+        String matchType) {
       this.id = id;
       this.name = name;
       this.similarity = similarity;
+      this.textSimilarity = textSimilarity;
+      this.matchType = matchType;
     }
 
     /**
@@ -386,6 +404,24 @@ public interface OcrLookups {
      */
     public String similarity() {
       return similarity;
+    }
+
+    /**
+     * Returns the whole-string similarity.
+     *
+     * @return the whole-string similarity, {@code null} when the search did not report it
+     */
+    public String textSimilarity() {
+      return textSimilarity;
+    }
+
+    /**
+     * Returns how the product's identifier relates to the description.
+     *
+     * @return "exact", "normalized" or "fuzzy", {@code null} when the search did not report it
+     */
+    public String matchType() {
+      return matchType;
     }
   }
 

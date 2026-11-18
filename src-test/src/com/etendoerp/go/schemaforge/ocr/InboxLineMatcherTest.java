@@ -212,6 +212,65 @@ class InboxLineMatcherTest {
         .getString(STATE));
   }
 
+  // ---------------------------------------------------------------- whole-string similarity and match type (ETP-5895)
+  // The search now also reports text_similarity_percent and match_type; the cases above, with the
+  // score only, keep the legacy rule.
+
+  private static Candidate found(String id, String name, String score, String text, String matchType) {
+    return new Candidate(id, name, score, text, matchType);
+  }
+
+  @Test
+  @DisplayName("ETP-5895: a name that only CONTAINS the line scores 100 but is only suggested")
+  void aContainingNameIsOnlySuggested() throws Exception {
+    JSONObject product = product("Mantenimiento Web",
+        found("P1", "Servicio de desarrollo y mantenimiento web", "100", "43.9", "fuzzy"));
+
+    assertEquals("ambiguous", product.getString(STATE));
+  }
+
+  @Test
+  @DisplayName("ETP-5895: a near-identical name (missing unit) clearly ahead is linked by similarity")
+  void aNearIdenticalNameClearlyAheadIsLinked() throws Exception {
+    JSONObject product = product("Bebida Energética 0,5",
+        found("P1", "Bebida Energética 0,5L", "95.5", "87.5", "fuzzy"),
+        found("P2", "Bebida Isotónica 0,5L", "70", "60", "fuzzy"));
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("P1", product.getString("id"));
+    assertEquals("similarity", product.getString("matchedBy"));
+  }
+
+  @Test
+  @DisplayName("ETP-5895: a runner-up within 10 points of whole-string similarity keeps it ambiguous")
+  void aCloseRunnerUpIsAmbiguous() throws Exception {
+    JSONObject product = product("Cerveza Ale 0,5",
+        found("P1", "Cerveza Ale 0,5L", "94", "88", "fuzzy"),
+        found("P2", "Cerveza Ale 0,33L", "90", "80", "fuzzy"));
+
+    assertEquals("ambiguous", product.getString(STATE));
+  }
+
+  @Test
+  @DisplayName("ETP-5895: the one product the search marks exact (e.g. by its search key) is linked as exact")
+  void theOneSearchExactIsLinkedAsExact() throws Exception {
+    JSONObject product = product("MTR-001", found("P1", "Cubic Meter", "100", "30", "fuzzy"),
+        found("P2", "Meter", "100", "25", "exact"));
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("P2", product.getString("id"));
+    assertEquals("exact", product.getString("matchedBy"));
+  }
+
+  @Test
+  @DisplayName("ETP-5895: two products the search marks exact are ambiguous")
+  void twoSearchExactsAreAmbiguous() throws Exception {
+    JSONObject product = product("MTR-001", found("P1", "Meter", "100", "25", "exact"),
+        found("P2", "Metre", "100", "25", "exact"));
+
+    assertEquals("ambiguous", product.getString(STATE));
+  }
+
   // ---------------------------------------------------------------- the unit and the new-product defaults (ETP-6051)
 
   private static JSONArray itemsWithUnit(String description, Object unit) throws JSONException {

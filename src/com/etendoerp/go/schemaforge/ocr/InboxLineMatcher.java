@@ -209,10 +209,15 @@ public final class InboxLineMatcher {
     return out.put(K_CANDIDATES, candidatesOf(candidates));
   }
 
-  /** {@code exact} when the matched product has the very name of the line, else {@code similarity}. */
+  /**
+   * {@code exact} when the matched product has the very name of the line, or the search marked it
+   * equal (its search key, or the name once accents are ignored), else {@code similarity}.
+   */
   private static String matchedBy(OcrProductMatch match, String description) {
-    boolean exact = OcrProductMatch.normalizeProductName(match.chosen().name())
-        .equals(OcrProductMatch.normalizeProductName(description));
+    String matchType = match.chosen().matchType();
+    boolean exact = "exact".equals(matchType) || "normalized".equals(matchType)
+        || OcrProductMatch.normalizeProductName(match.chosen().name())
+            .equals(OcrProductMatch.normalizeProductName(description));
     return exact ? "exact" : K_SIMILARITY;
   }
 
