@@ -39,6 +39,7 @@ Current constants:
 - `backend_bank_bounce_pair_decided` (ETP-5581)
 - `backend_bank_bounce_pair_restored` (ETP-5581)
 - `backend_bank_bounce_suggestions_applied` (ETP-5581)
+- `backend_remittance_file_generated` (ETP-6247)
 
 ### Added to every event by the Mixpanel sink (ETP-5581)
 
@@ -73,6 +74,7 @@ Allowed low-cardinality keys:
 - `confidence` (ETP-5581)
 - `decision` (ETP-5581)
 - `detection_signal` (ETP-5581)
+- `direction` — only `AR` or `AP`, any other value is dropped (ETP-6247)
 - `entity`
 - `entityType`
 - `flow`
@@ -94,6 +96,7 @@ Allowed boolean keys (a non-boolean value is dropped):
 - `critical`
 - `flag_enabled`
 - `is_customer`
+- `is_regeneration` (ETP-6247)
 - `is_vendor`
 - `previous_is_customer`
 - `preselected` (ETP-5581)
@@ -111,6 +114,7 @@ Allowed numeric keys:
 - `days_since_decided` (0–36500, ETP-5581)
 - `durationMs`
 - `httpStatus`
+- `invoice_count` (0–1000000, ETP-6247)
 - `pairs_shown`, `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` (0–1000000, ETP-5581)
 - `position`
 - `score`
@@ -121,6 +125,14 @@ Allowed numeric keys:
 
 Numeric keys must receive finite numeric values within their configured bounds.
 String and boolean values are dropped for numeric keys.
+
+Allowed list keys (ETP-6247) — a collection whose every element is one of the listed values; it is
+sent sorted and deduplicated, as a JSON array. An empty collection, a non-collection or any unknown
+element drops the whole property:
+
+- `role_groups` — `warehouse`, `sales`, `purchasing`, `finance`, `admin`, `other`: the SPA's
+  ETP-6043 property, computed in Java by `NeoRoleGroups` (the system role templates composed into
+  the user's personal role, `admin` for the client-admin role, `other` otherwise).
 
 The denylist always wins. Do not pass secrets, raw URLs, document numbers,
 record ids, names, labels, OAuth values, authorization values, or user-entered
@@ -331,6 +343,28 @@ Example (`backend_bank_bounce_pair_decided` as submitted to Mixpanel):
   "decision": "discarded", "surface": "modal",
   "environment": "production", "$insert_id": "3f0c2b9e8d7a4c1b9e6f5a4d3c2b1a09"}}
 ```
+
+## Remittance SEPA File KPIs (ETP-6247)
+
+`backend_remittance_file_generated` — a remittance's SEPA file was generated and stored, by
+«Confirmar» (`confirm`) or «Regenerar fichero» (`generateFile`). Emitted by
+`RemittanceFileTelemetry`, only with `sepa-remittances` on, through `NeoBatchScope.runAfterCommit`,
+on one bounded background thread. Outside a batch (the SPA and a single MCP call) the event is
+handed off **as soon as the action succeeds, before the request's own commit** — the same as the
+bounce-pair KPIs —, so a commit that failed afterwards would still have emitted it; inside a batch it
+waits for the batch commit and is dropped on rollback. A refused action (any 4xx/5xx) emits nothing.
+
+| Property | Value |
+|---|---|
+| `account_id` | the tenant (`AD_Client_ID`) |
+| `direction` | `AR` (collection, CORE) or `AP` (payment, SCT) |
+| `invoice_count` | distinct invoices of the remittance's active lines |
+| `is_regeneration` | `false` for `confirm`, `true` for `generateFile` |
+| `channel` | `ui` or `mcp` (`NeoWriteChannel`, as the bounce KPIs) |
+| `flag_enabled` | always `true` |
+| `role_groups` | list, see *Payload Safety*; omitted when no role can be read |
+
+No record id, document number, amount or name.
 
 ## Adding Authoritative Backend KPIs
 

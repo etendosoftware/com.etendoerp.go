@@ -96,7 +96,13 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li><b>«Procesar»</b>: declared action {@code process} ({@link RemittanceProcessAction}),
  *       Classic's {@code REMRemittanceProcess}; 422 when already processed, without lines, or
  *       refused by REM. <b>«Reactivar»</b>: {@code reactivate}, the same process with action
- *       {@code R}; 422 when not processed or refused by REM.</li>
+ *       {@code R}; 422 when not processed, collected/paid/voided, or refused by REM.</li>
+ *   <li><b>«Confirmar», «Enviada al banco», «Cobrada»</b> (ETP-6247): {@code confirm} processes the
+ *       remittance WITHOUT the automatic settlement (payments Remitted, invoices unpaid, status
+ *       {@code PR}) and stores its SEPA file; {@code markSent} ({@code PR -> SB}, informational) and
+ *       {@code markCollected} (settles every payment on the due date, {@code CT}/{@code PT}) are
+ *       {@link RemittanceStatusAction}. A remittance created through GO keeps
+ *       {@code EM_Etar_Automaticprocess = N} until collected.</li>
  *   <li><b>Due date</b>: a new or changed {@code dueDate} earlier than today (server calendar day,
  *       JVM default time zone) is refused with 422 {@value #MSG_DUE_DATE_PAST}; an unchanged past
  *       date of an existing remittance is accepted ({@link RemittanceHeaderWrites}).</li>
@@ -164,6 +170,18 @@ public class RemittanceHeaderHandler implements NeoHandler {
       return RemittanceSepaFileDataAction.handle(this, context);
     }
     if (endpoint == NeoEndpointType.ACTION
+        && RemittanceFileAction.serves(context.getFieldName())) {
+      return RemittanceFileAction.handle(this, context);
+    }
+    if (endpoint == NeoEndpointType.ACTION
+        && RemittanceStatusAction.serves(context.getFieldName())) {
+      return RemittanceStatusAction.handle(this, context);
+    }
+    if (endpoint == NeoEndpointType.ACTION
+        && RemittanceReturnAction.serves(context.getFieldName())) {
+      return RemittanceReturnAction.handle(this, context);
+    }
+    if (endpoint == NeoEndpointType.ACTION
         && (RemittanceDueItems.serves(context.getFieldName())
             || RemittanceProcessAction.serves(context.getFieldName()))) {
       return handleDueItemsAction(context);
@@ -190,6 +208,10 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * AD default, so the generic resolver falls back to the first account it finds, which the
    * account selector would not even offer; the default is dropped then, and the type with it,
    * since the type depends on the account.
+   *
+   * <p>CRUD (ETP-6247): nothing. A remittance created through GO keeps
+   * {@code EM_Etar_Automaticprocess = N}: it is processed without the automatic settlement and
+   * settled by «Cobrada» ({@link RemittanceStatusAction}).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -254,6 +276,9 @@ public class RemittanceHeaderHandler implements NeoHandler {
     RemittanceDueItems.addContracts(contracts);
     RemittanceProcessAction.addContract(contracts);
     RemittanceSepaFileData.addContract(contracts);
+    RemittanceFileAction.addContracts(contracts);
+    RemittanceStatusAction.addContracts(contracts);
+    RemittanceReturnAction.addContracts(contracts);
     return contracts;
   }
 

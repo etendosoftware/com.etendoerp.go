@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -612,6 +613,26 @@ class RemittanceHeaderHandlerTest {
   }
 
   /** A remittance account is kept as the default: the generic result stands. */
+  // ---------------------------------------------------------------- manual settlement (ETP-6247)
+
+  /**
+   * A remittance created through GO stays NOT automatic ({@code EM_Etar_Automaticprocess = N}, the
+   * column default): the step-by-step flow settles on «Cobrada», never when it is confirmed. A
+   * CRUD create is therefore left exactly as the generic write made it.
+   */
+  @Test
+  void aCreatedRemittanceIsNotMarkedAutomatic() throws Exception {
+    NeoContext created = context("POST", NeoEndpointType.CRUD, new JSONObject(), null);
+    when(created.getPreviousResult()).thenReturn(NeoResponse.ok(new JSONObject()
+        .put("response", new JSONObject().put("data",
+            new JSONArray().put(new JSONObject().put("id", "REM-NEW"))))));
+
+    assertNull(handler.afterHandle(created));
+
+    verify(handler, never()).loadRemittance(any());
+  }
+
+
   @Test
   void theDefaultsKeepARemittanceAccount() throws Exception {
     FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
@@ -1131,7 +1152,8 @@ class RemittanceHeaderHandlerTest {
   void theHeaderDeclaresTheDueItemsAndProcessActions() {
     assertTrue(handler.servesActions());
     assertEquals(List.of("availableDueItems", "selectDueItems", "syncDueItems", "process",
-        "reactivate", "sepaFileData"),
+        "reactivate", "sepaFileData", "fileReadiness", "confirm", "generateFile", "markSent", "markCollected",
+        "returnState", "returnLines"),
         new ArrayList<>(handler.actionContracts().keySet()));
   }
 

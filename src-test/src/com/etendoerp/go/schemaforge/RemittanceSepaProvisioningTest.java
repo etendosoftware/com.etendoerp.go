@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -80,6 +81,7 @@ import org.openbravo.module.remittance.RemittanceTypeParameter;
  * execution type {@code A}; the link tests pin exactly those setters.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceSepaProvisioning
+ * @covers com.etendoerp.go.schemaforge.RemittanceSepaFileSetup
  */
 class RemittanceSepaProvisioningTest {
 
@@ -206,7 +208,7 @@ class RemittanceSepaProvisioningTest {
 
     PaymentExecutionProcess process = only(PaymentExecutionProcess.class);
     List<FIN_PaymentMethod> methods = all(FIN_PaymentMethod.class);
-    assertEquals(2, methods.size());
+    assertEquals(3, methods.size(), "the two remittance methods, then the ETP-6247 return method");
 
     FIN_PaymentMethod core = methods.get(0);
     verify(core).setName("Remesa de cobro (adeudo SEPA)");
@@ -247,18 +249,93 @@ class RemittanceSepaProvisioningTest {
     verify(types.get(1)).setPaymentMethod(methods.get(1));
     verify(types.get(0)).setPostingAllowed(false);
 
-    List<RemittanceTypeParameter> params = all(RemittanceTypeParameter.class);
-    assertEquals(3, params.size(), "CORE marker, CORE creditor business code, SCT marker");
-    verify(params.get(0)).setRemittanceType(types.get(0));
-    verify(params.get(0)).setName(MARKER);
-    verify(params.get(0)).setValue(RemittanceSepaProvisioning.SCHEME_CORE);
-    verify(params.get(1)).setRemittanceType(types.get(0));
-    verify(params.get(1)).setName(RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE);
-    verify(params.get(1)).setValue("000");
-    verify(params.get(2)).setRemittanceType(types.get(1));
-    verify(params.get(2)).setName(MARKER);
-    verify(params.get(2)).setValue(RemittanceSepaProvisioning.SCHEME_SCT);
+    Map<String, String> core = parametersOf(types.get(0));
+    assertEquals(RemittanceSepaProvisioning.SCHEME_CORE, core.remove(MARKER));
+    assertEquals("000", core.remove(RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE));
+    assertEquals(RemittanceSepaFileSetup.expectedParameters(RemittanceSepaProvisioning.SCHEME_CORE),
+        core, "ETP-6247: the CORE type also gets the SEPA file parameters");
+    Map<String, String> sct = parametersOf(types.get(1));
+    assertEquals(RemittanceSepaProvisioning.SCHEME_SCT, sct.remove(MARKER));
+    assertEquals(RemittanceSepaFileSetup.expectedParameters(RemittanceSepaProvisioning.SCHEME_SCT),
+        sct, "ETP-6247: the SCT type also gets the SEPA file parameters");
+    verify(types.get(0)).setJavaClassName(RemittanceSepaFileSetup.CLASS_CORE);
+    verify(types.get(1)).setJavaClassName(RemittanceSepaFileSetup.CLASS_SCT);
     verify(dal).flush();
+  }
+
+  // ---------------------------------------------------------------- ETP-6247 return method
+
+  @Test
+  void aClientWithoutAReturnMethodGetsItsOwnWithTheModulesFlags() {
+    FIN_PaymentMethod method = RemittanceSepaProvisioning.ensureReturnPaymentMethod(client);
+
+    assertEquals(1, all(FIN_PaymentMethod.class).size());
+    assertSame(all(FIN_PaymentMethod.class).get(0), method);
+    verify(method).setNewOBObject(true);
+    verify(method).setClient(client);
+    verify(method).setOrganization(star);
+    verify(method).setName("Devolución de remesa");
+    verify(method).setEtarIsreturn(true);
+    verify(method).setPayinAllow(true);
+    verify(method).setPayoutAllow(true);
+    verify(method).setPayinExecutionType("M");
+    verify(method).setPayoutExecutionType("M");
+    verify(method).setPayinDeferred(false);
+    verify(method).setPayoutDeferred(false);
+    verify(method).setUponDepositUse("DEP");
+    verify(method).setUponWithdrawalUse("WIT");
+    verify(method).setAutomaticReceipt(false);
+    verify(method).setAutomaticPayment(false);
+    verify(method).setAutomaticDeposit(false);
+    verify(method).setAutomaticWithdrawn(false);
+    verify(method).setPayinIsMulticurrency(false);
+    verify(method).setPayoutIsMulticurrency(false);
+    verify(dal).save(method);
+  }
+
+  @Test
+  void theReturnMethodOfAnEnglishClientHasAnEnglishName() {
+    FIN_PaymentMethod method = RemittanceSepaProvisioning.ensureReturnPaymentMethod(
+        clientWithLanguage("en_US"));
+
+    verify(method).setName("Remittance return");
+  }
+
+  @Test
+  void anExistingReturnMethodIsReturnedWithoutCreatingOrSavingAnything() {
+    FIN_PaymentMethod existing = mock(FIN_PaymentMethod.class);
+    resolver = q -> q.entity == FIN_PaymentMethod.class ? existing : null;
+
+    FIN_PaymentMethod method = RemittanceSepaProvisioning.ensureReturnPaymentMethod(client);
+
+    assertSame(existing, method);
+    assertTrue(all(FIN_PaymentMethod.class).isEmpty());
+    verify(dal, never()).save(any());
+  }
+
+  @Test
+  void theReturnMethodIsFoundByItsFlagInOrganizationZeroOfTheClientNeverByName() {
+    FIN_PaymentMethod found = RemittanceSepaProvisioning.findReturnPaymentMethod(client);
+
+    assertNull(found);
+    Recorded lookup = queries.stream().filter(q -> q.entity == FIN_PaymentMethod.class)
+        .findFirst().orElseThrow(AssertionError::new);
+    assertTrue(lookup.hql.contains("m.etarIsreturn = true"), lookup.hql);
+    assertTrue(lookup.hql.contains("m.active = true"), lookup.hql);
+    assertFalse(lookup.hql.contains("m.name"), lookup.hql);
+    assertEquals(CLIENT_ID, lookup.params.get("client"));
+    assertEquals("0", lookup.params.get("org"));
+  }
+
+  @Test
+  void ensureClientAlsoProvisionsTheReturnMethod() {
+    RemittanceSepaProvisioning.ensureClient(client);
+
+    List<FIN_PaymentMethod> methods = all(FIN_PaymentMethod.class);
+    assertEquals(3, methods.size());
+    verify(methods.get(2)).setEtarIsreturn(true);
+    verify(methods.get(0), never()).setEtarIsreturn(true);
+    verify(methods.get(1), never()).setEtarIsreturn(true);
   }
 
   @Test
@@ -301,7 +378,9 @@ class RemittanceSepaProvisioningTest {
   void aProvisionedClientGetsNothingNew() {
     PaymentExecutionProcess existingProcess = mock(PaymentExecutionProcess.class);
     RemittanceType coreType = mock(RemittanceType.class);
+    when(coreType.getJavaClassName()).thenReturn(RemittanceSepaFileSetup.CLASS_CORE);
     RemittanceType sctType = mock(RemittanceType.class);
+    when(sctType.getJavaClassName()).thenReturn(RemittanceSepaFileSetup.CLASS_SCT);
     resolver = q -> {
       if (q.entity == PaymentExecutionProcess.class) {
         return existingProcess;
@@ -309,12 +388,16 @@ class RemittanceSepaProvisioningTest {
       if (q.entity == DocumentType.class) {
         return mock(DocumentType.class);
       }
+      if (q.entity == FIN_PaymentMethod.class) {
+        return mock(FIN_PaymentMethod.class); // the ETP-6247 return method exists
+      }
       if (q.entity == RemittanceTypeParameter.class) {
         Object scheme = q.params.get("scheme");
         if (scheme != null) {
           return marker(RemittanceSepaProvisioning.SCHEME_CORE.equals(scheme) ? coreType : sctType);
         }
-        return mock(RemittanceTypeParameter.class); // the creditor business code exists
+        // the creditor business code and the ETP-6247 file parameters exist
+        return mock(RemittanceTypeParameter.class);
       }
       return null;
     };
@@ -326,13 +409,18 @@ class RemittanceSepaProvisioningTest {
     verify(dal).flush();
   }
 
+  /**
+   * A type provisioned before ETP-6247 (marker only) is backfilled: the CORE creditor business
+   * code, the generator class and the SEPA file parameters, and nothing else is created.
+   */
   @Test
-  void aCoreTypeMissingItsCreditorBusinessCodeGetsOnlyThatParameter() {
+  void aTypeProvisionedBeforeTheFileSetupIsBackfilled() {
     RemittanceType coreType = mock(RemittanceType.class);
     when(coreType.getId()).thenReturn("CORE-TYPE");
     RemittanceType sctType = mock(RemittanceType.class);
     resolver = q -> {
-      if (q.entity == PaymentExecutionProcess.class || q.entity == DocumentType.class) {
+      if (q.entity == PaymentExecutionProcess.class || q.entity == DocumentType.class
+          || q.entity == FIN_PaymentMethod.class) {
         return mock(q.entity);
       }
       if (q.entity == RemittanceTypeParameter.class && q.params.containsKey("scheme")) {
@@ -346,10 +434,14 @@ class RemittanceSepaProvisioningTest {
 
     assertTrue(all(FIN_PaymentMethod.class).isEmpty());
     assertTrue(all(RemittanceType.class).isEmpty());
-    RemittanceTypeParameter param = only(RemittanceTypeParameter.class);
-    verify(param).setRemittanceType(coreType);
-    verify(param).setName(RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE);
-    verify(param).setValue("000");
+    Map<String, String> core = parametersOf(coreType);
+    assertEquals("000", core.remove(RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE));
+    assertEquals(RemittanceSepaFileSetup.expectedParameters(RemittanceSepaProvisioning.SCHEME_CORE),
+        core);
+    assertEquals(RemittanceSepaFileSetup.expectedParameters(RemittanceSepaProvisioning.SCHEME_SCT),
+        parametersOf(sctType));
+    verify(coreType).setJavaClassName(RemittanceSepaFileSetup.CLASS_CORE);
+    verify(sctType).setJavaClassName(RemittanceSepaFileSetup.CLASS_SCT);
   }
 
   @Test
@@ -570,6 +662,123 @@ class RemittanceSepaProvisioningTest {
         "the account's own client, then the account");
   }
 
+  // ---------------------------------------------------------------- RemittanceSepaFileSetup
+
+  /** The values the provisioned types carry, pinned literally (not through expectedParameters). */
+  @Test
+  void theFileSetupValuesArePinnedPerScheme() {
+    Map<String, String> core = RemittanceSepaFileSetup.expectedParameters(
+        RemittanceSepaProvisioning.SCHEME_CORE);
+    Map<String, String> sct = RemittanceSepaFileSetup.expectedParameters(
+        RemittanceSepaProvisioning.SCHEME_SCT);
+    for (Map<String, String> common : List.of(core, sct)) {
+      assertEquals("Y", common.get("STRICT_VALIDATION"));
+      assertEquals("Y", common.get("Use_Nm_ForIdentifiers"));
+      assertEquals("Y", common.get("Use_Id_ForIdentifiers"));
+      assertEquals("Y", common.get("Include_InitiatingPartyId"));
+      assertEquals("N", common.get("BIC_SWIFT_MANDATORY"), "BIC optional, format still checked");
+      assertEquals("N", common.get("GENERATE_BUSINESSPARTNER_IBAN"));
+      assertEquals("xml", common.get("FILE_EXTENSION"));
+      assertEquals("Y", common.get("ETAR_SETTLE_ON_DUEDATE"),
+          "settled on the remittance due date by the automated-remittance hook");
+    }
+    assertEquals(com.etendoerp.automated.remittance.hooks.RemittanceProcessHookImpl
+        .PARAM_SETTLE_ON_DUEDATE, RemittanceSepaFileSetup.PARAM_SETTLE_ON_DUEDATE,
+        "the literal must be the parameter the automated-remittance hook reads");
+    assertEquals("Y", core.get("Use_AT-02_toGenerateId"), "collections use the AT-02 id");
+    assertEquals("CORE", core.get("CORE_B2B"));
+    assertEquals(10, core.size(), core.toString());
+    assertEquals("N", sct.get("Use_AT-02_toGenerateId"));
+    assertEquals("N", sct.get("GroupBy_Duedate"));
+    assertEquals("ZZZ", sct.get("Business_Code"));
+    assertEquals("N", sct.get("DebtorIdentifier:Id+Business_Code"));
+    assertEquals(12, sct.size(), sct.toString());
+    assertEquals("org.openbravo.sepa.iso20022.coredirectdebit.customertobank.pain.x008.x001.x08"
+        + ".report.CoreDirectDebit", RemittanceSepaFileSetup.CLASS_CORE);
+    assertEquals("org.openbravo.sepa.iso20022.credittransfer.customertobank.pain.x001.x001.x09"
+        + ".report.CreditTransfer", RemittanceSepaFileSetup.CLASS_SCT);
+  }
+
+  @Test
+  void ensureFillsABlankClassNameAndKeepsOneAlreadySet() {
+    RemittanceType blank = typeWithClient("T-BLANK");
+    when(blank.getJavaClassName()).thenReturn("  ");
+    assertTrue(RemittanceSepaFileSetup.ensure(blank, RemittanceSepaProvisioning.SCHEME_SCT));
+    verify(blank).setJavaClassName(RemittanceSepaFileSetup.CLASS_SCT);
+
+    RemittanceType custom = typeWithClient("T-CUSTOM");
+    when(custom.getJavaClassName()).thenReturn("com.example.OlderSchemaGenerator");
+    RemittanceSepaFileSetup.ensure(custom, RemittanceSepaProvisioning.SCHEME_SCT);
+    verify(custom, never()).setJavaClassName(any());
+  }
+
+  /** Only the absent parameters are created; an existing one, whatever its value, is kept. */
+  @Test
+  void ensureAddsOnlyTheAbsentParameters() {
+    RemittanceType type = typeWithClient("T-1");
+    when(type.getJavaClassName()).thenReturn(RemittanceSepaFileSetup.CLASS_CORE);
+    resolver = q -> q.entity == RemittanceTypeParameter.class
+        && List.of("STRICT_VALIDATION", "CORE_B2B").contains(q.params.get("name"))
+        ? mock(RemittanceTypeParameter.class) : null;
+
+    assertTrue(RemittanceSepaFileSetup.ensure(type, RemittanceSepaProvisioning.SCHEME_CORE));
+
+    Map<String, String> expected = new java.util.LinkedHashMap<>(
+        RemittanceSepaFileSetup.expectedParameters(RemittanceSepaProvisioning.SCHEME_CORE));
+    expected.remove("STRICT_VALIDATION");
+    expected.remove("CORE_B2B");
+    assertEquals(expected, parametersOf(type));
+    verify(type, never()).setJavaClassName(any());
+  }
+
+  @Test
+  void ensureOfAFullySetUpTypeWritesNothing() {
+    RemittanceType type = typeWithClient("T-1");
+    when(type.getJavaClassName()).thenReturn(RemittanceSepaFileSetup.CLASS_CORE);
+    resolver = q -> q.entity == RemittanceTypeParameter.class
+        ? mock(RemittanceTypeParameter.class) : null;
+
+    assertFalse(RemittanceSepaFileSetup.ensure(type, RemittanceSepaProvisioning.SCHEME_CORE));
+    assertTrue(created.isEmpty(), "created: " + created.keySet());
+  }
+
+  @Test
+  void ensureLeavesAnUnknownSchemeOrNoTypeUntouched() {
+    RemittanceType type = typeWithClient("T-1");
+
+    assertFalse(RemittanceSepaFileSetup.ensure(type, "B2B"));
+    assertFalse(RemittanceSepaFileSetup.ensure(type, null));
+    assertFalse(RemittanceSepaFileSetup.ensure(null, RemittanceSepaProvisioning.SCHEME_CORE));
+    verify(type, never()).setJavaClassName(any());
+    assertTrue(created.isEmpty());
+  }
+
+  @Test
+  void schemeOfReadsTheMarkerAndIsNullForAnUnknownOne() {
+    RemittanceType type = typeWithClient("T-1");
+    RemittanceTypeParameter marker = mock(RemittanceTypeParameter.class);
+    resolver = q -> q.entity == RemittanceTypeParameter.class && MARKER.equals(q.params.get("name"))
+        ? marker : null;
+
+    when(marker.getValue()).thenReturn(" CORE ");
+    assertEquals(RemittanceSepaProvisioning.SCHEME_CORE, RemittanceSepaFileSetup.schemeOf(type));
+    when(marker.getValue()).thenReturn("SCT");
+    assertEquals(RemittanceSepaProvisioning.SCHEME_SCT, RemittanceSepaFileSetup.schemeOf(type));
+    when(marker.getValue()).thenReturn("B2B");
+    assertNull(RemittanceSepaFileSetup.schemeOf(type), "a marker GO does not know");
+    resolver = q -> null;
+    assertNull(RemittanceSepaFileSetup.schemeOf(type), "a type GO did not provision");
+    assertNull(RemittanceSepaFileSetup.schemeOf(null));
+  }
+
+  private RemittanceType typeWithClient(String id) {
+    RemittanceType type = mock(RemittanceType.class);
+    when(type.getId()).thenReturn(id);
+    when(type.getClient()).thenReturn(client);
+    when(type.getOrganization()).thenReturn(star);
+    return type;
+  }
+
   // ---------------------------------------------------------------- lookups
 
   @Test
@@ -669,7 +878,7 @@ class RemittanceSepaProvisioningTest {
     assertEquals(4L, RemittanceSepaProvisioning.countOpenRemittances(account("ACC")));
 
     verify(query).setParameter("account", "ACC");
-    verify(query).setParameterList("open", Arrays.asList("PE", "PR", "CP", "PP"));
+    verify(query).setParameterList("open", Arrays.asList("PE", "PR", "SB", "CP", "PP"));
     verify(query).setParameter("marker", MARKER);
     org.mockito.ArgumentCaptor<String> hql = org.mockito.ArgumentCaptor.forClass(String.class);
     verify(session).createQuery(hql.capture(), eq(Long.class));
@@ -770,6 +979,27 @@ class RemittanceSepaProvisioningTest {
     when(c.getId()).thenReturn(CLIENT_ID);
     when(c.getLanguage()).thenReturn(language);
     return c;
+  }
+
+  /**
+   * The parameters created for {@code type}, name to value, read from the setters called on the
+   * created (mocked) {@code RemittanceTypeParameter} rows.
+   */
+  private Map<String, String> parametersOf(RemittanceType type) {
+    Map<String, String> values = new java.util.LinkedHashMap<>();
+    for (RemittanceTypeParameter param : all(RemittanceTypeParameter.class)) {
+      Map<String, Object> set = new HashMap<>();
+      for (org.mockito.invocation.Invocation call : org.mockito.Mockito.mockingDetails(param)
+          .getInvocations()) {
+        if (call.getArguments().length == 1) {
+          set.put(call.getMethod().getName(), call.getArgument(0));
+        }
+      }
+      if (set.get("setRemittanceType") == type) {
+        values.put((String) set.get("setName"), (String) set.get("setValue"));
+      }
+    }
+    return values;
   }
 
   @SuppressWarnings("unchecked")

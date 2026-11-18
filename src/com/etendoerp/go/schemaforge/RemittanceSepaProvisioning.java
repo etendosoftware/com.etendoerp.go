@@ -59,12 +59,14 @@ import org.openbravo.module.remittance.RemittanceTypeParameter;
  *       credit transfer (SCT) — with the flags of the OBSEPA templates
  *       ({@code Core_Direct_Debit_Scheme.xml}, {@code Credit_Transfer_Scheme.xml}): one direction
  *       only, automatic execution through «In Remittance», deferred, no multicurrency;</li>
- *   <li>one {@code REM_Remittance_Type} per method, with no Java class, no posting and no
- *       parameters other than this class's own: the marker {@value #PARAM_SCHEME} (value
- *       {@value #SCHEME_CORE} or {@value #SCHEME_SCT}) and, on the CORE type, the
- *       {@value #PARAM_CREDITOR_BUSINESS_CODE} the SEPA XML reads (default
- *       {@value #DEFAULT_CREDITOR_BUSINESS_CODE}). The team that generates the XML completes the
- *       Java class and the rest of the parameters here.</li>
+ *   <li>one {@code REM_Remittance_Type} per method, with no posting, the marker
+ *       {@value #PARAM_SCHEME} (value {@value #SCHEME_CORE} or {@value #SCHEME_SCT}), on the CORE
+ *       type the {@value #PARAM_CREDITOR_BUSINESS_CODE} the SEPA XML reads (default
+ *       {@value #DEFAULT_CREDITOR_BUSINESS_CODE}) and, since ETP-6247, the Classic SEPA generator
+ *       class and its parameters ({@link RemittanceSepaFileSetup}).</li>
+ *   <li>since ETP-6247, the «return» payment method ({@link #ensureReturnPaymentMethod}) that the
+ *       remittance module's {@code AutomatedReturnProcess} uses for the negative payment of a
+ *       returned line; its reference data is never loaded in a GO tenant.</li>
  * </ul>
  *
  * <p><b>The marker.</b> No column identifies a remittance method or type: a payment method is a
@@ -113,11 +115,11 @@ public final class RemittanceSepaProvisioning {
   /**
    * Values of {@code REM_REMITTANCE.REMITTANCE_STATUS} (REM list {@code REM_RemittanceStatus},
    * maintained by REM's own processes through {@code RemittanceStatusUtil}) that keep a remittance
-   * open: pending, processed, partially collected, partially paid. Literals on purpose: the REM
+   * open: pending, processed, sent to bank (ETP-6247), partially collected, partially paid. Literals on purpose: the REM
    * constants are not a compile-time dependency of this module.
    */
   static final List<String> OPEN_STATUSES = Collections.unmodifiableList(
-      Arrays.asList("PE", "PR", "CP", "PP"));
+      Arrays.asList("PE", "PR", "SB", "CP", "PP"));
 
   /** DAL property of the remittance module's {@code REM_REMITTANCE.REMITTANCE_STATUS} (ETP-6148). */
   static final String PROPERTY_REMITTANCE_STATUS = "remittanceStatus";
@@ -131,6 +133,9 @@ public final class RemittanceSepaProvisioning {
   private static final String ORG_STAR = "0";
   private static final String EXECUTION_AUTOMATIC = "A";
   private static final String EXECUTION_MANUAL = "M";
+  /** The module's return method: deposit and withdrawal use of its reference data. */
+  private static final String RETURN_UPON_DEPOSIT_USE = "DEP";
+  private static final String RETURN_UPON_WITHDRAWAL_USE = "WIT";
   private static final String PARAM_TYPE_IN = "IN";
   private static final String INPUT_CHECK = "CHECK";
   private static final long SEQUENCE_START = 1000000L;
@@ -158,7 +163,70 @@ public final class RemittanceSepaProvisioning {
     for (String scheme : SCHEMES) {
       ensureType(client, star, scheme, process, spanish);
     }
+    ensureReturnPaymentMethod(client);
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * ETP-6247 — the payment method of the negative payment a return creates. The module's
+   * {@code AutomatedReturnProcess} needs an active method flagged {@code EM_Etar_IsReturn} in
+   * organization {@code 0}, with manual execution and «upon withdrawal use» {@code WIT}; the module
+   * ships it only as reference data, which a GO tenant never loads, so without this row no return
+   * could ever be registered. Idempotent and never overwriting; found by the flag, never by name.
+   * Called by {@link #ensureClient} and, as a backfill for clients provisioned earlier, before every
+   * return ({@link RemittanceReturnAction}). The caller runs in admin mode.
+   *
+   * @param client the tenant
+   * @return the client's return payment method (existing or created)
+   */
+  public static FIN_PaymentMethod ensureReturnPaymentMethod(Client client) {
+    FIN_PaymentMethod existing = findReturnPaymentMethod(client);
+    if (existing != null) {
+      return existing;
+    }
+    Organization star = OBDal.getInstance().getProxy(Organization.class, ORG_STAR);
+    FIN_PaymentMethod method = OBProvider.getInstance().get(FIN_PaymentMethod.class);
+    method.setNewOBObject(true);
+    method.setClient(client);
+    method.setOrganization(star);
+    method.setName(isSpanish(client) ? "Devolución de remesa" : "Remittance return");
+    method.setDescription("Return of settlement");
+    method.setAutomaticReceipt(false);
+    method.setAutomaticPayment(false);
+    method.setAutomaticDeposit(false);
+    method.setAutomaticWithdrawn(false);
+    method.setPayinAllow(true);
+    method.setPayoutAllow(true);
+    method.setPayinExecutionType(EXECUTION_MANUAL);
+    method.setPayoutExecutionType(EXECUTION_MANUAL);
+    method.setPayinDeferred(false);
+    method.setPayoutDeferred(false);
+    method.setUponDepositUse(RETURN_UPON_DEPOSIT_USE);
+    method.setUponWithdrawalUse(RETURN_UPON_WITHDRAWAL_USE);
+    method.setPayinIsMulticurrency(false);
+    method.setPayoutIsMulticurrency(false);
+    method.setEtarIsreturn(true);
+    OBDal.getInstance().save(method);
+    return method;
+  }
+
+  /**
+   * The client's return payment method: active, flagged {@code EM_Etar_IsReturn}, in organization
+   * {@code 0}.
+   *
+   * @param client the tenant
+   * @return the method, or {@code null} when the client has none yet
+   */
+  public static FIN_PaymentMethod findReturnPaymentMethod(Client client) {
+    OBQuery<FIN_PaymentMethod> query = OBDal.getInstance().createQuery(FIN_PaymentMethod.class,
+        "as m where m.client.id = :client and m.etarIsreturn = true and m.active = true "
+            + "and m.organization.id = :org order by m.creationDate");
+    query.setNamedParameter(Q_CLIENT, client.getId());
+    query.setNamedParameter("org", ORG_STAR);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult();
   }
 
   /**
@@ -341,6 +409,9 @@ public final class RemittanceSepaProvisioning {
     if (SCHEME_CORE.equals(scheme) && findTypeParameter(type, PARAM_CREDITOR_BUSINESS_CODE) == null) {
       saveTypeParameter(type, PARAM_CREDITOR_BUSINESS_CODE, DEFAULT_CREDITOR_BUSINESS_CODE);
     }
+    // ETP-6247 — the Classic SEPA generator and its parameters; also backfills a type provisioned
+    // before ETP-6247 the next time the client is provisioned.
+    RemittanceSepaFileSetup.ensure(type, scheme);
   }
 
   private static FIN_PaymentMethod createMethod(Client client, Organization star, String scheme,
@@ -382,7 +453,7 @@ public final class RemittanceSepaProvisioning {
     return language == null || language.toLowerCase(Locale.ROOT).startsWith("es");
   }
 
-  private static void saveTypeParameter(RemittanceType type, String name, String value) {
+  static void saveTypeParameter(RemittanceType type, String name, String value) {
     RemittanceTypeParameter parameter = OBProvider.getInstance().get(RemittanceTypeParameter.class);
     parameter.setNewOBObject(true);
     parameter.setClient(type.getClient());
@@ -393,7 +464,7 @@ public final class RemittanceSepaProvisioning {
     OBDal.getInstance().save(parameter);
   }
 
-  private static RemittanceTypeParameter findTypeParameter(RemittanceType type, String name) {
+  static RemittanceTypeParameter findTypeParameter(RemittanceType type, String name) {
     OBQuery<RemittanceTypeParameter> query = OBDal.getInstance().createQuery(
         RemittanceTypeParameter.class, "as p where p.remittanceType.id = :type and p.name = :name");
     query.setNamedParameter("type", type.getId());
@@ -499,7 +570,7 @@ public final class RemittanceSepaProvisioning {
   }
 
   /**
-   * Open remittances (REM status {@code PE}/{@code PR}/{@code CP}/{@code PP}) of a provisioned type
+   * Open remittances (REM status {@code PE}/{@code PR}/{@code SB}/{@code CP}/{@code PP}) of a provisioned type
    * on {@code account}. The remittance module's column is NOT NULL with default {@code PE}; a
    * remittance that existed before the column keeps {@code PE} until one of REM's transitions
    * refreshes it (it is not backfilled), so an old processed remittance counts as open.

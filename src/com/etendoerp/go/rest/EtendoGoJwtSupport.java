@@ -162,9 +162,10 @@ public final class EtendoGoJwtSupport {
    * documents both as returning an empty list, never {@code null}).
    *
    * <p>Package-private since ETP-5734: the "Mis empresas" environment details label an invited
-   * account's role in another tenant with exactly these names.
+   * account's role in another tenant with exactly these names. Public since ETP-6247: the backend
+   * telemetry derives {@code role_groups} from them ({@code NeoRoleGroups}), as the SPA does.
    */
-  static List<String> resolveEffectiveRoleNames(String userId) {
+  public static List<String> resolveEffectiveRoleNames(String userId) {
     List<String> templateRoleIds = new UserRoleCompositionService()
         .getAppliedTemplateRoleIds(userId);
     if (templateRoleIds.isEmpty()) {
