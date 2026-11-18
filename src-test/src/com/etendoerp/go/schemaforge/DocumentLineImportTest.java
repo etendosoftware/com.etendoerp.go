@@ -243,6 +243,35 @@ public class DocumentLineImportTest {
     assertFalse(DocumentLineImport.fits(bd("-1"), bd("1")));
   }
 
+  /**
+   * ETP-6002 CP-30: the refusal of an edit of a line that already holds units is the same 422 as
+   * the import's, plus {@code maximumAllowed} — the maximum counts what the line holds, so it is
+   * not a pending, and the key tells the two apart ({@link DocumentLineImport#exceeds} has none).
+   * A negative maximum is never shown: it reads 0.
+   */
+  @Test
+  public void exceedsLineMaximum_carriesTheMaximumAllowedAndNeverANegativeOne() throws Exception {
+    ImportRefusal refusal = DocumentLineImport.exceedsLineMaximum("il-1", "Agua", bd("6"),
+        bd("5"));
+    assertEquals(422, refusal.response().getHttpStatus());
+    assertEquals(DocumentLineImport.ERROR_EXCEEDS_PENDING, refusal.code());
+    JSONObject error = errorOf(refusal);
+    assertEquals("Agua", error.getString("product"));
+    assertEquals("il-1", error.getString("sourceLineId"));
+    assertEquals(0, bd("6").compareTo(new BigDecimal(error.get("requested").toString())));
+    assertEquals(0, bd("5").compareTo(new BigDecimal(error.get("maximumAllowed").toString())));
+    assertEquals(0, bd("5").compareTo(new BigDecimal(error.get("pending").toString())));
+
+    JSONObject negative = errorOf(DocumentLineImport.exceedsLineMaximum("il-1", "Agua",
+        bd("-1"), bd("-3")));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(negative.get("maximumAllowed").toString())));
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(negative.get("pending").toString())));
+
+    assertFalse(errorOf(DocumentLineImport.exceeds("il-1", "Agua", bd("6"), bd("5")))
+        .has("maximumAllowed"));
+  }
+
   // ── the preconditions ─────────────────────────────────────────────────────
 
   @Test

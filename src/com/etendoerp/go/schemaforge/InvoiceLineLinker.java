@@ -307,6 +307,33 @@ final class InvoiceLineLinker {
   }
 
   /**
+   * Undoes {@link #linkInvoiceLineToInOutLine} for one pair: the column when it points at this
+   * movement line, and its match row (ETP-6002 CP-30).
+   *
+   * @param invoiceLineId the source invoice line
+   * @param inoutLineId the movement line being given up
+   * @param matchTable the match table of the transaction direction
+   */
+  static void unlinkInvoiceLineFromInOutLine(String invoiceLineId, String inoutLineId,
+      InOutInvoiceLinks.MatchTable matchTable) {
+    OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "UPDATE C_InvoiceLine "
+            + "SET M_InOutLine_ID = NULL, Updated = now(), UpdatedBy = :userId "
+            + "WHERE C_InvoiceLine_ID = :invoiceLineId AND M_InOutLine_ID = :inoutLineId")
+        .setParameter(PARAM_USER_ID, currentUserIdOrSystem())
+        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
+        .executeUpdate();
+    OBDal.getInstance().getSession()
+        .createNativeQuery("DELETE FROM " + matchTable.tableName()
+            + " WHERE c_invoiceline_id = :invoiceLineId AND m_inoutline_id = :inoutLineId")
+        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
+        .executeUpdate();
+  }
+
+  /**
    * Brings the match rows written at DRAFT time ({@link #linkInvoiceLineToInOutLine}, a later
    * partial movement of an invoice line) up to the movement line's current quantity, right before
    * the movement is completed (ETP-6002 review M4). Such a row froze the quantity the line had when

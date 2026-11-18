@@ -375,6 +375,24 @@ final class DocumentLineImport {
     return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, message, extra);
   }
 
+  /**
+   * The same refusal for the edit of a line that already holds units: {@code maximum} counts them,
+   * so it is not what is pending. {@code maximumAllowed} tells the two sentences apart.
+   */
+  static ImportRefusal exceedsLineMaximum(String sourceLineId, String product,
+      BigDecimal requested, BigDecimal maximum) {
+    BigDecimal shown = maximum.max(BigDecimal.ZERO);
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_PRODUCT, product);
+    extra.put("requested", requested);
+    extra.put("pending", shown);
+    extra.put("maximumAllowed", shown);
+    extra.put(KEY_SOURCE_LINE_ID, sourceLineId);
+    return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, "Cannot save "
+        + plain(requested) + " of " + product + ": the maximum for this line is " + plain(shown)
+        + ".", extra);
+  }
+
   /** The subset of {@code all} that {@code planned} selects, in {@code planned} order. */
   static <T> List<T> selectPlanned(Map<String, BigDecimal> planned, Map<String, T> all) {
     List<T> selected = new ArrayList<>();
