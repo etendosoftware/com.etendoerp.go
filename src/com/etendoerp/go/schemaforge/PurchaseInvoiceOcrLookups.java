@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -38,10 +37,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -51,8 +47,6 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
-import org.openbravo.model.common.plm.ProductCategory;
-import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
@@ -115,7 +109,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   public List<Party> searchVendors(String name, int limit) {
     List<Party> parties = new ArrayList<>();
     for (JSONObject item : selectorItems(COLUMN_VENDOR, name, limit, vendorContext())) {
-      parties.add(new Party(item.optString(KEY_ID), labelOf(item)));
+      parties.add(new Party(item.optString(KEY_ID), OcrLookupRows.labelOf(item)));
     }
     return parties;
   }
@@ -208,69 +202,23 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
    */
   @Override
   public Optional<Party> uomByPrintedUnit(String printed) {
-    try {
-      OBContext context = OBContext.getOBContext();
-      List<OcrUnitMatcher.Unit> units = new ArrayList<>();
-      for (UOM uom : OBDal.getInstance().createQuery(UOM.class, "as u where u.active = true")
-          .list()) {
-        if (TenantOwnership.isVisibleToCurrentTenant(uom)) {
-          units.add(new OcrUnitMatcher.Unit(uom.getId(), uom.getClient().getId(), uom.getSymbol(),
-              uom.getEDICode(), uom.getName()));
-        }
-      }
-      String clientId = context == null ? null : context.getCurrentClient().getId();
-      return OcrUnitMatcher.resolve(printed, units, clientId).flatMap(this::uomById);
-    } catch (RuntimeException e) {
-      log.warn("OCR printed unit lookup failed: {}", e.getClass().getSimpleName());
-      return Optional.empty();
-    }
+    return PurchaseInvoiceProductDefaults.unitIdByPrintedUnit(printed).flatMap(this::uomById);
   }
 
   /** The default unit of the product window: {@link ProductDefaultsHandler#resolveDefaultId}. */
   @Override
   public Optional<Party> defaultUom() {
-    try {
-      OBContext context = OBContext.getOBContext();
-      String clientId = context == null ? null : context.getCurrentClient().getId();
-      String id = new ProductDefaultsHandler().resolveDefaultId(UOM.class, clientId);
-      return id == null ? Optional.empty() : uomById(id);
-    } catch (RuntimeException e) {
-      log.warn("OCR default unit lookup failed: {}", e.getClass().getSimpleName());
-      return Optional.empty();
-    }
+    return PurchaseInvoiceProductDefaults.defaultUnitId().flatMap(this::uomById);
   }
 
   /**
-   * The rule of the AD default of {@code M_Product.M_Product_Category_ID}: the greatest id of the
-   * client's {@code IsDefault} non-summary categories whose organization is the given (document)
-   * organization or one of its parents (the {@code AD_ISORGINCLUDED(org, row.org, client)} test).
+   * The rule of the AD default of {@code M_Product.M_Product_Category_ID}: see
+   * {@link PurchaseInvoiceProductDefaults#defaultCategoryId}.
    */
   @Override
   public Optional<Party> defaultProductCategory(String organizationId) {
-    try {
-      OBContext context = OBContext.getOBContext();
-      if (context == null) {
-        return Optional.empty();
-      }
-      String orgId = StringUtils.isNotBlank(organizationId) ? organizationId
-          : context.getCurrentOrganization().getId();
-      Set<String> organizations = context.getOrganizationStructureProvider()
-          .getParentTree(orgId, true);
-      OBCriteria<ProductCategory> criteria = OBDal.getInstance()
-          .createCriteria(ProductCategory.class);
-      criteria.add(Restrictions.eq("client.id", context.getCurrentClient().getId()));
-      criteria.add(Restrictions.eq("default", true));
-      criteria.add(Restrictions.eq("summaryLevel", false));
-      criteria.add(Restrictions.eq("active", true));
-      criteria.add(Restrictions.in("organization.id", organizations));
-      criteria.addOrder(Order.desc("id"));
-      criteria.setMaxResults(1);
-      ProductCategory category = (ProductCategory) criteria.uniqueResult();
-      return category == null ? Optional.empty() : productCategoryById(category.getId());
-    } catch (RuntimeException e) {
-      log.warn("OCR default category lookup failed: {}", e.getClass().getSimpleName());
-      return Optional.empty();
-    }
+    return PurchaseInvoiceProductDefaults.defaultCategoryId(organizationId)
+        .flatMap(this::productCategoryById);
   }
 
   /** An active row of the tenant by id, named in the session language (falling back to the base name). */
@@ -327,7 +275,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   @Override
   public Map<String, String> taxDocAmountModes(Collection<String> taxIds) {
-    Collection<String> ids = distinctIds(taxIds);
+    Collection<String> ids = OcrLookupRows.distinctIds(taxIds);
     Map<String, String> out = new HashMap<>();
     if (ids.isEmpty()) {
       return out;
@@ -424,7 +372,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   @Override
   public Map<String, String> taxNames(Collection<String> taxIds) {
-    Collection<String> ids = distinctIds(taxIds);
+    Collection<String> ids = OcrLookupRows.distinctIds(taxIds);
     Map<String, String> out = new HashMap<>();
     if (ids.isEmpty()) {
       return out;
@@ -452,7 +400,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   @Override
   public Map<String, VendorDetails> vendorDetails(Collection<String> vendorIds) {
-    Collection<String> ids = distinctIds(vendorIds);
+    Collection<String> ids = OcrLookupRows.distinctIds(vendorIds);
     Map<String, VendorDetails> out = new HashMap<>();
     if (ids.isEmpty()) {
       return out;
@@ -511,7 +459,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
 
   @Override
   public Map<String, ProductDetails> productDetails(Collection<String> productIds) {
-    Collection<String> ids = distinctIds(productIds);
+    Collection<String> ids = OcrLookupRows.distinctIds(productIds);
     Map<String, ProductDetails> out = new HashMap<>();
     if (ids.isEmpty()) {
       return out;
@@ -531,8 +479,8 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       String language = NeoLanguage.currentCode();
       Map<String, String> productNames = NeoTrl.translatedNames("Product", ids, language);
       Map<String, String> categoryNames = NeoTrl.translatedNames("ProductCategory",
-          idsOf(visible, true), language);
-      Map<String, String> uomNames = NeoTrl.translatedNames("UOM", idsOf(visible, false),
+          OcrLookupRows.idsOf(visible, true), language);
+      Map<String, String> uomNames = NeoTrl.translatedNames("UOM", OcrLookupRows.idsOf(visible, false),
           language);
       for (Product product : visible) {
         String category = product.getProductCategory() == null ? ""
@@ -547,32 +495,6 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       }
     } catch (RuntimeException e) {
       log.warn("OCR product details lookup failed: {}", e.getClass().getSimpleName());
-    }
-    return out;
-  }
-
-  /** The category ids (or unit ids) of the products, once each. */
-  private static Collection<String> idsOf(List<Product> products, boolean categories) {
-    Set<String> out = new LinkedHashSet<>();
-    for (Product product : products) {
-      if (categories && product.getProductCategory() != null) {
-        out.add(product.getProductCategory().getId());
-      } else if (!categories && product.getUOM() != null) {
-        out.add(product.getUOM().getId());
-      }
-    }
-    return out;
-  }
-
-  /** Non-blank ids, once each, in first-seen order. */
-  private static Collection<String> distinctIds(Collection<String> ids) {
-    Set<String> out = new LinkedHashSet<>();
-    if (ids != null) {
-      for (String id : ids) {
-        if (!StringUtils.isBlank(id)) {
-          out.add(id);
-        }
-      }
     }
     return out;
   }
@@ -635,7 +557,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
     try {
       JSONObject found = NeoSimSearchEndpoint.searchTerm("Product", description,
           PRODUCT_CANDIDATES, PRODUCT_MIN_SIMILARITY);
-      JSONArray rows = rowsOf(found);
+      JSONArray rows = OcrLookupRows.rowsOf(found);
       for (int i = 0; rows != null && i < rows.length(); i++) {
         JSONObject row = rows.getJSONObject(i);
         if (StringUtils.isBlank(row.optString(KEY_ID, ""))) {
@@ -650,19 +572,6 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       log.warn("OCR product similarity search failed: {}", e.getClass().getSimpleName());
     }
     return candidates;
-  }
-
-  /** The rows of a similarity answer, which carries them under {@code data} or {@code response.data}. */
-  private static JSONArray rowsOf(JSONObject found) {
-    if (found == null) {
-      return null;
-    }
-    JSONArray data = found.optJSONArray(KEY_DATA);
-    if (data != null) {
-      return data;
-    }
-    JSONObject response = found.optJSONObject("response");
-    return response == null ? null : response.optJSONArray(KEY_DATA);
   }
 
   @Override
@@ -753,15 +662,5 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       log.warn("OCR selector {} lookup failed: {}", column, e.getClass().getSimpleName());
       return null;
     }
-  }
-
-  private static String labelOf(JSONObject item) {
-    for (String key : new String[] { KEY_NAME, "label", "_identifier" }) {
-      String value = item.optString(key, "");
-      if (!value.isEmpty()) {
-        return value;
-      }
-    }
-    return item.optString(KEY_ID);
   }
 }

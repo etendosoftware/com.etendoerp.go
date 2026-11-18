@@ -61,6 +61,11 @@ public class InvoiceInboxHeaderHandler implements NeoHandler {
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
+    return dispatchAction(context);
+  }
+
+  /** Routes an inbox action to its implementation; {@code null} for an action not served here. */
+  private static NeoResponse dispatchAction(NeoContext context) {
     String action = context.getFieldName();
     boolean post = "POST".equals(context.getHttpMethod());
     if (InvoiceInboxReview.ACTION.equals(action)) {
