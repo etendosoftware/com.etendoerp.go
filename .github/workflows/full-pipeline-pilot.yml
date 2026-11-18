@@ -58,7 +58,7 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    branches: [main]
+    branches: [main, feature/ETP-6370]
   workflow_dispatch:
 
 permissions:
@@ -193,7 +193,7 @@ jobs:
     # from also spending runners before it is closed.
     needs: route
     # Skipped on a push to main that merges a cut the pilot already validated (ETP-6316).
-    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    if: ${{ github.ref_name != 'feature/ETP-6370' && !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -359,7 +359,7 @@ jobs:
     name: Integration (Tomcat + Playwright)
     needs: route
     # Skipped on a push to main that merges a cut the pilot already validated (ETP-6316).
-    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    if: ${{ github.ref_name != 'feature/ETP-6370' && !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -737,7 +737,7 @@ jobs:
   cell-report:
     name: Cell report
     needs: [route, go-tests, integration]
-    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    if: ${{ github.ref_name != 'feature/ETP-6370' && !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
