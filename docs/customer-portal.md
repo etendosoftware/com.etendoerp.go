@@ -284,7 +284,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
 - **PDF after a decision.** The decision moves the quotation's `updated`, so its stored printable
   is stale. `/pdf` re-renders a stale stored PDF before serving it (`PortalPrintable#isStale`, the
   app's freshness rule via `NeoDocumentPdf#isStoredStale`), keeping the stored file if the render
-  fails. The app's preview already re-renders on its own freshness check.
+  fails. The check compares the file and the document the request already loaded and scoped; it
+  never goes through `NeoAttachmentTarget`, whose role and tenant checks refuse a portal request
+  (no GO session). Unlike the app it does not consider the branding's last change. The app's preview already re-renders on its own freshness check.
 - **"Motivo" on the rejected quotation's PDF (Jira comment 149518 point 5, revised by QA).** The
   printable of a `CJ` quotation shows one observation line "Motivo: <reason>" with the customer's
   own portal reason only (with the "Otros" text), read from the portal's note line, which the
@@ -295,7 +297,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   prints no "Motivo" line. Editing the quotation moves its `updated`, so the stored PDF is stale
   and re-rendered by the app's preview, the portal (above) and
   the MCP. The note's wording in `emails_*.properties` (`portal-quotation-decision.note*`) is read
-  by the printable: keep its opening words and the "Motivo:" / "Reason:" marker.
+  by the printable: keep its opening words and the "Motivo:" / "Reason:" marker. A document row's
+  `reference` falls back to the notes without that line (`QuotationPrintableData.withoutPortalNote`),
+  and is empty when the notes held nothing else.
 - **KPI:** hook points only, `PortalDecisionEvents` (empty methods), pending the PO's KPI redefinition.
 
 ## 7. KPI events

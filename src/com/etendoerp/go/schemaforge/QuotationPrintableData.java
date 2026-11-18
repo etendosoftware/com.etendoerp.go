@@ -184,13 +184,14 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
 
   /**
    * The notes without the customer portal's decision line(s), for a copy of the quotation
-   * ({@link CloneOrderLinePriceHook}, ETP-6209): the same detection as the printable. Notes with no
+   * ({@link CloneOrderLinePriceHook}) and for the portal list's reference fallback
+   * ({@code PortalDocumentsEndpoint}), ETP-6209: the same detection as the printable. Notes with no
    * portal line come back untouched; notes that were only portal lines come back {@code null}.
    *
    * @param description the quotation's notes
    * @return the notes to keep
    */
-  static String withoutPortalNote(String description) {
+  public static String withoutPortalNote(String description) {
     if (description == null || java.util.Arrays.stream(description.split("\n", -1))
         .map(String::trim).noneMatch(QuotationPrintableData::isPortalNoteLine)) {
       return description;

@@ -437,8 +437,8 @@ public class PortalServletTest {
             eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn(quotation);
         endpoint.when(() -> PortalDocumentsEndpoint.mainAttachment(any(),
             eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn((Attachment) c[0]);
-        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, QUOTATION_ID))
-            .thenReturn((Boolean) c[1]);
+        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, quotation,
+            (Attachment) c[0])).thenReturn((Boolean) c[1]);
         printable.when(() -> PortalPrintable.renderAndFind(any(),
             eq(PortalDocumentKind.QUOTATION), eq(quotation))).thenReturn((Attachment) c[2]);
         streamer.when(() -> AnonymousAttachmentStreamer.stream(any(), any(), anyString()))

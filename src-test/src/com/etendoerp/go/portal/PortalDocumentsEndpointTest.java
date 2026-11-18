@@ -222,9 +222,27 @@ public class PortalDocumentsEndpointTest {
   }
 
   @Test
+  public void notesThatAreOnlyThePortalDecisionLineLeaveTheReferenceEmpty() throws Exception {
+    Invoice rejected = invoice("INV-8", null,
+        "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.", "ARI");
+    query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.INVOICE), any(),
+        anyInt(), anyInt())).thenReturn(Collections.singletonList(rejected));
+    query.when(() -> PortalDocumentQuery.invoiceSchedules(any(), any()))
+        .thenReturn(new HashMap<String, Object[]>());
+
+    JSONObject row = PortalDocumentsEndpoint.list(SESSION, "invoice", null, null, null, null, null,
+        null).getJSONArray("documents").getJSONObject(0);
+
+    assertEquals("", row.getString("reference"));
+  }
+
+  @Test
   public void aRowNamesCreditNotesFallsBackToTheDescriptionAndShipmentsCarryNoAmounts()
       throws Exception {
-    Invoice creditNote = invoice("INV-9", null, "Rectifica F-1", "ARC");
+    // ETP-6209: the notes stand in for the reference without the portal's decision line.
+    Invoice creditNote = invoice("INV-9", null,
+        "Rectifica F-1\nRechazado por el cliente desde el portal. Motivo: Precio demasiado alto.",
+        "ARC");
     Map<String, Object[]> schedules = new HashMap<>();
     schedules.put("INV-9", new Object[] { day(2026, 1, 10), 1L });
     query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.INVOICE), any(),

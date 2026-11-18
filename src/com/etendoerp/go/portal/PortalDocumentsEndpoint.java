@@ -55,6 +55,7 @@ import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
+import com.etendoerp.go.schemaforge.QuotationPrintableData;
 
 /**
  * The customer portal's document reads (ETP-6209, plan §B.3–§B.7): the home aggregates, the list
@@ -507,7 +508,10 @@ final class PortalDocumentsEndpoint {
     row.put("documentNo", text(document.get("documentNo")));
     row.put("isCreditNote", PortalDocumentKind.isCreditNote(document));
     String reference = StringUtils.trimToNull((String) document.get("orderReference"));
-    row.put("reference", reference != null ? reference : text(document.get(DESCRIPTION)));
+    // The notes stand in for a missing reference, never with the portal's own decision line
+    // ("Rechazado por el cliente desde el portal. Motivo: …", ETP-6209).
+    row.put("reference", reference != null ? reference
+        : text(QuotationPrintableData.withoutPortalNote((String) document.get(DESCRIPTION))));
     row.put("date", formatDate(PortalDocumentQuery.dateOf(document)));
     row.put("documentStatus", text(document.get("documentStatus")));
     if (kind != null && kind.hasAmounts()) {
