@@ -132,6 +132,6 @@
       </unique>
       <check name="ETGO_PORTAL_LINK_ACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_PORTAL_LINK_KIND_CHK"><![CDATA[DOCUMENT_KIND IN ('QUOTATION', 'ORDER', 'SHIPMENT', 'INVOICE')]]></check>
-      <check name="ETGO_PORTAL_LINK_ORIGIN_CHK"><![CDATA[LINK_ORIGIN IN ('SEND', 'RENEWAL', 'DECISION')]]></check>
+      <check name="ETGO_PORTAL_LINK_ORIGIN_CHK"><![CDATA[LINK_ORIGIN IN ('SEND', 'RENEWAL', 'DECISION', 'SHARED')]]></check>
     </table>
   </database>

@@ -29,6 +29,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -499,8 +500,13 @@ final class PortalDocumentQuery {
 
   private static void bind(Query<?> query, PortalSession session, PortalDocumentKind kind,
       Filter filter) {
-    query.setParameter(P_CLIENT, session.getClientId());
-    query.setParameter(P_BPARTNER, session.getBusinessPartnerId());
+    bind(query, session.getClientId(), session.getBusinessPartnerId(), kind, filter);
+  }
+
+  private static void bind(Query<?> query, String clientId, String businessPartnerId,
+      PortalDocumentKind kind, Filter filter) {
+    query.setParameter(P_CLIENT, clientId);
+    query.setParameter(P_BPARTNER, businessPartnerId);
     query.setParameterList(P_STATUSES, statusesFor(kind, filter));
     if (filter.dateFrom != null) {
       query.setParameter(P_FROM, filter.dateFrom);
@@ -514,6 +520,36 @@ final class PortalDocumentQuery {
     if (filter.group != null && filter.group.usesToday()) {
       query.setParameter(P_TODAY, filter.today);
     }
+  }
+
+  /**
+   * The customer's most recent document the portal would show, across the four kinds: the entry
+   * document of a link handed over without an email (ETP-5850). Same scope as every portal query
+   * (tenant, Business Partner, active, sales side, the kind's discriminator and visible statuses),
+   * taken from the arguments because no link, hence no session, exists yet.
+   *
+   * @return {@code [kind, document]}, or empty when the customer has nothing the portal shows
+   */
+  static Optional<Object[]> latestVisible(String clientId, String businessPartnerId) {
+    Object[] latest = null;
+    Date latestDate = null;
+    for (PortalDocumentKind kind : PortalDocumentKind.values()) {
+      Query<BaseOBObject> query = session().createQuery("select e from " + kind.getEntityName()
+          + ALIAS_WHERE + where(kind, Filter.none()) + " order by e." + kind.getDateProperty()
+          + " desc", BaseOBObject.class);
+      bind(query, clientId, businessPartnerId, kind, Filter.none());
+      query.setMaxResults(1);
+      List<BaseOBObject> found = query.list();
+      if (found.isEmpty()) {
+        continue;
+      }
+      Date date = (Date) found.get(0).get(kind.getDateProperty());
+      if (latest == null || (date != null && (latestDate == null || date.after(latestDate)))) {
+        latest = new Object[] { kind, found.get(0) };
+        latestDate = date;
+      }
+    }
+    return Optional.ofNullable(latest);
   }
 
   /**

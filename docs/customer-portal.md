@@ -31,7 +31,7 @@ dropped in a follow-up once production is confirmed empty.
 | Document | `AD_TABLE_ID`, `RECORD_ID`, `DOCUMENT_KIND` (`QUOTATION`, `ORDER`, `SHIPMENT`, `INVOICE`; a credit note is `INVOICE`) |
 | Recipients | `RECIPIENTS_TO`, `RECIPIENTS_CC`, `EMAIL_LANGUAGE` of the send — a renewal goes back to exactly these |
 | Lifecycle | Minted **pending** (`SENT_AT` null) while the email is built; confirmed by `EmailContract#onDelivered` only on a `SENT` outcome (`SENT_AT`, `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`). A pending row is invalid forever |
-| Chain | `LINK_ORIGIN` = `SEND`, `RENEWAL` or `DECISION` (minted by a confirmed quotation decision, §6b); `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
+| Chain | `LINK_ORIGIN` = `SEND`, `RENEWAL`, `DECISION` (minted by a confirmed quotation decision, §6b) or `SHARED` (asked for from the contact, §6c); `PARENT_LINK_ID` (the expired link a renewal replaced) and `ROOT_LINK_ID` (the original send — the KPI unit). Loose references, no DB foreign key, on purpose |
 | Usage | `FIRST_USED`, `LAST_USED` |
 
 Each link lives **48 hours** from its send (`etendo.go.portal.link.ttlMinutes`,
@@ -290,6 +290,31 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   the MCP. The note's wording in `emails_*.properties` (`portal-quotation-decision.note*`) is read
   by the printable: keep its opening words and the "Motivo:" / "Reason:" marker.
 - **KPI:** hook points only, `PortalDecisionEvents` (empty methods), pending the PO's KPI redefinition.
+
+## 6c. Link from the contact — `portalLink` action (ETP-5850)
+
+`POST /sws/neo/contacts/businessPartner/{id}/action/portalLink` (and MCP `etendo_action`, spec
+`contacts`, action `portalLink`) hands the user a link to the customer's portal so they can share it
+themselves; Holded's `get_contact_portal_link` serves the same need. Served by
+`ContactPortalLinkAction`, minted by `PortalContactShare`:
+
+- **Gate:** the `bp-portal-link` flag of the requesting account, like the email link: off -> 403
+  `feature_disabled`, nothing written. Declared as a **write** action: the role needs write access
+  to Contacts (the link opens the customer's documents to whoever holds it).
+- **Customer checks:** `PortalAccessChecks.blockReasonOrClosed` (blocked, inactive, plan expired)
+  -> 409 `portal_unavailable`. Another tenant's or unknown id -> 404.
+- **Entry document:** every link opens on a document, so the customer's most recent document the
+  portal shows (`PortalDocumentQuery.latestVisible`, same scope as every portal query, across the
+  four kinds) is the link's `RECORD_ID`; none -> 409 `no_portal_documents`.
+- **Recipient:** the contact's email (`C_BPartner.EM_ETGO_EMAIL`, else its oldest active contact person's) is `RECIPIENTS_TO`, where an expired link is
+  renewed (§4); none -> 409 `contact_without_email`.
+- **Row:** `LINK_ORIGIN = SHARED`, its own root, `CONTRACT_NAME = contact-portal-link`, confirmed at
+  insert (`SENT_AT` now, `EXPIRES_AT` now + TTL) and committed, like a decision link. `CREATEDBY`
+  records who asked. **Not a send:** no `portal.link.sent` event and no "sent with link" KPI (both
+  count `SEND` only); opening it records `portal.link.opened` with `origin: SHARED`.
+- **Answer (200):** `url`, `expiresAt` (ISO instant), `entryDocument` (`spec`, `id`, `documentNo`),
+  `renewalEmail`. No app base URL configured -> 503 `portal_not_configured`.
+- **Needs `update.database`:** `ETGO_PORTAL_LINK_ORIGIN_CHK` accepts `SHARED`.
 
 ## 7. KPI events
 
