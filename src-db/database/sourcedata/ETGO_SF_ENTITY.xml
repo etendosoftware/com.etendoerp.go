@@ -4283,6 +4283,7 @@ Bank connection (PSD2): to import a connected account's new bank movements use `
 <!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AGENT_PROMPT><![CDATA[The invoice inbox (Bandeja de facturas): supplier documents a person uploaded in the app, read by OCR. status is one of these exact codes: PROCESSING (being read), PENDING_REVIEW, READY and ERROR (all three are still pending to become a purchase invoice; ERROR means something must be fixed, see errorCode), CONFIRMED (became the purchase invoice in invoice) and DISCARDED. For what is pending, filter status in [PENDING_REVIEW, READY, ERROR]; any other value matches nothing. An agent can only read the inbox: uploading, reviewing, confirming and discarding are done by a person in the app.]]></AGENT_PROMPT>
 <!--C24AEA2FDC3C460DB477EA58C8C5A864--></ETGO_SF_ENTITY>
 
 <!--C339170F5740439186792CD2023D45A6--><ETGO_SF_ENTITY>
