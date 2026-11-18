@@ -50,8 +50,10 @@ import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
 import com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotals;
@@ -356,8 +358,8 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
         .put(newLine("JP-1 " + marker, "3", "1234.5", null, IVA_21, "21", "D"))
         .put(newLine("JP-2 " + marker, "1", "99.5", "7.5", IVA_21, "21", "D"));
 
-    BigDecimal engine = confirmedTotal(lines, linkedVendor("AF0FB839D60744F5AA4C9DCD4830084F"),
-        "113");
+    BigDecimal engine = confirmedTotal(lines,
+        persistedVendor(purchaseList("JPY", "113", false)), "113");
 
     assertEquals(0, engine.compareTo(engine.setScale(0, java.math.RoundingMode.HALF_UP)));
     assertEquals(0, engine.compareTo(InvoiceInboxTotals.totals(lines, 0).total()));
@@ -369,8 +371,8 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
   public void aVendorWithATaxIncludedPurchaseListIsRefusedAndNothingIsCreated() throws Exception {
     JSONArray lines = new JSONArray()
         .put(newLine("TI-1 " + marker, "1", "10.00", null, IVA_21, "21", "D"));
-    String id = row("PENDING_REVIEW",
-        document(linkedVendor("CDA1EEEB373A427092EA0814254356EC"), lines, "TI-1"), false);
+    JSONObject vendor = persistedVendor(purchaseList("TI", EUR, true));
+    String id = row("PENDING_REVIEW", document(vendor, lines, "TI-1"), false);
     long invoicesBefore = count("c_invoice");
     long productsBefore = count("m_product");
 
@@ -389,15 +391,23 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
   public void aVendorWithoutAPurchaseListUsesTheDefaultPurchaseList() throws Exception {
     JSONArray lines = new JSONArray()
         .put(newLine("DL-1 " + marker, "1", "10.00", null, IVA_21, "21", "D"));
-    String id = row("PENDING_REVIEW",
-        document(linkedVendor("CCC5FBB78FA1400484BC8B6651EC551C"), lines, "DL-1"), false);
+    assertTrue("the tenant needs a default purchase price list "
+        + "(referencedata/sampledata/GOClient/M_PRICELIST.xml, 'Tarifa de compra principal')",
+        scalar("SELECT count(*) FROM m_pricelist WHERE ad_client_id = '" + CLIENT_ID
+            + "' AND issopricelist = 'N' AND isdefault = 'Y' AND isactive = 'Y'") >= 1);
+    JSONObject vendor = persistedVendor(null);
+    String id = row("PENDING_REVIEW", document(vendor, lines, "DL-1"), false);
 
     NeoResponse response = InvoiceInboxConfirm.confirm(id, null);
 
     assertEquals(response.getBody().toString(), 200, response.getHttpStatus());
     assertEquals(false, response.getBody().getBoolean("createdVendor"));
-    assertEquals("F888E6AAB93E44E88433C21A8F3C0161", text("SELECT m_pricelist_id FROM c_invoice "
-        + "WHERE c_invoice_id = :id", response.getBody().getJSONObject("invoice").getString(ID)));
+    String invoicePriceList = text("SELECT m_pricelist_id FROM c_invoice WHERE c_invoice_id = :id",
+        response.getBody().getJSONObject("invoice").getString(ID));
+    assertEquals("the invoice takes a default purchase price list of the tenant", 1L,
+        scalar("SELECT count(*) FROM m_pricelist WHERE m_pricelist_id = '" + invoicePriceList
+            + "' AND ad_client_id = '" + CLIENT_ID + "' AND issopricelist = 'N'"
+            + " AND isdefault = 'Y'"));
   }
 
 
@@ -658,6 +668,52 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
     return new JSONObject().put("state", "linked").put("id", bpartnerId)
         .put("candidates", new JSONArray()).put("matchedBy", "taxId").put("addressState", "FOUND")
         .put("extracted", new JSONObject().put("name", "linked").put("taxId", ""));
+  }
+
+  /**
+   * A vendor of the tenant that is already in the database, as a linked vendor of a document. It is
+   * created by confirming a throwaway document with a new vendor (the production path, so the address
+   * is real), then given the purchase price list, or none. No sampledata vendor is assumed.
+   */
+  private JSONObject persistedVendor(String purchaseListId) throws Exception {
+    JSONArray seed = new JSONArray()
+        .put(newLine("FX-V " + marker + counter, "1", "1.00", null, IVA_21, "21", "D"));
+    String seedId = row("PENDING_REVIEW", document(newVendor(), seed, "FX-" + (++counter)), false);
+    NeoResponse created = InvoiceInboxConfirm.confirm(seedId, null);
+    assertEquals(created.getBody().toString(), 200, created.getHttpStatus());
+    String vendorId = text("SELECT c_bpartner_id FROM c_invoice WHERE c_invoice_id = :id",
+        created.getBody().getJSONObject("invoice").getString(ID));
+    OBContext.setAdminMode(false);
+    try {
+      BusinessPartner partner = OBDal.getInstance().get(BusinessPartner.class, vendorId);
+      partner.setPurchasePricelist(purchaseListId == null ? null
+          : OBDal.getInstance().get(PriceList.class, purchaseListId));
+      OBDal.getInstance().save(partner);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    return linkedVendor(vendorId);
+  }
+
+  /** A purchase price list of the tenant, in the given currency, inserted in the test transaction. */
+  private String purchaseList(String label, String currencyId, boolean includesTax) {
+    OBContext.setAdminMode(false);
+    try {
+      String id = (String) OBDal.getInstance().getSession()
+          .createNativeQuery("SELECT get_uuid()").uniqueResult();
+      OBDal.getInstance().getSession().createNativeQuery(
+          "INSERT INTO m_pricelist (m_pricelist_id, ad_client_id, ad_org_id, isactive, createdby,"
+              + " updatedby, name, istaxincluded, issopricelist, isdefault, c_currency_id)"
+              + " VALUES (:id, :client, :org, 'Y', :user, :user, :name, :tax, 'N', 'N', :currency)")
+          .setParameter(ID, id).setParameter("client", CLIENT_ID).setParameter("org", ORG_ID)
+          .setParameter("user", USER_ID).setParameter("name", marker + " " + label)
+          .setParameter("tax", includesTax ? "Y" : "N").setParameter("currency", currencyId)
+          .executeUpdate();
+      return id;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /** A conversion rate valid for the whole of 2026, inserted in the test transaction. */
