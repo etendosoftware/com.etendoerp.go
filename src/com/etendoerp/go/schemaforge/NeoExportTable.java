@@ -7,7 +7,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -50,8 +49,8 @@ final class NeoExportTable {
   private static final String FIELD_ID = "id";
   /** Column key of the contact phone (ETP-6225). */
   private static final String PHONE_COLUMN_KEY = "etgoPhone";
-  /** What a phone cell may contain once whitespace is gone: digits and {@code + ( ) - .} only. */
-  private static final Pattern PHONE_CELL = Pattern.compile("^[0-9+()\\-.]*[0-9][0-9+()\\-.]*$");
+  /** What a phone cell may contain once whitespace is gone, besides digits. */
+  private static final String PHONE_SEPARATORS = "+()-.";
 
   private final JSONArray rows;
   private final List<Column> columns;
@@ -129,7 +128,19 @@ final class NeoExportTable {
    * neutralization.
    */
   static boolean isPlainPhone(String value) {
-    return value != null && PHONE_CELL.matcher(value).matches();
+    if (value == null) {
+      return false;
+    }
+    boolean hasDigit = false;
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (Character.isDigit(c) && c < 128) {
+        hasDigit = true;
+      } else if (PHONE_SEPARATORS.indexOf(c) < 0) {
+        return false;
+      }
+    }
+    return hasDigit;
   }
 
   /** One row's cells, resolved, date-formatted and value-translated but NOT escaped. */

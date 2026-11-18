@@ -624,7 +624,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     try {
       JSONObject body = new JSONObject()
           .put("error", new JSONObject().put("message", message).put("status", 400))
-          .put("response", new JSONObject()
+          .put(RESPONSE_KEY, new JSONObject()
               .put("status", -4)
               .put("errors", new JSONObject().put(field, message)));
       return NeoResponse.error(400, body);
