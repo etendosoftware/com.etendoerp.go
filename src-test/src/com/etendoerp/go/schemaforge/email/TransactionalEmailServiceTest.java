@@ -33,6 +33,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -348,6 +350,101 @@ public class TransactionalEmailServiceTest {
         safetyStore.getAuditRecords().get(0).getStatus());
     assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
         safetyStore.getAuditRecords().get(1).getStatus());
+  }
+
+  // ---- ETP-5484: duplicate suppression is bounded by a time window ----
+
+  @Test
+  public void resendWithinWindowIsDuplicateAndNothingIsSent() throws Exception {
+    AtomicLong offset = new AtomicLong();
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore store = new InMemoryEmailSafetyStore(clock(offset));
+    TransactionalEmailService service = windowedService(new FixtureContract(), adapter, store,
+        offset, 60);
+    JSONObject command = duplicateCommand();
+
+    service.send("fixture-contract", command);
+    offset.addAndGet(30_000L);
+    JSONObject second = responseData(service.send("fixture-contract", command));
+
+    assertEquals(TransactionalEmailService.STATUS_DUPLICATE, second.getString("status"));
+    assertEquals(1, adapter.getSendCount());
+  }
+
+  @Test
+  public void resendAfterWindowIsSentAndAuditedAsSent() throws Exception {
+    AtomicLong offset = new AtomicLong();
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore store = new InMemoryEmailSafetyStore(clock(offset));
+    TransactionalEmailService service = windowedService(new FixtureContract(), adapter, store,
+        offset, 60);
+    JSONObject command = duplicateCommand();
+
+    service.send("fixture-contract", command);
+    offset.addAndGet(61_000L);
+    JSONObject second = responseData(service.send("fixture-contract", command));
+
+    assertEquals(TransactionalEmailService.STATUS_SENT, second.getString("status"));
+    assertEquals(2, adapter.getSendCount());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        store.getAuditRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void throttleStillAppliesToAResendAfterTheWindow() throws Exception {
+    AtomicLong offset = new AtomicLong();
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore store = new InMemoryEmailSafetyStore(clock(offset));
+    // duplicate window (10 s) is shorter than the contract's 60 s throttle window
+    TransactionalEmailService service = windowedService(new RecipientThrottleContract(), adapter,
+        store, offset, 10);
+    JSONObject command = duplicateCommand();
+
+    service.send("recipient-throttle", command);
+    offset.addAndGet(30_000L);
+    NeoResponse second = service.send("recipient-throttle", command);
+
+    assertEquals(TransactionalEmailService.HTTP_TOO_MANY_REQUESTS, second.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_THROTTLED,
+        responseData(second).getString("status"));
+    assertEquals(1, adapter.getSendCount());
+  }
+
+  @Test
+  public void duplicateWindowConfigurationFallsBackToDefault() {
+    long defaultWindow = EmailDuplicateWindow.DEFAULT_SECONDS;
+    assertEquals(120L, EmailDuplicateWindow.parseSeconds(" 120 "));
+    assertEquals(defaultWindow, EmailDuplicateWindow.parseSeconds(null));
+    assertEquals(defaultWindow, EmailDuplicateWindow.parseSeconds(""));
+    assertEquals(defaultWindow, EmailDuplicateWindow.parseSeconds("abc"));
+    assertEquals(defaultWindow, EmailDuplicateWindow.parseSeconds("-5"));
+    assertEquals(defaultWindow, EmailDuplicateWindow.parseSeconds("0"));
+    long capped = EmailDuplicateWindow.parseSeconds(
+        String.valueOf(Long.MAX_VALUE));
+    assertTrue(capped > 0 && capped * 1000L > 0);
+  }
+
+  private static JSONObject duplicateCommand() throws JSONException {
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, "fixture:ABC123:v1");
+    return command;
+  }
+
+  /** Real time shifted by a test-controlled offset; audit rows are stamped with real time. */
+  private static LongSupplier clock(AtomicLong offset) {
+    return () -> System.currentTimeMillis() + offset.get();
+  }
+
+  private static TransactionalEmailService windowedService(EmailContract contract,
+      FakeProviderAdapter adapter, InMemoryEmailSafetyStore store, AtomicLong offset,
+      long windowSeconds) {
+    return new TransactionalEmailService(new SingleContractRegistry(contract), adapter, store,
+        new InMemoryEmailSendLogStore(), new LogEmailObservabilitySink(), clock(offset),
+        windowSeconds);
   }
 
   @Test
