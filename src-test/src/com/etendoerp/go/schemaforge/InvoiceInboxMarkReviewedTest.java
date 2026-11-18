@@ -183,6 +183,19 @@ class InvoiceInboxMarkReviewedTest {
   }
 
   @Test
+  void anErrorDocumentWithoutACodeIsNotReviewableEither() throws Exception {
+    status = "ERROR";
+    errorCode = null;
+
+    NeoResponse response = mark();
+
+    assertRefusal(response, 409, "not_reviewable");
+    assertEquals("ERROR", response.getBody().getJSONObject("error").getString("documentStatus"));
+    verify(dal, never()).save(any());
+    assertEquals("ERROR", status);
+  }
+
+  @Test
   void anInvalidDocumentIsNotValidAndListsWhatIsMissing() throws Exception {
     currentData = "{version:1,header:{vendor:{state:'none',candidates:[],extracted:{}},"
         + "documentNo:'',invoiceDate:null,totalAmount:null,totalSource:'lines'},lines:[],notices:[]}";
@@ -200,6 +213,22 @@ class InvoiceInboxMarkReviewedTest {
     assertEquals("ERROR", status);
     assertFalse(reviewed);
     assertEquals("ERROR", response.getBody().getJSONObject("error").getString("documentStatus"));
+  }
+
+  @Test
+  void aNewVendorThatPrintsNoAddressCannotBeMarkedReviewedAndNamesTheVendorAddress()
+      throws Exception {
+    currentData = VALID.replace("vendor:{state:'linked',id:'V1',name:'ACME',candidates:[],"
+        + "extracted:{}}", "vendor:{state:'new',id:null,candidates:[],extracted:{name:'ACME',"
+        + "taxId:'B1'}}");
+
+    NeoResponse response = mark();
+
+    assertRefusal(response, 422, "not_valid");
+    assertTrue(response.getBody().getJSONObject("error").getJSONArray("missing").toString()
+        .contains("vendorAddress"), response.getBody().toString());
+    assertEquals("ERROR", status);
+    assertFalse(reviewed);
   }
 
   @Test

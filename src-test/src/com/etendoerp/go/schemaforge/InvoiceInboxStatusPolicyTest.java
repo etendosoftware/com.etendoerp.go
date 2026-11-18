@@ -269,4 +269,33 @@ class InvoiceInboxStatusPolicyTest {
     assertFalse(InvoiceInboxStatusPolicy.apply(unreadable, valid()));
     verify(unreadable, never()).setStatus(any());
   }
+
+  @Test
+  @DisplayName("an edit clears the reason of a failed confirmation, whatever the new verdict")
+  void anEditClearsTheErrorDetail() throws Exception {
+    IncomingDocument valid = row(ERROR, "CONFIRM_FAILED");
+    IncomingDocument invalid = row(PENDING_REVIEW, null);
+
+    InvoiceInboxStatusPolicy.applyAfterEdit(valid, valid());
+    InvoiceInboxStatusPolicy.applyAfterEdit(invalid, failed(MISSING_FIELDS));
+
+    verify(valid).setErrorDetail(null);
+    verify(valid).setStatus(PENDING_REVIEW);
+    verify(valid).setErrorCode(null);
+    verify(invalid).setErrorDetail(null);
+    verify(invalid).setStatus(ERROR);
+  }
+
+  @Test
+  @DisplayName("a row the edit cannot move keeps its error detail")
+  void aNonMovableRowKeepsItsErrorDetail() {
+    IncomingDocument confirmed = row("CONFIRMED", null);
+    IncomingDocument foreign = row(ERROR, InvoiceInboxValidator.FOREIGN_RECEIVER);
+
+    assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(confirmed, valid()));
+    assertFalse(InvoiceInboxStatusPolicy.applyAfterEdit(foreign, valid()));
+
+    verify(confirmed, never()).setErrorDetail(any());
+    verify(foreign, never()).setErrorDetail(any());
+  }
 }

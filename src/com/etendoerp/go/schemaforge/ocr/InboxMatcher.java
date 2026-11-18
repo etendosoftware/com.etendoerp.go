@@ -79,14 +79,27 @@ public final class InboxMatcher {
   private static final int TWO_DECIMALS = 2;
 
   private final OcrLookups lookups;
+  private final String organizationId;
 
   /**
-   * Creates the matcher.
+   * Creates the matcher for the session's current organization.
    *
    * @param lookups the lookups of the document type
    */
   public InboxMatcher(OcrLookups lookups) {
+    this(lookups, null);
+  }
+
+  /**
+   * Creates the matcher.
+   *
+   * @param lookups        the lookups of the document type
+   * @param organizationId the organization of the document, which decides the default category of a
+   *                       new product ({@code null}: the session's current one)
+   */
+  public InboxMatcher(OcrLookups lookups, String organizationId) {
     this.lookups = lookups;
+    this.organizationId = organizationId;
   }
 
   /**
@@ -123,7 +136,7 @@ public final class InboxMatcher {
     String documentNo = OcrJson.str(extraction, "document_no");
     header.put(K_DUPLICATE, duplicate(vendor, documentNo, notices));
     String date = isoDate(extraction);
-    return new InboxLineMatcher(lookups).review(extraction.optJSONArray(OcrDocType.LINES_KEY),
+    return new InboxLineMatcher(lookups, organizationId).review(extraction.optJSONArray(OcrDocType.LINES_KEY),
         locationId, date);
   }
 

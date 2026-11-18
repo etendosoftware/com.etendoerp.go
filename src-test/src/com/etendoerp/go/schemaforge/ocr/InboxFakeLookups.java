@@ -69,6 +69,15 @@ final class InboxFakeLookups implements OcrLookups {
   Optional<DocCurrency> currency = Optional.empty();
   /** The vendor ids the document currency was asked with, one entry per ask ({@code null} too). */
   final List<String> currencyAsks = new ArrayList<>();
+  /** The unit each printed text resolves to (ETP-6051); a text not in the map resolves to none. */
+  final Map<String, Party> unitsByPrinted = new HashMap<>();
+  /** The tenant default unit, empty when none. */
+  Optional<Party> defaultUom = Optional.empty();
+  /** The tenant default product category, empty when none. */
+  Optional<Party> defaultCategory = Optional.empty();
+  final List<String> printedUnitAsks = new ArrayList<>();
+  final List<String> categoryOrganizations = new ArrayList<>();
+  int defaultUomAsks;
 
   @Override
   public List<Party> searchVendors(String name, int limit) {
@@ -134,5 +143,23 @@ final class InboxFakeLookups implements OcrLookups {
   public Optional<DocCurrency> documentCurrency(String vendorId) {
     currencyAsks.add(vendorId);
     return currency;
+  }
+
+  @Override
+  public Optional<Party> uomByPrintedUnit(String printed) {
+    printedUnitAsks.add(printed);
+    return Optional.ofNullable(unitsByPrinted.get(printed));
+  }
+
+  @Override
+  public Optional<Party> defaultUom() {
+    defaultUomAsks++;
+    return defaultUom;
+  }
+
+  @Override
+  public Optional<Party> defaultProductCategory(String organizationId) {
+    categoryOrganizations.add(organizationId);
+    return defaultCategory;
   }
 }
