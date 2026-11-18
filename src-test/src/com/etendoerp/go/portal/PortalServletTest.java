@@ -668,6 +668,19 @@ public class PortalServletTest {
     verifyNoInteractions(decisionService);
   }
 
+  @Test
+  public void aFailedPostIsLoggedUnderTheOperationOfItsRoute() {
+    // Columns: POST route, operation the failure's log line names.
+    String[][] cases = {
+        { "/decisions/confirm", "decision confirmation" },
+        { "/quotations/" + QUOTATION_ID + "/decision", "decision request" },
+        { "/renew", "renewal" },
+    };
+    for (String[] c : cases) {
+      assertEquals(c[0], c[1], PortalServlet.postOperation(c[0]));
+    }
+  }
+
   // ── /me ─────────────────────────────────────────────────────────────────────
 
   @Test
