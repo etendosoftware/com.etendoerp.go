@@ -28,7 +28,8 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>An identity is resolved once per event, from one client, so its parts never mix two tenants.
  * It is captured on the thread that has the session and handed to the thread that emits
- * ({@link #runWith}); an event with no session carries {@link #NONE} and none of the properties.</p>
+ * (capture it with {@code NeoTelemetryService#captureIdentity}, hand it over with
+ * {@link #runWith}); an event with no session carries {@link #NONE} and none of the properties.</p>
  */
 public final class NeoTelemetryIdentity {
 
@@ -122,18 +123,7 @@ public final class NeoTelemetryIdentity {
    *
    * @return the handed-off identity
    */
-  static NeoTelemetryIdentity handedOff() {
+  public static NeoTelemetryIdentity handedOff() {
     return HANDED_OFF.get();
-  }
-
-  /**
-   * Captures the identity of the current session, on the calling thread.
-   *
-   * @param clientId the client the event happened under, or {@code null} for the session's
-   * @param userId the user, or {@code null} for the session's
-   * @return the identity, {@link #NONE} when nothing resolves
-   */
-  public static NeoTelemetryIdentity capture(String clientId, String userId) {
-    return RuntimeNeoTelemetryIdentityResolver.INSTANCE.resolve(clientId, userId);
   }
 }

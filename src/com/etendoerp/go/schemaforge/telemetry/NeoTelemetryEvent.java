@@ -110,13 +110,12 @@ public final class NeoTelemetryEvent {
   }
 
   /**
-   * The tenant ({@code AD_Client_ID}) the event happened under, for the server log only.
+   * The tenant ({@code AD_Client_ID}) the event happened under, for the server log.
    *
-   * <p>Deliberately not one of {@link #getProperties()}: properties are what every sink receives,
-   * Mixpanel included, and the tenant id stays on our side. Only {@code LogNeoTelemetrySink} prints
-   * it, so a failure seen in Datadog can be traced to its tenant (ETP-5639). An event that must be
-   * segmented by tenant in Mixpanel sends it explicitly as the allowlisted {@code account_id}
-   * property instead (the contact KPI events, ETP-5791).</p>
+   * <p>Not one of {@link #getProperties()}: those are what every sink receives. {@code
+   * LogNeoTelemetrySink} prints it, so a failure seen in Datadog can be traced to its tenant
+   * (ETP-5639). Mixpanel receives the tenant through {@link #getIdentity()} as {@code ad_client_id}
+   * (and {@code account_id} during the transition), added by the Mixpanel sink (ETP-6228).</p>
    *
    * @return the AD client id, or {@code null} when the event carries none
    */

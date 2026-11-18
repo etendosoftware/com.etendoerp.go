@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.util;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
@@ -42,6 +43,15 @@ public final class OwnerAccountResolver {
    *     legacy client), the owner has no email or no active account matches: absent, never guessed
    */
   public static String findOwnerAccountId(String clientId) {
+    OBContext.setAdminMode(true);
+    try {
+      return lookup(clientId);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String lookup(String clientId) {
     String ownerUserId = OwnerSupport.findOwnerUserId(clientId);
     if (ownerUserId == null) {
       return null;

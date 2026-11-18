@@ -343,12 +343,13 @@ public final class ContactTypeTelemetry {
     }
   }
 
-  private static void send(String event, Map<String, Object> properties, String clientId) {
+  static void send(String event, Map<String, Object> properties, String clientId) {
     try {
       // ETP-6228: the sender thread has no session, so the identity is captured here.
-      NeoTelemetryIdentity identity = NeoTelemetryIdentity.capture(clientId, null);
+      NeoTelemetryService service = telemetry();
+      NeoTelemetryIdentity identity = service.captureIdentity(clientId, null);
       SENDER.execute(() -> NeoTelemetryIdentity.runWith(identity,
-          () -> telemetry().emit(event, properties, clientId)));
+          () -> service.emit(event, properties, clientId)));
     } catch (RejectedExecutionException e) {
       log.debug("Contact telemetry queue full; dropping {}", event);
     }

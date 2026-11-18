@@ -7665,7 +7665,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Build the environment block of a restore response: the selected {@code user/role/client/org/
    * warehouse}, or {@code null} when no environment has been entered yet on this session.
    */
-  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+  static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
     if (sessionRecord.getUserId() == null) {
       return JSONObject.NULL;
     }

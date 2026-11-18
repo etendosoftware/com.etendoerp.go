@@ -75,8 +75,10 @@ user `0`) or no session means no identity: events from a scheduler or an anonymo
 without the ids.
 
 Emitters that send from a background thread (`BankBounceKpiTelemetry`, `ContactTypeTelemetry`)
-capture the identity on the calling thread (`NeoTelemetryIdentity.capture`) and hand it to the sender
-(`NeoTelemetryIdentity.runWith`); `McpUsageLogger` passes its row's client and user. A new emitter
+capture the identity on the calling thread through the service (`NeoTelemetryService.captureIdentity`,
+so it uses the service's own resolver) and hand it to the sender (`NeoTelemetryIdentity.runWith`);
+`McpUsageLogger.enqueue` captures it from its row's client and user on the request thread, before
+the row goes to the writer thread, which has no session and never touches `OBDal`. A new emitter
 must do the same, or run on a thread that has the session.
 
 The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`

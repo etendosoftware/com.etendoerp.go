@@ -294,6 +294,19 @@ public class NeoTelemetryService {
   }
 
   /**
+   * Captures the identity of the current session with this service's own resolver, on the calling
+   * thread, for an emitter that sends from a background thread that has no session (ETP-6228);
+   * hand it over with {@link NeoTelemetryIdentity#runWith}. Never throws.
+   *
+   * @param clientId the client the event happened under, or {@code null} for the session's
+   * @param userId the user, or {@code null} for the session's
+   * @return the identity, {@link NeoTelemetryIdentity#NONE} when nothing resolves
+   */
+  public NeoTelemetryIdentity captureIdentity(String clientId, String userId) {
+    return identityResolver.resolve(clientId, userId);
+  }
+
+  /**
    * The identity of the event being built (ETP-6228): the one handed to this thread by an emitter
    * that sends from a background thread, else the one of the current session.
    */

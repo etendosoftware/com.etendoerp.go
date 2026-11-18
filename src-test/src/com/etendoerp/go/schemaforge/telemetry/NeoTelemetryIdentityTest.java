@@ -35,6 +35,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
 
 /**
  * ETP-6228: the common identity of backend events.
@@ -208,6 +213,70 @@ class NeoTelemetryIdentityTest {
 
     // C0 was evicted by the bound, so it is looked up again.
     assertEquals(RuntimeNeoTelemetryIdentityResolver.MAX_ENTRIES + 2, lookups.get());
+  }
+
+  // ── doResolve: the session from OBContext ─────────────────────────────────────────────────
+
+  private static RuntimeNeoTelemetryIdentityResolver factsResolver() {
+    return new RuntimeNeoTelemetryIdentityResolver(
+        client -> new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER-" + client, "demo"),
+        System::currentTimeMillis);
+  }
+
+  private static OBContext sessionContext(String clientId, String userId) {
+    OBContext context = Mockito.mock(OBContext.class);
+    if (clientId != null) {
+      Client client = Mockito.mock(Client.class);
+      Mockito.when(client.getId()).thenReturn(clientId);
+      Mockito.when(context.getCurrentClient()).thenReturn(client);
+    }
+    if (userId != null) {
+      User user = Mockito.mock(User.class);
+      Mockito.when(user.getId()).thenReturn(userId);
+      Mockito.when(context.getUser()).thenReturn(user);
+    }
+    return context;
+  }
+
+  @Test
+  void theSessionSuppliesTheUserAndClientWhenTheEventNamesNone() {
+    try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
+      ob.when(OBContext::getOBContext).thenReturn(sessionContext("C1", "U1"));
+
+      NeoTelemetryIdentity identity = factsResolver().resolve(null, null);
+
+      assertEquals("U1", property(identity, "ad_user_id"));
+      assertEquals("C1", property(identity, "ad_client_id"));
+      assertEquals("OWNER-C1", property(identity, "etgo_account_id"));
+    }
+  }
+
+  @Test
+  void theSessionUserIsNotUsedForAnotherClient() {
+    try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
+      ob.when(OBContext::getOBContext).thenReturn(sessionContext("C1", "U1"));
+
+      NeoTelemetryIdentity named = factsResolver().resolve("C2", null);
+      NeoTelemetryIdentity sameClient = factsResolver().resolve("C1", null);
+      NeoTelemetryIdentity explicitUser = factsResolver().resolve("C2", "U2");
+
+      assertEquals("C2", property(named, "ad_client_id"));
+      assertNull(property(named, "ad_user_id"));
+      assertEquals("OWNER-C2", property(named, "etgo_account_id"));
+      assertEquals("U1", property(sameClient, "ad_user_id"));
+      assertEquals("U2", property(explicitUser, "ad_user_id"));
+    }
+  }
+
+  @Test
+  void aSystemSessionOrNoSessionCarriesNothing() {
+    try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
+      ob.when(OBContext::getOBContext).thenReturn(sessionContext("0", "0"));
+      assertSame(NeoTelemetryIdentity.NONE, factsResolver().resolve(null, null));
+
+      ob.when(OBContext::getOBContext).thenReturn(null);
+      assertSame(NeoTelemetryIdentity.NONE, factsResolver().resolve(null, null));
+    }
   }
 
   private static String property(NeoTelemetryIdentity identity, String key) {

@@ -836,11 +836,11 @@ final class BankBounceKpiTelemetry {
    * @param properties its properties
    * @param clientId   the tenant for the server log, or {@code null}
    */
-  private static void sendNow(String event, Map<String, Object> properties, String clientId) {
+  static void sendNow(String event, Map<String, Object> properties, String clientId) {
     try {
       NeoTelemetryService service = telemetry();
       // ETP-6228: the sender thread has no session, so the identity is captured here.
-      NeoTelemetryIdentity identity = NeoTelemetryIdentity.capture(clientId, null);
+      NeoTelemetryIdentity identity = service.captureIdentity(clientId, null);
       SENDER.execute(() -> NeoTelemetryIdentity.runWith(identity,
           () -> service.emit(event, properties, clientId)));
     } catch (RejectedExecutionException e) {
