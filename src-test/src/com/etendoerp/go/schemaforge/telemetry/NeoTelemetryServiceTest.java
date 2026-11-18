@@ -316,6 +316,28 @@ class NeoTelemetryServiceTest {
   }
 
   @Test
+  void emitKeepsTheAdjustedFlagOfTheInboxConfirmedEventAndDropsAnIdentifier() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED,
+        mapOf("account_id", "CLIENT-1", "adjusted", true, "recordId", "ROW-1", "invoiceId", "I1"));
+
+    assertEquals(Map.of("account_id", "CLIENT-1", "adjusted", true), sink.last().getProperties());
+  }
+
+  @Test
+  void emitDropsANonBooleanAdjustedFlag() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED,
+        mapOf("account_id", "CLIENT-1", "adjusted", "yes"));
+
+    assertFalse(sink.last().getProperties().containsKey("adjusted"));
+  }
+
+  @Test
   void measureBackendOperationEmitsWriteTimingWithoutRecordId() throws Exception {
     RecordingSink sink = new RecordingSink();
     NeoTelemetryService service = service(sink, 0L, 125_000_000L);

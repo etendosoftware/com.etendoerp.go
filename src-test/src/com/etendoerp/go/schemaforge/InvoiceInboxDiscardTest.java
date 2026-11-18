@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -154,6 +155,23 @@ class InvoiceInboxDiscardTest {
     assertEquals(404, response.getHttpStatus());
     verify(selectQuery).setParameterList("clients", new String[] { "CLIENT-1" });
     verify(updateQuery, never()).executeUpdate();
+  }
+
+  @Test
+  void anErrorRowIsDiscardedWhateverItsErrorCode() throws Exception {
+    // the discard never reads the error code: an ERROR row with a null code succeeds as any other
+    rowRead("ERROR");
+    when(updateQuery.executeUpdate()).thenReturn(1);
+    doAnswer(invocation -> {
+      Object[] next = reads.poll();
+      return next != null ? next : "2026-01-01 10:00:00";
+    }).when(selectQuery).uniqueResult();
+
+    NeoResponse response = InvoiceInboxDiscard.discard("ID-1");
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("DISCARDED", response.getBody().getString("status"));
+    assertFalse(response.getBody().getBoolean("alreadyDiscarded"));
   }
 
   @Test

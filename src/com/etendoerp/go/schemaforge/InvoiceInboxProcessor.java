@@ -221,7 +221,7 @@ public final class InvoiceInboxProcessor {
     inAdminMode(() -> {
       JSONObject extraction = extractionOf(id, claimed, type.get());
       if (extraction != null) {
-        matchAndStore(id, extraction, type.get());
+        matchAndStore(id, extraction, type.get(), claimed.orgId());
       }
       return null;
     });
@@ -294,14 +294,15 @@ public final class InvoiceInboxProcessor {
     throw last;
   }
 
-  private void matchAndStore(String id, JSONObject extraction, OcrDocType type)
+  private void matchAndStore(String id, JSONObject extraction, OcrDocType type,
+      String orgId)
       throws JSONException {
     Optional<OcrLookups> lookups = OcrLookupsRegistry.forResolver(type.getResolver());
     if (lookups.isEmpty()) {
       store.fail(id, ERR_SERVICE);
       return;
     }
-    JSONObject document = new InboxMatcher(lookups.get()).build(extraction);
+    JSONObject document = new InboxMatcher(lookups.get(), orgId).build(extraction);
     OBDal.getInstance().rollbackAndClose();
     persist(id, document);
   }
@@ -314,7 +315,7 @@ public final class InvoiceInboxProcessor {
     }
     IncomingDocument row = OBDal.getInstance().get(IncomingDocument.class, id);
     InvoiceInboxDuplicates.addInboxDuplicates(row, document);
-    InvoiceInboxValidator.Result verdict = InvoiceInboxValidator.validate(document);
+    InvoiceInboxValidator.Result verdict = InvoiceInboxLiveChecks.verdict(document, row);
     document.put(K_VALIDATION, verdict.toJson());
     row.setCurrentData(document.toString());
     InvoiceInboxSummary.syncFrom(document, row);

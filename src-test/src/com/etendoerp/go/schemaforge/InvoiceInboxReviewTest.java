@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -386,6 +387,52 @@ class InvoiceInboxReviewTest {
 
   // ------------------------------------------------------------------ enrichment
 
+  // ------------------------------------------------------------------ ETP-6051: the confirm failure and the warning
+
+  @Test
+  void theErrorDetailOfAFailedConfirmationIsAnsweredOnlyWhenThereIsOne() throws Exception {
+    when(row.getStatus()).thenReturn("ERROR");
+    when(row.getErrorCode()).thenReturn("CONFIRM_FAILED");
+    when(row.getErrorDetail()).thenReturn("line 2: tax is required");
+    assertEquals("line 2: tax is required", ok().getString("errorDetail"));
+
+    when(row.getErrorDetail()).thenReturn("  ");
+    assertFalse(ok().has("errorDetail"));
+    when(row.getErrorDetail()).thenReturn(null);
+    assertFalse(ok().has("errorDetail"));
+  }
+
+  @Test
+  void theTotalMismatchWarningIsAnsweredFromThePrintedTotalAndTheLines() throws Exception {
+    String line = "{\"quantity\":1,\"unitPrice\":100,\"taxRate\":21}";
+    when(row.getCurrentData()).thenReturn("{\"version\":1,\"header\":{\"vendor\":{\"state\":"
+        + "\"linked\",\"id\":\"V1\"},\"totalSource\":\"printed\",\"totalAmount\":150},"
+        + "\"lines\":[" + line + "]}");
+    assertTrue(ok().getBoolean("totalMismatch"));
+
+    when(row.getCurrentData()).thenReturn("{\"version\":1,\"header\":{\"vendor\":{\"state\":"
+        + "\"linked\",\"id\":\"V1\"},\"totalSource\":\"printed\",\"totalAmount\":121.01},"
+        + "\"lines\":[" + line + "]}");
+    assertFalse(ok().getBoolean("totalMismatch"), "one cent is within the tolerance");
+
+    when(row.getCurrentData()).thenReturn("{\"version\":1,\"header\":{\"vendor\":{\"state\":"
+        + "\"linked\",\"id\":\"V1\"},\"totalSource\":\"lines\",\"totalAmount\":150},"
+        + "\"lines\":[" + line + "]}");
+    assertFalse(ok().getBoolean("totalMismatch"), "a computed total is never a mismatch");
+  }
+
+  @Test
+  void aNewVendorWithoutAddressDataReportsTheVendorAddressInTheVerdict() throws Exception {
+    when(row.getCurrentData()).thenReturn(doc(
+        "{\"state\":\"new\",\"extracted\":{\"name\":\"Acme\",\"taxId\":\"B1\"}}", "[]"));
+
+    JSONObject validation = ok().getJSONObject("document").getJSONObject("validation");
+
+    assertFalse(validation.getBoolean("valid"));
+    assertTrue(validation.getJSONArray("missing").toString().contains("vendorAddress"),
+        validation.toString());
+  }
+
   private static String doc(String vendor, String lines) {
     return "{\"version\":1,\"header\":{\"vendor\":" + vendor + "},\"lines\":" + lines + "}";
   }
@@ -627,7 +674,8 @@ class InvoiceInboxReviewTest {
 
     ok();
 
-    verify(lookups).documentCurrency(isNull(), eq("ROW-ORG"));
+    // asked by the review, the summary and the live checks alike: all with the ROW's organization
+    verify(lookups, atLeastOnce()).documentCurrency(isNull(), eq("ROW-ORG"));
   }
 
   @Test
@@ -641,12 +689,12 @@ class InvoiceInboxReviewTest {
 
     when(row.getCurrentData()).thenReturn(doc("{\"state\":\"linked\",\"id\":\"V1\"}", "[]"));
     ok();
-    verify(lookups).documentCurrency(eq("V1"), any());
+    verify(lookups, atLeastOnce()).documentCurrency(eq("V1"), any());
 
     when(row.getCurrentData()).thenReturn(doc("{\"state\":\"ambiguous\",\"id\":\"V1\"}",
         "[]"));
     ok();
-    verify(lookups).documentCurrency(isNull(), any());
+    verify(lookups, atLeastOnce()).documentCurrency(isNull(), any());
     verify(row, never()).setCurrentData(anyString());
   }
 
@@ -758,6 +806,10 @@ class InvoiceInboxReviewTest {
     assertTrue(InvoiceInboxReview.isEditable("ERROR", "UNREADABLE"));
     assertTrue(InvoiceInboxReview.isEditable("ERROR", "MISSING_FIELDS"));
     assertFalse(InvoiceInboxReview.isEditable("ERROR", "FOREIGN_RECEIVER"));
+    // nullable columns: a null status is not editable, a null code never blocks an ERROR row
+    assertFalse(InvoiceInboxReview.isEditable(null, null));
+    assertFalse(InvoiceInboxReview.isEditable(null, "UNREADABLE"));
+    assertTrue(InvoiceInboxReview.isEditable("ERROR", null));
     for (String status : new String[] { "PROCESSING", "CONFIRMED", "DISCARDED", "", "NOPE" }) {
       assertFalse(InvoiceInboxReview.isEditable(status, null), status);
     }

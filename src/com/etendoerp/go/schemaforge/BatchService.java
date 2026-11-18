@@ -536,6 +536,50 @@ public class BatchService {
   }
 
   /**
+   * Runs the operations through the very same pipeline as {@link #executeBatch(JSONArray)} but
+   * leaves the transaction to the caller (ETP-6051): nothing is committed, and the result is
+   * {@code {committed:false, operations:[{id, ok, recordId}, ...]}} on success. The caller flushes,
+   * writes whatever else belongs to the unit and commits once (the invoice inbox confirm commits
+   * through the invoice completion).
+   *
+   * <p>On a failure the session is rolled back here (a failed operation leaves it unusable) and the
+   * failure envelope of {@link #executeBatch(JSONArray)} is returned, so the caller never continues
+   * with half a unit. The claim of the transaction is always released, whatever happens: the
+   * request thread is pooled. The batch scope (memo, after-commit actions) belongs to the caller,
+   * who opens it before and closes it after the commit.</p>
+   *
+   * @param operations the ordered list of operation objects (must be non-null)
+   * @return the success or failure envelope
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  JSONObject executeInCallerTransaction(JSONArray operations) throws JSONException {
+    Map<String, String> resolvedIds = new HashMap<>();
+    JSONArray opResults = new JSONArray();
+    TransactionTracker tracker = new TransactionTracker();
+    beginCallerOwnedTransaction();
+    try {
+      for (int i = 0; i < operations.length(); i++) {
+        JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds,
+            opResults, tracker, null);
+        if (failure != null) {
+          rollbackQuietly();
+          NeoErrorResponses.retranslateBatchFailure(failure);
+          return failure;
+        }
+      }
+      return new JSONObject().put(FIELD_COMMITTED, false).put("operations", opResults);
+    } catch (Exception e) {
+      rollbackQuietly();
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] unit",
+          "Batch failed: ");
+      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
+          refusalDetail(classified), tracker.durable());
+    } finally {
+      endCallerOwnedTransaction();
+    }
+  }
+
+  /**
    * Process one batch operation. Returns {@code null} on success (the op was
    * dispatched and its recordId stored in {@code resolvedIds} / {@code opResults}),
    * or a failure body that the caller should return after rolling back.

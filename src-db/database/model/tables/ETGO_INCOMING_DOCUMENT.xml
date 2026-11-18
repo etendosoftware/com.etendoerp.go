@@ -121,11 +121,30 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ERROR_DETAIL" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="C_CURRENCY_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="NEW_PRODUCTS" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TOTAL_MISMATCH" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="C_BPARTNER" name="ETGO_INCDOC_BPARTNER_FK">
         <reference local="C_BPARTNER_ID" foreign="C_BPARTNER_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_USER" name="ETGO_INCDOC_CRTBY_FK">
         <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="C_CURRENCY" name="ETGO_INCDOC_CURRENCY_FK">
+        <reference local="C_CURRENCY_ID" foreign="C_CURRENCY_ID"/>
       </foreign-key>
       <foreign-key foreignTable="C_INVOICE" name="ETGO_INCDOC_DUPINV_FK">
         <reference local="DUPLICATE_INVOICE_ID" foreign="C_INVOICE_ID"/>
@@ -154,6 +173,7 @@
       </index>
       <check name="ETGO_INCDOC_ADJUSTED_CHK"><![CDATA[ADJUSTED IN ('Y', 'N')]]></check>
       <check name="ETGO_INCDOC_REVIEWED_CHK"><![CDATA[REVIEWED IN ('Y', 'N')]]></check>
+      <check name="ETGO_INCDOC_TOTALMM_CHK"><![CDATA[TOTAL_MISMATCH IN ('Y', 'N')]]></check>
       <check name="ETGO_OMINGDOCUMENT_CTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
     </table>
   </database>

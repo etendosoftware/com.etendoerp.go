@@ -1157,6 +1157,161 @@ class PurchaseInvoiceOcrLookupsTest {
       assertTrue(lookups.uomById(null).isEmpty());
     }
 
+    // ---- the printed unit and the defaults of a new product (ETP-6051)
+
+    private UOM catalogUnit(String id, String clientId, String symbol, String edi, String name,
+        boolean visible) {
+      UOM unit = unit(id, name, true, visible);
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn(clientId);
+      when(unit.getClient()).thenReturn(client);
+      when(unit.getSymbol()).thenReturn(symbol);
+      when(unit.getEDICode()).thenReturn(edi);
+      return unit;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void unitsInCatalog(UOM... units) {
+      OBQuery<UOM> query = mock(OBQuery.class);
+      when(query.list()).thenReturn(List.of(units));
+      when(dal.createQuery(eq(UOM.class), anyString())).thenReturn(query);
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client current = mock(org.openbravo.model.ad.system.Client.class);
+      when(current.getId()).thenReturn("C1");
+      when(context.getCurrentClient()).thenReturn(current);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    @Test
+    @DisplayName("a printed unit resolves among the units visible to the tenant, by symbol, name or alias")
+    void uomByPrintedUnit() {
+      UOM kg = catalogUnit("U-KG", "0", "kg", "KGM", "Kilogram", true);
+      UOM foreign = catalogUnit("U-FOREIGN", "OTHER", "bx", null, "Box", false);
+      unitsInCatalog(kg, foreign);
+      givenUnit("U-KG", "Kilogram", true, true);
+
+      assertEquals("U-KG", lookups.uomByPrintedUnit("KG").orElseThrow().id());
+      assertEquals("U-KG", lookups.uomByPrintedUnit("kilos").orElseThrow().id());
+      assertTrue(lookups.uomByPrintedUnit("bx").isEmpty(), "another client's unit is never offered");
+      assertTrue(lookups.uomByPrintedUnit("zzz").isEmpty());
+      assertTrue(lookups.uomByPrintedUnit(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the tenant's own unit wins over the System's one with the same symbol")
+    void theTenantsUnitWins() {
+      UOM system = catalogUnit("U-SYS", "0", "kg", null, "Kilogram", true);
+      UOM own = catalogUnit("U-OWN", "C1", "kg", null, "Kilogram", true);
+      unitsInCatalog(system, own);
+      givenUnit("U-OWN", "Kilogram", true, true);
+
+      assertEquals("U-OWN", lookups.uomByPrintedUnit("kg").orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("a failing unit catalog is an empty answer, never an exception")
+    void uomByPrintedUnitFailure() {
+      when(dal.createQuery(eq(UOM.class), anyString())).thenThrow(new IllegalStateException("db"));
+
+      assertTrue(lookups.uomByPrintedUnit("kg").isEmpty());
+    }
+
+    @Test
+    @DisplayName("the default unit is the tenant's default of the product window, empty when there is none or it fails")
+    void defaultUom() {
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client current = mock(org.openbravo.model.ad.system.Client.class);
+      when(current.getId()).thenReturn("C1");
+      when(context.getCurrentClient()).thenReturn(current);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      givenUnit("U-DEF", "Unit", true, true);
+      try (org.mockito.MockedConstruction<ProductDefaultsHandler> handler =
+          org.mockito.Mockito.mockConstruction(ProductDefaultsHandler.class, (mocked, ctx) -> {
+            when(mocked.resolveDefaultId(UOM.class, "C1")).thenReturn("U-DEF");
+          })) {
+        assertEquals("U-DEF", lookups.defaultUom().orElseThrow().id());
+      }
+      try (org.mockito.MockedConstruction<ProductDefaultsHandler> handler =
+          org.mockito.Mockito.mockConstruction(ProductDefaultsHandler.class, (mocked, ctx) -> {
+            when(mocked.resolveDefaultId(UOM.class, "C1")).thenReturn(null);
+          })) {
+        assertTrue(lookups.defaultUom().isEmpty());
+      }
+      try (org.mockito.MockedConstruction<ProductDefaultsHandler> handler =
+          org.mockito.Mockito.mockConstruction(ProductDefaultsHandler.class, (mocked, ctx) -> {
+            when(mocked.resolveDefaultId(UOM.class, "C1")).thenThrow(new IllegalStateException());
+          })) {
+        assertTrue(lookups.defaultUom().isEmpty());
+      }
+    }
+
+    private org.openbravo.dal.security.OrganizationStructureProvider structure;
+
+    @SuppressWarnings("unchecked")
+    private org.openbravo.dal.service.OBCriteria<ProductCategory> categoryCriteria(
+        String currentOrg, java.util.Set<String> tree, ProductCategory answer) {
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client current = mock(org.openbravo.model.ad.system.Client.class);
+      when(current.getId()).thenReturn("C1");
+      when(context.getCurrentClient()).thenReturn(current);
+      Organization organization = mock(Organization.class);
+      when(organization.getId()).thenReturn(currentOrg);
+      when(context.getCurrentOrganization()).thenReturn(organization);
+      structure = mock(org.openbravo.dal.security.OrganizationStructureProvider.class);
+      org.openbravo.dal.security.OrganizationStructureProvider provider = structure;
+      when(provider.getParentTree(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
+          .thenReturn(tree);
+      when(context.getOrganizationStructureProvider()).thenReturn(provider);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      org.openbravo.dal.service.OBCriteria<ProductCategory> criteria =
+          mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(ProductCategory.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(answer);
+      return criteria;
+    }
+
+    @Test
+    @DisplayName("the default category is the tenant's IsDefault, non-summary, active one of the organization's tree, the greatest id")
+    void defaultProductCategory() {
+      ProductCategory found = category("C-DEF", "General", true, true);
+      when(dal.get(ProductCategory.class, "C-DEF")).thenReturn(found);
+      org.openbravo.dal.service.OBCriteria<ProductCategory> criteria =
+          categoryCriteria("SESSION-ORG", java.util.Set.of("ROW-ORG", "PARENT", "0"), found);
+
+      Party party = lookups.defaultProductCategory("ROW-ORG").orElseThrow();
+
+      assertEquals("C-DEF", party.id());
+      ArgumentCaptor<org.hibernate.criterion.Criterion> restrictions =
+          ArgumentCaptor.forClass(org.hibernate.criterion.Criterion.class);
+      verify(criteria, times(5)).add(restrictions.capture());
+      String all = restrictions.getAllValues().toString();
+      assertTrue(all.contains("client.id=C1"), all);
+      assertTrue(all.contains("default=true"), all);
+      assertTrue(all.contains("summaryLevel=false"), all);
+      assertTrue(all.contains("active=true"), all);
+      assertTrue(all.contains("organization.id in"), all);
+      verify(criteria).setMaxResults(1);
+      verify(structure).getParentTree("ROW-ORG", true);
+    }
+
+    @Test
+    @DisplayName("without an organization it uses the session's; no category, no context or a failure is empty")
+    void defaultProductCategoryFallbacks() {
+      org.openbravo.dal.service.OBCriteria<ProductCategory> criteria =
+          categoryCriteria("SESSION-ORG", java.util.Set.of("SESSION-ORG"), null);
+
+      assertTrue(lookups.defaultProductCategory(" ").isEmpty(), "no category in the tenant");
+      verify(structure).getParentTree("SESSION-ORG", true);
+
+      contextMock.when(OBContext::getOBContext).thenReturn(null);
+      assertTrue(lookups.defaultProductCategory("ROW-ORG").isEmpty(), "no context");
+
+      when(criteria.uniqueResult()).thenThrow(new IllegalStateException("db"));
+      categoryCriteria("SESSION-ORG", java.util.Set.of("SESSION-ORG"), null);
+      when(dal.createCriteria(ProductCategory.class)).thenThrow(new IllegalStateException("db"));
+      assertTrue(lookups.defaultProductCategory("ROW-ORG").isEmpty(), "a failing lookup");
+    }
+
     @Test
     @DisplayName("the category and unit names follow the session language and fall back to the base name")
     void categoryAndUnitNamesAreTranslated() {

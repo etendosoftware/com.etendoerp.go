@@ -381,6 +381,85 @@ public class BatchServiceTest {
   }
 
   /**
+   * The caller-owned variant runs the same pipeline but never commits: the writes run with the
+   * transaction claimed (they defer their commit), the answer says {@code committed:false}, and the
+   * claim is gone when it returns.
+   */
+  @Test
+  public void executeInCallerTransactionRunsTheOperationsAndLeavesTheCommitToTheCaller()
+      throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    List<Boolean> ownedWhileWriting = new ArrayList<>();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acct =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubWritableEntity(obDal, support, access, acct);
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(),
+          any())).thenAnswer(invocation -> {
+            ownedWhileWriting.add(BatchService.callerOwnsTransaction());
+            JSONObject row = new JSONObject().put("id", "rec-" + ownedWhileWriting.size());
+            return new NeoResponse(201, new JSONObject().put("response",
+                new JSONObject().put("data", new JSONArray().put(row))));
+          });
+
+      JSONObject result = BatchService.forBatchOnly().executeInCallerTransaction(productOps(2));
+
+      assertFalse("nothing is committed here", result.getBoolean("committed"));
+      assertEquals(2, result.getJSONArray("operations").length());
+      assertEquals("rec-1", result.getJSONArray("operations").getJSONObject(0)
+          .getString("recordId"));
+      assertEquals("rec-2", result.getJSONArray("operations").getJSONObject(1)
+          .getString("recordId"));
+      assertEquals(List.of(Boolean.TRUE, Boolean.TRUE), ownedWhileWriting);
+      assertFalse("the claim is released", BatchService.callerOwnsTransaction());
+      verify(obDal, never()).commitAndClose();
+      verify(obDal, never()).rollbackAndClose();
+    }
+  }
+
+  /** A failed operation rolls the session back here and answers the failure envelope. */
+  @Test
+  public void executeInCallerTransactionRollsBackAndAnswersTheFailureOfAnOperation()
+      throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      JSONArray ops = new JSONArray().put(new JSONObject().put("id", "op1"));
+
+      JSONObject result = BatchService.forBatchOnly().executeInCallerTransaction(ops);
+
+      assertFalse(result.getBoolean("committed"));
+      assertNotNull(result.getJSONObject("error"));
+      verify(obDal).rollbackAndClose();
+      verify(obDal, never()).commitAndClose();
+      assertFalse(BatchService.callerOwnsTransaction());
+    }
+  }
+
+  /** An exception out of the pipeline is classified, the session rolled back, the claim released. */
+  @Test
+  public void executeInCallerTransactionClassifiesAnExceptionAndReleasesTheClaim()
+      throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      support.when(() -> NeoServletSupport.findSpec(SCOPE_SPEC))
+          .thenThrow(new IllegalStateException("lookup failed"));
+
+      JSONObject result = BatchService.forBatchOnly().executeInCallerTransaction(productOps(1));
+
+      assertFalse(result.getBoolean("committed"));
+      assertEquals(500, result.getJSONObject("error").getInt("status"));
+      verify(obDal).rollbackAndClose();
+      assertFalse(BatchService.callerOwnsTransaction());
+    }
+  }
+
+  /**
    * Spec and entity are looked up once per batch, and a second batch on the same thread looks
    * them up again: nothing a request memoized survives into the next one.
    */

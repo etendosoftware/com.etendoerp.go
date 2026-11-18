@@ -38,7 +38,10 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -48,12 +51,15 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.plm.ProductCategory;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
+import com.etendoerp.go.schemaforge.ocr.OcrUnitMatcher;
 import com.etendoerp.go.schemaforge.ocr.TaxIdNormalizer;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
@@ -193,6 +199,78 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   @Override
   public Optional<Party> uomById(String id) {
     return translatedById(org.openbravo.model.common.uom.UOM.class, "UOM", id);
+  }
+
+  /**
+   * The unit a line printed, among the active units the tenant can see ({@link OcrUnitMatcher}).
+   * The table is small and a document asks once per distinct printed text, so the rows are read
+   * per call rather than cached in an instance that outlives a request.
+   */
+  @Override
+  public Optional<Party> uomByPrintedUnit(String printed) {
+    try {
+      OBContext context = OBContext.getOBContext();
+      List<OcrUnitMatcher.Unit> units = new ArrayList<>();
+      for (UOM uom : OBDal.getInstance().createQuery(UOM.class, "as u where u.active = true")
+          .list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(uom)) {
+          units.add(new OcrUnitMatcher.Unit(uom.getId(), uom.getClient().getId(), uom.getSymbol(),
+              uom.getEDICode(), uom.getName()));
+        }
+      }
+      String clientId = context == null ? null : context.getCurrentClient().getId();
+      return OcrUnitMatcher.resolve(printed, units, clientId).flatMap(this::uomById);
+    } catch (RuntimeException e) {
+      log.warn("OCR printed unit lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  /** The default unit of the product window: {@link ProductDefaultsHandler#resolveDefaultId}. */
+  @Override
+  public Optional<Party> defaultUom() {
+    try {
+      OBContext context = OBContext.getOBContext();
+      String clientId = context == null ? null : context.getCurrentClient().getId();
+      String id = new ProductDefaultsHandler().resolveDefaultId(UOM.class, clientId);
+      return id == null ? Optional.empty() : uomById(id);
+    } catch (RuntimeException e) {
+      log.warn("OCR default unit lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * The rule of the AD default of {@code M_Product.M_Product_Category_ID}: the greatest id of the
+   * client's {@code IsDefault} non-summary categories whose organization is the given (document)
+   * organization or one of its parents (the {@code AD_ISORGINCLUDED(org, row.org, client)} test).
+   */
+  @Override
+  public Optional<Party> defaultProductCategory(String organizationId) {
+    try {
+      OBContext context = OBContext.getOBContext();
+      if (context == null) {
+        return Optional.empty();
+      }
+      String orgId = StringUtils.isNotBlank(organizationId) ? organizationId
+          : context.getCurrentOrganization().getId();
+      Set<String> organizations = context.getOrganizationStructureProvider()
+          .getParentTree(orgId, true);
+      OBCriteria<ProductCategory> criteria = OBDal.getInstance()
+          .createCriteria(ProductCategory.class);
+      criteria.add(Restrictions.eq("client.id", context.getCurrentClient().getId()));
+      criteria.add(Restrictions.eq("default", true));
+      criteria.add(Restrictions.eq("summaryLevel", false));
+      criteria.add(Restrictions.eq("active", true));
+      criteria.add(Restrictions.in("organization.id", organizations));
+      criteria.addOrder(Order.desc("id"));
+      criteria.setMaxResults(1);
+      ProductCategory category = (ProductCategory) criteria.uniqueResult();
+      return category == null ? Optional.empty() : productCategoryById(category.getId());
+    } catch (RuntimeException e) {
+      log.warn("OCR default category lookup failed: {}", e.getClass().getSimpleName());
+      return Optional.empty();
+    }
   }
 
   /** An active row of the tenant by id, named in the session language (falling back to the base name). */
