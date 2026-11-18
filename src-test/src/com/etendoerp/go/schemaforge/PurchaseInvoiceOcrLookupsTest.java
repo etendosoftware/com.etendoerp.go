@@ -51,6 +51,8 @@ import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -472,7 +474,8 @@ class PurchaseInvoiceOcrLookupsTest {
     @Test
     @DisplayName("ETP-5895: a score of 96.7 % with a whole-string similarity of 80 % is only suggested")
     void highScoreLowWholeStringSimilarityIsSuggested() throws Exception {
-      JSONObject product = reviewedProduct(new JSONArray().put(simRow("P1", "Servicio webs", "96.7000%")));
+      JSONObject product = reviewedProduct(new JSONArray()
+          .put(simRow("P1", "Servicios web avanzados", "96.7000%")));
       assertEquals("suggested", product.getString("state"));
     }
 
@@ -489,6 +492,118 @@ class PurchaseInvoiceOcrLookupsTest {
       simMock.when(() -> NeoSimSearchEndpoint.searchTerm(anyString(), anyString(), anyInt(),
           anyString())).thenReturn(new JSONObject().put("data", rows));
       return lookups.productCandidates(List.of("Servicios web")).get(0).get(0).similarity();
+    }
+  }
+
+  // ── vendor product history (ETP-6364) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("ETP-6364: vendor product history")
+  class ProductHistory {
+
+    @SuppressWarnings("unchecked")
+    private NativeQuery<Object[]> nativeQuery(List<Object[]> rows) {
+      NativeQuery<Object[]> query = mock(NativeQuery.class, org.mockito.Mockito.RETURNS_SELF);
+      when(query.list()).thenReturn(rows);
+      Session session = mock(Session.class);
+      when(session.createNativeQuery(anyString())).thenReturn((NativeQuery) query);
+      when(dal.getSession()).thenReturn(session);
+      sessionClientCl1();
+      return query;
+    }
+
+    private Object[] row(String term, String id, String name, long count) {
+      return new Object[] { term, id, name, count, new Date() };
+    }
+
+    @Test
+    @DisplayName("no vendor: one empty list per description and no query")
+    void noVendorNoQuery() {
+      List<List<OcrLookups.HistoryProduct>> found = lookups.productHistory(null,
+          List.of("Cafe", "Te"));
+
+      assertEquals(List.of(List.of(), List.of()), found);
+      verify(dal, never()).getSession();
+    }
+
+    @Test
+    @DisplayName("only blank descriptions: one empty list each and no query")
+    void blankDescriptionsNoQuery() {
+      List<List<OcrLookups.HistoryProduct>> found = lookups.productHistory("V1",
+          List.of(" ", ""));
+
+      assertEquals(List.of(List.of(), List.of()), found);
+      verify(dal, never()).getSession();
+    }
+
+    @Test
+    @DisplayName("one query, every input bound, distinct normalized terms, client from the session")
+    void bindsEveryInput() {
+      NativeQuery<Object[]> query = nativeQuery(List.of());
+
+      lookups.productHistory("V1", List.of("  Café   MOLIDO ", " ", "cafe molido", "Té"));
+
+      verify(query).setParameter("vendorId", "V1");
+      verify(query).setParameter("clientId", "CL1");
+      verify(query).setParameter("accented", PurchaseInvoiceProductHistory.ACCENTED);
+      verify(query).setParameter("unaccented", PurchaseInvoiceProductHistory.UNACCENTED);
+      ArgumentCaptor<java.util.Collection> terms = ArgumentCaptor.forClass(java.util.Collection.class);
+      verify(query).setParameterList(eq("terms"), terms.capture());
+      assertEquals(List.of("cafe molido", "te"), new ArrayList<>(terms.getValue()));
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(dal.getSession()).createNativeQuery(sql.capture());
+      assertFalse(sql.getValue().contains("molido"), "the input is never concatenated");
+      assertTrue(sql.getValue().contains("i.issotrx = 'N'"));
+      assertTrue(sql.getValue().contains("i.docstatus IN ('CO', 'CL')"));
+    }
+
+    @Test
+    @DisplayName("rows map to their descriptions by term, at most 3 products, in query order")
+    void mapsRowsByTerm() {
+      nativeQuery(List.of(row("cafe molido", "P1", "Café 1kg", 5),
+          row("cafe molido", "P2", "Café 500g", 2), row("cafe molido", "P3", "Café 250g", 1),
+          row("cafe molido", "P4", "Café 100g", 1), row("te", "P9", "Té verde", 1)));
+
+      List<List<OcrLookups.HistoryProduct>> found = lookups.productHistory("V1",
+          List.of("Café Molido", " ", "Te", "Otro"));
+
+      assertEquals(4, found.size());
+      assertEquals(3, found.get(0).size());
+      assertEquals("P1", found.get(0).get(0).id());
+      assertEquals("Café 1kg", found.get(0).get(0).name());
+      assertEquals(5, found.get(0).get(0).count());
+      assertEquals("P3", found.get(0).get(2).id());
+      assertTrue(found.get(1).isEmpty(), "a blank description never matches");
+      assertEquals("P9", found.get(2).get(0).id());
+      assertTrue(found.get(3).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a failing query answers no history, never an exception")
+    void failureIsNoHistory() {
+      Session session = mock(Session.class);
+      when(session.createNativeQuery(anyString())).thenThrow(new IllegalStateException("db"));
+      when(dal.getSession()).thenReturn(session);
+      sessionClientCl1();
+
+      assertEquals(List.of(List.of()), lookups.productHistory("V1", List.of("Cafe")));
+    }
+
+    private void sessionClientCl1() {
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn("CL1");
+      OBContext context = mock(OBContext.class);
+      when(context.getCurrentClient()).thenReturn(client);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    @Test
+    @DisplayName("the term is normalized as the query normalizes the line: case, spaces, accents; ñ kept")
+    void normalizesLikeTheQuery() {
+      assertEquals("cafe molido", PurchaseInvoiceProductHistory.normalize("  Café \t MOLIDO "));
+      assertEquals("año", PurchaseInvoiceProductHistory.normalize("AÑO"));
+      assertEquals("", PurchaseInvoiceProductHistory.normalize(null));
+      assertEquals("", PurchaseInvoiceProductHistory.normalize("   "));
     }
   }
 

@@ -28,6 +28,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Tax;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 
@@ -35,8 +36,9 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
  * The lines part of the review (ETP-5715): for each line, which product it is and which tax it takes,
  * the two things the application's lines review settles.
  *
- * <p><b>Products</b> come from the similarity search ({@link OcrProductMatch}): one same-name product,
- * or the single highest candidate at 90% similarity or more, is an {@code auto_matched} proposal;
+ * <p><b>Products</b> come from the vendor's history and the similarity search
+ * ({@link OcrProductMatch}): the one product the vendor's past lines with that description were
+ * booked to, one same-name product, or a single clear winner is an {@code auto_matched} proposal;
  * anything else is only a suggestion, and nothing similar is {@code none}. Each line also offers
  * {@code skip}, because the server rejects a line without a product.</p>
  *
@@ -96,6 +98,7 @@ final class OcrLineReview {
    * Reviews every line.
    *
    * @param lines       the sanitized {@code line_items}
+   * @param vendorId    the effective vendor, {@code null} when none (no history is asked)
    * @param locationId  the vendor's address, {@code null} when unknown (taxes stay pending)
    * @param invoiceDate the detected date as ISO, or {@code null}
    * @param vendorChosen whether the user already chose the vendor: while it is only a suggestion the
@@ -103,8 +106,8 @@ final class OcrLineReview {
    *                     carry them
    * @throws JSONException when a body cannot be built
    */
-  void review(JSONArray lines, String locationId, String invoiceDate, boolean vendorChosen)
-      throws JSONException {
+  void review(JSONArray lines, String vendorId, String locationId, String invoiceDate,
+      boolean vendorChosen) throws JSONException {
     this.vendorChosen = vendorChosen;
     List<JSONObject> items = new ArrayList<>();
     List<String> descriptions = new ArrayList<>();
@@ -118,15 +121,18 @@ final class OcrLineReview {
       return;
     }
     List<List<Candidate>> candidates = lookups.productCandidates(descriptions);
+    List<List<HistoryProduct>> history = lookups.productHistory(vendorId, descriptions);
     for (int i = 0; i < items.size(); i++) {
       List<Candidate> forLine = i < candidates.size() ? candidates.get(i) : List.of();
-      reviewLine(i, items.get(i), forLine, locationId, invoiceDate);
+      List<HistoryProduct> booked = i < history.size() ? history.get(i) : List.of();
+      reviewLine(i, items.get(i), forLine, booked, locationId, invoiceDate);
     }
   }
 
   private void reviewLine(int index, JSONObject item, List<Candidate> candidates,
-      String locationId, String invoiceDate) throws JSONException {
-    OcrProductMatch match = OcrProductMatch.classify(OcrJson.str(item, KEY_DESCRIPTION), candidates);
+      List<HistoryProduct> history, String locationId, String invoiceDate) throws JSONException {
+    OcrProductMatch match = OcrProductMatch.classify(OcrJson.str(item, KEY_DESCRIPTION), candidates,
+        history);
     JSONObject taxDecision = taxDecision(index, OcrJson.decimal(item, "tax_rate"), locationId,
         invoiceDate);
     decisions.add(productDecision(index, match, candidates));

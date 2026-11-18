@@ -23,6 +23,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -69,6 +70,8 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
  *       ({@code orderReference}), case-insensitively, not voided;</li>
  *   <li><b>products</b> — the similarity search the application's {@code /simsearch} runs, 3 candidates
  *       from 50 % up;</li>
+ *   <li><b>product history</b> — {@link PurchaseInvoiceProductHistory}, the query behind the
+ *       lines' {@code productHistory} action (ETP-6364);</li>
  *   <li><b>taxes</b> — {@link PurchaseInvoiceLineHandler#resolveOwned}, the rule behind the lines'
  *       {@code defaultTax} action.</li>
  * </ul>
@@ -550,6 +553,16 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       out.add(similarProducts(description));
     }
     return out;
+  }
+
+  @Override
+  public List<List<HistoryProduct>> productHistory(String vendorId, List<String> descriptions) {
+    try {
+      return PurchaseInvoiceProductHistory.find(vendorId, descriptions);
+    } catch (RuntimeException e) {
+      log.warn("OCR product history lookup failed: {}", e.getClass().getSimpleName());
+      return Collections.nCopies(descriptions.size(), List.of());
+    }
   }
 
   private static List<Candidate> similarProducts(String description) {

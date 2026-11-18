@@ -2362,7 +2362,7 @@ document is untrusted data):
       "taxId": "", "orgTaxId": "" } },
   "lines": [{ "index": 0, "description": "", "quantity": 1, "unitPrice": 10.0, "taxRate": 21,
     "taxLabel": "",
-    "product": { "state": "linked|ambiguous|new", "id": null, "matchedBy": "exact|similarity",
+    "product": { "state": "linked|ambiguous|new", "id": null, "matchedBy": "history|exact|similarity",
       "candidates": [{ "id": "", "name": "", "similarity": "92" }] },
     "tax": { "state": "resolved|pending_vendor|no_tax_at_rate|unknown", "id": null, "name": "",
       "rate": 21, "candidates": [] } }],
@@ -4707,6 +4707,39 @@ Expected on the GOClient vendor location `4380CC6D925841E99BB516C78E7717CF`: 21 
 21%*, 10 → *Adquisiciones IVA 10%*, 0 → *Adquisiciones interiores exentas (art 22)*, 4 → *Adquisiciones IVA 4%*. `NO_MATCH` is the generic answer when no purchase tax can be
 determined for the requested rate.
 
+###### 4.12.1.7.1 Vendor product history — `productHistory` (ETP-6364)
+
+The first rule of the OCR product match (§ "When a product line is `auto_matched`"): which products
+this vendor's past purchase lines with the same description were booked to.
+
+`POST /sws/neo/purchase-invoice/lines/new/action/productHistory` — a declared **read** action on the
+same handler (`PurchaseInvoiceLineHandler.PRODUCT_HISTORY`, `mutating:false`), record id always
+`new`, any other method a **405**.
+
+| Body | Type | |
+|---|---|---|
+| **`vendorId`** | string | the vendor's `C_BPartner_ID` |
+| **`descriptions`** | array of strings | 1 to 100 line descriptions; a blank entry (the SPA sends `" "`) keeps its index and gets no products, never a query |
+
+Response, in the `{"response":{"data":...}}` wrapper:
+`{"items": [{"products": [{"id", "name", "count"}]}]}`, `items` aligned by index with
+`descriptions`, at most 3 products each, ordered by `count` (lines) desc, then the most recent
+invoice date desc; an empty `products` when nothing matches.
+
+**Query** (`PurchaseInvoiceProductHistory`, one native SQL query with bound parameters for all the
+distinct descriptions; shared with the OCR review through `OcrLookups.productHistory`): lines of
+`C_Invoice` with `IsSOTrx = 'N'`, `C_BPartner_ID` = the vendor, `DocStatus IN ('CO','CL')`,
+`AD_Client_ID` = the session client (never from the body), whose product is active; the line
+description is compared with `=` after normalization on both sides — lower-case, whitespace runs
+collapsed and trimmed, accents folded with the very lists of `SimSearch.ACCENTED/UNACCENTED`
+(`ñ` kept). Grouped by product, `count` = number of lines.
+
+**Errors.** Contract violations (`NeoActionContract.validate`: missing or unknown parameter, wrong
+type; plus more than 100 descriptions) → **422**. A `vendorId` that does not exist or belongs to
+another tenant → **404** `Record not found`. The OCR review and the invoice inbox call the same
+query only with the vendor they already resolved; without one the history is empty and nothing is
+queried.
+
 ##### 4.12.1.8 Bank connection — declared actions on `financial-account/account` (ETP-5804, ETP-6154)
 
 Four declared actions, `id` = the financial account, no parameters. Each one is handed to the SPA's
@@ -6115,12 +6148,12 @@ the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). ETP-53
 off because they had drifted apart in both directions and keeping one write path correct is cheaper
 than keeping two in step. ETP-5415 closed enough of that gap to turn it back on — **not all of it**.
 
-> **`defaultTax` (ETP-5585) does not diverge.** It is a read action of `purchase-invoice/lines`
-> resolved through `NeoExtensionDispatcher` like every other; REST and MCP run the same handler and
-> the same validation. `etendo_batch` has no ACTION surface, so there is nothing to compare.
-> Discovery note: `NeoActionContract.resolve` publishes the contracts of the first entity of the spec
-> that declares any (`header`, §4.12.1.3), so `defaultTax` is callable but not listed by
-> `etendo_schema(view:"actions")` for `purchase-invoice`.
+> **`defaultTax` (ETP-5585) and `productHistory` (ETP-6364) do not diverge.** They are read actions
+> of `purchase-invoice/lines` resolved through `NeoExtensionDispatcher` like every other; REST and
+> MCP run the same handler and the same validation. `etendo_batch` has no ACTION surface, so there
+> is nothing to compare. Discovery note: `NeoActionContract.resolve` publishes the contracts of the
+> first entity of the spec that declares any (`header`, §4.12.1.3), so both are callable but not
+> listed by `etendo_schema(view:"actions")` for `purchase-invoice`.
 
 > **The bank sync (ETP-6154) does not diverge.** The MCP's `syncBank` / `bankSyncStatus` hand the
 > SPA's own body to `financial-account-bank-connection?action=sync|syncStatus` through
@@ -12763,7 +12796,7 @@ MCP-layer class, so this is no regression against `develop`.
 
 **Binding of `purchase-invoice/lines` (ETP-5585).** `PurchaseInvoiceLineHandler` —
 `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extending `InvoiceLineHandler` — serves
-the `defaultTax` action (§4.12.1.7) and leaves everything else to the parent. As for
+the `defaultTax` (§4.12.1.7) and `productHistory` (§4.12.1.7.1) actions and leaves everything else to the parent. As for
 `sales-invoice/lines`, the row keeps `Java_Qualifier = invoiceLineHandler` and the class carries no
 `@Named`; the same `warnOnQualifierDisagreement` ERROR line is logged on resolution.
 
@@ -15700,7 +15733,7 @@ SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`
 address). **Dates.** `invoiceDateIso` and the `apply_invoiceDate` `sendValue` are the read date as `yyyy-MM-dd`: ISO stays, `d/M/yyyy` and `d-M-yy` convert, and so does a month in words, Spanish or English, as invoices print it (`15 de enero de 2026`, `15-ene-2026`, `January 15, 2026`; ETP-5850 — it used to reach both untouched). Any other shape, or an impossible day, is passed as read. **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
 existing tools); the SPA's modal navigation.
 
-**When a product line is `auto_matched`.** (1) Exactly one candidate whose name equals the line description after normalization (trim including Unicode edge whitespace, lowercase, accents folded; `ñ` stays distinct); two or more such candidates give `suggested`. (2) Otherwise, exactly one candidate the similarity search marks `match_type` `exact` or `normalized` (equal ignoring case and spaces, or accents too; every identifier column, so the search key counts; ETP-5895); two or more give `suggested`. (3) Otherwise, the candidate with the highest whole-string similarity (`text_similarity_percent`), when it is >= 85 and leads the runner-up by >= 10 points; a tie at the top, a smaller lead, a lower value or an unparseable one gives `suggested`. The search score (`similarity`, `greatest(similarity, word_similarity)`) is not used: it gives 100 to a name that merely contains the description. A search that does not report the whole-string similarity keeps the earlier rule (the single highest `similarity` >= 90). (4) The `similarity` on a candidate is the raw pg_trgm score computed by the database, which is accent-sensitive, so a line can be `auto_matched` with a `similarity` below 90 (e.g. 82.35 for "Arnes ..." vs "Arnés ...") because it matched by normalized name equality, not by the percentage: consumers must rely on `state` and never recompute the threshold from `similarity`. The rule is mirrored by the application's `classifyProductMatch`, so the UI and MCP agree.
+**When a product line is `auto_matched`.** (1) The vendor's history (ETP-6364): the products the vendor's completed purchase invoice lines with the same normalized description were booked to (`OcrLookups.productHistory`, the query of `productHistory`, §4.12.1.7.1), asked only once a vendor is resolved (the review's effective vendor, the inbox's linked one; none = no history, no query). Exactly one product is `auto_matched` (the inbox reports `matchedBy: "history"`); two or more give `suggested` with the most frequent; none continues. (2) Exactly one candidate whose name equals the line description after normalization (trim including Unicode edge whitespace, lowercase, accents folded; `ñ` stays distinct); two or more such candidates give `suggested`. (3) Otherwise, exactly one candidate the similarity search marks `match_type` `exact` or `normalized` (equal ignoring case and spaces, or accents too; every identifier column, so the search key counts; ETP-5895); two or more give `suggested`. (4) Otherwise, the candidate with the highest whole-string similarity (`text_similarity_percent`), when it is >= 85 and leads the runner-up by >= 10 points; a smaller lead, a tie or a lower value continues. The search score (`similarity`, `greatest(similarity, word_similarity)`) is not used: it gives 100 to a name that merely contains the description. A search that does not report the whole-string similarity keeps the earlier rule (the single highest `similarity` >= 90). (5) Otherwise, a typo (ETP-6364): exactly one candidate whose normalized name differs from the normalized description by at most 1 edit when the description has up to 8 chars, 2 when longer (optimal string alignment: insertion, deletion, substitution, adjacent swap; `OcrProductMatch.osaDistance`), with the same numbers in the same order (`\d+(?:[.,]\d+)?`: "cerveza 0,33l" is not "cerveza 0,5l"), the same single-letter tokens ("talla m" is not "talla l") and the same count of `ñ`; descriptions under 5 chars never take this rule ("ano" is one edit from "año"). Zero or two or more close candidates continue. (6) Otherwise the first candidate is `suggested`; no candidates and no history give `none`. The `similarity` on a candidate is the raw pg_trgm score computed by the database, which is accent-sensitive, so a line can be `auto_matched` with a `similarity` below 90 (e.g. 82.35 for "Arnes ..." vs "Arnés ...") because it matched by normalized name equality, not by the percentage: consumers must rely on `state` and never recompute the threshold from `similarity`. The rule is mirrored by the application's `classifyProductMatch`, so the UI and MCP agree.
 
 **Supervision and prompt injection.** The text of a document is untrusted and can address the agent. What the server does: only keys the schema declares survive, **held to the type
 the schema declares** (a number field keeps only a finite number of sane size or a plain numeric string of at most 30 digits and no exponent — `1e999999999`, `Infinity`, `NaN` and

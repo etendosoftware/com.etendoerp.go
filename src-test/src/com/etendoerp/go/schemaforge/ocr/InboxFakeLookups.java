@@ -28,6 +28,7 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Address;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.AddressState;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 
@@ -48,6 +49,10 @@ final class InboxFakeLookups implements OcrLookups {
   Duplicates duplicates = new Duplicates(true, List.of());
   /** One list of candidates per line description, in line order. */
   List<List<Candidate>> products = new ArrayList<>();
+  /** The vendor's history by line description (ETP-6364); a description not in the map has none. */
+  final Map<String, List<HistoryProduct>> history = new HashMap<>();
+  /** The vendor ids the history was asked with, one entry per ask ({@code null} too). */
+  final List<String> historyAsks = new ArrayList<>();
   /** The tax answer for each requested rate (key: plain string of the rate, "" for no rate). */
   final Map<String, TaxAnswer> taxByRate = new HashMap<>();
   TaxAnswer defaultTaxAnswer = new TaxAnswer(true, null, List.of());
@@ -117,6 +122,16 @@ final class InboxFakeLookups implements OcrLookups {
   public List<List<Candidate>> productCandidates(List<String> descriptions) {
     productAsks.add(descriptions);
     return products;
+  }
+
+  @Override
+  public List<List<HistoryProduct>> productHistory(String vendorId, List<String> descriptions) {
+    historyAsks.add(vendorId);
+    List<List<HistoryProduct>> out = new ArrayList<>();
+    for (String description : descriptions) {
+      out.add(vendorId == null ? List.of() : history.getOrDefault(description, List.of()));
+    }
+    return out;
   }
 
   @Override

@@ -33,6 +33,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Tax;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 
@@ -49,6 +50,7 @@ class InboxLineMatcherTest {
   private static final String PRODUCT = "product";
   private static final String TAX = "tax";
   private static final String DESCRIPTION = "description";
+  private static final String VENDOR = "V1";
   private static final String LOCATION = "LOC1";
   private static final String DATE = "2026-10-30";
   private static final String HARNESS = "Arnés escalada QA5289 talla M";
@@ -73,7 +75,7 @@ class InboxLineMatcherTest {
 
   private JSONObject product(String description, Candidate... candidates) throws Exception {
     lookups.products = List.<List<Candidate>>of(List.of(candidates));
-    return matcher.review(items(description), LOCATION, DATE).getJSONObject(0)
+    return matcher.review(items(description), VENDOR, LOCATION, DATE).getJSONObject(0)
         .getJSONObject(PRODUCT);
   }
 
@@ -90,7 +92,7 @@ class InboxLineMatcherTest {
     items.put(new JSONObject().put(DESCRIPTION, "Bare"));
     lookups.products = List.of(List.of(), List.of());
 
-    JSONArray lines = matcher.review(items, LOCATION, DATE);
+    JSONArray lines = matcher.review(items, VENDOR, LOCATION, DATE);
 
     JSONObject first = lines.getJSONObject(0);
     assertEquals(0, first.getInt("index"));
@@ -109,8 +111,8 @@ class InboxLineMatcherTest {
   @Test
   @DisplayName("no items, or none at all, give no lines and ask nothing")
   void noItemsGiveNoLines() throws Exception {
-    assertEquals(0, matcher.review(null, LOCATION, DATE).length());
-    assertEquals(0, matcher.review(new JSONArray(), LOCATION, DATE).length());
+    assertEquals(0, matcher.review(null, VENDOR, LOCATION, DATE).length());
+    assertEquals(0, matcher.review(new JSONArray(), VENDOR, LOCATION, DATE).length());
     assertTrue(lookups.productAsks.isEmpty());
   }
 
@@ -119,7 +121,7 @@ class InboxLineMatcherTest {
   void productsAreAskedInOneCall() throws Exception {
     lookups.products = List.of(List.of(), List.of());
 
-    matcher.review(items("First", "Second"), LOCATION, DATE);
+    matcher.review(items("First", "Second"), VENDOR, LOCATION, DATE);
 
     assertEquals(1, lookups.productAsks.size());
     assertEquals(List.of("First", "Second"), lookups.productAsks.get(0));
@@ -130,7 +132,7 @@ class InboxLineMatcherTest {
   void missingCandidateListsAreNone() throws Exception {
     lookups.products = List.of(List.of());
 
-    JSONArray lines = matcher.review(items("First", "Second"), LOCATION, DATE);
+    JSONArray lines = matcher.review(items("First", "Second"), VENDOR, LOCATION, DATE);
 
     assertEquals("new", lines.getJSONObject(1).getJSONObject(PRODUCT).getString(STATE));
   }
@@ -174,10 +176,10 @@ class InboxLineMatcherTest {
   @Test
   @DisplayName("the threshold is 90 %: 90 links, 89.9 does not")
   void theThresholdIsNinety() throws Exception {
-    assertEquals("linked", product("Servicio web", new Candidate("P1", "Servicios web", "90"))
+    assertEquals("linked", product("Servicio web", new Candidate("P1", "Servicios web pro", "90"))
         .getString(STATE));
-    assertEquals("ambiguous", product("Servicio web", new Candidate("P1", "Servicios web", "89.9"))
-        .getString(STATE));
+    assertEquals("ambiguous", product("Servicio web",
+        new Candidate("P1", "Servicios web pro", "89.9")).getString(STATE));
   }
 
   @Test
@@ -210,6 +212,60 @@ class InboxLineMatcherTest {
 
     assertEquals("new", product("Brand new thing", new Candidate(null, "ghost", "99"))
         .getString(STATE));
+  }
+
+  // ---------------------------------------------------------------- vendor history and typos (ETP-6364)
+
+  @Test
+  @DisplayName("ETP-6364: the one product the vendor's past lines were booked to is linked by history")
+  void theOneHistoryProductIsLinkedByHistory() throws Exception {
+    lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café molido 1kg", 4)));
+
+    JSONObject product = product("Cafe molido", new Candidate("P1", "Cafe molido", "99"));
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("H1", product.getString("id"), "history beats a same-name candidate");
+    assertEquals("Café molido 1kg", product.getString("name"));
+    assertEquals("history", product.getString("matchedBy"));
+    assertEquals(List.of(VENDOR), lookups.historyAsks, "asked once, with the linked vendor");
+  }
+
+  @Test
+  @DisplayName("ETP-6364: two history products are not decided for the user: ambiguous")
+  void twoHistoryProductsAreAmbiguous() throws Exception {
+    lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café 1kg", 4),
+        new HistoryProduct("H2", "Café 500g", 1)));
+
+    JSONObject product = product("Cafe molido", new Candidate("P1", "Cafe molido", "99"));
+
+    assertEquals("ambiguous", product.getString(STATE));
+    assertTrue(product.isNull("id"));
+  }
+
+  @Test
+  @DisplayName("ETP-6364: without a linked vendor there is no history, the search rules decide")
+  void noVendorNoHistory() throws Exception {
+    lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café 1kg", 4)));
+    lookups.products = List.<List<Candidate>>of(List.of(new Candidate("P1", "Cafe molido", "99")));
+
+    JSONObject product = matcher.review(items("Cafe molido"), null, LOCATION, DATE).getJSONObject(0)
+        .getJSONObject(PRODUCT);
+
+    assertEquals("P1", product.getString("id"));
+    assertEquals("exact", product.getString("matchedBy"));
+    assertEquals(java.util.Arrays.asList((String) null), lookups.historyAsks);
+  }
+
+  @Test
+  @DisplayName("ETP-6364: the one candidate a typo away is linked by similarity")
+  void theOneTypoAwayIsLinkedBySimilarity() throws Exception {
+    JSONObject product = product("Tornilo hexagonal",
+        found("P1", "Tornillo hexagonal", "80", "70", "fuzzy"),
+        found("P2", "Tuerca hexagonal", "60", "50", "fuzzy"));
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("P1", product.getString("id"));
+    assertEquals("similarity", product.getString("matchedBy"));
   }
 
   // ---------------------------------------------------------------- whole-string similarity and match type (ETP-5895)
@@ -245,7 +301,7 @@ class InboxLineMatcherTest {
   @DisplayName("ETP-5895: a runner-up within 10 points of whole-string similarity keeps it ambiguous")
   void aCloseRunnerUpIsAmbiguous() throws Exception {
     JSONObject product = product("Cerveza Ale 0,5",
-        found("P1", "Cerveza Ale 0,5L", "94", "88", "fuzzy"),
+        found("P1", "Cerveza Ale Tostada 0,5L", "94", "88", "fuzzy"),
         found("P2", "Cerveza Ale 0,33L", "90", "80", "fuzzy"));
 
     assertEquals("ambiguous", product.getString(STATE));
@@ -280,7 +336,7 @@ class InboxLineMatcherTest {
 
   private JSONObject lineWithUnit(Object unit) throws Exception {
     lookups.products = List.of(List.of());
-    return matcher.review(itemsWithUnit("Brand new thing", unit), LOCATION, DATE).getJSONObject(0);
+    return matcher.review(itemsWithUnit("Brand new thing", unit), VENDOR, LOCATION, DATE).getJSONObject(0);
   }
 
   @Test
@@ -289,7 +345,7 @@ class InboxLineMatcherTest {
     assertEquals("kg", lineWithUnit("kg").getString("unitPrinted"));
     assertFalse(lineWithUnit("  ").has("unitPrinted"));
     assertFalse(lineWithUnit(JSONObject.NULL).has("unitPrinted"));
-    assertFalse(matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0)
+    assertFalse(matcher.review(items("Widget"), VENDOR, LOCATION, DATE).getJSONObject(0)
         .has("unitPrinted"));
   }
 
@@ -346,7 +402,7 @@ class InboxLineMatcherTest {
     lookups.defaultCategory = java.util.Optional.of(new OcrLookups.Party("C-DEF", "General"));
     lookups.products = List.of(List.of(new Candidate("P1", "Widget", "99")));
 
-    JSONObject line = matcher.review(itemsWithUnit("Widget", "kg"), LOCATION, DATE)
+    JSONObject line = matcher.review(itemsWithUnit("Widget", "kg"), VENDOR, LOCATION, DATE)
         .getJSONObject(0);
 
     assertEquals("linked", line.getJSONObject(PRODUCT).getString(STATE));
@@ -362,7 +418,7 @@ class InboxLineMatcherTest {
     lookups.products = List.of(List.of(new Candidate("P1", "Widget", "99"),
         new Candidate("P2", "Widget", "99")));
 
-    JSONObject product = matcher.review(itemsWithUnit("Widget", "kg"), LOCATION, DATE)
+    JSONObject product = matcher.review(itemsWithUnit("Widget", "kg"), VENDOR, LOCATION, DATE)
         .getJSONObject(0).getJSONObject(PRODUCT);
 
     assertEquals("ambiguous", product.getString(STATE));
@@ -375,7 +431,7 @@ class InboxLineMatcherTest {
     InboxLineMatcher forOrg = new InboxLineMatcher(lookups, "ROW-ORG");
     lookups.products = List.of(List.of());
 
-    forOrg.review(itemsWithUnit("Brand new thing", "kg"), LOCATION, DATE);
+    forOrg.review(itemsWithUnit("Brand new thing", "kg"), VENDOR, LOCATION, DATE);
 
     assertEquals(List.of("ROW-ORG"), lookups.categoryOrganizations);
   }
@@ -387,7 +443,7 @@ class InboxLineMatcherTest {
   void withoutAnAddressTheTaxIsPending() throws Exception {
     lookups.products = List.of(List.of());
 
-    JSONObject line = matcher.review(items("Widget"), null, DATE).getJSONObject(0);
+    JSONObject line = matcher.review(items("Widget"), VENDOR, null, DATE).getJSONObject(0);
 
     assertEquals("pending_vendor", line.getJSONObject(TAX).getString(STATE));
     assertTrue(lookups.taxAsks.isEmpty());
@@ -400,7 +456,7 @@ class InboxLineMatcherTest {
     lookups.taxByRate.put("21", new TaxAnswer(true, tax("T21", "IVA 21%", "21"),
         List.of(tax("T21", "IVA 21%", "21"), tax("T21R", "IVA 21% rec", "21"))));
 
-    JSONObject taxJson = matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0)
+    JSONObject taxJson = matcher.review(items("Widget"), VENDOR, LOCATION, DATE).getJSONObject(0)
         .getJSONObject(TAX);
 
     assertEquals("resolved", taxJson.getString(STATE));
@@ -418,7 +474,7 @@ class InboxLineMatcherTest {
     lookups.products = List.of(List.of());
     lookups.taxByRate.put("21", new TaxAnswer(true, null, List.of(tax("T10", "IVA 10%", "10"))));
 
-    JSONObject taxJson = matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0)
+    JSONObject taxJson = matcher.review(items("Widget"), VENDOR, LOCATION, DATE).getJSONObject(0)
         .getJSONObject(TAX);
 
     assertEquals("no_tax_at_rate", taxJson.getString(STATE));
@@ -432,7 +488,7 @@ class InboxLineMatcherTest {
     lookups.products = List.of(List.of());
     lookups.taxByRate.put("21", new TaxAnswer(false, null, List.of()));
 
-    assertEquals("unknown", matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0)
+    assertEquals("unknown", matcher.review(items("Widget"), VENDOR, LOCATION, DATE).getJSONObject(0)
         .getJSONObject(TAX).getString(STATE));
   }
 
@@ -447,7 +503,7 @@ class InboxLineMatcherTest {
     items.put(new JSONObject().put(DESCRIPTION, "d"));
     items.put(new JSONObject().put(DESCRIPTION, "e").put("tax_rate", JSONObject.NULL));
 
-    matcher.review(items, LOCATION, DATE);
+    matcher.review(items, VENDOR, LOCATION, DATE);
 
     assertEquals(List.of(LOCATION + "|21", LOCATION + "|10", LOCATION + "|"), lookups.taxAsks);
   }
@@ -459,7 +515,7 @@ class InboxLineMatcherTest {
     lookups.taxByRate.put("", new TaxAnswer(true, tax("TDEF", "IVA default", "21"), List.of()));
     JSONArray items = new JSONArray().put(new JSONObject().put(DESCRIPTION, "a"));
 
-    JSONObject taxJson = matcher.review(items, LOCATION, null).getJSONObject(0).getJSONObject(TAX);
+    JSONObject taxJson = matcher.review(items, VENDOR, LOCATION, null).getJSONObject(0).getJSONObject(TAX);
 
     assertEquals("resolved", taxJson.getString(STATE));
     assertEquals("TDEF", taxJson.getString("id"));
@@ -479,7 +535,7 @@ class InboxLineMatcherTest {
     JSONArray items = new JSONArray().put(new JSONObject().put(DESCRIPTION, "Widget")
         .put("quantity", quantity).put("unit_price", price).put("tax_rate", 21)
         .put("discount_percent", percent).put("discount_amount", amount));
-    return matcher.review(items, LOCATION, DATE).getJSONObject(0);
+    return matcher.review(items, VENDOR, LOCATION, DATE).getJSONObject(0);
   }
 
   @Test
@@ -528,7 +584,7 @@ class InboxLineMatcherTest {
   void aLineWithoutTheKeysHasNoDiscount() throws Exception {
     lookups.products = List.of(List.of());
 
-    JSONObject line = matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0);
+    JSONObject line = matcher.review(items("Widget"), VENDOR, LOCATION, DATE).getJSONObject(0);
 
     assertFalse(line.has("discount"));
   }

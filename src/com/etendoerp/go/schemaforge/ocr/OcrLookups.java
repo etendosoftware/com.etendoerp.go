@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.ocr;
 
 import java.math.BigDecimal;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -339,6 +340,56 @@ public interface OcrLookups {
      */
     public List<Duplicate> documents() {
       return documents;
+    }
+  }
+
+  /**
+   * A product the vendor's completed purchase invoice lines with the same description were booked
+   * to (ETP-6364), with how many lines.
+   */
+  final class HistoryProduct {
+    private final String id;
+    private final String name;
+    private final int count;
+
+    /**
+     * Describes a product of the vendor's history.
+     *
+     * @param id    the product id
+     * @param name  the product name
+     * @param count the number of lines booked to it
+     */
+    public HistoryProduct(String id, String name, int count) {
+      this.id = id;
+      this.name = name;
+      this.count = count;
+    }
+
+    /**
+     * Returns the product id.
+     *
+     * @return the product id
+     */
+    public String id() {
+      return id;
+    }
+
+    /**
+     * Returns the product name.
+     *
+     * @return the product name
+     */
+    public String name() {
+      return name;
+    }
+
+    /**
+     * Returns how many lines were booked to the product.
+     *
+     * @return the number of lines
+     */
+    public int count() {
+      return count;
     }
   }
 
@@ -764,6 +815,20 @@ public interface OcrLookups {
    * @return one list per description (empty when nothing is similar), same order
    */
   List<List<Candidate>> productCandidates(List<String> descriptions);
+
+  /**
+   * The products this vendor's completed purchase invoice lines with the same description (after
+   * normalization) were booked to (ETP-6364), most frequent first.
+   *
+   * <p>Default: no history, one empty list per description.</p>
+   *
+   * @param vendorId     the resolved vendor, {@code null} when there is none yet (no query)
+   * @param descriptions one per line, blank allowed (never matched)
+   * @return one list per description, same order, empty when nothing or the lookup failed
+   */
+  default List<List<HistoryProduct>> productHistory(String vendorId, List<String> descriptions) {
+    return Collections.nCopies(descriptions.size(), List.of());
+  }
 
   /**
    * The tax a line should default to for a printed rate.
