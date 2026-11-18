@@ -217,8 +217,15 @@ public final class NeoPrintAfterComplete {
     final String clientId;
     final String orgId;
     final String language;
+    /** Whether a PDF this job stores is an MCP render for the monthly usage figure (ETP-5993). */
+    final boolean countsAsMcpUsage;
 
     Job(String specName, String entityId, String tableName, String recordId, Caller caller) {
+      this(specName, entityId, tableName, recordId, caller, true);
+    }
+
+    private Job(String specName, String entityId, String tableName, String recordId, Caller caller,
+        boolean countsAsMcpUsage) {
       this.specName = specName;
       this.entityId = entityId;
       this.tableName = tableName;
@@ -228,6 +235,13 @@ public final class NeoPrintAfterComplete {
       this.clientId = caller.clientId;
       this.orgId = caller.orgId;
       this.language = caller.language;
+      this.countsAsMcpUsage = countsAsMcpUsage;
+    }
+
+    /** This same job, for a render no MCP call asked for: what it stores is not MCP usage. */
+    Job outsideMcpUsage() {
+      return new Job(specName, entityId, tableName, recordId,
+          new Caller(userId, roleId, clientId, orgId, language), false);
     }
 
     /** The key a render of this document is serialized on. */
@@ -294,7 +308,8 @@ public final class NeoPrintAfterComplete {
    * and is accountable for (the customer portal renders as the user who sent the document, in the
    * document's own client and organization, ETP-6209). Everything else is the same path — the
    * worker, the in-JVM join, the advisory lock and re-check, the write-access check (D23) and the
-   * store as the main attachment.
+   * store as the main attachment. Only what it stores is not counted as MCP usage: no MCP call asked
+   * for it. A render joined in flight counts as the job that started it.
    *
    * @param entity the document's NEO entity
    * @param recordId the document
@@ -310,14 +325,24 @@ public final class NeoPrintAfterComplete {
       String language, String userId, String roleId, String clientId, String orgId) {
     Job job;
     try {
-      job = jobFor(entity, recordId,
-          StringUtils.isAnyBlank(userId, roleId, clientId, orgId, language) ? null
-              : new Caller(userId, roleId, clientId, orgId, language));
+      job = jobAs(entity, recordId, language, userId, roleId, clientId, orgId);
     } catch (RuntimeException e) {
       log.warn(MSG_NOT_QUEUED, e.getClass().getSimpleName());
       return null;
     }
     return job == null ? null : await(submit(job), recordId);
+  }
+
+  /**
+   * The job of {@link #renderAndWaitAs}: as the identity given, outside the MCP usage, or
+   * {@code null} when a part of the identity is missing or there is nothing to render.
+   */
+  static Job jobAs(SFEntity entity, String recordId, String language, String userId, String roleId,
+      String clientId, String orgId) {
+    Job job = jobFor(entity, recordId,
+        StringUtils.isAnyBlank(userId, roleId, clientId, orgId, language) ? null
+            : new Caller(userId, roleId, clientId, orgId, language));
+    return job == null ? null : job.outsideMcpUsage();
   }
 
   /** The outcome of a render, waited for at most {@link #REQUEST_WAIT}; {@code null} past it. */
@@ -534,7 +559,9 @@ public final class NeoPrintAfterComplete {
       String document = NeoPdfSourceConfig.printDocumentOf(entity);
       OBDal.getInstance().commitAndClose();
       // ETP-5993: counted once committed, so a store that rolled back is never a generated PDF.
-      DocumentPdfUsage.recordServerRender(document);
+      if (job.countsAsMcpUsage) {
+        DocumentPdfUsage.recordServerRender(document);
+      }
     } else {
       log.debug("[print] {}/{}: nothing stored ({})", job.specName, job.recordId, outcome);
     }
