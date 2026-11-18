@@ -88,6 +88,10 @@ final class DocumentCurrencyRate {
    * for the shared {@link CurrencyOptionsHandler} it routes {@code currencyOptions} to.
    */
   static final String ATTR_RATE_TYPE = "etgo.documentRateType";
+  /** Core's {@code AD_MESSAGE} "Document posted/processed" (ETP-6177 rate lock). */
+  static final String MSG_PROCESSED = "20501";
+  /** {@code error.code} of the refusal of a rate change on a processed document (ETP-6177). */
+  static final String CODE_PROCESSED = "document_processed";
 
   private static final String PROP_CURRENCY = "currency";
   private static final String PROP_ORGANIZATION = "organization";
@@ -301,7 +305,7 @@ final class DocumentCurrencyRate {
     boolean create = StringUtils.isBlank(context.getRecordId());
     BaseOBObject stored = create ? null : load(context.getRecordId());
     if (!create && (stored == null || isProcessed(stored))) {
-      return null;
+      return stored == null ? null : refuseRateChangeOnProcessed(body, stored);
     }
     String bodyCurrency = idOf(body.opt(PROP_CURRENCY));
     LocalDate bodyDate = parseDate(body.opt(type.referenceDateProperty()));
@@ -340,6 +344,51 @@ final class DocumentCurrencyRate {
     }
     return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
         type.referenceDateLabelKey(), type.referenceDateProperty());
+  }
+
+  /**
+   * ETP-6177: a write that changes the rate of a processed document is refused (422, nothing saved),
+   * whatever the document's currency — the organization's own included. The window locks its rate
+   * picker once the document is processed ({@code @Processed@='Y'}), and core's header restriction
+   * triggers do not cover the rate column, so without this an API, REST or MCP write changed the
+   * rate of a completed document. The refusal reuses core's {@code AD_MESSAGE} 20501 ("Document
+   * posted/processed"), the key core's own triggers answer for the other columns, so clients and
+   * the MCP recovery hint already know it. A body that does not send the rate, or sends the stored
+   * value, is not a change and keeps today's behaviour.
+   *
+   * @return the refusal, or {@code null}
+   */
+  private NeoResponse refuseRateChangeOnProcessed(JSONObject body, BaseOBObject stored)
+      throws JSONException {
+    if (!body.has(type.rateProperty())) {
+      return null;
+    }
+    Object sent = body.opt(type.rateProperty());
+    // An absent value as a client serializes it (null, "") is the stored empty rate re-sent.
+    BigDecimal sentRate = sent == null || sent == JSONObject.NULL
+        || StringUtils.isBlank(String.valueOf(sent)) ? null : decimalOrZero(sent);
+    BigDecimal storedRate = (BigDecimal) stored.get(type.rateProperty());
+    boolean unchanged = sentRate == null ? storedRate == null
+        : storedRate != null && sentRate.compareTo(storedRate) == 0;
+    if (unchanged) {
+      return null;
+    }
+    NeoResponse refusal = NeoMessageText.error(422, MSG_PROCESSED);
+    JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error") : null;
+    if (error != null) {
+      error.put("code", CODE_PROCESSED);
+    }
+    return refusal;
+  }
+
+  /** A sent rate as a number; an unreadable value counts as 0, which is never a stored rate. */
+  private static BigDecimal decimalOrZero(Object value) {
+    try {
+      return value instanceof BigDecimal b ? b
+          : new BigDecimal(StringUtils.trimToEmpty(String.valueOf(value)));
+    } catch (Exception e) {
+      return BigDecimal.ZERO;
+    }
   }
 
   /**
