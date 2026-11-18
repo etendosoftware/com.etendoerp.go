@@ -219,9 +219,9 @@ public class PortalServlet extends HttpBaseServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    String path = StringUtils.defaultString(request.getPathInfo());
     try {
       OBContext.setAdminMode(true);
-      String path = StringUtils.defaultString(request.getPathInfo());
       if (path.equals(PATH_DECISION_CONFIRM)) {
         handleDecisionConfirm(request, response);
       } else if (path.startsWith(PATH_QUOTATIONS)) {
@@ -231,7 +231,7 @@ public class PortalServlet extends HttpBaseServlet {
         handleRenew(request, response);
       }
     } catch (Exception e) {
-      log.error("Portal renewal request failed", e);
+      log.error("Portal {} request failed", postOperation(path), e);
       if (!response.isCommitted()) {
         response.reset();
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -240,6 +240,14 @@ public class PortalServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** The POST route's operation, so a failure's log names it (it said "renewal" for all). */
+  static String postOperation(String path) {
+    if (PATH_DECISION_CONFIRM.equals(path)) {
+      return "decision confirmation";
+    }
+    return path.startsWith(PATH_QUOTATIONS) ? "decision request" : FIELD_RENEWAL;
   }
 
   @Override
@@ -284,15 +292,19 @@ public class PortalServlet extends HttpBaseServlet {
    *
    * <pre>
    * 401 {"error": "This link is no longer valid"}          unknown, pending, deactivated (as MVP)
-   * 200 {"state": "valid", businessPartnerName, tenantName, hasLogo,
+   * 200 {"state": "valid", businessPartnerName, email, tenantName, hasLogo,
    *      entryDocument: {kind, id} | null, entryKind?}  entryKind only when entryDocument is null
    * 200 {"state": "expired", tenantName, hasLogo}          the page then calls POST /renew
    * 200 {"state": "unavailable", tenantName, hasLogo}      blocked, inactive or plan expired
    * </pre>
    *
-   * <p>An expired or unavailable answer carries no Business Partner name and no document: the
-   * holder of that link is no longer entitled to them. Which of the three closures applies is never
-   * said.
+   * <p>{@code email} is the customer's address the portal already uses for them: the first valid To
+   * of the link's root send ({@link PortalDecisionService#confirmationRecipient}), {@code ""} when
+   * there is none. The user menu shows it beside the name (ETP-6209 PO answer).</p>
+   *
+   * <p>An expired or unavailable answer carries no Business Partner name, no email and no
+   * document: the holder of that link is no longer entitled to them. Which of the three closures
+   * applies is never said.
    */
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
@@ -320,6 +332,9 @@ public class PortalServlet extends HttpBaseServlet {
     } else {
       body.put(FIELD_STATE, STATE_VALID);
       body.put("businessPartnerName", StringUtils.defaultString(link.getBusinessPartnerName()));
+      body.put("email", StringUtils.defaultString(validation.getSession()
+          .map(session -> decisionService.confirmationRecipient(session.getRootLinkId()))
+          .orElse(null)));
       Object entry = entryDocument(validation, link);
       body.put("entryDocument", entry);
       if (entry == JSONObject.NULL && link.getDocumentKind() != null) {
@@ -474,7 +489,7 @@ public class PortalServlet extends HttpBaseServlet {
    * email to the first To of the link's root send.
    *
    * <pre>
-   * 200 {"state": "sent", "maskedEmail": "ju•••@example.com"}
+   * 200 {"state": "sent", "email": "julia@example.com"}
    * 404                                      not in scope (as every other read)
    * 409 {"error": "not_pending" | "expired" | "no_recipient" | "accept_unavailable"}
    * 422 {"error": "invalid_reason"}          a reject without a valid reason / "Otros" text
@@ -501,7 +516,7 @@ public class PortalServlet extends HttpBaseServlet {
       case SENT:
         JSONObject sent = new JSONObject();
         sent.put(FIELD_STATE, "sent");
-        sent.put("maskedEmail", StringUtils.defaultString(result.getMaskedEmail()));
+        sent.put("email", StringUtils.defaultString(result.getEmail()));
         sendJson(response, HttpServletResponse.SC_OK, sent);
         return;
       case NOT_FOUND:
@@ -706,7 +721,7 @@ public class PortalServlet extends HttpBaseServlet {
       // the MCP uses and store it as the main attachment (ETP-6209). Any failure answers the same
       // 404, and the page shows the data sheet.
       attachment = PortalPrintable.renderAndFind(validated, kind, document);
-    } else if (attachment != null && PortalPrintable.isStale(kind, id)) {
+    } else if (attachment != null && PortalPrintable.isStale(kind, document, attachment)) {
       // The stored printable predates the document (a confirmed decision changed the quotation's
       // status and notes, Part C): render it again; if that fails, the stored one is still served.
       Attachment fresh = PortalPrintable.renderAndFind(validated, kind, document);
