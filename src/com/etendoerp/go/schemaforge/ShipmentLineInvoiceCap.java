@@ -278,6 +278,10 @@ final class ShipmentLineInvoiceCap {
       if (requested.signum() < 0 || commitsQuantity(source)) {
         BigDecimal maximum = DirectLinkPending.pendingByLine(source)
             .getOrDefault(link.getKey(), BigDecimal.ZERO).add(held);
+        if (requested.signum() < 0) {
+          throw DocumentLineImport.quantityNotPositiveOnEdit(link.getKey(),
+              productName(line.getProduct()), requested, maximum);
+        }
         if (!DocumentLineImport.fits(requested, maximum)) {
           throw DocumentLineImport.exceedsLineMaximum(link.getKey(),
               productName(line.getProduct()), requested, maximum);
@@ -294,6 +298,10 @@ final class ShipmentLineInvoiceCap {
 
   private static void requireFits(String invoiceLineId, Product product, BigDecimal requested,
       BigDecimal maximum) {
+    if (requested.signum() <= 0) {
+      throw DocumentLineImport.quantityNotPositive(invoiceLineId, productName(product), requested,
+          maximum);
+    }
     if (!DocumentLineImport.fits(requested, maximum)) {
       throw DocumentLineImport.exceeds(invoiceLineId, productName(product), requested, maximum);
     }

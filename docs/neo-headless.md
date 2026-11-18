@@ -14297,11 +14297,12 @@ lock is held from the first pre-hook and a refusal rolls the whole batch back.
 | Write | Outcome |
 |---|---|
 | Create with `invoiceLineId`, quantity above 0 and up to the pending | created and linked |
-| Create with `invoiceLineId`, quantity of 0 or below, above the pending, or nothing pending | 422 `importQuantityExceedsPending` (`error.product`, `requested`, `pending`, `sourceLineId`), nothing persisted, no link |
+| Create with `invoiceLineId`, quantity above the pending, or nothing pending | 422 `importQuantityExceedsPending` (`error.product`, `requested`, `pending`, `sourceLineId`), nothing persisted, no link |
+| Create with `invoiceLineId` and a quantity of 0 or below | the same 422 and keys, plus `error.quantityNotPositive: true`; the message is `The quantity of <product> must be greater than 0.` (SPA key `backendError.importQuantityMustBePositive`) |
 | Create with `invoiceLineId` and no `movementQuantity` | takes the pending, whatever the callout cascade proposed (MCP: `ATTR_CLIENT_PROVIDED_FIELDS` says the caller did not send it); nothing pending is the same 422 |
 | Create on an invoice that is not completed | the resolver carries no line, so nothing is pending: the same 422 |
 | Update of `movementQuantity` on a line linked through `C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI` | up to pending + what the line holds, for EVERY linked invoice line; above it the same 422, with that maximum in `error.pending` and `error.maximumAllowed` |
-| Update of a linked line to a negative quantity | the same 422 |
+| Update of a linked line to a negative quantity | the same 422, with `error.quantityNotPositive: true` and the "must be greater than 0" message |
 | Update that lowers the quantity, down to 0, or leaves it unchanged | allowed |
 | Update of a line whose linked invoice is no longer completed | that invoice does not cap a positive quantity |
 | Update without `movementQuantity`; a line with no invoice link; a non-numeric quantity; an `invoiceLineId` that is not the caller's own | unchanged, no cap |
