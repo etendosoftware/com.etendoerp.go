@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.portal;
 
+import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
@@ -29,7 +30,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.schemaforge.NeoAttachmentTarget;
 import com.etendoerp.go.schemaforge.NeoDocumentPdf;
 import com.etendoerp.go.schemaforge.NeoPdfSourceConfig;
 import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
@@ -142,20 +142,28 @@ final class PortalPrintable {
   /**
    * Whether the document's stored PDF predates the document: a confirmed portal decision (Part C)
    * moves the quotation's {@code updated}, and its stored printable must not be served as it was.
-   * The app's own freshness rule ({@code NeoDocumentPdf#isStoredStale}); never renders, never
-   * throws (a failed check reads as "not stale", the stored file is served as before).
+   * The app's own freshness rule ({@code NeoDocumentPdf#isStoredStale}) on the document and the
+   * file this request already loaded and authorized (never the app's attachment target, which
+   * needs a GO role the portal does not have). Never renders, never throws (a failed check reads
+   * as "not stale", the stored file is served as before). Admin mode by the caller.
+   *
+   * @param kind       the document's kind
+   * @param document   the document, from {@code PortalDocumentQuery#findInScope}
+   * @param attachment its stored main attachment
    */
-  static boolean isStale(PortalDocumentKind kind, String documentId) {
+  static boolean isStale(PortalDocumentKind kind, BaseOBObject document, Attachment attachment) {
     try {
       SFEntity entity = printableEntity(kind);
-      if (entity == null) {
+      if (entity == null || attachment == null) {
         return false;
       }
-      NeoAttachmentTarget target = NeoAttachmentTarget.resolve(entity.getETGOSFSpec(), entity,
-          documentId, false);
-      return NeoDocumentPdf.isStoredStale(target, entity);
+      Date written = attachment.getUpdated() != null ? attachment.getUpdated()
+          : attachment.getCreationDate();
+      Object updated = document.get("updated");
+      return NeoDocumentPdf.isStoredStale(written, entity,
+          updated instanceof Date ? (Date) updated : null);
     } catch (RuntimeException e) {
-      log.debug("[portal] {}/{}: the PDF freshness check failed: {}", kind.name(), documentId,
+      log.warn("[portal] {}/{}: the PDF freshness check failed: {}", kind.name(), document.getId(),
           e.getClass().getSimpleName());
       return false;
     }

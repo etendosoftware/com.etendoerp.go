@@ -63,6 +63,19 @@ final class InvoiceInboxMessages {
   static final String UNKNOWN_UOM = "ETGO_InvoiceInboxUnknownUom";
   static final String UNKNOWN_TAX = "ETGO_InvoiceInboxUnknownTax";
   static final String NOT_VALID = "ETGO_InvoiceInboxNotValid";
+  static final String NOT_CONFIRMABLE = "ETGO_InvoiceInboxNotConfirmable";
+  static final String DUPLICATE_INVOICE = "ETGO_InvoiceInboxDuplicateInvoice";
+  static final String MISSING_EXCHANGE_RATE = "ETGO_InvoiceInboxMissingExchangeRate";
+  static final String VENDOR_ADDRESS_MISSING = "ETGO_InvoiceInboxVendorAddressMissing";
+  static final String CONFIRM_FAILED = "ETGO_InvoiceInboxConfirmFailed";
+  static final String CONFIRM_ATTACH_FAILED = "ETGO_InvoiceInboxConfirmAttachFailed";
+  static final String CONFIRM_TOTAL_MISMATCH = "ETGO_InvoiceInboxConfirmTotalMismatch";
+  static final String CONFIRM_CURRENCY_MISMATCH = "ETGO_InvoiceInboxConfirmCurrencyMismatch";
+  static final String CONFIRM_NO_FILE = "ETGO_InvoiceInboxConfirmNoFile";
+  static final String PRICE_LIST_TAX_INCLUDED = "ETGO_InvoiceInboxPriceListTaxIncluded";
+  static final String CONFIRM_NO_CATEGORY = "ETGO_InvoiceInboxConfirmNoVendorCategory";
+  static final String CONFIRM_COMPLETION_ERROR = "ETGO_InvoiceInboxConfirmCompletionError";
+  static final String CONFIRM_SEARCH_KEY_EXISTS = "ETGO_InvoiceInboxConfirmSearchKeyExists";
 
   private static final Map<String, String> DEFAULTS = Map.ofEntries(
       Map.entry(DISABLED, "The invoice inbox is not enabled for this user."),
@@ -104,7 +117,31 @@ final class InvoiceInboxMessages {
       Map.entry(UNKNOWN_CATEGORY, "The product category does not exist or cannot be used."),
       Map.entry(UNKNOWN_UOM, "The unit of measure does not exist or cannot be used."),
       Map.entry(UNKNOWN_TAX, "The tax does not exist or cannot be used on this document."),
-      Map.entry(NOT_VALID, "The document is not complete: @missing@."));
+      Map.entry(NOT_VALID, "The document is not complete: @missing@."),
+      Map.entry(NOT_CONFIRMABLE, "The document cannot be confirmed in status @status@. Only "
+          + "documents pending review or ready to confirm can be confirmed, or one whose last "
+          + "confirmation failed."),
+      Map.entry(DUPLICATE_INVOICE, "A purchase invoice @documentNo@ with the same number from "
+          + "this vendor already exists."),
+      Map.entry(MISSING_EXCHANGE_RATE, "There is no exchange rate from @to@ to @from@ valid on "
+          + "the invoice date. Add it and confirm again."),
+      Map.entry(VENDOR_ADDRESS_MISSING, "The vendor has no usable address. Choose a vendor that "
+          + "has one, or add the address to the vendor, and confirm again."),
+      Map.entry(CONFIRM_FAILED, "The invoice could not be created: @reason@"),
+      Map.entry(CONFIRM_ATTACH_FAILED, "The original file could not be attached to the invoice."),
+      Map.entry(CONFIRM_TOTAL_MISMATCH, "Internal totals divergence: the invoice total (@invoice@) "
+          + "differs from the total computed from the lines (@document@). Nothing was created."),
+      Map.entry(CONFIRM_CURRENCY_MISMATCH, "The invoice currency does not match the document "
+          + "currency."),
+      Map.entry(CONFIRM_NO_FILE, "The original file of the document is no longer available."),
+      Map.entry(PRICE_LIST_TAX_INCLUDED, "The vendor's purchase price list includes tax, which the "
+          + "invoice inbox does not support: use a price list without tax included for this vendor."),
+      Map.entry(CONFIRM_NO_CATEGORY, "The contact category 'Proveedor' does not exist exactly "
+          + "once for this company, so the new vendor cannot be created as a supplier. Fix the "
+          + "contact categories and confirm again."),
+      Map.entry(CONFIRM_COMPLETION_ERROR, "The invoice could not be completed because of a "
+          + "technical error. Nothing was created; try again and, if it persists, contact support."),
+      Map.entry(CONFIRM_SEARCH_KEY_EXISTS, "the search key already exists"));
 
   private InvoiceInboxMessages() {
   }

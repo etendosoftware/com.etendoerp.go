@@ -1,5 +1,6 @@
 package com.etendoerp.go.portal;
 
+import java.text.SimpleDateFormat;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -51,6 +52,8 @@ class PortalDecisionEntry {
   private static final String FIELD_STATE = "state";
   private static final String FIELD_TENANT_NAME = "tenantName";
   private static final Duration ONE_DAY = Duration.ofDays(1);
+  /** A calendar day as the portal API speaks it. */
+  private static final String CALENDAR_DAY = "yyyy-MM-dd";
 
   private final PortalLinkService linkService;
   private final Clock clock;
@@ -94,12 +97,35 @@ class PortalDecisionEntry {
     if (decision.getReasonText() != null) {
       body.put("reasonText", decision.getReasonText());
     }
-    body.put("documentNo", view.getQuotation() == null ? ""
-        : StringUtils.defaultString(view.getQuotation().getDocumentNo()));
+    PortalDecisionService.Summary summary = view.getSummary();
+    body.put("documentNo", summary == null ? ""
+        : StringUtils.defaultString(summary.getDocumentNo()));
+    putSummary(body, summary);
     // The company's name only: the landing carries no portal token, so it cannot fetch /logo.
     body.put(FIELD_TENANT_NAME, linkService.findLink(decision.getLinkId())
         .map(PortalLink::getClientName).orElse(""));
     return body;
+  }
+
+  /**
+   * The confirmation page's summary (ETP-6209 redesign): the quotation's issue date, total,
+   * currency and current status, so the page shows real figures. Additive; nothing without a
+   * quotation. Reads the view's {@link PortalDecisionService.Summary}, never the quotation: after
+   * an applying confirmation the quotation is detached.
+   */
+  static void putSummary(JSONObject body, PortalDecisionService.Summary summary)
+      throws JSONException {
+    if (summary == null) {
+      return;
+    }
+    Date date = summary.getDate();
+    body.put("date", date == null ? JSONObject.NULL
+        : new SimpleDateFormat(CALENDAR_DAY).format(date));
+    body.put("grandTotal", summary.getGrandTotal() == null ? JSONObject.NULL
+        : summary.getGrandTotal());
+    body.put("currency", summary.getCurrency() == null ? JSONObject.NULL
+        : summary.getCurrency());
+    body.put("documentStatus", StringUtils.defaultString(summary.getDocumentStatus()));
   }
 
   /**

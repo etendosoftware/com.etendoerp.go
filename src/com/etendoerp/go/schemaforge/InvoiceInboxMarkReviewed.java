@@ -118,7 +118,7 @@ final class InvoiceInboxMarkReviewed {
           InvoiceInboxEditGate.details(InvoiceInboxEditGate.KEY_DOCUMENT_STATUS, status),
           "status", status);
     }
-    InvoiceInboxValidator.Result verdict = InvoiceInboxValidator.validate(document(row));
+    InvoiceInboxValidator.Result verdict = InvoiceInboxLiveChecks.verdict(document(row), row);
     if (!verdict.isValid()) {
       return notValid(row, verdict);
     }
@@ -139,7 +139,7 @@ final class InvoiceInboxMarkReviewed {
    * exception), so the answer carries the NEW {@code updated} token and the new status for the
    * caller to adopt without a reload.
    */
-  private static NeoResponse notValid(IncomingDocument row, InvoiceInboxValidator.Result verdict)
+  static NeoResponse notValid(IncomingDocument row, InvoiceInboxValidator.Result verdict)
       throws JSONException {
     InvoiceInboxStatusPolicy.applyAfterEdit(row, verdict);
     OBDal.getInstance().save(row);

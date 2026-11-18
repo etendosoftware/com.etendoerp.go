@@ -527,4 +527,61 @@ class InvoiceInboxValidatorTest {
       assertEquals(InvoiceInboxValidator.MISSING_FIELDS, result.getErrorCode());
     }
   }
+
+  // ---------------------------------------------------------------- the live codes (the database half)
+
+  @Test
+  @DisplayName("without live codes the verdict is the pure one, for null and for an empty list")
+  void noLiveCodesIsThePureVerdict() throws Exception {
+    InvoiceInboxValidator.Result none = InvoiceInboxValidator.validate(complete(), null);
+    InvoiceInboxValidator.Result empty = InvoiceInboxValidator.validate(complete(), List.of());
+
+    assertTrue(none.isValid());
+    assertTrue(empty.isValid());
+    assertTrue(none.getMissing().isEmpty());
+  }
+
+  @Test
+  @DisplayName("a live code makes an otherwise valid document MISSING_FIELDS and is reported with the others")
+  void aLiveCodeMakesAValidDocumentIncomplete() throws Exception {
+    InvoiceInboxValidator.Result live = InvoiceInboxValidator.validate(complete(),
+        List.of("vendorAddress", "exchangeRate"));
+    JSONObject incomplete = complete();
+    header(incomplete).remove("invoiceDate");
+    InvoiceInboxValidator.Result both = InvoiceInboxValidator.validate(incomplete,
+        List.of("exchangeRate"));
+
+    assertFalse(live.isValid());
+    assertEquals("MISSING_FIELDS", live.getErrorCode());
+    assertEquals(List.of("vendorAddress", "exchangeRate"), live.getMissing());
+    assertEquals("MISSING_FIELDS", both.getErrorCode());
+    assertTrue(both.getMissing().contains("invoiceDate"));
+    assertEquals("exchangeRate", both.getMissing().get(both.getMissing().size() - 1));
+  }
+
+  @Test
+  @DisplayName("an over-long number keeps its own code and the live codes join its missing list")
+  void aTooLongNumberKeepsItsCodeAndGainsTheLiveCodes() throws Exception {
+    JSONObject document = complete();
+    header(document).put(DOCUMENT_NO, "X".repeat(21));
+
+    InvoiceInboxValidator.Result result = InvoiceInboxValidator.validate(document,
+        List.of("vendorAddress"));
+
+    assertEquals(InvoiceInboxValidator.validate(document).getErrorCode(), result.getErrorCode());
+    assertTrue(result.getMissing().contains("vendorAddress"));
+  }
+
+  @Test
+  @DisplayName("a foreign receiver wins and the live codes are not added")
+  void aForeignReceiverIgnoresTheLiveCodes() throws Exception {
+    JSONObject document = complete();
+    header(document).put("receiver", new JSONObject().put("check", "mismatch"));
+
+    InvoiceInboxValidator.Result result = InvoiceInboxValidator.validate(document,
+        List.of("vendorAddress"));
+
+    assertEquals(InvoiceInboxValidator.FOREIGN_RECEIVER, result.getErrorCode());
+    assertFalse(result.getMissing().contains("vendorAddress"));
+  }
 }

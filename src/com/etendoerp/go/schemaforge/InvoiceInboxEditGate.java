@@ -145,7 +145,8 @@ final class InvoiceInboxEditGate {
     return null;
   }
 
-  private static boolean isStale(IncomingDocument row, String token) {
+  /** Whether the {@code updated} token the caller read is older than the stored row. */
+  static boolean isStale(IncomingDocument row, String token) {
     String current = NeoDateFormat.toAuditToken(row.getUpdated());
     if (token.equals(current)) {
       return false;
