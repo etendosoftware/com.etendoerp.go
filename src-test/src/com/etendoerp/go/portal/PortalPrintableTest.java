@@ -51,7 +51,6 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoAttachmentTarget;
-import com.etendoerp.go.schemaforge.NeoDocumentPdf;
 import com.etendoerp.go.schemaforge.NeoPdfSourceConfig;
 import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoPrintableRenderer;
@@ -237,25 +236,50 @@ public class PortalPrintableTest {
     worker.verifyNoInteractions();
   }
 
+  /**
+   * ETP-6209 repro: after a decision the stored PDF must read as stale in a portal request. The
+   * check used to resolve the app's attachment target, which refuses a request with no GO session,
+   * and the refusal read as "fresh". It now judges the file and the document already loaded.
+   */
   @Test
-  public void isStaleIsTheAppsFreshnessRuleAndAFailedCheckReadsAsFresh() {
-    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
-    try (MockedStatic<NeoAttachmentTarget> targets = mockStatic(NeoAttachmentTarget.class);
-        MockedStatic<NeoDocumentPdf> pdfs = mockStatic(NeoDocumentPdf.class)) {
-      targets.when(() -> NeoAttachmentTarget.resolve(any(), eq(entity), eq(DOC_ID), eq(false)))
-          .thenReturn(target);
-      for (boolean stale : new boolean[] { true, false }) {
-        pdfs.when(() -> NeoDocumentPdf.isStoredStale(target, entity)).thenReturn(stale);
+  public void isStaleComparesTheLoadedFileAndDocumentWithoutTheAppsAttachmentTarget() {
+    Date filed = new Date(1_000_000L);
+    Date later = new Date(1_060_000L);
+    Date sameSecond = new Date(1_000_400L);
+    // Columns: file updated, file created, document updated, source, expected.
+    Object[][] cases = {
+        { filed, filed, later, NeoPdfSourceConfig.Source.RENDERED, true },
+        { null, filed, later, NeoPdfSourceConfig.Source.RENDERED, true },
+        { later, filed, filed, NeoPdfSourceConfig.Source.RENDERED, false },
+        { filed, filed, sameSecond, NeoPdfSourceConfig.Source.RENDERED, false },
+        { filed, filed, null, NeoPdfSourceConfig.Source.RENDERED, false },
+        { null, null, later, NeoPdfSourceConfig.Source.RENDERED, false },
+        { filed, filed, later, NeoPdfSourceConfig.Source.SUPPLIER, false },
+    };
+    try (MockedStatic<NeoAttachmentTarget> targets = mockStatic(NeoAttachmentTarget.class)) {
+      for (Object[] c : cases) {
+        Attachment stored = mock(Attachment.class);
+        when(stored.getUpdated()).thenReturn((Date) c[0]);
+        when(stored.getCreationDate()).thenReturn((Date) c[1]);
+        when(document.get("updated")).thenReturn(c[2]);
+        pdfConfig.when(() -> NeoPdfSourceConfig.sourceOf(entity))
+            .thenReturn((NeoPdfSourceConfig.Source) c[3]);
 
-        assertEquals(stale, PortalPrintable.isStale(KIND, DOC_ID));
+        assertEquals(Arrays.toString(c), c[4], PortalPrintable.isStale(KIND, document, stored));
       }
-      pdfs.when(() -> NeoDocumentPdf.isStoredStale(target, entity))
-          .thenThrow(new IllegalStateException("lookup"));
-      assertFalse("a failed check serves the stored file", PortalPrintable.isStale(KIND, DOC_ID));
-
-      pdfConfig.when(() -> NeoPdfSourceConfig.printDocumentOf(entity)).thenReturn(null);
-      assertFalse("no printable entity", PortalPrintable.isStale(KIND, DOC_ID));
+      targets.verifyNoInteractions();
     }
+  }
+
+  @Test
+  public void aFailedFreshnessCheckOrNoPrintableServesTheStoredFile() {
+    Attachment stored = mock(Attachment.class);
+    when(stored.getUpdated()).thenReturn(new Date(1_000_000L));
+    when(document.get("updated")).thenThrow(new IllegalStateException("lookup"));
+    assertFalse("a failed check", PortalPrintable.isStale(KIND, document, stored));
+
+    pdfConfig.when(() -> NeoPdfSourceConfig.printDocumentOf(entity)).thenReturn(null);
+    assertFalse("no printable entity", PortalPrintable.isStale(KIND, document, stored));
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────
