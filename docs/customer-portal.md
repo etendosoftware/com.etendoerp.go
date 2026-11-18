@@ -51,7 +51,7 @@ CRUD engine), reachable with no Etendo session. Every response is `no-store`.
 
 | Endpoint | Answers |
 |---|---|
-| `GET /me[/{token}]` | The link's state: `valid` (Business Partner name, tenant name, `hasLogo`, `entryDocument` or `null` + `entryKind` when the link's own document left its scope), `expired`, `unavailable`; or the 401 below |
+| `GET /me[/{token}]` | The link's state: `valid` (Business Partner name, `email` — the customer's address the portal already uses, the first valid To of the link's root send, `""` when none; shown in the user menu —, tenant name, `hasLogo`, `entryDocument` or `null` + `entryKind` when the link's own document left its scope), `expired`, `unavailable`; or the 401 below |
 | `POST /renew` | For an expired link: `{state:"renewed", renewal:"sent"}`, `{state:"renewed", renewal:"recentlySent"}` (cool-down, nothing sent), `{state:"unavailable"}`, `{state:"valid"}` (not expired), `503` when the email could not be sent |
 | `GET /logo` | The issuing company's logo, resolved from the link's organization; served for any sent link, so the expired page keeps the branding |
 | `GET /home?months=` | Pending-payment balances, one tile per kind (count + highlight: quotations awaiting an answer, overdue invoices, orders in progress, shipments this month), recent documents, `paidThisYear` (per currency, `Invoice.totalPaid` of this year's completed/closed invoices), `invoicesThisYear` (`total`, `upToDate`) and `chart` (invoiced per month over `months` = 3, 6 or 12, default 12, in the currency invoiced in most months) — server-side aggregates |
@@ -170,6 +170,9 @@ link and the app's preview reuse it and the app's freshness rule applies.
 - **One render per document:** concurrent opens join the render in flight in this JVM; across
   nodes the worker's `pg_advisory_xact_lock` and re-check store one file. The request waits at most
   the worker's bound (40 s).
+- **Not MCP usage:** a PDF rendered for the portal is not counted in the monthly `server_render`
+  figure (`DocumentPdfUsage`, MCP renders only). A portal open that joins a render an MCP call
+  started counts once, as that MCP render; an MCP call that joins a portal render adds no count.
 - **Never a 500 for this:** not configured (no jsreport / printables location), not printable, not
   allowed, timed out or failed → the same 404 as before, and the page shows its data sheet with
   "PDF no disponible".
@@ -219,10 +222,13 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   rule). Decidable = `UE` only
   (`QuotationDecisions.isDecidable`, PO answer Q3) and not expired (no `ValidUntil` = not expired). Reject
   needs one of `PRICE`, `DELIVERY`, `PAYMENT_TERMS`, `OTHER_SUPPLIER`, `NOT_NEEDED`, `OTHER` (text
-  required). Answers `{state:"sent", maskedEmail}`, 404 out of scope, 409 `not_pending` /
+  required). Answers `{state:"sent", email}`, 404 out of scope, 409 `not_pending` /
   `expired` / `no_recipient` / `accept_unavailable`, 422 `invalid_reason`, 429 `cooldown`, 503.
 - **Recipient:** the confirmation goes to the **first To of the link's root send** only, never CC.
-  No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`.
+  No To: the detail's `decision.canDecide` is false with `blockedReason: "no_recipient"`. When the
+  quotation can be decided, the detail's `decision` also carries `email` (as the request's
+  answer), so the SPA's accept / reject popups name it before anything is sent. The address is
+  shown in full, not masked: a product decision following the Figma design.
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.
@@ -232,8 +238,10 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   **`POST /decisions/confirm`** on load and shows the result ("Has rechazado el presupuesto …",
   already applied, superseded, no longer pending, expired). **A bare GET of the link applies
   nothing:** a scanner that does not run the page's script never reaches the POST. The token
-  travels in **`X-Portal-Decision-Token`**. `GET /decisions/view` (read-only) is still served but
-  the SPA no longer calls it. Confirm answers `appliedNow: true` only on the call that applied the
+  travels in **`X-Portal-Decision-Token`**. The landing reads `GET /decisions/view` (read-only)
+  only as a fallback, when the confirm POST and its single automatic resend both lost their answer.
+  Both answers carry the quotation's summary for the confirmation page: `date` (yyyy-MM-dd),
+  `grandTotal`, `currency` (ISO) and `documentStatus`. Confirm answers `appliedNow: true` only on the call that applied the
   decision (a re-opened link answers `confirmed` with `appliedNow: false`, and sends no second
   notice or KPI event). **Accepted trade-off (PO, one-step flow):** a mail scanner that executes
   the page's JavaScript could confirm a pending decision. The token is single-use, and the email
@@ -244,8 +252,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
   decision's link, 48 h from now, `LINK_ORIGIN = DECISION`, parent = the decision's link, root =
   its root, and usable at once (`SENT_AT`/`EXPIRES_AT` set on insert, committed): no email carries
   it. Its raw token is returned only in the confirm POST's answer (`portalToken`, plus
-  `quotationId`); only its hash is stored. The SPA then opens `/portal/<token>?view=doc&kind=
-  QUOTATION&id=<quotationId>` with a one-off notice carried in router state (never in the URL).
+  `quotationId`); only its hash is stored. The SPA shows its confirmation page and its "Portal de
+  clientes" button opens `/portal/<token>?view=doc&kind=QUOTATION&id=<quotationId>` with a one-off
+  notice carried in router state (never in the URL).
   Opening the portal records `portal.link.opened` as usual (with `origin: DECISION`). No link
   (the landing keeps its own card): invalid token, portal closed for the customer by the access
   checks, or minting failed. Bound: at most 10 `DECISION` links per decision link and day (by
@@ -278,17 +287,22 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
 - **PDF after a decision.** The decision moves the quotation's `updated`, so its stored printable
   is stale. `/pdf` re-renders a stale stored PDF before serving it (`PortalPrintable#isStale`, the
   app's freshness rule via `NeoDocumentPdf#isStoredStale`), keeping the stored file if the render
-  fails. The app's preview already re-renders on its own freshness check.
-- **"Motivo" on the rejected quotation's PDF (user decision 2026-11-16, Jira comment 149518 point
-  5).** The printable of a `CJ` quotation shows one observation line "Motivo: <reason>": the
-  tenant's `C_Reject_Reason` when the seller has set one, else the customer's portal reason (with
-  the "Otros" text), read from the portal's note line, which the printable leaves out of the
-  observations so "Motivo" never shows twice (`QuotationPrintableData.notesAndRejectReason`, port of
-  `buildQuotationData`). **The internal reason is visible to the customer** (portal download and
-  email attachment); the user accepted this explicitly. Editing the reason moves the quotation's
-  `updated`, so the stored PDF is stale and re-rendered by the app's preview, the portal (above) and
+  fails. The check compares the file and the document the request already loaded and scoped; it
+  never goes through `NeoAttachmentTarget`, whose role and tenant checks refuse a portal request
+  (no GO session). Unlike the app it does not consider the branding's last change. The app's preview already re-renders on its own freshness check.
+- **"Motivo" on the rejected quotation's PDF (Jira comment 149518 point 5, revised by QA).** The
+  printable of a `CJ` quotation shows one observation line "Motivo: <reason>" with the customer's
+  own portal reason only (with the "Otros" text), read from the portal's note line, which the
+  printable leaves out of the observations so "Motivo" never shows twice
+  (`QuotationPrintableData.notesAndRejectReason`, port of `buildQuotationData`). **The tenant's
+  `C_Reject_Reason` is never printed**: it can be internal and the PDF reaches the customer (portal
+  download and email attachment). A quotation rejected without a portal reason (e.g. in the app)
+  prints no "Motivo" line. Editing the quotation moves its `updated`, so the stored PDF is stale
+  and re-rendered by the app's preview, the portal (above) and
   the MCP. The note's wording in `emails_*.properties` (`portal-quotation-decision.note*`) is read
-  by the printable: keep its opening words and the "Motivo:" / "Reason:" marker.
+  by the printable: keep its opening words and the "Motivo:" / "Reason:" marker. A document row's
+  `reference` falls back to the notes without that line (`QuotationPrintableData.withoutPortalNote`),
+  and is empty when the notes held nothing else.
 - **KPI:** hook points only, `PortalDecisionEvents` (empty methods), pending the PO's KPI redefinition.
 
 ## 6c. Link from the contact — `portalLink` action (ETP-5850)

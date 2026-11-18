@@ -10,12 +10,17 @@ inputs:
   etendobot_token:
     description: Reads etendo_core, schema_forge, etendo-localenv and the GitHub modules.
     required: true
+  # Only written to gradle.properties: etendo_core uses them to publish SNAPSHOT versions and the
+  # Etendo Gradle plugin for artifacts that live only in Etendo's Nexus. Building the environment
+  # does not need them (ETP-6367): schema_forge's full pipeline builds it without them.
   nexus_user:
-    description: Nexus user for the dependencies.
-    required: true
+    description: Nexus user, written to gradle.properties. Empty when the caller has none.
+    required: false
+    default: ''
   nexus_password:
-    description: Nexus password for the dependencies.
-    required: true
+    description: Nexus password, written to gradle.properties. Empty when the caller has none.
+    required: false
+    default: ''
   bitbucket_ssh_key:
     description: Read key for the Bitbucket modules listed in jenkinsExtraModules.txt.
     required: true
