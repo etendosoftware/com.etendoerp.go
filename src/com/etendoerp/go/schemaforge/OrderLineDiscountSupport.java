@@ -264,12 +264,17 @@ final class OrderLineDiscountSupport {
       // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
       boolean clientPriced = LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE,
           FIELD_LIST_PRICE, FIELD_DISCOUNT);
-      // ETP-6177: the line is in its order's currency — whether or not the product has a price
-      // in the list — and the price list's prices are converted into it by the order's rate when
-      // the order is in a foreign currency, as the form does.
+      // ETP-6177: a line with a product is in its order's currency — whether or not the product
+      // has a price in the list — and the price list's prices are converted into it by the
+      // order's rate when the order is in a foreign currency, as the form does. The order is read
+      // only once the guards pass (a product and a parent order): no read otherwise.
       String orderId = parentOrderId(body);
+      if (StringUtils.isBlank(body.optString(FIELD_PRODUCT, null))
+          || StringUtils.isBlank(orderId)) {
+        return;
+      }
       OrderLineCurrencyConversion conversion = OrderLineCurrencyConversion.forOrder(
-          StringUtils.isBlank(orderId) ? null : OBDal.getInstance().get(Order.class, orderId));
+          OBDal.getInstance().get(Order.class, orderId));
       conversion.applyLineCurrency(body);
       ProductPrice productPrice = resolveProductPrice(body);
       if (productPrice == null) {
