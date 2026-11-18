@@ -560,6 +560,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # First: checking etendo_core out into etendo_core/ wipes anything already there, the module
+      # included. A few seconds, so it runs even when the suite is skipped.
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ env.CORE_BRANCH }}
+          path: etendo_core
+
       - name: Checkout com.etendoerp.go
         uses: actions/checkout@v4
         with:
@@ -601,15 +611,6 @@ jobs:
             echo "::error::The repo secrets PUBLIC_API_E2E_EMAIL and PUBLIC_API_E2E_PASSWORD (GOAdmin of GOClient) are not set."
             exit 1
           fi
-
-      - name: Checkout etendo_core
-        if: steps.changes.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: etendosoftware/etendo_core
-          token: ${{ secrets.ETENDOBOT_TOKEN }}
-          ref: ${{ env.CORE_BRANCH }}
-          path: etendo_core
 
       # The same environment as the integration job, with schema_forge on the paired branch: the
       # gateway and the suite come from there.
