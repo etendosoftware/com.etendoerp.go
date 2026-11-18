@@ -52,7 +52,7 @@ final class InvoiceInboxConfirmFailure {
    * @param recordId the id of the {@code ETGO_INCOMING_DOCUMENT} row
    * @param reason   the translated reason, shown to the user
    */
-  static void record(String recordId, String reason) {
+  static void recordFailure(String recordId, String reason) {
     try {
       Session session = OBDal.getInstance().getSession();
       session.createNativeQuery(UPDATE)

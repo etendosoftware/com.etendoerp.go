@@ -335,7 +335,7 @@ class InvoiceInboxConfirmTest {
     assertEquals("line 2: tax is required",
         response.getBody().getJSONObject("error").getString("detail"));
     verify(dal).rollbackAndClose();
-    failure.verify(() -> InvoiceInboxConfirmFailure.record(ROW_ID, "line 2: tax is required"));
+    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID, "line 2: tax is required"));
     telemetry.verifyNoInteractions();
   }
 
@@ -403,7 +403,7 @@ class InvoiceInboxConfirmTest {
     NeoResponse response = InvoiceInboxConfirm.confirm(ROW_ID, null);
 
     assertRefusal(response, 422, "confirm_failed");
-    failure.verify(() -> InvoiceInboxConfirmFailure.record(ROW_ID, "SIF fields are missing"));
+    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID, "SIF fields are missing"));
     telemetry.verifyNoInteractions();
   }
 
@@ -423,7 +423,7 @@ class InvoiceInboxConfirmTest {
       assertRefusal(response, 422, "confirm_failed");
       assertEquals("The operation could not be completed",
           response.getBody().getJSONObject("error").getString("detail"));
-      failure.verify(() -> InvoiceInboxConfirmFailure.record(ROW_ID,
+      failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID,
           "The operation could not be completed"));
       assertFalse(response.getBody().toString().contains("SELECT"));
     }

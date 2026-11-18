@@ -60,10 +60,10 @@ class InvoiceInboxTelemetryTest {
     sender.setAccessible(true);
     java.util.concurrent.ThreadPoolExecutor executor =
         (java.util.concurrent.ThreadPoolExecutor) sender.get(null);
-    long deadline = System.currentTimeMillis() + 10000;
+    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
     while ((!executor.getQueue().isEmpty() || executor.getActiveCount() > 0)
-        && System.currentTimeMillis() < deadline) {
-      Thread.sleep(10);
+        && System.nanoTime() < deadline) {
+      Thread.yield();
     }
   }
 

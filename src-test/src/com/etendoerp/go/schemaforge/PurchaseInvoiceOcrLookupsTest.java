@@ -1247,22 +1247,35 @@ class PurchaseInvoiceOcrLookupsTest {
 
     private org.openbravo.dal.security.OrganizationStructureProvider structure;
 
+    private void installContext(String currentOrg) {
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client client = clientOf("C1");
+      Organization organization = organizationOf(currentOrg);
+      when(context.getCurrentClient()).thenReturn(client);
+      when(context.getCurrentOrganization()).thenReturn(organization);
+      when(context.getOrganizationStructureProvider()).thenReturn(structure);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    private static org.openbravo.model.ad.system.Client clientOf(String id) {
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn(id);
+      return client;
+    }
+
+    private static Organization organizationOf(String id) {
+      Organization organization = mock(Organization.class);
+      when(organization.getId()).thenReturn(id);
+      return organization;
+    }
+
     @SuppressWarnings("unchecked")
     private org.openbravo.dal.service.OBCriteria<ProductCategory> categoryCriteria(
         String currentOrg, java.util.Set<String> tree, ProductCategory answer) {
-      OBContext context = mock(OBContext.class);
-      org.openbravo.model.ad.system.Client current = mock(org.openbravo.model.ad.system.Client.class);
-      when(current.getId()).thenReturn("C1");
-      when(context.getCurrentClient()).thenReturn(current);
-      Organization organization = mock(Organization.class);
-      when(organization.getId()).thenReturn(currentOrg);
-      when(context.getCurrentOrganization()).thenReturn(organization);
       structure = mock(org.openbravo.dal.security.OrganizationStructureProvider.class);
-      org.openbravo.dal.security.OrganizationStructureProvider provider = structure;
-      when(provider.getParentTree(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
+      when(structure.getParentTree(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
           .thenReturn(tree);
-      when(context.getOrganizationStructureProvider()).thenReturn(provider);
-      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      installContext(currentOrg);
       org.openbravo.dal.service.OBCriteria<ProductCategory> criteria =
           mock(org.openbravo.dal.service.OBCriteria.class);
       when(dal.createCriteria(ProductCategory.class)).thenReturn(criteria);

@@ -155,7 +155,7 @@ final class InvoiceInboxConfirm {
 
   /** The refusal after a failed unit: the failure is recorded in a new transaction first. */
   private static NeoResponse failed(String rowId, String reason) {
-    InvoiceInboxConfirmFailure.record(rowId, reason);
+    InvoiceInboxConfirmFailure.recordFailure(rowId, reason);
     return InvoiceInboxEditGate.refuse(422, CODE_CONFIRM_FAILED,
         InvoiceInboxMessages.CONFIRM_FAILED, InvoiceInboxEditGate.details("detail", reason),
         "reason", reason);

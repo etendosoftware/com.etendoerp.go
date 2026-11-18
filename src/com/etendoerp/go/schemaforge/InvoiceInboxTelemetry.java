@@ -63,8 +63,8 @@ final class InvoiceInboxTelemetry {
   static void documentConfirmed(boolean adjusted, String accountId) {
     try {
       Map<String, Object> properties = properties(adjusted, accountId);
-      // the test seam is captured at enqueue time, so a queued event never drifts to a later seam;
-      // the runtime service is still built lazily on the sender thread, never on the request
+      // The test seam is captured at enqueue time, so a queued event never drifts to a later seam.
+      // The runtime service is still built lazily on the sender thread, never on the request.
       NeoTelemetryService seam = TELEMETRY_SERVICE.get();
       SENDER.execute(() -> {
         try {

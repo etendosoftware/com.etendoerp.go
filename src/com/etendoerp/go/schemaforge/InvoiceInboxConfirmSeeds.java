@@ -161,7 +161,7 @@ final class InvoiceInboxConfirmSeeds {
   static JSONObject addressBody(JSONObject extracted, String countryId) throws JSONException {
     JSONObject body = new JSONObject().put(K_COUNTRY, countryId);
     putIfPresent(body, "addressLine1", text(extracted, K_ADDRESS));
-    putIfPresent(body, "postalCode", text(extracted, K_POSTAL_CODE));
+    putIfPresent(body, K_POSTAL_CODE, text(extracted, K_POSTAL_CODE));
     putIfPresent(body, "cityName", text(extracted, K_CITY));
     return body;
   }

@@ -86,6 +86,9 @@ final class InvoiceInboxConfirmWork {
   private static final String OP_INVOICE = "inv";
   private static final String OP_PRODUCT = "p";
   private static final String OP_LINE = "ln";
+  private static final String K_BUSINESS_PARTNER = "businessPartner";
+  private static final String K_ERROR = "error";
+  private static final String K_MESSAGE = "message";
 
   /** A failure of the unit: a reason to record, or a refusal to answer as it is. */
   static final class Stop extends RuntimeException {
@@ -245,11 +248,11 @@ final class InvoiceInboxConfirmWork {
       // The popup stops here too: never a customer-only contact by accident.
       throw new Stop(InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_NO_CATEGORY));
     }
-    ops.put(op(OP_VENDOR, SPEC_CONTACTS, "businessPartner", null, withOrganization(
+    ops.put(op(OP_VENDOR, SPEC_CONTACTS, K_BUSINESS_PARTNER, null, withOrganization(
         InvoiceInboxConfirmSeeds.vendorBody(extracted, categoryType, category))));
     ops.put(op(OP_ADDRESS, SPEC_CONTACTS, "locationAddress", OP_VENDOR,
         InvoiceInboxConfirmSeeds.addressBody(extracted, countryId)
-            .put("businessPartner", BatchService.REF_PREFIX + OP_VENDOR)));
+            .put(K_BUSINESS_PARTNER, BatchService.REF_PREFIX + OP_VENDOR)));
     createdVendor = true;
   }
 
@@ -259,7 +262,7 @@ final class InvoiceInboxConfirmWork {
       JSONObject product = line.optJSONObject(K_PRODUCT);
       if (product != null && S_NEW.equals(product.optString(K_STATE, ""))) {
         String taxCategory = InvoiceInboxConfirmLookups.taxCategoryOf(taxIdOf(line));
-        ops.put(op(OP_PRODUCT + i, SPEC_PRODUCT, "product", null,
+        ops.put(op(OP_PRODUCT + i, SPEC_PRODUCT, SPEC_PRODUCT, null,
             withOrganization(InvoiceInboxConfirmLines.productBody(line, taxCategory,
                 nextProductKey()))));
       }
@@ -301,7 +304,7 @@ final class InvoiceInboxConfirmWork {
   }
 
   private JSONObject headerBody() throws JSONException {
-    JSONObject body = new JSONObject().put("businessPartner", vendorId)
+    JSONObject body = new JSONObject().put(K_BUSINESS_PARTNER, vendorId)
         .put("partnerAddress", locationId);
     String documentNo = header.optString(K_DOCUMENT_NO, "").trim();
     if (!documentNo.isEmpty()) {
@@ -448,7 +451,7 @@ final class InvoiceInboxConfirmWork {
 
   /** The names of the missing fields the failed operation reported, as ": fields a, b" or empty. */
   private static String missingFields(JSONObject detail) {
-    JSONObject nested = detail == null ? null : detail.optJSONObject("error");
+    JSONObject nested = detail == null ? null : detail.optJSONObject(K_ERROR);
     JSONArray fields = nested == null ? null : nested.optJSONArray("fields");
     if (fields == null || fields.length() == 0) {
       return "";
@@ -462,15 +465,15 @@ final class InvoiceInboxConfirmWork {
 
   /** The reason a batch failure carries: the detail of the operation, else the batch's own. */
   static String reasonOf(JSONObject failure) {
-    JSONObject error = failure.optJSONObject("error");
+    JSONObject error = failure.optJSONObject(K_ERROR);
     JSONObject detail = error == null ? null : error.optJSONObject("detail");
-    JSONObject nested = detail == null ? null : detail.optJSONObject("error");
-    String reason = nested != null ? nested.optString("message", "") : "";
+    JSONObject nested = detail == null ? null : detail.optJSONObject(K_ERROR);
+    String reason = nested != null ? nested.optString(K_MESSAGE, "") : "";
     if (reason.isEmpty() && detail != null) {
-      reason = detail.optString("message", "");
+      reason = detail.optString(K_MESSAGE, "");
     }
     if (reason.isEmpty() && error != null) {
-      reason = error.optString("message", "");
+      reason = error.optString(K_MESSAGE, "");
     }
     return (reason.isEmpty() ? "The creation was refused" : reason) + missingFields(detail);
   }

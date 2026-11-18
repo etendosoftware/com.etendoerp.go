@@ -48,8 +48,10 @@ public final class InboxNewProductDefaults {
 
   private final OcrLookups lookups;
   private final String organizationId;
-  private Optional<Party> defaultUom;
-  private Optional<Party> defaultCategory;
+  private Optional<Party> defaultUom = Optional.empty();
+  private Optional<Party> defaultCategory = Optional.empty();
+  private boolean uomLoaded;
+  private boolean categoryLoaded;
   private final Map<String, Optional<Party>> printed = new HashMap<>();
 
   /**
@@ -98,14 +100,16 @@ public final class InboxNewProductDefaults {
   }
 
   private Optional<Party> defaultUom() {
-    if (defaultUom == null) {
+    if (!uomLoaded) {
+      uomLoaded = true;
       defaultUom = lookups.defaultUom();
     }
     return defaultUom;
   }
 
   private Optional<Party> defaultCategory() {
-    if (defaultCategory == null) {
+    if (!categoryLoaded) {
+      categoryLoaded = true;
       defaultCategory = lookups.defaultProductCategory(organizationId);
     }
     return defaultCategory;

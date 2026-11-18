@@ -85,7 +85,7 @@ class InvoiceInboxConfirmFailureTest {
   @Test
   @DisplayName("the row becomes ERROR / CONFIRM_FAILED with the reason, scoped to the readable clients, and commits")
   void recordsTheFailureAndCommits() {
-    InvoiceInboxConfirmFailure.record("ROW-1", "The invoice could not be created: x");
+    InvoiceInboxConfirmFailure.recordFailure("ROW-1", "The invoice could not be created: x");
 
     ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
     verify(dal.getSession()).createNativeQuery(sql.capture());
@@ -104,8 +104,8 @@ class InvoiceInboxConfirmFailureTest {
   @Test
   @DisplayName("a reason longer than the 2000-character column is abbreviated to fit, null is empty")
   void theReasonIsCapped() {
-    InvoiceInboxConfirmFailure.record("ROW-1", "x".repeat(5000));
-    InvoiceInboxConfirmFailure.record("ROW-2", null);
+    InvoiceInboxConfirmFailure.recordFailure("ROW-1", "x".repeat(5000));
+    InvoiceInboxConfirmFailure.recordFailure("ROW-2", null);
 
     ArgumentCaptor<Object> detail = ArgumentCaptor.forClass(Object.class);
     verify(query, org.mockito.Mockito.atLeastOnce()).setParameter(eq("detail"), detail.capture());
@@ -119,7 +119,7 @@ class InvoiceInboxConfirmFailureTest {
   void itNeverThrows() {
     when(query.executeUpdate()).thenThrow(new IllegalStateException("db down"));
 
-    assertDoesNotThrow(() -> InvoiceInboxConfirmFailure.record("ROW-1", "reason"));
+    assertDoesNotThrow(() -> InvoiceInboxConfirmFailure.recordFailure("ROW-1", "reason"));
 
     verify(dal).rollbackAndClose();
     verify(dal, never()).commitAndClose();
