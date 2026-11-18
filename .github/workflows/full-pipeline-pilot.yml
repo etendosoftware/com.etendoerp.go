@@ -3,13 +3,12 @@ name: Full Pipeline Pilot
 # ETP-6149: the go full pipeline (Jenkins etendo-go-tests) as parallel GitHub Actions jobs, run in
 # shadow next to Jenkins on what reaches main. Jenkins runs it almost all in series: a successful
 # run takes a median 103 min, and a failure re-runs all of it. Here each block is its own job, so
-# a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
-# compares duration and failures per block with Jenkins before anything is replaced.
+# a failed block re-runs alone ("Re-run failed jobs"). main requires its "Go tests + Sonar +
+# coverage" check (ETP-6299).
 #
-# Every job name starts with "Pilot: ". The cut job (auto-cut.mjs in com.etendoerp.jenkins.pipelines)
-# and base-branch-health.yml ignore the checks with that prefix, so a red or still running pilot
-# job neither holds a cut nor turns main red while Jenkins is the gate. Dropping the prefix when
-# Actions replaces Jenkins makes them count.
+# ETP-6320: the job names no longer start with "Pilot: ", the prefix the cut job (auto-cut.mjs in
+# com.etendoerp.jenkins.pipelines) and base-branch-health.yml skipped while Jenkins was the gate. They
+# count now: a red pilot job holds the cut and turns main red. Cell report never fails.
 #
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
@@ -79,7 +78,7 @@ jobs:
   # coverage of the PR's run. Anything else runs in full: a PR, a dispatch, a direct push, a red or
   # missing PR run, an expired coverage artifact, or an error while looking (never a red job).
   route:
-    name: 'Pilot: Route'
+    name: Route
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -118,7 +117,7 @@ jobs:
               if (run.conclusion !== 'success') {
                 return full(`#${pr.number}'s pilot run ${run.html_url} ended ${run.conclusion || run.status}`);
               }
-              // The jobs by name without the "Pilot: " prefix, so dropping it (ETP-6320) changes nothing.
+              // Without the "Pilot: " prefix the jobs had before ETP-6320, so a PR run from before it counts.
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                 owner, repo, run_id: run.id, filter: 'latest', per_page: 100,
               });
@@ -138,7 +137,7 @@ jobs:
   # Main's Sonar branch analysis for a validated push: the scanner alone, with the JaCoCo report the
   # PR's go-tests job uploaded. sonar.java.binaries is ".", so nothing needs compiling.
   validated-cut-sonar:
-    name: 'Pilot: Sonar with the cut coverage'
+    name: Sonar with the cut coverage
     needs: route
     if: needs.route.outputs.validated_run != ''
     runs-on: ubuntu-24.04
@@ -184,7 +183,7 @@ jobs:
           args: -Dsonar.coverage.jacoco.xmlReportPaths=${{ steps.jacoco.outputs.xml }}
 
   go-tests:
-    name: 'Pilot: Go tests + Sonar + coverage'
+    name: Go tests + Sonar + coverage
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
     needs: route
@@ -222,6 +221,11 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          # ETP-6319: the snapshot cache Jenkins uses. This job publishes snapshots where Jenkins does
+          # (a push to main, a mergeblock/* cut), with the read-write keys; integration only reads.
+          localenv_s3_key: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_KEY || secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_SECRET || secrets.LOCALENV_CACHE_RO_SECRET }}
+          localenv_push: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && '1' || '0' }}
 
       # Jenkins runs `test --tests "com.etendoerp.go.*"` (the database-free half, finalized by
       # goIsolatedDalTest). Here both halves go in one Gradle invocation, as in the mini pipeline;
@@ -347,7 +351,7 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY"
 
   integration:
-    name: 'Pilot: Integration (Tomcat + Playwright)'
+    name: Integration (Tomcat + Playwright)
     needs: route
     # Skipped on a push to main that merges a cut the pilot already validated (ETP-6316).
     if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
@@ -398,6 +402,8 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          localenv_s3_key: ${{ secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ secrets.LOCALENV_CACHE_RO_SECRET }}
 
       - name: Start Tomcat
         working-directory: etendo_core
@@ -538,7 +544,7 @@ jobs:
           if-no-files-found: ignore
 
   cell-report:
-    name: 'Pilot: Cell report'
+    name: Cell report
     needs: [route, go-tests, integration]
     if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04

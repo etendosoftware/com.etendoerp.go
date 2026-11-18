@@ -2857,7 +2857,10 @@ everything is Classic's model.
   `hasRemittanceMethodLink` runs, and every item is `{id, label, iban (raw or null), ibanValid}`
   (`ibanValid` = the account form's pair check); `totalCount`/`hasMore` come from the same list as
   the items. `remittanceType` offers only the provisioned types linked to the request's
-  `FIN_Financial_Account_ID`. Writes stay strict: saving with an account without a valid IBAN is
+  `FIN_Financial_Account_ID`; through the MCP, `etendo_selectors` takes it as
+  `recordContext.financialAccount` (or `FIN_Financial_Account_ID`) and passes it on (ETP-5850;
+  before, the key was dropped and the selector answered no types). Writes stay strict: saving with
+  an account without a valid IBAN is
   `422 ETGO_RemittanceAccountIbanRequired`. DEFAULTS keep the strict rule too and never prefill an
   account that is not a remittance account, an IBAN-less one included. Interactive
   callouts never reach Classic's `REM_RemittanceType_FinAccount` (it runs type → account, the
@@ -5766,6 +5769,34 @@ DB column name (upper-cased), consulted identically for any entity that happens 
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
 
+**Field label, wrong language (ETP-5806 / CP-10b).** The 3 structured columns have no `AD_Field`
+anywhere (Classic only ever surfaces them inside the Location/Address selector popup, by design —
+see the `AGENT_PROMPT` discussion above), so `etendo_schema`'s normal field-label fallback chain
+(§4.12.16, "Field labels and descriptions": `mcp_field_labels_<lang>` → `AD_FIELD_TRL` → `AD_FIELD`
+→ `AD_COLUMN.name`) never had an `AD_FIELD` row to read, and `McpSchemaFieldBuilder#buildSchemaField`
+fell all the way back to the raw, never-translated `AD_Column.Name` ("EM_Obsepa_Strtnm" instead of
+"Nombre de calle"). The column's `AD_Element` does carry the right translation, so
+`resolveSchemaFieldLabel` reads it there for exactly these 3 columns
+(`STRUCTURED_ADDRESS_COLUMNS = {EM_OBSEPA_STRTNM, EM_OBSEPA_BLDGNB, EM_OBSEPA_BLDGNM}`, matched
+structurally by DB column name, the same set `AddressVirtualSelectorPolicy` already special-cases
+for the published-name override above) — never a window- or entity-name check, consistent with the
+NeoHandler "structure yes, identity no" rule.
+
+`Element.getName()` resolves its translation through Hibernate's ambient `OBContext` session
+language, not through the language the specific MCP request actually wants, so a Spanish request
+made under an English/base session still got the English element name — the same class of bug
+§4.12.16's `AD_FIELD_TRL` direct-query fix already avoids for ordinary fields.
+`McpFieldLabels.elementTranslation(elementId, langCode)` applies the identical fix here: it queries
+`AD_ELEMENT_TRL` directly by element id + the request's `langCode` (admin mode, total — never
+throws, falls back to the base-language `AD_Element.Name` on no match), instead of trusting
+`getApplicationElement().getName()`. `langCode` is resolved once in `McpToolRouter` (via
+`NeoLanguage.currentCode()`) and threaded explicitly through `buildSchemaFieldsArray` →
+`buildVirtualFieldsArray` → `buildSchemaField` → `resolveSchemaFieldLabel`, rather than re-read
+ambiently at each layer. This is an `etendo_schema`-only fix: it corrects the field **label**
+returned to the agent, not any stored data, and does not change `missingFields[].label` on a write
+refusal (§4.12.16) for these 3 columns, since that path does not go through
+`resolveSchemaFieldLabel`.
+
 **Binding (ETP-6206).** `ContactsLocationAddressHandler` is bound by `@NeoExtension contacts/locationAddress` alone; its `@Named("contactsLocationAddressHandler")` and the row's `Java_Qualifier` were removed (the annotation already won on every channel since ETP-5806).
 
 **Update semantics and concurrency (ETP-6012).** `ContactsLocationAddressHandler` serves `PUT` and
@@ -8040,6 +8071,37 @@ A client that needs its own wording keys on `messageKeys`, never on the prose.
 
 Never edit the Classic module's `AD_MESSAGE` to get the same effect, and never add a spec or window
 condition here: the catalog is keyed by message only.
+
+### 4.18 Report selectors endpoint and its `ids` lookup (ETP-6239)
+
+`ReportSelectorsServlet` (`GET /sws/report-selectors/{type}`, entry point `report-selectors`) feeds the
+searchable pickers of report parameters (`currency`, `bpartner`, `product`, `warehouse`, `org`, `account`,
+`acctschema`, `year`, `tax`, `project`). It is a standalone servlet, not a NEO spec. The normal call is
+`?q=&limit=20&offset=0` and answers `{ items: [{ id, name, label }], totalCount, hasMore }`; the optional
+`selectedOrgId`, `selectedAcctSchemaId` and `warehouseIds` narrow some types (see the class Javadoc).
+
+**`ids` - resolve exactly these records.** A report restored from a link (the SPA keeps its selections in
+the URL, `docs/dynamic-reports.md` in the functional repo) carries ids only. To label the chips it asks for
+those rows and nothing else, however many there are (a plain search would only see the first page):
+
+```
+GET /sws/report-selectors/bpartner?ids=4028E6C72959682B01295A070DC80D06,B81EE5C5...
+-> { "items": [ { "id": "4028...", "name": "Acme, S.L.", "label": "Acme, S.L." } ], "totalCount": 1, "hasMore": false }
+```
+
+| Case | Answer |
+|------|--------|
+| Type other than `bpartner` / `product` | `400` (`ids is not supported for selector: <type>`), checked before anything else, so a blank `ids` on `org` is also a 400 |
+| `ids` present but blank, or with no valid id (`ids=`, `ids=,,`, `ids=not-an-id`) | `200` with no items. It never falls back to the whole selector |
+| A mix of valid and invalid ids | Each invalid one is dropped on its own (valid ids are hex and hyphens, at most 36 characters); the valid ones resolve |
+| More than 100 ids | The first 100 are kept, the rest silently dropped (`MAX_IDS`; the SPA caps a filter at the same number) |
+| `q`, `limit`, `offset` | Ignored: no search, no paging, at most one row per id |
+| `isactive` | Ignored in this mode: a contact or product deactivated since the link was shared still resolves its name |
+| Scoping | Unchanged: `ids` only adds an `AND ... IN (:ids)` to the normal query, so the client filter, the role's organizations, and for products the system-category exclusion and the stock `EXISTS` still apply. An id the role cannot reach does not resolve |
+
+An id that comes back absent (deleted, other client, out of the role's reach) is the caller's signal that it
+is stale. The ids are bound with `setParameterList`, never concatenated. Tests: `ReportSelectorsServletTest`.
+The SPA dev server mirrors the rule in `tools/app-shell/vite-plugins/report-api.js`; keep both in sync.
 
 ## 5. Configuration
 
@@ -14884,30 +14946,44 @@ rectificative was computed either on the detail GET or by the header callout whe
   on the next detail GET.
 - *Server-side defaults* (`SalesRectificativeFiscalDefaults`, called on every CRUD POST/PUT/PATCH of
   the header, ids-only included). Only on a draft (`DR`), unprocessed sales invoice whose document type
-  is `EM_Etsg_Isrectificative = 'Y'`:
+  is `EM_Etsg_Isrectificative = 'Y'`. It writes only the fields that say "this is a correction" and
+  **never picks a reason code** (TicketBAI `tbaiReverseinvoicecode`, VERI*FACTU `R1`–`R5`, SII
+  `aeatsiiMotivoRectif`): `RectificationFiscalCodeGuard` blocks completion while one is missing.
+  - with the organization enrolled in the SII (`siiConfigActive`, `AEATSIIConfig.isAcogidaAlSII`):
+    `aeatsiiClaveTipo` is **enforced** to `R`, `aeatsiiTipoRectif = I` only when blank (ETP-5747
+    CP-11). Possible because `EM_AEATSII_C_INV_RECT_CHK` (SII module) now reads
+    `PROCESSED = 'N' OR <type + motivo rules>`: a draft may hold `R` with no motivo; the motivo and
+    type are required only once the invoice is processed (completed), so Classic and GO completion
+    still hit the constraint, and a reactivated draft is free again;
   - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
     the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
     rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
     `tbaiReverseinvoicetype = I` only when blank. `tbaiReverseinvoicecode` is **never** defaulted
     (ETP-5745 CP-14 reverted the ETP-5747 `R4` auto-pick): it stays empty until the user chooses it;
   - with an active VERI*FACTU config in the system for the legal entity (the
-    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` is **never** written (ETP-5745 CP-20); only
-    when the invoice already carries an `R1`-`R5` type the user picked and `etvfacReverseinvtype` is
-    blank, the reverse type gets the document type's one, or `I` when the document type has none.
+    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): a non-rectificative `F*` `etvfacInvType` (in practice the AD
+    default `F1` an insert stamps) or a blank one is **cleared to null** (ETP-5747 CP-5/CP-11), matching
+    the empty "Tipo de Factura" the doc-type callout and the SIF tab show; an `R*` value is kept and the
+    document type's own code is never copied. When the type is `R*` and `etvfacReverseinvtype` is blank,
+    the document type's reverse type, or `I` when it has none.
 
-  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive and the TicketBAI
-  code stay empty, and `RectificationFiscalCodeGuard` blocks completion until the user chooses them.
-  (A customer return is different: its "Datos fiscales" step preselects `R1`, see ETP-6179.)
+  On a manual sales rectificative no motive/code is ever auto-picked: the SII motive, the TicketBAI
+  code and the VERI*FACTU `R1`-`R5` type stay empty, and `RectificationFiscalCodeGuard` blocks
+  completion until the user chooses them. (A customer return is different: its "Datos fiscales" step
+  preselects `R1`, see ETP-6179.)
 
-  Any other value already set is never overwritten, and nothing is ever cleared. The values are
+  Any other value already set is never overwritten. The values are
   flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
   and answered as "nothing applied", but a DB-level failure on the flush aborts the write, as for
-  `persistSiiAuthorizationno`. An invoice created with the rectificative type already
+  `persistSiiAuthorizationno`.
+  **Deployment coupling:** this change requires the `org.openbravo.module.sii` version carrying the
+  relaxed `EM_AEATSII_C_INV_RECT_CHK` (`PROCESSED = 'N' OR ...`, ETP-5747). No `AD_MODULE_DEPENDENCY`
+  of this module enforces it, so deploy both together: against an older SII module, storing `R`
+  with no motivo violates the constraint on the flush and the header write of a draft sales
+  rectificative fails for every SII-enrolled organization. An invoice created with the rectificative type already
   set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
-  so TicketBAI kept no reverse code (its XML generator then fails with `TBAI_SetKey`) and VERI*FACTU
-  showed `F1` while in draft. SII is **not** defaulted on the server: `EM_AEATSII_C_INV_RECT_CHK` requires
-  `aeatsiiMotivoRectif` once the type is `R`, and the motivo is a user choice — that default stays in the
-  SPA (`useSifFieldPatcher.js`), driven by the `isRectificative` the write response now carries.
+  so without these defaults it kept SII `F1` and VERI*FACTU `F1` while in draft. The written keys
+  (`etvfacInvType` as JSON `null`) are echoed in the write response.
 - Same behaviour on REST single, `/batch` and MCP `etendo_create` / `etendo_update` (all run the
   header's `afterHandle`); no divergence to declare. The added keys are not AD fields of the spec and
   are put by the post-hook, after `NeoFieldFilter.filterGetResponse` has run, so they reach the caller
@@ -15620,7 +15696,7 @@ recomputes address, duplicates and taxes for that vendor from the cached reading
 notice (warn-only; `iEquals` on `orderReference`, status ≠ `VO`, the vendor's invoices of the session's tenant, ≤ 10); `apply_*` = the two toggles (**respected**, unlike the
 SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`skip` because the server rejects a line without a product); `line_i_tax` =
 `findDefaultTax` (`no_rate` is informative — the default applies; `no_tax_at_rate` lists the alternatives of that rate; `pending_vendor` waits for a vendor with an
-address). **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
+address). **Dates.** `invoiceDateIso` and the `apply_invoiceDate` `sendValue` are the read date as `yyyy-MM-dd`: ISO stays, `d/M/yyyy` and `d-M-yy` convert, and so does a month in words, Spanish or English, as invoices print it (`15 de enero de 2026`, `15-ene-2026`, `January 15, 2026`; ETP-5850 — it used to reach both untouched). Any other shape, or an impossible day, is passed as read. **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
 existing tools); the SPA's modal navigation.
 
 **When a product line is `auto_matched`.** (1) Exactly one candidate whose name equals the line description after normalization (trim including Unicode edge whitespace, lowercase, accents folded; `ñ` stays distinct); two or more such candidates give `suggested`. (2) Otherwise, the single highest `similarity`, when it is >= 90 and no other candidate shares that top value; a tie at the top (>= 90) gives `suggested` with the first candidate, and below 90 or an unparseable value also gives `suggested`. (3) The `similarity` on a candidate is the raw pg_trgm score computed by the database, which is accent-sensitive, so a line can be `auto_matched` with a `similarity` below 90 (e.g. 82.35 for "Arnes ..." vs "Arnés ...") because it matched by normalized name equality, not by the percentage: consumers must rely on `state` and never recompute the threshold from `similarity`. The rule is mirrored by the application's `classifyProductMatch`, so the UI and MCP agree.
