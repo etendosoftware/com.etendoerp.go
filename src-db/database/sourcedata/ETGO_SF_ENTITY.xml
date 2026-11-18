@@ -2063,6 +2063,7 @@
 <!--59B96B75153149EF993CD7FD3CE9439F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--59B96B75153149EF993CD7FD3CE9439F-->  <JAVA_QUALIFIER><![CDATA[goodsMovementsHeaderHandler]]></JAVA_QUALIFIER>
 <!--59B96B75153149EF993CD7FD3CE9439F-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--59B96B75153149EF993CD7FD3CE9439F-->  <AGENT_PROMPT><![CDATA[Movements between warehouses or bins only. For everything that moved for one product (receipts, shipments, inventories, consumptions and these movements together), list spec product, entity transactions, with parentId = the product id.]]></AGENT_PROMPT>
 <!--59B96B75153149EF993CD7FD3CE9439F--></ETGO_SF_ENTITY>
 
 <!--59F6B08209AA48969DD26439762DE8D0--><ETGO_SF_ENTITY>
@@ -2684,6 +2685,7 @@
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <SEQNO><![CDATA[100]]></SEQNO>
+<!--6B95037D284B4A54B319FEE155968CA4-->  <AGENT_PROMPT><![CDATA[Every stock movement of this product, one row per movement: goods receipts and shipments, returns, movements between warehouses, physical inventories, internal consumptions and production. List it with parentId = the product id (spec product, entity transactions): movementDate, movementQuantity (positive in, negative out), etgoDocKind (the document type, e.g. goods-receipt, goods-shipment), etgoWarehouse and the cost. This is the place to answer what moved, came in or went out for one product, instead of reading the lines of each document type.]]></AGENT_PROMPT>
 <!--6B95037D284B4A54B319FEE155968CA4--></ETGO_SF_ENTITY>
 
 <!--6C195FB483114126A0E1EBB486245FA3--><ETGO_SF_ENTITY>
