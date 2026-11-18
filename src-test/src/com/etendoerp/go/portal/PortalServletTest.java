@@ -673,6 +673,8 @@ public class PortalServletTest {
   @Test
   public void meNamesTheEntryDocumentOnlyWhenItIsStillInScope() throws Exception {
     validLink();
+    // The user menu's email: the customer's address the portal already uses (the root send's To).
+    when(decisionService.confirmationRecipient(any())).thenReturn("julia@example.com");
     BaseOBObject visible = mock(BaseOBObject.class);
     // Columns: the entry document in scope?, expected entryDocument id or null.
     for (boolean inScope : new boolean[] { true, false }) {
@@ -685,6 +687,7 @@ public class PortalServletTest {
 
         JSONObject body = new JSONObject(call.body.toString());
         assertEquals("valid", body.getString("state"));
+        assertEquals("julia@example.com", body.getString("email"));
         if (inScope) {
           assertEquals("INV-1", body.getJSONObject("entryDocument").getString("id"));
           assertEquals("INVOICE", body.getJSONObject("entryDocument").getString("kind"));

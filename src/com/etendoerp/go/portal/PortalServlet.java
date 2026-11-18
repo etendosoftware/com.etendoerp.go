@@ -292,15 +292,19 @@ public class PortalServlet extends HttpBaseServlet {
    *
    * <pre>
    * 401 {"error": "This link is no longer valid"}          unknown, pending, deactivated (as MVP)
-   * 200 {"state": "valid", businessPartnerName, tenantName, hasLogo,
+   * 200 {"state": "valid", businessPartnerName, email, tenantName, hasLogo,
    *      entryDocument: {kind, id} | null, entryKind?}  entryKind only when entryDocument is null
    * 200 {"state": "expired", tenantName, hasLogo}          the page then calls POST /renew
    * 200 {"state": "unavailable", tenantName, hasLogo}      blocked, inactive or plan expired
    * </pre>
    *
-   * <p>An expired or unavailable answer carries no Business Partner name and no document: the
-   * holder of that link is no longer entitled to them. Which of the three closures applies is never
-   * said.
+   * <p>{@code email} is the customer's address the portal already uses for them: the first valid To
+   * of the link's root send ({@link PortalDecisionService#confirmationRecipient}), {@code ""} when
+   * there is none. The user menu shows it beside the name (ETP-6209 PO answer).</p>
+   *
+   * <p>An expired or unavailable answer carries no Business Partner name, no email and no
+   * document: the holder of that link is no longer entitled to them. Which of the three closures
+   * applies is never said.
    */
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
@@ -328,6 +332,9 @@ public class PortalServlet extends HttpBaseServlet {
     } else {
       body.put(FIELD_STATE, STATE_VALID);
       body.put("businessPartnerName", StringUtils.defaultString(link.getBusinessPartnerName()));
+      body.put("email", StringUtils.defaultString(validation.getSession()
+          .map(session -> decisionService.confirmationRecipient(session.getRootLinkId()))
+          .orElse(null)));
       Object entry = entryDocument(validation, link);
       body.put("entryDocument", entry);
       if (entry == JSONObject.NULL && link.getDocumentKind() != null) {
