@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -33,6 +34,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -43,9 +45,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.LazyInitializationException;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
@@ -58,6 +63,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.RejectReason;
@@ -216,12 +222,12 @@ public class PortalDecisionServiceTest {
   }
 
   @Test
-  public void theConfirmationGoesToTheFirstValidToMaskedAndNeverToCc() throws Exception {
+  public void theConfirmationGoesToTheFirstValidToInFullAndNeverToCc() throws Exception {
     PortalDecisionService.RequestResult result = service().request(session, QUOTATION_ID,
         "REJECT", "PRICE", null);
 
     assertEquals(PortalDecisionService.RequestOutcome.SENT, result.getOutcome());
-    assertEquals("fi•••@customer.test", result.getMaskedEmail());
+    assertEquals("first@customer.test", result.getEmail());
     assertEquals("first@customer.test", service().confirmationRecipient(ROOT_ID));
     JSONObject command = sentCommand(PortalDecisionService.CONFIRM_CONTRACT);
     assertEquals(QUOTATION_ID, command.getString("recordId"));
@@ -291,15 +297,6 @@ public class PortalDecisionServiceTest {
     emailStatus = TransactionalEmailService.STATUS_SENT;
     service().request(session, QUOTATION_ID, "ACCEPT", null, null);
     assertFalse(executed("SET isactive = 'N'"));
-  }
-
-  @Test
-  public void maskShowsTwoCharactersAtMost() {
-    assertEquals("ju•••@example.com", PortalDecisionService.mask("julia@example.com"));
-    assertEquals("j•••@example.com", PortalDecisionService.mask("jo@example.com"));
-    assertEquals("", PortalDecisionService.mask("@example.com"));
-    assertEquals("", PortalDecisionService.mask("not-an-address"));
-    assertEquals("", PortalDecisionService.mask(null));
   }
 
   // ── mint and view ───────────────────────────────────────────────────────────
@@ -463,6 +460,48 @@ public class PortalDecisionServiceTest {
     kpi.verifyNoInteractions();
   }
 
+  /**
+   * Both paths that commit answer after {@code commitAndClose}, with the quotation detached: its
+   * lazy currency then throws, which answered 500 to the first confirmation. The summary must be
+   * read after the decision is applied and before the session closes.
+   */
+  @Test
+  public void aConfirmationThatCommitsCarriesTheSummaryReadBeforeTheSessionCloses() {
+    AtomicBoolean sessionClosed = new AtomicBoolean();
+    doAnswer(inv -> {
+      sessionClosed.set(true);
+      return null;
+    }).when(obDal).commitAndClose();
+    // Columns: label, status when confirming, expected state, applied now, status in the summary.
+    Object[][] cases = {
+        { "applied", QuotationDecisions.STATUS_UNDER_EVALUATION,
+            PortalDecisionService.State.CONFIRMED, true, QuotationDecisions.STATUS_ACCEPTED },
+        { "no longer decidable", "CO", PortalDecisionService.State.NOT_PENDING, false, "CO" },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      sessionClosed.set(false);
+      Date orderDate = day(-3);
+      BigDecimal grandTotal = new BigDecimal("2450.00");
+      Order detachable = quotationDetachedWhenClosed(sessionClosed, (String) c[1], orderDate,
+          grandTotal);
+      when(obDal.get(Order.class, QUOTATION_ID)).thenReturn(detachable);
+      decisionRow = row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, true);
+
+      PortalDecisionService.View view = service().confirm(TOKEN);
+
+      assertTrue(label + ": the session closed", sessionClosed.get());
+      assertEquals(label, c[2], view.getState());
+      assertEquals(label, c[3], view.isAppliedNow());
+      PortalDecisionService.Summary summary = view.getSummary();
+      assertEquals(label, "PR-0042", summary.getDocumentNo());
+      assertEquals(label, orderDate, summary.getDate());
+      assertEquals(label, grandTotal, summary.getGrandTotal());
+      assertEquals(label, "EUR", summary.getCurrency());
+      assertEquals(label, c[4], summary.getDocumentStatus());
+    }
+  }
+
   @Test
   public void aConfirmForAClosedCustomerAppliesNothing() {
     // A decision token never expires: a customer blocked, inactive or out of plan since asking
@@ -505,6 +544,33 @@ public class PortalDecisionServiceTest {
 
   private PortalDecisionService service() {
     return new PortalDecisionService(linkService, accessChecks);
+  }
+
+  /**
+   * A quotation whose status follows what the confirmation writes, and whose lazy currency stops
+   * loading once the session has closed, as a detached Hibernate proxy does.
+   */
+  private static Order quotationDetachedWhenClosed(AtomicBoolean sessionClosed, String status,
+      Date orderDate, BigDecimal grandTotal) {
+    Currency currency = mock(Currency.class);
+    when(currency.getISOCode()).thenAnswer(inv -> {
+      if (sessionClosed.get()) {
+        throw new LazyInitializationException("could not initialize proxy - no Session");
+      }
+      return "EUR";
+    });
+    AtomicReference<String> currentStatus = new AtomicReference<>(status);
+    Order detachable = mock(Order.class);
+    when(detachable.getDocumentStatus()).thenAnswer(inv -> currentStatus.get());
+    doAnswer(inv -> {
+      currentStatus.set(inv.getArgument(0));
+      return null;
+    }).when(detachable).setDocumentStatus(anyString());
+    when(detachable.getDocumentNo()).thenReturn("PR-0042");
+    when(detachable.getOrderDate()).thenReturn(orderDate);
+    when(detachable.getGrandTotalAmount()).thenReturn(grandTotal);
+    when(detachable.getCurrency()).thenReturn(currency);
+    return detachable;
   }
 
   private void assertBlocked(PortalDecisionService.Blocked expected) {

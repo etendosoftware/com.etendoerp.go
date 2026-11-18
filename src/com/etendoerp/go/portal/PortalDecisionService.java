@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.portal;
 
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -139,12 +140,12 @@ public class PortalDecisionService {
   public static final class RequestResult {
     private final RequestOutcome outcome;
     private final Blocked blocked;
-    private final String maskedEmail;
+    private final String email;
 
-    RequestResult(RequestOutcome outcome, Blocked blocked, String maskedEmail) {
+    RequestResult(RequestOutcome outcome, Blocked blocked, String email) {
       this.outcome = outcome;
       this.blocked = blocked;
-      this.maskedEmail = maskedEmail;
+      this.email = email;
     }
 
     public RequestOutcome getOutcome() {
@@ -155,8 +156,9 @@ public class PortalDecisionService {
       return blocked;
     }
 
-    public String getMaskedEmail() {
-      return maskedEmail;
+    /** The confirmation's recipient, in full (design decision, Figma). */
+    public String getEmail() {
+      return email;
     }
   }
 
@@ -251,6 +253,54 @@ public class PortalDecisionService {
     }
   }
 
+  /**
+   * The quotation's figures the landing shows, read while the DAL session is open. A confirmation
+   * commits and closes its session before answering, which detaches the quotation: reading a lazy
+   * association then (its currency) threw {@code LazyInitializationException} and answered 500 to
+   * every applying confirmation (ETP-6209 live test).
+   */
+  public static final class Summary {
+    private final String documentNo;
+    private final Date date;
+    private final BigDecimal grandTotal;
+    private final String currency;
+    private final String documentStatus;
+
+    private Summary(Order quotation) {
+      this.documentNo = quotation.getDocumentNo();
+      this.date = quotation.getOrderDate();
+      this.grandTotal = quotation.getGrandTotalAmount();
+      this.currency = quotation.getCurrency() == null ? null
+          : quotation.getCurrency().getISOCode();
+      this.documentStatus = quotation.getDocumentStatus();
+    }
+
+    /** The quotation's figures, or {@code null} without a quotation. Needs an open session. */
+    static Summary of(Order quotation) {
+      return quotation == null ? null : new Summary(quotation);
+    }
+
+    public String getDocumentNo() {
+      return documentNo;
+    }
+
+    public Date getDate() {
+      return date;
+    }
+
+    public BigDecimal getGrandTotal() {
+      return grandTotal;
+    }
+
+    public String getCurrency() {
+      return currency;
+    }
+
+    public String getDocumentStatus() {
+      return documentStatus;
+    }
+  }
+
   /** What the landing shows: the state and, unless invalid, the decision and its quotation. */
   public static final class View {
     private final State state;
@@ -258,6 +308,8 @@ public class PortalDecisionService {
     private final Order quotation;
     private final boolean appliedNow;
     private final boolean customerClosed;
+    /** Read before the session closed, or {@code null} to read the quotation when asked. */
+    private final Summary summary;
 
     View(State state, Decision decision, Order quotation) {
       this(state, decision, quotation, false);
@@ -269,11 +321,26 @@ public class PortalDecisionService {
 
     private View(State state, Decision decision, Order quotation, boolean appliedNow,
         boolean customerClosed) {
+      this(state, decision, quotation, appliedNow, customerClosed, null);
+    }
+
+    private View(State state, Decision decision, Order quotation, boolean appliedNow,
+        boolean customerClosed, Summary summary) {
       this.state = state;
       this.decision = decision;
       this.quotation = quotation;
       this.appliedNow = appliedNow;
       this.customerClosed = customerClosed;
+      this.summary = summary;
+    }
+
+    /**
+     * A view whose summary is read now, for an answer given after the session closes (the
+     * confirmation's transaction commits and closes before the landing reads it).
+     */
+    static View beforeSessionCloses(State state, Decision decision, Order quotation,
+        boolean appliedNow) {
+      return new View(state, decision, quotation, appliedNow, false, Summary.of(quotation));
     }
 
     /** The answer when the portal is closed for the customer: nothing applied, no way in. */
@@ -309,6 +376,11 @@ public class PortalDecisionService {
 
     public Order getQuotation() {
       return quotation;
+    }
+
+    /** The quotation's figures: the ones read before the session closed, else read now. */
+    public Summary getSummary() {
+      return summary != null ? summary : Summary.of(quotation);
     }
   }
 
@@ -357,7 +429,7 @@ public class PortalDecisionService {
    * @param decision {@code ACCEPT} or {@code REJECT}
    * @param reasonCode one of {@link #REASON_CODES} (reject only)
    * @param reasonText required for {@code OTHER}, at most {@value #MAX_REASON_TEXT} characters
-   * @return the outcome, with the masked recipient when the email left
+   * @return the outcome, with the recipient when the email left
    */
   public RequestResult request(PortalSession session, String quotationId, String decision,
       String reasonCode, String reasonText) {
@@ -416,7 +488,8 @@ public class PortalDecisionService {
     String status = sendConfirmation(session, quotation, normalizedDecision, reason, text);
     if (TransactionalEmailService.STATUS_SENT.equals(status)) {
       PortalDecisionEvents.requested(session, quotation.getId(), normalizedDecision);
-      return new RequestResult(RequestOutcome.SENT, null, mask(recipient));
+      return new RequestResult(RequestOutcome.SENT, null,
+          StringUtils.trimToEmpty(recipient));
     }
     // The email did not leave: its pending row must not count against the cool-down (Part A's
     // renewal rule), so a provider failure does not lock the customer out for the whole window.
@@ -605,16 +678,19 @@ public class PortalDecisionService {
       State blocked = notApplicableState(quotation);
       if (blocked != null) {
         setStatus(current.id, STATUS_NOT_APPLIED, "closed_at");
+        View notApplied = View.beforeSessionCloses(blocked, current, quotation, false);
         OBDal.getInstance().commitAndClose();
         PortalDecisionEvents.notApplied(current.id, current.quotationId, blocked.getCode());
-        return new View(blocked, current, quotation);
+        return notApplied;
       }
       apply(current, quotation);
       setStatus(current.id, STATUS_CONFIRMED, "confirmed_at");
       voided.addAll(voidOthers(current));
-      OBDal.getInstance().commitAndClose();
       current.status = STATUS_CONFIRMED;
-      return new View(State.CONFIRMED, current, quotation, true);
+      // Read before commitAndClose: the quotation is detached afterwards (lazy currency).
+      View applied = View.beforeSessionCloses(State.CONFIRMED, current, quotation, true);
+      OBDal.getInstance().commitAndClose();
+      return applied;
     } catch (RuntimeException e) {
       OBDal.getInstance().rollbackAndClose();
       throw e;
@@ -889,17 +965,5 @@ public class PortalDecisionService {
           .executeUpdate();
     }
     return ids;
-  }
-
-  /** {@code ju•••@example.com}: enough for the customer to recognise it, not to read it. */
-  static String mask(String email) {
-    String value = StringUtils.trimToEmpty(email);
-    int at = value.indexOf('@');
-    if (at <= 0) {
-      return "";
-    }
-    String local = value.substring(0, at);
-    String shown = local.length() <= 2 ? local.substring(0, 1) : local.substring(0, 2);
-    return shown + "•••" + value.substring(at);
   }
 }

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -49,6 +50,8 @@ import org.openbravo.model.common.order.OrderLine;
  * delegating the actual clone work to the core hook. RED phase: the skeleton hook only
  * returns the delegate's result untouched, so these tests are expected to fail until the
  * GREEN-phase fix is implemented.
+ *
+ * @covers com.etendoerp.go.schemaforge.CloneOrderLinePriceHook
  */
 public class CloneOrderLinePriceHookTest {
 
@@ -182,6 +185,43 @@ public class CloneOrderLinePriceHookTest {
   }
 
   /**
+   * ETP-6209: the copy drops only the customer portal's decision line(s) from its notes; the
+   * seller's lines stay, and notes without a portal line are not touched.
+   */
+  @Test
+  public void testPostCopyDropsOnlyThePortalDecisionNote() throws Exception {
+    String es = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
+    String en = "Rejected by the customer from the portal. Reason: Otros: too late";
+    // Columns: the copied notes, the notes expected to be set (null in column 2 + false in
+    // column 3: setDescription never called).
+    Object[][] cases = {
+        { "Gracias\n" + es, "Gracias", true },
+        { es, null, true },
+        { "Nota\n" + es + "\n" + en, "Nota", true },
+        { "Solo notas del vendedor", null, false },
+        { null, null, false },
+    };
+    for (Object[] c : cases) {
+      CloneRecordHook delegate = mock(CloneRecordHook.class);
+      Order original = mock(Order.class);
+      Order placeholder = mock(Order.class);
+      Order clone = mock(Order.class);
+      when(original.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+      when(clone.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+      when(clone.getDescription()).thenReturn((String) c[0]);
+      when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+      new CloneOrderLinePriceHook(delegate).postCopy(original, placeholder);
+
+      if (Boolean.TRUE.equals(c[2])) {
+        verify(clone).setDescription((String) c[1]);
+      } else {
+        verify(clone, never()).setDescription(org.mockito.ArgumentMatchers.any());
+      }
+    }
+  }
+
+  /**
    * The copy is a fresh record: it must not point at the source's related documents (the
    * quotation it came from, the order it cancelled or replaced, a reversed invoice, the
    * SO/PO counterpart line, the quotation line, a shipment line).
@@ -207,6 +247,8 @@ public class CloneOrderLinePriceHookTest {
     verify(clone).setReplacedorder(null);
     verify(clone).setReplacementorder(null);
     verify(clone).setEtvfacReversedInvoice(null);
+    // ETP-6209 repro: a copy of a rejected quotation must not carry its reject reason.
+    verify(clone).setRejectReason(null);
     verify(clonedLine).setSOPOReference(null);
     verify(clonedLine).setQuotationLine(null);
     verify(clonedLine).setGoodsShipmentLine(null);
