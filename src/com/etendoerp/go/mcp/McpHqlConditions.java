@@ -53,9 +53,30 @@ final class McpHqlConditions {
       where.append(idPath).append('=')
           .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
     } else {
+      requireAllowedValue(key, prop, value);
       where.append(path).append('=').append(
           McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
     }
+  }
+
+  /**
+   * ETP-5850: a list field (a column with a list reference: document status, inbox status...)
+   * holds only its codes, so a value outside them matches no row. Refused instead of answering an
+   * empty list, which reads as "there is none". Case matters: the codes are stored as written.
+   *
+   * @param key   the filter key as the caller spelled it
+   * @param prop  the compared property
+   * @param value the filter value; anything but a text value is left to the type checks
+   * @throws McpRoutingException 422 naming the field's codes in {@code available}
+   */
+  static void requireAllowedValue(String key, Property prop, Object value) {
+    java.util.Set<String> allowed = prop.getAllowedValues();
+    if (allowed == null || allowed.isEmpty() || !(value instanceof String)
+        || allowed.contains(value)) {
+      return;
+    }
+    throw McpRoutingException.invalidFilterValue(key, (String) value,
+        new java.util.ArrayList<>(new java.util.TreeSet<>(allowed)));
   }
 
   /**
@@ -108,8 +129,14 @@ final class McpHqlConditions {
         where.append(containsCondition(path, prop, type, key, operators.get(op)));
       } else if (McpBusinessFilters.OP_IN.equals(op)) {
         String inPath = prop.isPrimitive() ? path : idPath;
+        java.util.List<Object> values = inValues(key, operators.optJSONArray(op));
+        if (prop.isPrimitive()) {
+          for (Object value : values) {
+            requireAllowedValue(key, prop, value);
+          }
+        }
         where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
-            inValues(key, operators.optJSONArray(op))));
+            values));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {

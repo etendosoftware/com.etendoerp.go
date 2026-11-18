@@ -648,6 +648,27 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * A filter value outside the closed set of a list field (ETP-5850). Such a value matches no row,
+   * so it answered 200 with nothing, which an agent reads as "there is none": filtering the invoice
+   * inbox on {@code status: "pending"} answered "no documents" while one was pending. The set is
+   * the column's list reference, the codes the field holds.
+   *
+   * @param key       the filter key as the caller spelled it
+   * @param value     the refused value
+   * @param available the field's codes, sorted
+   * @return the exception to throw
+   */
+  static McpRoutingException invalidFilterValue(String key, String value,
+      List<String> available) {
+    return new McpRoutingException(
+        "Value '" + value + "' is not one of the values of '" + key + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, available,
+        "No row can hold this value, so the filter would match nothing. Retry with one of the "
+            + "codes in 'available' (exact spelling), or 'in' for several.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * The same refusal, also naming {@code allParents} for an entity that may be listed across every
    * parent (ETP-5852): the agent learns the on-purpose alternative only where it exists.
    *
