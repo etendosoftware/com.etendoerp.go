@@ -2898,4 +2898,19 @@ class BusinessPartnerHandlerTest {
     assertEquals(SpanishTaxIdValidator.ERR_FORMAT,
         result.getBody().getJSONObject("response").getJSONObject("errors").getString("taxID"));
   }
+
+  @Test
+  void testInvalidEmailIsKeyedByField() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoEmail", "not-an-email");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    JSONObject errors = result.getBody().getJSONObject("response").getJSONObject("errors");
+    assertEquals(result.getBody().getJSONObject("error").getString("message"), errors.getString("etgoEmail"));
+  }
 }

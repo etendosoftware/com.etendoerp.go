@@ -7,6 +7,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -50,7 +51,7 @@ final class NeoExportTable {
   /** Column key of the contact phone (ETP-6225). */
   private static final String PHONE_COLUMN_KEY = "etgoPhone";
   /** What a phone cell may contain once whitespace is gone: digits and {@code + ( ) - .} only. */
-  private static final java.util.regex.Pattern PHONE_CELL = java.util.regex.Pattern.compile("^[0-9+()\\-.]*[0-9][0-9+()\\-.]*$");
+  private static final Pattern PHONE_CELL = Pattern.compile("^[0-9+()\\-.]*[0-9][0-9+()\\-.]*$");
 
   private final JSONArray rows;
   private final List<Column> columns;

@@ -33,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -627,7 +628,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
               .put("status", -4)
               .put("errors", new JSONObject().put(field, message)));
       return NeoResponse.error(400, body);
-    } catch (org.codehaus.jettison.json.JSONException e) {
+    } catch (JSONException e) {
       return NeoResponse.error(400, message);
     }
   }

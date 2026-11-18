@@ -219,8 +219,7 @@ final class NeoCsvExportService {
    * user's spreadsheet rather than a defence against anything.
    */
   private static String csvField(String value) {
-    String safe = neutralizeSpreadsheetCell(value == null ? "" : value);
-    return "\"" + safe.replace("\"", "\"\"") + "\"";
+    return quoted(neutralizeSpreadsheetCell(value == null ? "" : value));
   }
 
   /**
