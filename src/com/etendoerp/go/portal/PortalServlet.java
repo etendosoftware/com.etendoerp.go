@@ -247,7 +247,7 @@ public class PortalServlet extends HttpBaseServlet {
     if (PATH_DECISION_CONFIRM.equals(path)) {
       return "decision confirmation";
     }
-    return path.startsWith(PATH_QUOTATIONS) ? "decision request" : "renewal";
+    return path.startsWith(PATH_QUOTATIONS) ? "decision request" : FIELD_RENEWAL;
   }
 
   @Override
