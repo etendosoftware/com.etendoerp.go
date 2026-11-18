@@ -47,6 +47,10 @@ final class NeoExportTable {
   private static final String PARAM_VALUE_MAPS = "valueMaps";
   private static final String TYPE_DATE = "date";
   private static final String FIELD_ID = "id";
+  /** Column key of the contact phone (ETP-6225). */
+  private static final String PHONE_COLUMN_KEY = "etgoPhone";
+  /** What a phone cell may contain once whitespace is gone: digits and {@code + ( ) - .} only. */
+  private static final java.util.regex.Pattern PHONE_CELL = java.util.regex.Pattern.compile("^[0-9+()\\-.]*[0-9][0-9+()\\-.]*$");
 
   private final JSONArray rows;
   private final List<Column> columns;
@@ -108,14 +112,46 @@ final class NeoExportTable {
     return id != null && idFilter.contains(id);
   }
 
+  /**
+   * Whether the column at {@code index} is the contact phone. Its cells are written without the
+   * CSV formula apostrophe when they are plain phone numbers (ETP-6225), see
+   * {@link #isPlainPhone(String)}.
+   */
+  boolean isPhoneColumn(int index) {
+    return index >= 0 && index < columns.size() && PHONE_COLUMN_KEY.equals(columns.get(index).key);
+  }
+
+  /**
+   * True when the value is made only of digits and {@code + ( ) - .} (at least one digit). Such a
+   * value has no letters, so it cannot carry a function call or a DDE payload, and a spreadsheet
+   * cannot turn it into anything but a number or text. Anything else keeps the full CSV
+   * neutralization.
+   */
+  static boolean isPlainPhone(String value) {
+    return value != null && PHONE_CELL.matcher(value).matches();
+  }
+
   /** One row's cells, resolved, date-formatted and value-translated but NOT escaped. */
   List<String> cells(JSONObject row) {
     List<String> values = new ArrayList<>(columns.size());
     for (Column column : columns) {
       String value = formatValue(resolveValue(row, column.key), column.type);
-      values.add(translateValue(value, valueMaps.get(column.key)));
+      String translated = translateValue(value, valueMaps.get(column.key));
+      values.add(PHONE_COLUMN_KEY.equals(column.key) ? stripPhoneSpaces(translated) : translated);
     }
     return values;
+  }
+
+  /**
+   * Drops all whitespace from a phone so an exported file imports back unchanged (ETP-6225). A
+   * value that is not a plain phone once stripped is returned as it came, so nothing is hidden.
+   */
+  private static String stripPhoneSpaces(String value) {
+    if (value == null) {
+      return null;
+    }
+    String stripped = value.replaceAll("[\\s\\u00A0\\uFEFF]+", "");
+    return isPlainPhone(stripped) ? stripped : value;
   }
 
   /** Resolves a flat key or a dotted path ({@code etgoChildData.city}) on a row. */

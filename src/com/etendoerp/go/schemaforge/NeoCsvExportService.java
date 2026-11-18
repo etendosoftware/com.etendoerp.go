@@ -178,20 +178,36 @@ final class NeoCsvExportService {
       if (!table.isKept(row)) {
         continue;
       }
-      writer.write(joinCsv(table.cells(row)));
+      writer.write(joinCsv(table.cells(row), table));
       writer.write(CRLF);
     }
   }
 
   private static String joinCsv(List<String> values) {
+    return joinCsv(values, null);
+  }
+
+  /**
+   * Joins one CSV line. In the phone column a plain phone number is written as-is, quoted, with
+   * no apostrophe (ETP-6225): an apostrophe changes the value, so an exported file could not be
+   * imported back. A phone-column value that is not a plain phone still goes through the
+   * neutralization like any other cell.
+   */
+  private static String joinCsv(List<String> values, NeoExportTable table) {
     StringBuilder line = new StringBuilder();
     for (int i = 0; i < values.size(); i++) {
       if (i > 0) {
         line.append(',');
       }
-      line.append(csvField(values.get(i)));
+      String value = values.get(i);
+      boolean plainPhone = table != null && table.isPhoneColumn(i) && NeoExportTable.isPlainPhone(value);
+      line.append(plainPhone ? quoted(value) : csvField(value));
     }
     return line.toString();
+  }
+
+  private static String quoted(String value) {
+    return "\"" + value.replace("\"", "\"\"") + "\"";
   }
 
   /**
