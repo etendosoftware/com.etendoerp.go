@@ -363,13 +363,19 @@ final class DocumentCurrencyRate {
     if (!body.has(type.rateProperty())) {
       return null;
     }
+    // "Empty" means what it means in the rest of this class: absent, null, blank or non-positive
+    // (parseRate). Empty re-sent over an empty stored rate is no change; an unreadable value is.
     Object sent = body.opt(type.rateProperty());
-    // An absent value as a client serializes it (null, "") is the stored empty rate re-sent.
-    BigDecimal sentRate = sent == null || sent == JSONObject.NULL
-        || StringUtils.isBlank(String.valueOf(sent)) ? null : decimalOrZero(sent);
+    boolean sentBlank = sent == null || sent == JSONObject.NULL
+        || StringUtils.isBlank(String.valueOf(sent));
+    BigDecimal sentRate = sentBlank ? null : decimalOrNull(sent);
+    boolean sentEmpty = sentBlank || (sentRate != null && sentRate.signum() <= 0);
     BigDecimal storedRate = (BigDecimal) stored.get(type.rateProperty());
-    boolean unchanged = sentRate == null ? storedRate == null
-        : storedRate != null && sentRate.compareTo(storedRate) == 0;
+    if (storedRate != null && storedRate.signum() <= 0) {
+      storedRate = null;
+    }
+    boolean unchanged = sentEmpty ? storedRate == null
+        : sentRate != null && storedRate != null && sentRate.compareTo(storedRate) == 0;
     if (unchanged) {
       return null;
     }
@@ -381,13 +387,13 @@ final class DocumentCurrencyRate {
     return refusal;
   }
 
-  /** A sent rate as a number; an unreadable value counts as 0, which is never a stored rate. */
-  private static BigDecimal decimalOrZero(Object value) {
+  /** A sent rate as a number, or {@code null} when it is not one. */
+  private static BigDecimal decimalOrNull(Object value) {
     try {
       return value instanceof BigDecimal b ? b
           : new BigDecimal(StringUtils.trimToEmpty(String.valueOf(value)));
     } catch (Exception e) {
-      return BigDecimal.ZERO;
+      return null;
     }
   }
 

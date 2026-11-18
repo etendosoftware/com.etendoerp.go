@@ -153,6 +153,7 @@ public class DocumentCurrencyRateTest {
     }
     Object value = body.opt(RATE);
     if ("".equals(value)) {
+      // Sentinel for a rate sent as "" (a form serializing an empty field), distinct from null.
       return "<blank>";
     }
     return value == null || value == JSONObject.NULL ? NULL
@@ -229,6 +230,19 @@ public class DocumentCurrencyRateTest {
             "{\"eTGOCurrencyRate\":\"1.1\"}", false, "usd", manual, true, null, "1.1" },
         { "processed document, write without a rate untouched", DOC_ID,
             "{\"description\":\"x\"}", false, "usd", manual, true, null, ABSENT },
+        { "processed document accepts its stored rate at another scale", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"1.10\"}", false, "usd", new BigDecimal("1.1"), true, null,
+            "1.1" },
+        { "processed document refuses a numeric rate", DOC_ID, "{\"eTGOCurrencyRate\":2.5}",
+            false, "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2.5" },
+        { "processed document with a stored 0 accepts an empty rate re-sent", DOC_ID,
+            "{\"eTGOCurrencyRate\":null}", false, "usd", BigDecimal.ZERO, true, null, NULL },
+        { "completing a draft with a rate is not the processed lock", DOC_ID,
+            "{\"documentAction\":\"CO\",\"eTGOCurrencyRate\":\"1.5\"}", true,
+            "usd", manual, false, null, "1.5" },
+        { "reactivating with a different rate is refused", DOC_ID,
+            "{\"documentAction\":\"RE\",\"eTGOCurrencyRate\":\"2\"}", false,
+            "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2" },
         { "processed org-currency document refuses a rate too", DOC_ID,
             "{\"eTGOCurrencyRate\":\"0.5\"}", false, "eur", null, true,
             DocumentCurrencyRate.CODE_PROCESSED, "0.5" },
