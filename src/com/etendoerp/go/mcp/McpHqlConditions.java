@@ -75,7 +75,7 @@ final class McpHqlConditions {
         || allowed.contains(value)) {
       return;
     }
-    throw McpRoutingException.invalidFilterValue(key, (String) value,
+    throw McpRequestRefusals.invalidFilterValue(key, (String) value,
         new java.util.ArrayList<>(new java.util.TreeSet<>(allowed)));
   }
 
@@ -128,15 +128,7 @@ final class McpHqlConditions {
       } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
         where.append(containsCondition(path, prop, type, key, operators.get(op)));
       } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        String inPath = prop.isPrimitive() ? path : idPath;
-        java.util.List<Object> values = inValues(key, operators.optJSONArray(op));
-        if (prop.isPrimitive()) {
-          for (Object value : values) {
-            requireAllowedValue(key, prop, value);
-          }
-        }
-        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
-            values));
+        where.append(inCondition(prop, path, idPath, type, key, operators.optJSONArray(op)));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
@@ -147,6 +139,22 @@ final class McpHqlConditions {
             .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
       }
     }
+  }
+
+  /**
+   * The condition of an {@code in}: on the value for a column, on the referenced id for a
+   * reference. On a list field every value must be one of its codes (ETP-5850).
+   */
+  private static String inCondition(Property prop, String path, String idPath, Class<?> type,
+      String key, JSONArray rawValues) throws JSONException {
+    java.util.List<Object> values = inValues(key, rawValues);
+    if (prop.isPrimitive()) {
+      for (Object value : values) {
+        requireAllowedValue(key, prop, value);
+      }
+    }
+    return McpBusinessFilters.inCondition(key, prop.isPrimitive() ? path : idPath, type,
+        prop.isPrimitive(), values);
   }
 
   private static String betweenCondition(String path, Property prop, Class<?> type, String key,

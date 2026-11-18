@@ -56,6 +56,8 @@ final class PortalDocumentQuery {
 
   /** The main entity's alias and the start of its condition, in every list query. */
   private static final String ALIAS_WHERE = " e where ";
+  /** Start of every query that reads the documents themselves. */
+  private static final String SELECT_DOCUMENTS_FROM = "select e from ";
 
   /** Visible {@code DocStatus} per kind (plan §B.1). Drafts and in-process states never show. */
   private static final Map<PortalDocumentKind, List<String>> VISIBLE_STATUSES =
@@ -217,7 +219,7 @@ final class PortalDocumentQuery {
    */
   static List<BaseOBObject> list(PortalSession session, PortalDocumentKind kind, Filter filter,
       int offset, int limit) {
-    Query<BaseOBObject> query = session().createQuery("select e from " + kind.getEntityName()
+    Query<BaseOBObject> query = session().createQuery(SELECT_DOCUMENTS_FROM + kind.getEntityName()
         + ALIAS_WHERE + where(kind, filter) + " order by e." + kind.getDateProperty()
         + " desc, e.documentNo desc", BaseOBObject.class);
     bind(query, session, kind, filter);
@@ -271,7 +273,7 @@ final class PortalDocumentQuery {
     if (ids == null || ids.isEmpty()) {
       return Collections.emptyList();
     }
-    Query<BaseOBObject> query = session().createQuery("select e from " + kind.getEntityName()
+    Query<BaseOBObject> query = session().createQuery(SELECT_DOCUMENTS_FROM + kind.getEntityName()
         + " e where e.id in (:" + P_IDS + ") and " + where(kind, Filter.none()),
         BaseOBObject.class);
     bind(query, session, kind, Filter.none());
@@ -534,7 +536,7 @@ final class PortalDocumentQuery {
     Object[] latest = null;
     Date latestDate = null;
     for (PortalDocumentKind kind : PortalDocumentKind.values()) {
-      Query<BaseOBObject> query = session().createQuery("select e from " + kind.getEntityName()
+      Query<BaseOBObject> query = session().createQuery(SELECT_DOCUMENTS_FROM + kind.getEntityName()
           + ALIAS_WHERE + where(kind, Filter.none()) + " order by e." + kind.getDateProperty()
           + " desc", BaseOBObject.class);
       bind(query, clientId, businessPartnerId, kind, Filter.none());
