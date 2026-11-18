@@ -69,9 +69,8 @@ class PaymentLedgerStore {
       + " stripe_event_id, stripe_subscription_id, stripe_customer_id, currency, amount_paid,"
       + " subtotal, tax_amount, total_amount, paid_at, period_start, period_end, lines,"
       + " fiscal_data, fiscal_data_at, payment_method)"
-      + " values (get_uuid(), '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '"
-      + PaymentStatus.PENDING_INVOICE + "', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-      + " ?, ?)"
+      + " values (get_uuid(), '0', '0', 'Y', now(), '0', now(), '0', ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+      + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       + " on conflict (stripe_invoice_id) do nothing"
       + " returning etgo_payment_id";
 
@@ -213,6 +212,7 @@ class PaymentLedgerStore {
       int i = 1;
       statement.setString(i++, accountId);
       statement.setString(i++, environmentClientId);
+      statement.setString(i++, PaymentStatus.PENDING_INVOICE);
       statement.setString(i++, payment.paymentType());
       statement.setString(i++, payment.billingReason());
       statement.setString(i++, billingEmail);
