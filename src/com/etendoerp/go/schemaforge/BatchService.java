@@ -128,7 +128,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  */
 public class BatchService {
 
-  private static final String KEY_ERROR = "error";
+  static final String KEY_ERROR = "error";
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   /**
@@ -230,6 +230,8 @@ public class BatchService {
   /** The record a {@code DELETE} operation removes. */
   static final String FIELD_RECORD_ID = "recordId";
   static final String METHOD_DELETE = NeoMethodPolicy.METHOD_DELETE;
+  private static final String KEY_OPERATIONS = "operations";
+  private static final String MSG_BATCH_FAILED = "Batch failed: ";
   private static final String OPS_PREFIX = "operations[";
   private static final String OPERATION_PREFIX = "Operation '";
 
@@ -286,7 +288,7 @@ public class BatchService {
       return;
     }
 
-    JSONArray operations = body.optJSONArray("operations");
+    JSONArray operations = body.optJSONArray(KEY_OPERATIONS);
     if (operations == null || operations.length() == 0) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing or empty 'operations' array");
@@ -308,7 +310,7 @@ public class BatchService {
     } catch (JSONException e) {
       log.error("[BATCH] JSON error while executing batch", e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage());
+          MSG_BATCH_FAILED + e.getMessage());
       return;
     }
 
@@ -509,7 +511,7 @@ public class BatchService {
       NeoBatchScope.runAfterCommitActions();
       JSONObject ok = new JSONObject();
       ok.put(FIELD_COMMITTED, true);
-      ok.put("operations", opResults);
+      ok.put(KEY_OPERATIONS, opResults);
       return ok;
     } catch (Exception e) {
       if (!commitAttempted) {
@@ -521,9 +523,9 @@ public class BatchService {
       // translation reads AD_Message on a usable session. A 5xx message is sanitized: it used to
       // forward e.getMessage() verbatim.
       NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] batch",
-          "Batch failed: ");
-      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
-          refusalDetail(classified), tracker.durable());
+          MSG_BATCH_FAILED);
+      return failureBody(-1, null, classified.getHttpStatus(), BatchRefusals.messageOf(classified),
+          BatchRefusals.detailOf(classified), tracker.durable());
     } finally {
       // Nested so the transaction claim is released whatever closing the scope does: a claim left
       // on the pooled thread would stop the next, unrelated request from ever committing.
@@ -532,6 +534,50 @@ public class BatchService {
       } finally {
         endCallerOwnedTransaction();
       }
+    }
+  }
+
+  /**
+   * Runs the operations through the very same pipeline as {@link #executeBatch(JSONArray)} but
+   * leaves the transaction to the caller (ETP-6051): nothing is committed, and the result is
+   * {@code {committed:false, operations:[{id, ok, recordId}, ...]}} on success. The caller flushes,
+   * writes whatever else belongs to the unit and commits once (the invoice inbox confirm commits
+   * through the invoice completion).
+   *
+   * <p>On a failure the session is rolled back here (a failed operation leaves it unusable) and the
+   * failure envelope of {@link #executeBatch(JSONArray)} is returned, so the caller never continues
+   * with half a unit. The claim of the transaction is always released, whatever happens: the
+   * request thread is pooled. The batch scope (memo, after-commit actions) belongs to the caller,
+   * who opens it before and closes it after the commit.</p>
+   *
+   * @param operations the ordered list of operation objects (must be non-null)
+   * @return the success or failure envelope
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  JSONObject executeInCallerTransaction(JSONArray operations) throws JSONException {
+    Map<String, String> resolvedIds = new HashMap<>();
+    JSONArray opResults = new JSONArray();
+    TransactionTracker tracker = new TransactionTracker();
+    beginCallerOwnedTransaction();
+    try {
+      for (int i = 0; i < operations.length(); i++) {
+        JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds,
+            opResults, tracker, null);
+        if (failure != null) {
+          rollbackQuietly();
+          NeoErrorResponses.retranslateBatchFailure(failure);
+          return failure;
+        }
+      }
+      return new JSONObject().put(FIELD_COMMITTED, false).put(KEY_OPERATIONS, opResults);
+    } catch (Exception e) {
+      rollbackQuietly();
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] unit",
+          MSG_BATCH_FAILED);
+      return failureBody(-1, null, classified.getHttpStatus(), BatchRefusals.messageOf(classified),
+          BatchRefusals.detailOf(classified), tracker.durable());
+    } finally {
+      endCallerOwnedTransaction();
     }
   }
 
@@ -643,25 +689,8 @@ public class BatchService {
           "[BATCH] preprocessor on op '" + op.opId() + "' (index " + op.index() + ")",
           "Failed to preprocess operation '" + op.opId() + "': ");
       return failureBody(op.index(), op.opId(), classified.getHttpStatus(),
-          errorMessageOf(classified), refusalDetail(classified), tracker.durable());
+          BatchRefusals.messageOf(classified), BatchRefusals.detailOf(classified), tracker.durable());
     }
-  }
-
-  /**
-   * The body of a classified refusal, as the failure's {@code detail} so its {@code code} and
-   * {@code messageKeys} reach the caller; {@code null} for a 5xx, whose failure carried no detail.
-   */
-  private static JSONObject refusalDetail(NeoResponse classified) {
-    return classified.getHttpStatus() < HttpServletResponse.SC_INTERNAL_SERVER_ERROR
-        ? classified.getBody()
-        : null;
-  }
-
-  /** The {@code error.message} of a NEO error response, or {@code null}. */
-  private static String errorMessageOf(NeoResponse response) {
-    JSONObject body = response.getBody();
-    JSONObject error = body != null ? body.optJSONObject(KEY_ERROR) : null;
-    return error != null ? error.optString("message", null) : null;
   }
 
   /**
@@ -959,7 +988,7 @@ public class BatchService {
    * use…"), so a bulk delete can tell the user why each row stayed.
    */
   private static String deleteRefusalMessage(String opId, NeoResponse rowResp) {
-    String reason = errorMessageOf(rowResp);
+    String reason = BatchRefusals.messageOf(rowResp);
     return StringUtils.isNotBlank(reason) ? reason
         : OPERATION_PREFIX + opId + "' rejected by server";
   }

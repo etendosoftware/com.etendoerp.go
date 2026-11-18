@@ -26,13 +26,17 @@ name: Mini Pipeline
 # project: the analysis token gets 403) reads the coverage for the comparison.
 #
 # ETP-6300: develop only. What reaches main (the daily cut, a hotfix, the push to main) is validated
-# by the full pipeline pilot (full-pipeline-pilot.yml), whose "Pilot: Go tests + Sonar + coverage"
+# by the full pipeline pilot (full-pipeline-pilot.yml), whose "Go tests + Sonar + coverage"
 # job does the same analysis and coverage gate against main (ETP-6299). A main -> develop back-merge
 # still runs here, its target being develop.
 #
 # ETP-6328: one job, like the pilot's: the tests, then Sonar with their coverage. Sonar only runs
 # when the tests passed; without the coverage of a full run its analysis says nothing. develop
-# requires this job's check, "Go tests + Sonar + coverage".
+# requires this job's check, "Mini Pipeline: Go tests + Sonar + coverage".
+#
+# ETP-6358: a name of its own. A cut's head is develop's head, which carries this job's run from
+# its push to develop; with the full pipeline's name, that run could meet main's required check
+# before the full pipeline ran on the cut.
 
 on:
   pull_request:
@@ -54,7 +58,7 @@ concurrency:
 
 jobs:
   go-tests:
-    name: Go tests + Sonar + coverage
+    name: 'Mini Pipeline: Go tests + Sonar + coverage'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:

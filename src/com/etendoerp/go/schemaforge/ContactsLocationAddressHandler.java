@@ -136,7 +136,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return handleCreate(ctx);
       }
       if (("PUT".equals(method) || "PATCH".equals(method)) && recordId != null) {
-        return handleUpdate(ctx, "PATCH".equals(method));
+        return handleUpdate(ctx);
       }
     } catch (Exception e) {
       SessionHandler.getInstance().rollback();
@@ -419,12 +419,20 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ update
 
-  private NeoResponse handleUpdate(NeoContext ctx, boolean partial) throws Exception {
+  private NeoResponse handleUpdate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
     String bplId = ctx.getRecordId();
     // ETP-5806 — resolved before the admin-mode block, for the same reasons as handleCreate.
     boolean structuredAddressEnabled =
         StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
+    // ETP-5806 CP-12b — see StructuredAddressComposer#requiresMergeOnUpdate for why this is a
+    // single call rather than inline `||`/`&&` here: the raw (pre-merge) body values are read as
+    // plain assignments, which cost nothing in Cognitive Complexity, and all the branching that
+    // decides the one boolean lives in that method instead of in this already-busy one.
+    boolean partial = StructuredAddressComposer.requiresMergeOnUpdate(ctx.getHttpMethod(),
+        structuredAddressEnabled, readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER), nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_COUNTRY, null)));
 
     OBContext.setAdminMode(true);
     try {
@@ -476,10 +484,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
 
       String nameVal = nullIfEmpty(body.optString("name", null));
-      if (nameVal != null) {
-        // ETP-6206: capped at C_BPartner_Location.Name (60) like the create path, or an edit that
-        // sends "city, long address line" fails at flush.
-        bpLoc.setName(ContactAddressName.capped(nameVal));
+      // ETP-6206 / ETP-5806 CP-12c. A caller-sent name wins and is capped at
+      // C_BPartner_Location.Name (60), like the create path; failing that, ContactAddressName
+      // recomputes the display name from the post-write geoLoc instead of leaving it stale. That
+      // whole decision is resolved inside ContactAddressName, as a plain method call with no
+      // branching added here, for the same Cognitive Complexity reason as the partial flag above.
+      String resolvedName = ContactAddressName.forUpdate(nameVal, structuredAddressEnabled, geoLoc,
+          ContactsLocationAddressHandler::buildDisplayName);
+      if (resolvedName != null) {
+        bpLoc.setName(resolvedName);
       }
       applyLocationFlags(body, bpLoc);
       // The address lives in C_Location, so an address-only edit would leave this row clean and
@@ -499,8 +512,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   /**
    * A PATCH changes only what it sends, but the update path overwrites the whole address: fill
-   * every address field the body omits with the stored value first (ETP-6012). Name and the
-   * flags already keep their stored value when omitted, so they are not merged here.
+   * every address field the body omits with the stored value first (ETP-6012). A PUT merges the
+   * same way whenever the body alone cannot satisfy the mandatory fields (ETP-5806 CP-12b) — see
+   * {@link StructuredAddressComposer#requiresMergeOnUpdate}. Name and the flags already keep
+   * their stored value when omitted, so they are not merged here.
    */
   static void mergeStoredAddress(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {

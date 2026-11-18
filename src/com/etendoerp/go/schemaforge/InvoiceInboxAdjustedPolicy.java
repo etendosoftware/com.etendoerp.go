@@ -29,14 +29,6 @@ package com.etendoerp.go.schemaforge;
  */
 final class InvoiceInboxAdjustedPolicy {
 
-  /**
-   * N1, decided by the product owner on 2026-11-13: choosing the category and/or the unit of a NEW
-   * product counts as modifying the alta. Neither is extracted by the OCR, so the user always
-   * chooses them, and therefore {@code newProduct} always marks. Flip this to {@code false} to go
-   * back to the plan's reading (only a changed name, or replacing a linked product, marks).
-   */
-  static final boolean NEW_PRODUCT_ALWAYS_MARKS = true;
-
   private InvoiceInboxAdjustedPolicy() {
   }
 
@@ -75,15 +67,28 @@ final class InvoiceInboxAdjustedPolicy {
   }
 
   /**
-   * Creating a new product from a line. See {@link #NEW_PRODUCT_ALWAYS_MARKS}.
+   * Creating a new product from a line. ETP-6051 reversed the N1 decision (every
+   * {@code newProduct} marks): the worker pre-fills the category and the unit, so creating the
+   * product with what was pre-filled does not mark. The category and the unit are compared against
+   * the stored base: the {@code new} block when the line already was a new product, else what the
+   * worker would pre-fill for it (the printed unit or the default).
+   *
+   * <p>Owner decision (2026-11-17): a mandatory value the OCR could not define does not count as
+   * adjusted when the user fills it. So {@code choiceDiffers} is true only when a field that HAD a
+   * stored value now differs (another value, or cleared); an empty -> value fill never counts. The
+   * name keeps the plain rule (it differs from the stored one), and replacing a linked product
+   * marks.</p>
    *
    * @param changed          whether the operation changed anything stored
    * @param previouslyLinked whether the product was linked before
    * @param nameDiffers      whether the name differs from the stored new name (the line
    *                         description the first time)
+   * @param choiceDiffers    whether the category or the unit, having had a stored value, now differs from it
+   *                         (another value or cleared); filling an empty one does not count
    * @return whether it marks
    */
-  static boolean newProduct(boolean changed, boolean previouslyLinked, boolean nameDiffers) {
-    return changed && (NEW_PRODUCT_ALWAYS_MARKS || previouslyLinked || nameDiffers);
+  static boolean newProduct(boolean changed, boolean previouslyLinked, boolean nameDiffers,
+      boolean choiceDiffers) {
+    return changed && (previouslyLinked || nameDiffers || choiceDiffers);
   }
 }

@@ -80,6 +80,15 @@ public final class UsageEventTypes {
   public static final String PUBLIC_API_REQUEST = "publicapi.request";
 
   /**
+   * ETP-5993 — one effective PDF of a document (a comprobante), never a preview: downloaded,
+   * printed or emailed from the app (source {@code ui}), or rendered and stored by the server
+   * (source {@code mcp}). {@code target} is the document type, {@code action} the channel and
+   * {@code properties.variant} the template it was printed with; nothing of the document itself.
+   * The shape is enforced by {@code com.etendoerp.go.schemaforge.DocumentPdfUsage}.
+   */
+  public static final String DOCUMENT_PDF_GENERATE = "document.pdf.generate";
+
+  /**
    * ETP-6209 — a customer portal link left with a document email. {@code sessionKey} is the link's
    * root ({@code etgo_portal_link.root_link_id}): one send.
    */
@@ -105,6 +114,7 @@ public final class UsageEventTypes {
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,
+      DOCUMENT_PDF_GENERATE,
       PORTAL_LINK_SENT,
       PORTAL_LINK_OPENED,
       PORTAL_LINK_RENEWED,
@@ -114,9 +124,12 @@ public final class UsageEventTypes {
    * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
    * ({@code NeoUsageEventEndpoint}, {@code POST /sws/neo/usage}) drops them, because a row of one of
    * these types is read as a fact about the tenant: a login, public API requests that are billed,
-   * or a decision whose cost counts in the tenant's AI spend. Each must also be in {@link #KNOWN}.
+   * or an AI turn or decision whose cost counts in the tenant's AI spend. Each must also be in
+   * {@link #KNOWN}.
    */
   private static final Set<String> SERVER_ONLY = Set.of(
+      AI_SUPPORT_MESSAGE,
+      AI_TOOL_EXECUTE,
       AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,

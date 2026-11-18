@@ -625,6 +625,40 @@ public interface OcrLookups {
   }
 
   /**
+   * The unit of measure a line printed, resolved to one of the tenant's (ETP-6051): by symbol, EDI
+   * code or name, ignoring case and diacritics, with a small alias table. Used only to pre-fill the
+   * unit of a product that does not exist yet.
+   *
+   * @param printed the unit as printed on the line, may be {@code null}
+   * @return the unit, empty when nothing matches or more than one unit does (never a guess)
+   */
+  default Optional<Party> uomByPrintedUnit(String printed) {
+    return Optional.empty();
+  }
+
+  /**
+   * The tenant's default unit of measure ({@code IsDefault}, the tenant's own first, then System's),
+   * the one the product window preselects (ETP-6051).
+   *
+   * @return the unit, empty when none is flagged
+   */
+  default Optional<Party> defaultUom() {
+    return Optional.empty();
+  }
+
+  /**
+   * The tenant's default product category (ETP-6051): the one the product's category column
+   * defaults to, the client's {@code IsDefault} non-summary category of the organization's own tree.
+   *
+   * @param organizationId the organization of the document (its own tree decides), {@code null} for
+   *                       the session's current one
+   * @return the category, empty when the tenant has none
+   */
+  default Optional<Party> defaultProductCategory(String organizationId) {
+    return Optional.empty();
+  }
+
+  /**
    * A unit of measure the session can use, by id (ETP-6050), to create a new product with it. The
    * name is the one of the session language.
    *

@@ -461,10 +461,12 @@ final class McpSchemaFieldBuilder {
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
+    // CP-10b: no langCode in scope for this legacy (test-only) overload — callers that need the
+    // translated structured-address label use the langCode-carrying overload below.
     return buildSchemaFieldsArray(adTab, dalEntity,
         new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
             java.util.Set.of()),
-        promptByColumnId, systemColumns, selectorRefs);
+        promptByColumnId, systemColumns, selectorRefs, null);
   }
 
   /**
@@ -493,12 +495,14 @@ final class McpSchemaFieldBuilder {
    * @param promptByColumnId  agent prompts keyed by AD_Column id
    * @param systemColumns system/audit columns never published
    * @param selectorRefs  AD_Reference ids treated as selectors
+   * @param langCode      the request's target language (CP-10b), for the structured-address
+   *                      label translation; may be {@code null}
    * @return the field array
    * @throws JSONException if the array cannot be assembled
    */
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       FieldMetadata fieldMetadata, Map<String, String> promptByColumnId,
-      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs, String langCode)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     // ETP-5684: without showAccountingFields the accounting status and the posting buttons are
@@ -521,7 +525,7 @@ final class McpSchemaFieldBuilder {
       if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
-            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
+            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs, langCode);
         McpUserRequiredOverride.apply(fieldObj,
             fieldMetadata.userRequiredByColumnId.get((String) col.getId()));
         fieldsArray.put(fieldObj);
@@ -570,7 +574,7 @@ final class McpSchemaFieldBuilder {
   }
 
   static JSONArray buildVirtualFieldsArray(SFEntity sfEntity, Tab adTab,
-      java.util.Set<String> selectorRefs) throws JSONException {
+      java.util.Set<String> selectorRefs, String langCode) throws JSONException {
     JSONArray virtualFields = new JSONArray();
     List<Column> columns = NeoSelectorPolicy.resolveVirtualColumns(sfEntity);
     if (columns.isEmpty()) {
@@ -590,7 +594,7 @@ final class McpSchemaFieldBuilder {
         .getEntityByTableName(columns.get(0).getTable().getDBTableName());
     for (Column col : columns) {
       JSONObject field = buildSchemaField(col, adTab, backingEntity, editable,
-          new HashMap<>(), new HashMap<>(), promptByColumnId, selectorRefs);
+          new HashMap<>(), new HashMap<>(), promptByColumnId, selectorRefs, langCode);
       // Says where the value really lands, so a reader who checks the entity's table against this
       // list does not conclude the schema is lying to them.
       field.put("backingTable", col.getTable().getDBTableName());
@@ -652,10 +656,39 @@ final class McpSchemaFieldBuilder {
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
   }
 
+  /**
+   * ETP-5806 / CP-10b — {@code AD_Column.Name} is a static, never-translated copy taken at
+   * column-creation time; the 3 structured SEPA address columns have no {@code AD_Field} anywhere
+   * (by design — Classic only ever surfaces them inside the Location/Address selector popup), so
+   * there is no field label to fall back to either. Their {@code AD_Element} already carries the
+   * correct Spanish translation, so for exactly these 3 columns the label comes from there instead.
+   *
+   * <p><b>CP-10b correction.</b> {@code Element.getName()} resolves through Hibernate's ambient
+   * {@code OBContext} session language, not through {@code langCode} — the language this specific
+   * request actually wants — so a Spanish request behind an English/base session still got the
+   * English name. {@link McpFieldLabels#elementTranslation} queries {@code AD_ELEMENT_TRL}
+   * directly by element id + {@code langCode}, the same explicit-language pattern
+   * {@link McpFieldLabels#loadFieldTranslations} already uses for {@code AD_Field}. Falls back to
+   * {@code getApplicationElement().getName()} (today's base-language name) when no translation row
+   * matches, and to {@code col.getName()} when the column has no {@code AD_Element} at all.
+   *
+   * @param langCode the request's target language, e.g. {@code es_ES}; may be {@code null}
+   */
+  private static String resolveSchemaFieldLabel(Column col, String langCode) {
+    String dbColName = col.getDBColumnName();
+    if (STRUCTURED_ADDRESS_COLUMNS.contains(dbColName.toUpperCase())
+        && col.getApplicationElement() != null) {
+      String translated = McpFieldLabels.elementTranslation(
+          (String) col.getApplicationElement().getId(), langCode);
+      return translated != null ? translated : col.getApplicationElement().getName();
+    }
+    return col.getName();
+  }
+
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
-      java.util.Set<String> selectorRefs) throws JSONException {
+      java.util.Set<String> selectorRefs, String langCode) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
     String type = mapColumnType(refId);
@@ -663,7 +696,7 @@ final class McpSchemaFieldBuilder {
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
-    fieldObj.put(McpConstants.KEY_LABEL, col.getName());
+    fieldObj.put(McpConstants.KEY_LABEL, resolveSchemaFieldLabel(col, langCode));
     fieldObj.put("type", type);
     if (!isButton) {
       // IMP-21: a button carries no payload value, so AD's NOT NULL flag says nothing about what

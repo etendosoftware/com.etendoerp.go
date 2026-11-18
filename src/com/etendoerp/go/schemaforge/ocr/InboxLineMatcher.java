@@ -24,6 +24,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INDEX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_MATCHED_BY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RATE;
@@ -33,6 +34,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_LABEL;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRINTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_AMBIGUOUS;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_NEW;
@@ -70,10 +72,16 @@ public final class InboxLineMatcher {
   private static final int PERCENT_SCALE = 4;
 
   private final OcrLookups lookups;
+  private final InboxNewProductDefaults newProductDefaults;
   private final Map<String, TaxAnswer> taxByRate = new HashMap<>();
 
   InboxLineMatcher(OcrLookups lookups) {
+    this(lookups, null);
+  }
+
+  InboxLineMatcher(OcrLookups lookups, String organizationId) {
     this.lookups = lookups;
+    this.newProductDefaults = new InboxNewProductDefaults(lookups, organizationId);
   }
 
   /**
@@ -116,9 +124,32 @@ public final class InboxLineMatcher {
     if (discount != null) {
       line.put(K_DISCOUNT, discount.doubleValue());
     }
-    line.put(K_PRODUCT, product(OcrJson.str(item, K_DESCRIPTION), candidates));
+    String printedUnit = OcrJson.str(item, "unit");
+    if (OcrJson.filled(printedUnit)) {
+      line.put(K_UNIT_PRINTED, printedUnit);
+    }
+    line.put(K_PRODUCT, productWithDefaults(OcrJson.str(item, K_DESCRIPTION), candidates,
+        printedUnit));
     line.put(K_TAX, tax(rate, locationId, invoiceDate));
     return line;
+  }
+
+  /**
+   * The product of a line; when it ends up {@code new}, its {@code new} block is pre-filled
+   * (ETP-6051) with the unit and the category it would be created with, each tagged by source. A
+   * linked or ambiguous product gets none: a linked one keeps its own unit and category, and the
+   * printed unit is never applied to it.
+   */
+  private JSONObject productWithDefaults(String description, List<Candidate> candidates,
+      String printedUnit) throws JSONException {
+    JSONObject product = product(description, candidates);
+    if (S_NEW.equals(product.optString(K_STATE))) {
+      JSONObject draft = newProductDefaults.draftFor(printedUnit);
+      if (draft.length() > 0) {
+        product.put(K_NEW, draft);
+      }
+    }
+    return product;
   }
 
   /**

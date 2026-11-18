@@ -162,6 +162,24 @@ public final class AddressVirtualSelectorPolicy {
       "EM_OBSEPA_BLDGNB", "buildingNumber",
       "EM_OBSEPA_BLDGNM", "buildingName");
 
+  /**
+   * The inverse of {@link #PUBLISHED_NAME_OVERRIDES} — published name to DB column name. Built
+   * once, not per lookup: the forward map is small (3 entries) and never changes at runtime.
+   *
+   * <p>ETP-5806 CP-10b (QA finding) — {@code McpQuerySupport#resolveFilterProperty} only ever
+   * resolved a filter key against the raw DAL property name
+   * ({@code oBSEPAStreetName}/etc, {@code Entity#getPropertyByColumnName}/{@code getProperty}), and
+   * never consulted this policy — so filtering {@code bp-location} (or any other address wrapper)
+   * by the very name {@code etendo_schema} publishes for these 3 columns ({@code streetName}/
+   * {@code buildingNumber}/{@code buildingName}) 422'd with {@code unknown_filter_field}, and only
+   * the undocumented raw DAL property name actually worked. See
+   * {@code McpQuerySupport#resolveFilterProperty}'s added fallback.
+   */
+  private static final Map<String, String> PUBLISHED_NAME_TO_COLUMN =
+      PUBLISHED_NAME_OVERRIDES.entrySet().stream()
+          .collect(java.util.stream.Collectors.toUnmodifiableMap(
+              Map.Entry::getValue, Map.Entry::getKey));
+
   private AddressVirtualSelectorPolicy() {
   }
 
@@ -174,6 +192,18 @@ public final class AddressVirtualSelectorPolicy {
    */
   public static String publishedNameOverride(String dbColumnName) {
     return dbColumnName == null ? null : PUBLISHED_NAME_OVERRIDES.get(dbColumnName.toUpperCase());
+  }
+
+  /**
+   * The DB column name behind a published structured-address field name — the inverse of
+   * {@link #publishedNameOverride} (ETP-5806 CP-10b).
+   *
+   * @param publishedName the field name as {@code etendo_schema} advertises it, e.g. {@code streetName}
+   * @return the DB column name (e.g. {@code EM_OBSEPA_StrtNm}'s upper-cased form), or {@code null}
+   *     when {@code publishedName} is not one of the 3 overridden names
+   */
+  public static String rawColumnNameForPublishedName(String publishedName) {
+    return publishedName == null ? null : PUBLISHED_NAME_TO_COLUMN.get(publishedName);
   }
 
   /**
