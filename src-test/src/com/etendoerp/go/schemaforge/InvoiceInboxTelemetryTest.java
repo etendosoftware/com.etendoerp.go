@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -32,6 +33,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -48,10 +50,19 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
  */
 class InvoiceInboxTelemetryTest {
 
+  @BeforeEach
+  void startFromAQuietSender() throws Exception {
+    // events queued by other test classes (the confirm tests send with no seam) must not leak in
+    awaitSenderIdle();
+    InvoiceInboxTelemetry.setTelemetryService(null);
+    awaitSenderIdle();
+  }
+
   @AfterEach
   void restoreTheRuntimeService() throws Exception {
     awaitSenderIdle();
     InvoiceInboxTelemetry.setTelemetryService(null);
+    assertFalse(InvoiceInboxTelemetry.properties(false, null).isEmpty());
   }
 
   /** Waits until the static single-thread sender has nothing queued or running (events drained). */
@@ -130,13 +141,16 @@ class InvoiceInboxTelemetryTest {
 
       InvoiceInboxTelemetry.documentConfirmed(false, "CLIENT-1");
 
-      // wait for the sender to go idle instead of for the holder: if runtime() is slow the wait
-      // is long enough, and if it throws the sender swallows it and the holder stays null
-      awaitSenderIdle();
+      // poll the holder (bounded): the executor's idle check is approximate, so idle != built
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (holder.get() == null && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
       NeoTelemetryService built = holder.get();
+      org.junit.jupiter.api.Assertions.assertNotNull(built, "the runtime service was built");
       InvoiceInboxTelemetry.documentConfirmed(true, null);
       awaitSenderIdle();
-      assertEquals(built, holder.get(), "when it is built, it is built once");
+      assertSame(built, holder.get(), "it is built once, the second event reuses it");
     } finally {
       if (previous == null) {
         System.clearProperty(enabledKey);
