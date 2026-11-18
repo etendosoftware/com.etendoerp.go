@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -43,6 +45,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.data.IncomingDocument;
@@ -237,5 +240,144 @@ class InvoiceInboxSummaryTest {
     verify(row, never()).setAdjusted(any());
     verify(row, never()).setReviewed(any());
     verify(row, never()).setCurrentData(any());
+  }
+
+  // ------------------------------------------------------------------ the totals warning
+
+  private static Currency currency(long precision) {
+    Currency currency = mock(Currency.class);
+    when(currency.getStandardPrecision()).thenReturn(precision);
+    return currency;
+  }
+
+  /** One line of 100 at 21% (lines total 121) with the given total source and printed total. */
+  private static JSONObject printed(String source, Object total) throws JSONException {
+    JSONObject header = new JSONObject().put("totalSource", source);
+    if (total != null) {
+      header.put("totalAmount", total);
+    }
+    return new JSONObject().put(HEADER, header).put("lines", new JSONArray().put(
+        new JSONObject().put("quantity", 1).put("unitPrice", 100).put("taxRate", 21)));
+  }
+
+  @Test
+  @DisplayName("a printed total equal to the lines total, or one cent away, does not warn")
+  void aPrintedTotalWithinOneMinimalUnitDoesNotWarn() throws Exception {
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 121), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 121.01), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 120.99), null));
+  }
+
+  @Test
+  @DisplayName("a printed total two cents or more away warns, a large gap too")
+  void aPrintedTotalBeyondOneMinimalUnitWarns() throws Exception {
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 121.02), null));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 119.98), null));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 5000), null));
+  }
+
+  @Test
+  @DisplayName("the printed total is rounded HALF_UP at the currency scale before comparing")
+  void thePrintedTotalIsRoundedAtTheScaleBeforeComparing() throws Exception {
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 121.014), null));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 121.016), null));
+  }
+
+  @Test
+  @DisplayName("the minimal unit is the one of the currency: whole units for 0 decimals, 3 for KWD")
+  void theBoundaryFollowsTheCurrencyScale() throws Exception {
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 122), currency(0)));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 123), currency(0)));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 121.001), currency(3)));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 121.002), currency(3)));
+  }
+
+  @Test
+  @DisplayName("a currency without precision reads as two decimals")
+  void aCurrencyWithoutPrecisionIsTwoDecimals() throws Exception {
+    Currency noPrecision = mock(Currency.class);
+    when(noPrecision.getStandardPrecision()).thenReturn(null);
+
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", 121.01), noPrecision));
+    assertTrue(InvoiceInboxSummary.totalMismatch(printed("printed", 121.02), noPrecision));
+  }
+
+  @Test
+  @DisplayName("only a printed total is compared: a lines total, or none, never warns")
+  void onlyAPrintedTotalIsCompared() throws Exception {
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("lines", 999), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", null), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", JSONObject.NULL), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(printed("printed", "abc"), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(new JSONObject(), null));
+    assertFalse(InvoiceInboxSummary.totalMismatch(null, null));
+  }
+
+  @Test
+  @DisplayName("negative totals compare with their sign: a sign difference is a mismatch")
+  void aSignDifferenceIsAMismatch() throws Exception {
+    JSONObject credit = new JSONObject().put(HEADER, new JSONObject().put("totalSource", "printed")
+        .put("totalAmount", -121)).put("lines", new JSONArray().put(
+            new JSONObject().put("quantity", -1).put("unitPrice", 100).put("taxRate", 21)));
+    assertFalse(InvoiceInboxSummary.totalMismatch(credit, null));
+
+    credit.getJSONObject(HEADER).put("totalAmount", 121);
+    assertTrue(InvoiceInboxSummary.totalMismatch(credit, null));
+  }
+
+  @Test
+  @DisplayName("a printed total with no lines compares against zero")
+  void noLinesCompareAgainstZero() throws Exception {
+    JSONObject noLines = new JSONObject().put(HEADER, new JSONObject()
+        .put("totalSource", "printed").put("totalAmount", 0.01));
+    assertFalse(InvoiceInboxSummary.totalMismatch(noLines, null));
+
+    noLines.getJSONObject(HEADER).put("totalAmount", 0.02);
+    assertTrue(InvoiceInboxSummary.totalMismatch(noLines, null));
+  }
+
+  @Test
+  @DisplayName("newProducts counts the lines whose product is in state new")
+  void newProductsCountsTheNewLines() throws Exception {
+    JSONArray lines = new JSONArray()
+        .put(new JSONObject().put("product", new JSONObject().put(STATE, "new")))
+        .put(new JSONObject().put("product", new JSONObject().put(STATE, "linked")))
+        .put(new JSONObject().put("product", new JSONObject().put(STATE, "new")))
+        .put(new JSONObject()).put("not-an-object");
+
+    assertEquals(2, InvoiceInboxSummary.newProducts(lines));
+    assertEquals(0, InvoiceInboxSummary.newProducts(null));
+    assertEquals(0, InvoiceInboxSummary.newProducts(new JSONArray()));
+  }
+
+  @Test
+  @DisplayName("syncFrom writes the currency, the warning and the new products count")
+  void syncFromWritesTheDerivedColumns() throws Exception {
+    Currency eur = currency(2);
+    when(dal.get(Currency.class, "EUR")).thenReturn(eur);
+    JSONObject document = printed("printed", 130);
+    document.getJSONObject(HEADER).put("currencyId", "EUR");
+    document.getJSONArray("lines").getJSONObject(0)
+        .put("product", new JSONObject().put(STATE, "new"));
+
+    InvoiceInboxSummary.syncFrom(document, row);
+
+    verify(row).setCurrency(eur);
+    verify(row).setTotalMismatch(true);
+    verify(row).setNewProducts(1L);
+  }
+
+  @Test
+  @DisplayName("syncFrom clears the warning when the printed total follows the lines")
+  void syncFromClearsTheWarning() throws Exception {
+    JSONObject document = printed("printed", 121);
+    document.getJSONObject(HEADER).put("currencyId", "EUR");
+    Currency eur = currency(2);
+    when(dal.get(Currency.class, "EUR")).thenReturn(eur);
+
+    InvoiceInboxSummary.syncFrom(document, row);
+
+    verify(row).setTotalMismatch(false);
+    verify(row).setNewProducts(0L);
   }
 }

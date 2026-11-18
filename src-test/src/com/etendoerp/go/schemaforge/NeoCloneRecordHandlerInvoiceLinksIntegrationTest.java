@@ -102,10 +102,10 @@ public class NeoCloneRecordHandlerInvoiceLinksIntegrationTest extends WeldBaseTe
       throws Exception {
     Invoice source = createLinkedDraftSource();
     String sourceId = source.getId();
+    String correctedInvoiceId = source.getAeatsiiInvoice().getId();
     String sourceDocNo = source.getDocumentNo();
     int sourceLineCount = source.getInvoiceLineList().size();
     assertTrue("fixture: the source needs lines", sourceLineCount > 0);
-    assertNotNull("fixture: corrected invoice set", source.getAeatsiiInvoice());
     assertNotNull("fixture: order set", source.getSalesOrder());
     for (InvoiceLine line : source.getInvoiceLineList()) {
       assertNotNull("fixture: order line set", line.getSalesOrderLine());
@@ -147,6 +147,8 @@ public class NeoCloneRecordHandlerInvoiceLinksIntegrationTest extends WeldBaseTe
     Invoice reloadedSource = OBDal.getInstance().get(Invoice.class, sourceId);
     assertEquals(sourceDocNo, reloadedSource.getDocumentNo());
     assertNotNull("the source keeps its corrected invoice", reloadedSource.getAeatsiiInvoice());
+    assertEquals("the source keeps the same corrected invoice", correctedInvoiceId,
+        reloadedSource.getAeatsiiInvoice().getId());
     assertNotNull("the source keeps its order", reloadedSource.getSalesOrder());
     assertEquals(sourceLineCount, reloadedSource.getInvoiceLineList().size());
     for (InvoiceLine line : reloadedSource.getInvoiceLineList()) {
@@ -182,12 +184,21 @@ public class NeoCloneRecordHandlerInvoiceLinksIntegrationTest extends WeldBaseTe
     source.setDocumentAction("CO");
     source.setProcessed(false);
     source.setPosted("N");
-    source.setAeatsiiInvoice(template);
     for (InvoiceLine line : source.getInvoiceLineList()) {
       line.setETGOSourceInvoiceLine(referencedLine);
     }
-    OBDal.getInstance().save(source);
-    OBDal.getInstance().flush();
+    OBDal dal = OBDal.getInstance();
+    dal.save(source);
+    dal.flush();
+
+    // The SII insert trigger assigns the link according to the legal entity's configuration.
+    dal.refresh(source);
+    source.setAeatsiiInvoice(template);
+    dal.flush();
+    dal.refresh(source);
+    assertNotNull("fixture: corrected invoice persisted", source.getAeatsiiInvoice());
+    assertEquals("fixture: the source points to the template", template.getId(),
+        source.getAeatsiiInvoice().getId());
     return source;
   }
 

@@ -531,7 +531,10 @@ public final class NeoPrintAfterComplete {
     NeoPrintableRenderer.Outcome outcome = new NeoPrintableRenderer().renderAndStore(
         entity.getETGOSFSpec(), entity, job.recordId, status, job.language);
     if (outcome == NeoPrintableRenderer.Outcome.STORED) {
+      String document = NeoPdfSourceConfig.printDocumentOf(entity);
       OBDal.getInstance().commitAndClose();
+      // ETP-5993: counted once committed, so a store that rolled back is never a generated PDF.
+      DocumentPdfUsage.recordServerRender(document);
     } else {
       log.debug("[print] {}/{}: nothing stored ({})", job.specName, job.recordId, outcome);
     }

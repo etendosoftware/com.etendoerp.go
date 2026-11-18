@@ -864,9 +864,11 @@ public class McpToolRouter {
 
     // ETP-5802: a reference the agent set must not point at an inactive row. Checked right after
     // ownership, on the same ids-only body.
-    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
-    if (inactiveReference != null) {
-      return wrapAsErrorContent(inactiveReference);
+    // ETP-6176: ... and must be one the app's selector offers for this record.
+    JSONObject badReference = McpNotOfferedReference.refuse(sfEntity, adTab, null,
+        filteredBody.optString(McpConstants.PARAM_PARENT_ID, null), filteredBody, null, null);
+    if (badReference != null) {
+      return wrapAsErrorContent(badReference);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -1153,9 +1155,13 @@ public class McpToolRouter {
     // ETP-5802: same inactive-reference check as handleCreate. filteredBody here carries only the
     // keys the caller sent (no defaults pass runs on update, per the IMP-16 note below), so a field
     // the caller does not touch is never re-validated — CP-6 regression guard.
-    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
-    if (inactiveReference != null) {
-      return wrapAsErrorContent(inactiveReference);
+    // ETP-6176: then the callouts of the references this update changes are re-fired, exactly as
+    // the REST preflight does, and the selector check judges the record the update leaves behind.
+    JSONObject badReference = McpNotOfferedReference.refuse(sfEntity, adTab, recordId, null,
+        filteredBody, McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT,
+            recordId, filteredBody, adTab, sfEntity), dalEntityName);
+    if (badReference != null) {
+      return wrapAsErrorContent(badReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until

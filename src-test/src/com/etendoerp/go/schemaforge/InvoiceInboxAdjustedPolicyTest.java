@@ -52,34 +52,34 @@ class InvoiceInboxAdjustedPolicyTest {
   }
 
   @Test
-  void n1TheDecisionIsInForceAndAnAltaOfAProductAlwaysMarksWhenItChangedSomething() {
-    assertTrue(InvoiceInboxAdjustedPolicy.NEW_PRODUCT_ALWAYS_MARKS);
-    for (boolean linked : new boolean[] { false, true }) {
-      for (boolean nameDiffers : new boolean[] { false, true }) {
-        assertTrue(InvoiceInboxAdjustedPolicy.newProduct(true, linked, nameDiffers));
-      }
-    }
+  void anAltaOfAProductMarksOnlyForAStoredValueChangeOrAReplacedLinkedOne() {
+    // changed, previouslyLinked, nameDiffers, choiceDiffers -> marks; choiceDiffers is true only for
+    // a field that had a stored value (filling an empty one is false: owner decision 2026-11-17)
+    assertFalse(InvoiceInboxAdjustedPolicy.newProduct(true, false, false, false));
+    assertTrue(InvoiceInboxAdjustedPolicy.newProduct(true, true, false, false));
+    assertTrue(InvoiceInboxAdjustedPolicy.newProduct(true, false, true, false));
+    assertTrue(InvoiceInboxAdjustedPolicy.newProduct(true, false, false, true));
+    assertTrue(InvoiceInboxAdjustedPolicy.newProduct(true, true, true, true));
   }
 
   @Test
-  void aProductAltaThatChangedNothingNeverMarksWhateverTheFlag() {
-    for (boolean linked : new boolean[] { false, true }) {
-      for (boolean nameDiffers : new boolean[] { false, true }) {
-        assertFalse(InvoiceInboxAdjustedPolicy.newProduct(false, linked, nameDiffers));
-      }
-    }
+  void aProductAltaThatChangedNothingNeverMarks() {
+    assertFalse(InvoiceInboxAdjustedPolicy.newProduct(false, false, false, false));
+    assertFalse(InvoiceInboxAdjustedPolicy.newProduct(false, true, true, true));
   }
 
   @Test
-  void theFlagFalseReadingIsThePlansMatrixAndIsWhatTheFlagSwitches() {
-    // With the flag off (the plan's reading) only a changed name or replacing a linked product
-    // marks. The flag is a compile-time constant, so the plan's table is checked as a function of
-    // it: under N1 every row of the table below is true.
-    boolean flag = InvoiceInboxAdjustedPolicy.NEW_PRODUCT_ALWAYS_MARKS;
-    boolean[][] table = { { false, false }, { false, true }, { true, false }, { true, true } };
-    for (boolean[] row : table) {
-      boolean plan = row[0] || row[1];
-      assertEquals(flag || plan, InvoiceInboxAdjustedPolicy.newProduct(true, row[0], row[1]));
+  void theProductAltaTableIsExplicitForEveryCombination() {
+    // changed, previouslyLinked, nameDiffers, choiceDiffers -> marks
+    for (int bits = 0; bits < 16; bits++) {
+      boolean changed = (bits & 8) != 0;
+      boolean linked = (bits & 4) != 0;
+      boolean name = (bits & 2) != 0;
+      boolean choice = (bits & 1) != 0;
+      boolean expected = changed && (linked || name || choice);
+
+      assertEquals(expected, InvoiceInboxAdjustedPolicy.newProduct(changed, linked, name, choice),
+          "changed=" + changed + " linked=" + linked + " name=" + name + " choice=" + choice);
     }
   }
 }
