@@ -333,17 +333,28 @@ final class DocumentCurrencyRate {
     if (finalRate != null && finalRate.signum() > 0) {
       return null;
     }
+    return missingRateRefusal(completing, changed, inputs, orgCurrencyId);
+  }
+
+  /**
+   * The refusal of a write whose rate to save is empty: missing on complete, emptied by the caller
+   * on a save that did not change the currency or the date, or missing from the rate range.
+   */
+  private NeoResponse missingRateRefusal(boolean completing, boolean changed, RateInputs inputs,
+      String orgCurrencyId) {
+    String currencyId = inputs.currencyId();
     if (completing) {
       return DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId));
     }
     // A write that changes neither the currency nor the date never looked the rate up: the rate is
     // empty because the caller cleared it (or it was stored empty), which says nothing about the
     // range. Only claim the range is missing when it really is (ETP-5840 QA CP-12a).
-    if (!changed && lookupRate(orgCurrencyId, currencyId, date, orgId, clientId) != null) {
+    if (!changed && lookupRate(orgCurrencyId, currencyId, inputs.referenceDate(), inputs.orgId(),
+        inputs.clientId()) != null) {
       return DocumentRateMessages.emptyOnSave(isoCode(orgCurrencyId), isoCode(currencyId));
     }
-    return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
-        type.referenceDateLabelKey(), type.referenceDateProperty());
+    return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId),
+        inputs.referenceDate(), type.referenceDateLabelKey(), type.referenceDateProperty());
   }
 
   /**
