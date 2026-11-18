@@ -37,6 +37,7 @@ public final class NeoTelemetryEvent {
   private final Instant timestamp;
   private final String clientId;
   private final String insertId;
+  private final NeoTelemetryIdentity identity;
 
   /**
    * An event with no tenant for the server log.
@@ -59,6 +60,21 @@ public final class NeoTelemetryEvent {
    */
   NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
       String clientId) {
+    this(name, properties, timestamp, clientId, NeoTelemetryIdentity.NONE);
+  }
+
+  /**
+   * An event with its common identity (ETP-6228).
+   *
+   * @param name       backend event name
+   * @param properties sanitized properties
+   * @param timestamp  creation instant
+   * @param clientId   the {@code AD_Client_ID} for the server log, or {@code null}
+   * @param identity   the identity resolved when the event was built, {@code null} for none
+   */
+  NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
+      String clientId, NeoTelemetryIdentity identity) {
+    this.identity = identity == null ? NeoTelemetryIdentity.NONE : identity;
     this.name = name;
     this.properties = Collections.unmodifiableMap(new LinkedHashMap<>(properties));
     this.timestamp = timestamp;
@@ -117,5 +133,15 @@ public final class NeoTelemetryEvent {
    */
   public String getInsertId() {
     return insertId;
+  }
+
+  /**
+   * The common identity (user, environment, owner account, tenant type) resolved when the event
+   * was built (ETP-6228), never {@code null}. The Mixpanel sink adds it to the event.
+   *
+   * @return the identity, {@link NeoTelemetryIdentity#NONE} when the event had no session
+   */
+  public NeoTelemetryIdentity getIdentity() {
+    return identity;
   }
 }

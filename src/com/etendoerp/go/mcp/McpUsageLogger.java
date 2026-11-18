@@ -38,6 +38,7 @@ import org.openbravo.database.ExternalConnectionPool;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -361,7 +362,10 @@ final class McpUsageLogger {
       props.put("respBytes", row.respBytes());
       // row.payload() is deliberately absent and must stay absent.
       // The tenant goes to the server log only, not into props (which Mixpanel receives).
-      telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props, row.clientId());
+      // ETP-6228: the row names its client and user; the identity travels with the event.
+      NeoTelemetryIdentity.runWith(NeoTelemetryIdentity.capture(row.clientId(), row.userId()),
+          () -> telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props,
+              row.clientId()));
     } catch (Throwable t) { // NOSONAR — the projection is best-effort by construction.
       log.debug("Could not project MCP telemetry for tool '{}'.", row.toolName(), t);
     }

@@ -54,6 +54,7 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
 import com.etendoerp.go.schemaforge.BankBouncePairService.Detection;
 import com.etendoerp.go.schemaforge.BankBouncePairService.Validated;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -838,7 +839,10 @@ final class BankBounceKpiTelemetry {
   private static void sendNow(String event, Map<String, Object> properties, String clientId) {
     try {
       NeoTelemetryService service = telemetry();
-      SENDER.execute(() -> service.emit(event, properties, clientId));
+      // ETP-6228: the sender thread has no session, so the identity is captured here.
+      NeoTelemetryIdentity identity = NeoTelemetryIdentity.capture(clientId, null);
+      SENDER.execute(() -> NeoTelemetryIdentity.runWith(identity,
+          () -> service.emit(event, properties, clientId)));
     } catch (RejectedExecutionException e) {
       log.debug("Bounce KPI telemetry queue full; dropping {}", event);
     }
