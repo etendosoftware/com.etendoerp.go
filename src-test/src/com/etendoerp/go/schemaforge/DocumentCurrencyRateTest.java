@@ -219,8 +219,8 @@ public class DocumentCurrencyRateTest {
             "usd", manual, false, DocumentRateMessages.CODE_MISSING_ON_COMPLETE, NULL },
         { "processed document untouched", DOC_ID, "{\"eTGOCurrencyRate\":null}", false,
             "usd", null, true, null, NULL },
-        // ETP-6177: the rate is locked on a processed document, as the window's rate picker is;
-        // core's C_Order restriction trigger does not cover the column, so this is the refusal.
+        // ETP-6177: the rate is locked on a processed document, as the window's rate picker is.
+        // Core's C_Order restriction trigger does not cover the column, so this is the refusal.
         { "processed document refuses a new rate", DOC_ID, "{\"eTGOCurrencyRate\":\"2.5\"}",
             false, "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2.5" },
         { "processed document refuses clearing its rate", DOC_ID,

@@ -715,7 +715,16 @@ public class BatchService {
   public record OperationContext(int index, String opId, String specName, String entityName,
       JSONObject body, String parentId, Map<String, Object> hookAttributes) {
 
-    /** An operation with no hook attributes yet. */
+    /**
+     * An operation with no hook attributes yet.
+     *
+     * @param index      the operation's position in the batch
+     * @param opId       the operation's own id within the batch
+     * @param specName   the spec the operation targets
+     * @param entityName the entity within that spec
+     * @param body       the operation body, with every {@code $ref} already resolved
+     * @param parentId   the resolved parent record id, or {@code null} for a top-level entity
+     */
     public OperationContext(int index, String opId, String specName, String entityName,
         JSONObject body, String parentId) {
       this(index, opId, specName, entityName, body, parentId, new HashMap<>());
