@@ -59,7 +59,10 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
  *       therefore cannot roll back the user's order — the hazard D25 names.</li>
  *   <li><b>Its own thread.</b> {@link #record(McpUsageRow)} only enqueues; the INSERT happens on a
  *       single daemon writer thread. The caller pays a queue offer, not a database round-trip, so a
- *       slow or unreachable database slows telemetry and nothing else.</li>
+ *       slow or unreachable database slows telemetry and nothing else. One exception (ETP-6228):
+ *       the Mixpanel identity is resolved in {@link McpSessionManager#executeInContext}, on the
+ *       request thread, while its DAL session is live, so a resolver cache miss (once per client
+ *       per minute) may cost a lookup there; the writer thread never touches {@code OBDal}.</li>
  *   <li><b>It cannot throw.</b> {@link #record(McpUsageRow)} catches {@link Throwable}; so does the
  *       writer task. A full queue drops the row and logs at debug. There is no code path from a
  *       telemetry failure back to the caller or to the tool result.</li>
@@ -231,13 +234,21 @@ final class McpUsageLogger {
    * @param row the already-resolved row; ignored when null or when telemetry is disabled
    */
   static void enqueue(McpUsageRow row) {
+    enqueue(row, NeoTelemetryIdentity.NONE);
+  }
+
+  /**
+   * Enqueue one row with the identity its Mixpanel projection carries (ETP-6228), captured earlier
+   * by {@link #captureIdentity}; the writer thread has no session and never touches {@code OBDal}.
+   *
+   * @param row      the already-resolved row; ignored when null or when telemetry is disabled
+   * @param identity the identity captured for the call, {@code null} for none
+   */
+  static void enqueue(McpUsageRow row, NeoTelemetryIdentity identity) {
     if (row == null || !isEnabled()) {
       return;
     }
     try {
-      // ETP-6228: the identity is resolved here, on the caller's thread, which has the session;
-      // the writer thread has no OBContext and, by Rule 1, never touches OBDal.
-      NeoTelemetryIdentity identity = captureIdentity(row);
       WRITER.execute(() -> write(row, identity));
     } catch (RejectedExecutionException e) {
       noteDrop("queue full or writer shut down", row.toolName());
@@ -248,16 +259,17 @@ final class McpUsageLogger {
   }
 
   /**
-   * The identity the row's Mixpanel projection will carry, captured on the calling thread; none
-   * when the projection is off, so no lookup is made for a row that is never projected. Never
-   * throws.
+   * The identity a call's Mixpanel projection will carry, captured on a thread that still has the
+   * call's context and DAL session ({@link McpSessionManager#executeInContext}); none when the
+   * projection is off, so no lookup is made for a row that is never projected. A resolver cache
+   * miss costs two queries on that thread, once per client per minute. Never throws.
    */
-  static NeoTelemetryIdentity captureIdentity(McpUsageRow row) {
+  static NeoTelemetryIdentity captureIdentity(String clientId, String userId) {
     if (!isMixpanelEnabled()) {
       return NeoTelemetryIdentity.NONE;
     }
     try {
-      return telemetry().captureIdentity(row.clientId(), row.userId());
+      return telemetry().captureIdentity(clientId, userId);
     } catch (Throwable t) { // NOSONAR — telemetry must not escalate anything to the caller.
       log.debug("Could not capture the MCP telemetry identity.", t);
       return NeoTelemetryIdentity.NONE;

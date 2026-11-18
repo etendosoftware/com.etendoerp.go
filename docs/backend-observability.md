@@ -77,8 +77,9 @@ without the ids.
 Emitters that send from a background thread (`BankBounceKpiTelemetry`, `ContactTypeTelemetry`)
 capture the identity on the calling thread through the service (`NeoTelemetryService.captureIdentity`,
 so it uses the service's own resolver) and hand it to the sender (`NeoTelemetryIdentity.runWith`);
-`McpUsageLogger.enqueue` captures it from its row's client and user on the request thread, before
-the row goes to the writer thread, which has no session and never touches `OBDal`. A new emitter
+`McpSessionManager.executeInContext` captures it for the call's client and user on the request
+thread, while the call's context and DAL session (owned by `DalRequestFilter`) are live, and the row
+carries it to the writer thread, which has no session and never touches `OBDal`. A new emitter
 must do the same, or run on a thread that has the session.
 
 The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`
@@ -101,7 +102,8 @@ Payloads are allowlisted before reaching the sink.
 Allowed low-cardinality keys:
 
 - `account_id` — the tenant (`AD_Client_ID`). The **only** identifier a backend event may carry
-  (PM legal rule, ETP-5791); the web client sends the same key. No record id of any kind.
+  (PM legal rule, ETP-5791; superseded by the ETP-6228 common identity, pending owner
+  confirmation); the web client sends the same key. No record id of any kind.
 - `category`
 - `change_origin`
 - `change_trigger`

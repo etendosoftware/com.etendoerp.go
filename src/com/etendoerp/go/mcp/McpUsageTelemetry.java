@@ -31,6 +31,8 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
+
 /**
  * Turns an MCP request/response pair into the <i>shape</i> of a call, for {@link McpUsageLogger}
  * (Track B1), and remembers what the {@code initialize} handshake said about the client.
@@ -153,7 +155,28 @@ final class McpUsageTelemetry {
    */
   private static final ThreadLocal<String> CURRENT_CALLER = new ThreadLocal<>();
 
+  /**
+   * The common Mixpanel identity (ETP-6228) of the call on this thread, captured by
+   * {@link McpSessionManager#executeInContext} while the call's DAL session and context are still
+   * live, and handed to the usage row's projection. Cleared with {@link #CURRENT_TENANT}.
+   */
+  private static final ThreadLocal<NeoTelemetryIdentity> CURRENT_IDENTITY = new ThreadLocal<>();
+
   private McpUsageTelemetry() {
+  }
+
+  /** Bind the identity captured for the current call. */
+  static void setCurrentIdentity(NeoTelemetryIdentity identity) {
+    CURRENT_IDENTITY.set(identity);
+  }
+
+  /**
+   * @return the identity captured for this call, or {@link NeoTelemetryIdentity#NONE} when the
+   *     request never entered {@link McpSessionManager#executeInContext}
+   */
+  static NeoTelemetryIdentity currentIdentity() {
+    NeoTelemetryIdentity identity = CURRENT_IDENTITY.get();
+    return identity == null ? NeoTelemetryIdentity.NONE : identity;
   }
 
   /** Bind the effective client/org the current call runs under. Never throws. */
@@ -164,6 +187,7 @@ final class McpUsageTelemetry {
   /** Unbind the effective tenant. Must run in a {@code finally} — the servlet thread is pooled. */
   static void clearCurrentTenant() {
     CURRENT_TENANT.remove();
+    CURRENT_IDENTITY.remove();
   }
 
   /**

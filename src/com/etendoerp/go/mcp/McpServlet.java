@@ -547,7 +547,7 @@ public class McpServlet extends HttpServlet {
           .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
           .payload(payload)
           .build();
-      McpUsageLogger.enqueue(row);
+      McpUsageLogger.enqueue(row, McpUsageTelemetry.currentIdentity());
       if (payload != null) {
         // ETP-5639: Datadog sees an accepted report, and where to read it — counts only.
         McpFeedbackTool.logReceived(row);

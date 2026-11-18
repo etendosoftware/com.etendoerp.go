@@ -46,16 +46,6 @@ class McpUsageLoggerIdentityTest {
     McpUsageLogger.setTelemetryService(null);
   }
 
-  private static McpUsageRow row() {
-    return McpUsageRow.builder()
-        .id("ROW1")
-        .clientId("C1")
-        .userId("U1")
-        .toolName("tool")
-        .outcome(McpUsageRow.OUTCOME_OK)
-        .build();
-  }
-
   private static MockedStatic<OBPropertiesProvider> properties(String mixpanelEnabled) {
     MockedStatic<OBPropertiesProvider> provider = Mockito.mockStatic(OBPropertiesProvider.class);
     OBPropertiesProvider instance = mock(OBPropertiesProvider.class);
@@ -76,7 +66,7 @@ class McpUsageLoggerIdentityTest {
     McpUsageLogger.setTelemetryService(service);
 
     try (MockedStatic<OBPropertiesProvider> provider = properties(null)) {
-      assertSame(identity, McpUsageLogger.captureIdentity(row()));
+      assertSame(identity, McpUsageLogger.captureIdentity("C1", "U1"));
     }
   }
 
@@ -86,7 +76,7 @@ class McpUsageLoggerIdentityTest {
     McpUsageLogger.setTelemetryService(service);
 
     try (MockedStatic<OBPropertiesProvider> provider = properties("false")) {
-      assertSame(NeoTelemetryIdentity.NONE, McpUsageLogger.captureIdentity(row()));
+      assertSame(NeoTelemetryIdentity.NONE, McpUsageLogger.captureIdentity("C1", "U1"));
     }
     verify(service, never()).captureIdentity(Mockito.any(), Mockito.any());
   }
@@ -98,7 +88,7 @@ class McpUsageLoggerIdentityTest {
     McpUsageLogger.setTelemetryService(service);
 
     try (MockedStatic<OBPropertiesProvider> provider = properties(null)) {
-      assertSame(NeoTelemetryIdentity.NONE, McpUsageLogger.captureIdentity(row()));
+      assertSame(NeoTelemetryIdentity.NONE, McpUsageLogger.captureIdentity("C1", "U1"));
     }
   }
 }
