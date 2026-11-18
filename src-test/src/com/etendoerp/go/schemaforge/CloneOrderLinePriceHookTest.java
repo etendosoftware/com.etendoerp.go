@@ -49,6 +49,8 @@ import org.openbravo.model.common.order.OrderLine;
  * delegating the actual clone work to the core hook. RED phase: the skeleton hook only
  * returns the delegate's result untouched, so these tests are expected to fail until the
  * GREEN-phase fix is implemented.
+ *
+ * @covers com.etendoerp.go.schemaforge.CloneOrderLinePriceHook
  */
 public class CloneOrderLinePriceHookTest {
 
@@ -207,6 +209,8 @@ public class CloneOrderLinePriceHookTest {
     verify(clone).setReplacedorder(null);
     verify(clone).setReplacementorder(null);
     verify(clone).setEtvfacReversedInvoice(null);
+    // ETP-6209 repro: a copy of a rejected quotation must not carry its reject reason.
+    verify(clone).setRejectReason(null);
     verify(clonedLine).setSOPOReference(null);
     verify(clonedLine).setQuotationLine(null);
     verify(clonedLine).setGoodsShipmentLine(null);

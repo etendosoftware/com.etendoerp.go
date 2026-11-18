@@ -70,6 +70,10 @@ public class CloneOrderLinePriceHook extends CloneLinePriceHook {
     clone.setReplacedorder(null);
     clone.setReplacementorder(null);
     clone.setEtvfacReversedInvoice(null);
+    // A copy is a new draft and never inherits a rejection (ETP-6209): a copy of a rejected
+    // quotation kept the tenant's internal reason, which then showed once it was rejected again
+    // from the portal (which sets none).
+    clone.setRejectReason(null);
     for (OrderLine line : clone.getOrderLineList()) {
       line.setDateDelivered(null);
       line.setInvoiceDate(null);
