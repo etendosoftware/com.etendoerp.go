@@ -222,9 +222,27 @@ public class PortalDocumentsEndpointTest {
   }
 
   @Test
+  public void notesThatAreOnlyThePortalDecisionLineLeaveTheReferenceEmpty() throws Exception {
+    Invoice rejected = invoice("INV-8", null,
+        "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.", null);
+    query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.INVOICE), any(),
+        anyInt(), anyInt())).thenReturn(Collections.singletonList(rejected));
+    query.when(() -> PortalDocumentQuery.invoiceSchedules(any(), any()))
+        .thenReturn(new HashMap<String, Object[]>());
+
+    JSONObject row = PortalDocumentsEndpoint.list(SESSION, "invoice", null, null, null, null, null,
+        null).getJSONArray("documents").getJSONObject(0);
+
+    assertEquals("", row.getString("reference"));
+  }
+
+  @Test
   public void aRowNamesCreditNotesFallsBackToTheDescriptionAndShipmentsCarryNoAmounts()
       throws Exception {
-    Invoice creditNote = invoice("INV-9", null, "Rectifica F-1", "ARC");
+    // ETP-6209: the notes stand in for the reference without the portal's decision line.
+    Invoice creditNote = invoice("INV-9", null,
+        "Rectifica F-1\nRechazado por el cliente desde el portal. Motivo: Precio demasiado alto.",
+        "ARC");
     Map<String, Object[]> schedules = new HashMap<>();
     schedules.put("INV-9", new Object[] { day(2026, 1, 10), 1L });
     query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.INVOICE), any(),
@@ -403,8 +421,11 @@ public class PortalDocumentsEndpointTest {
         mockStatic(AnonymousAttachmentStreamer.class)) {
       for (Object[] c : cases) {
         try (MockedConstruction<PortalDecisionService> decisions = mockConstruction(
-            PortalDecisionService.class, (service, context) -> when(service.blockedReason(any(),
-                any())).thenReturn((PortalDecisionService.Blocked) c[0]))) {
+            PortalDecisionService.class, (service, context) -> {
+              when(service.blockedReason(any(), any()))
+                  .thenReturn((PortalDecisionService.Blocked) c[0]);
+              when(service.confirmationRecipient(any())).thenReturn(" juan@example.com ");
+            })) {
 
           JSONObject decision = PortalDocumentsEndpoint.detail(SESSION, "quotation", "Q-1")
               .getJSONObject("decision");
@@ -417,6 +438,12 @@ public class PortalDocumentsEndpointTest {
           }
           assertEquals(PortalDecisionService.ACCEPT_AVAILABLE,
               decision.getBoolean("acceptAvailable"));
+          // The popups name the recipient in full (trimmed), and only when the customer can decide.
+          if (Boolean.TRUE.equals(c[1])) {
+            assertEquals("juan@example.com", decision.getString("email"));
+          } else {
+            assertFalse(decision.has("email"));
+          }
           verify(decisions.constructed().get(0)).blockedReason(SESSION, quotation);
         }
       }
