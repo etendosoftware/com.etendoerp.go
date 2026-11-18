@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -181,6 +182,43 @@ public class CloneOrderLinePriceHookTest {
     verify(clone).setReinvoice(false);
     verify(clonedLine).setDateDelivered(null);
     verify(clonedLine).setInvoiceDate(null);
+  }
+
+  /**
+   * ETP-6209: the copy drops only the customer portal's decision line(s) from its notes; the
+   * seller's lines stay, and notes without a portal line are not touched.
+   */
+  @Test
+  public void testPostCopyDropsOnlyThePortalDecisionNote() throws Exception {
+    String es = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
+    String en = "Rejected by the customer from the portal. Reason: Otros: too late";
+    // Columns: the copied notes, the notes expected to be set (null in column 2 + false in
+    // column 3: setDescription never called).
+    Object[][] cases = {
+        { "Gracias\n" + es, "Gracias", true },
+        { es, null, true },
+        { "Nota\n" + es + "\n" + en, "Nota", true },
+        { "Solo notas del vendedor", null, false },
+        { null, null, false },
+    };
+    for (Object[] c : cases) {
+      CloneRecordHook delegate = mock(CloneRecordHook.class);
+      Order original = mock(Order.class);
+      Order placeholder = mock(Order.class);
+      Order clone = mock(Order.class);
+      when(original.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+      when(clone.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+      when(clone.getDescription()).thenReturn((String) c[0]);
+      when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+      new CloneOrderLinePriceHook(delegate).postCopy(original, placeholder);
+
+      if (Boolean.TRUE.equals(c[2])) {
+        verify(clone).setDescription((String) c[1]);
+      } else {
+        verify(clone, never()).setDescription(org.mockito.ArgumentMatchers.any());
+      }
+    }
   }
 
   /**

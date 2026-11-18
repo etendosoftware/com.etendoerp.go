@@ -255,6 +255,24 @@ class PrintableDataTest {
   }
 
   @Test
+  @DisplayName("withoutPortalNote: drops only the portal decision lines, leaves other notes untouched")
+  void withoutPortalNoteKeepsTheSellersNotes() {
+    String es = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
+    String en = "Rejected by the customer from the portal. Reason: Delivery too late.";
+    // Columns: notes, expected notes.
+    String[][] cases = {
+        { "Gracias\n" + es, "Gracias" },
+        { es, null },
+        { "Nota\n" + es + "\n" + en, "Nota" },
+        { "Línea 1\n  Línea 2\n", "Línea 1\n  Línea 2\n" },
+        { null, null },
+    };
+    for (String[] c : cases) {
+      assertEquals(c[1], QuotationPrintableData.withoutPortalNote(c[0]), java.util.Arrays.toString(c));
+    }
+  }
+
+  @Test
   @DisplayName("which statuses store a PDF: completed for invoices and orders, any non-draft for a quotation")
   void storedStatuses() {
     assertTrue(new SalesInvoicePrintableData().storesFor("CO"));
