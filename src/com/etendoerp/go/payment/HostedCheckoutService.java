@@ -270,8 +270,12 @@ public class HostedCheckoutService {
     String requestId = UUID.randomUUID().toString();
     // Persist intent before the purchase (and before locking an old one): this ledger commit
     // must neither leave a recoverable purchase without its offer nor release a replacement lock.
+    // The free trial is once per account: a re-subscription, the legacy plan or an account that
+    // already paid a purchase (any PAID, PROVISIONING or PROVISIONED request) pays from the
+    // first month.
     JSONObject terms = promotionTerms.recordIntent(requestId, price,
-        sessionOptions.reactivatedClientId == null && !PlanCatalogService.namesLegacyPlan(planKey),
+        sessionOptions.reactivatedClientId == null && !PlanCatalogService.namesLegacyPlan(planKey)
+            && checkoutRequestStore.findForAccount(accountId, accountEmail).isEmpty(),
         sessionOptions.language);
     CheckoutRequest predecessor = null;
     if (StringUtils.isNotBlank(replacePurchaseId)) {
@@ -543,7 +547,7 @@ public class HostedCheckoutService {
       String expectedSessionId, boolean reactivation, JSONObject terms) throws IOException, JSONException {
     String mode = modeOf(price);
     String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(),
-        planKey, mode, reactivation);
+        planKey, mode, reactivation, CheckoutPromotionTerms.freeTrialDays(terms));
     StringBuilder promotedForm = new StringBuilder(form);
     for (Map.Entry<String, String> field : CheckoutPromotionTerms.formFields(terms).entrySet()) {
       add(promotedForm, field.getKey(), field.getValue());
@@ -656,6 +660,25 @@ public class HostedCheckoutService {
   static String buildSessionForm(String requestId, String accountEmail, String clientName,
       String origin, String priceId, String planKey, String mode, boolean reactivation)
       throws UnsupportedEncodingException {
+    return buildSessionForm(requestId, accountEmail, clientName, origin, priceId, planKey, mode,
+        reactivation, 0);
+  }
+
+  /**
+   * Builds the form-encoded Checkout Session body, with the free trial the recorded terms grant.
+   *
+   * <p>A trial session charges nothing today, so the card has to be asked for explicitly
+   * ({@code payment_method_collection=always}): with {@code if_required} Stripe would skip it and
+   * leave nothing to charge when the trial ends. Should a trial still end without a card, the
+   * subscription is canceled instead of left unpaid.
+   *
+   * @param freeTrialDays free days before the first installment; {@code 0} for none
+   * @see CheckoutPromotionTerms#freeTrialDays(JSONObject)
+   */
+  @SuppressWarnings("java:S107")
+  static String buildSessionForm(String requestId, String accountEmail, String clientName,
+      String origin, String priceId, String planKey, String mode, boolean reactivation,
+      int freeTrialDays) throws UnsupportedEncodingException {
     String success = reactivation
         ? origin + "/dashboard?reactivation=success&requestId=" + requestId
         : origin + "/upgrade?checkout=success&requestId=" + requestId;
@@ -701,7 +724,14 @@ public class HostedCheckoutService {
       //  - It is only safe for coupons with `duration=forever`. A `once` or `repeating` coupon
       //    leaves no payment method on file, so the first invoice after the discount ends has
       //    nothing to charge. Coupons meant to make an environment free must be created `forever`.
-      add(form, "payment_method_collection", "if_required");
+      if (freeTrialDays > 0) {
+        add(form, "subscription_data[trial_period_days]", String.valueOf(freeTrialDays));
+        add(form, "subscription_data[trial_settings][end_behavior][missing_payment_method]",
+            "cancel");
+        add(form, "payment_method_collection", "always");
+      } else {
+        add(form, "payment_method_collection", "if_required");
+      }
     }
     return form.toString();
   }

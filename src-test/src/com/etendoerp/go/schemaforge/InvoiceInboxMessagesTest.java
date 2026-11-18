@@ -86,7 +86,8 @@ class InvoiceInboxMessagesTest {
         InvoiceInboxMessages.REQUEST_TOO_LARGE, InvoiceInboxMessages.UNSUPPORTED_TYPE,
         InvoiceInboxMessages.EMPTY_FILE, InvoiceInboxMessages.STORE_FAILED,
         InvoiceInboxMessages.ORG_NOT_ALLOWED, InvoiceInboxMessages.NOT_FOUND,
-        InvoiceInboxMessages.NOT_DISCARDABLE, InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED };
+        InvoiceInboxMessages.NOT_DISCARDABLE, InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED,
+        InvoiceInboxMessages.PROCESSING };
     try (MockedStatic<OBMessageUtils> utils = mockStatic(OBMessageUtils.class)) {
       for (String key : keys) {
         utils.when(() -> OBMessageUtils.messageBD(key)).thenReturn(key);
@@ -194,8 +195,26 @@ class InvoiceInboxMessagesTest {
       }
     }
 
-    assertEquals(12, defaults.size());
-    assertEquals(12, keys.size());
+    assertEquals(43, defaults.size());
+    assertEquals(43, keys.size());
     assertEquals(keys, defaults.keySet());
+  }
+
+  @Test
+  void theConfirmMessagesReplaceTheirPlaceholdersAndNeutralizeTheDelimiter() {
+    try (org.mockito.MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+        org.mockito.Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      String failed = InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_FAILED, "reason",
+          "line 2: x@y");
+      String notConfirmable = InvoiceInboxMessages.text(InvoiceInboxMessages.NOT_CONFIRMABLE,
+          "status", "DISCARDED");
+      String totals = InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_TOTAL_MISMATCH,
+          "invoice", "121.02", "document", "121.00");
+
+      assertEquals("The invoice could not be created: line 2: x\uFF20y", failed);
+      assertEquals(true, notConfirmable.contains("DISCARDED"), notConfirmable);
+      assertEquals(true, totals.contains("121.02") && totals.contains("121.00"), totals);
+      assertEquals(false, failed.contains("@reason@"));
+    }
   }
 }

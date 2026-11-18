@@ -18,6 +18,14 @@
 package com.etendoerp.go.schemaforge.ocr;
 
 import java.math.BigDecimal;
+import java.text.Normalizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -28,6 +36,33 @@ import org.codehaus.jettison.json.JSONObject;
  * returns the text {@code "null"} for a JSON null, which would read as a vendor named "null".
  */
 final class OcrJson {
+
+  /** {@code d/M/yyyy} or {@code d-M-yy}. */
+  private static final Pattern NUMERIC_DATE =
+      Pattern.compile("(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})");
+  /** Separators of a written date ({@code 15-ene-2026}, {@code Jan 15, 2026}). */
+  private static final Pattern DATE_SEPARATORS = Pattern.compile("[-/.,]");
+  /** Linking words of a Spanish written date ({@code 15 de enero de 2026}). */
+  private static final Set<String> DATE_LINKS = Set.of("de", "del");
+  /**
+   * Month names a printed invoice uses, Spanish and English, full or abbreviated (without accents:
+   * the date is folded before matching).
+   */
+  private static final Map<String, Integer> MONTHS = Map.ofEntries(
+      Map.entry("enero", 1), Map.entry("ene", 1), Map.entry("january", 1), Map.entry("jan", 1),
+      Map.entry("febrero", 2), Map.entry("feb", 2), Map.entry("february", 2),
+      Map.entry("marzo", 3), Map.entry("mar", 3), Map.entry("march", 3),
+      Map.entry("abril", 4), Map.entry("abr", 4), Map.entry("april", 4), Map.entry("apr", 4),
+      Map.entry("mayo", 5), Map.entry("may", 5),
+      Map.entry("junio", 6), Map.entry("jun", 6), Map.entry("june", 6),
+      Map.entry("julio", 7), Map.entry("jul", 7), Map.entry("july", 7),
+      Map.entry("agosto", 8), Map.entry("ago", 8), Map.entry("august", 8), Map.entry("aug", 8),
+      Map.entry("septiembre", 9), Map.entry("setiembre", 9), Map.entry("sep", 9),
+      Map.entry("sept", 9), Map.entry("set", 9), Map.entry("september", 9),
+      Map.entry("octubre", 10), Map.entry("oct", 10), Map.entry("october", 10),
+      Map.entry("noviembre", 11), Map.entry("nov", 11), Map.entry("november", 11),
+      Map.entry("diciembre", 12), Map.entry("dic", 12), Map.entry("december", 12),
+      Map.entry("dec", 12));
 
   private OcrJson() {
   }
@@ -110,8 +145,13 @@ final class OcrJson {
   }
 
   /**
-   * The application's {@code toIsoDate}: {@code yyyy-MM-dd} stays, {@code d/M/yyyy} and
-   * {@code d-M-yy} are converted (two-digit years are 20yy), anything else is returned as it came.
+   * The application's {@code toIsoDate}, plus written months: {@code yyyy-MM-dd} stays,
+   * {@code d/M/yyyy} and {@code d-M-yy} are converted (two-digit years are 20yy), and so are dates
+   * with the month in words, Spanish or English, as invoices print them
+   * ({@code 15 de enero de 2026}, {@code 15-ene-2026}, {@code January 15, 2026}). The extraction
+   * model returns the date as the document shows it, so a written one used to reach
+   * {@code invoiceDateIso} and the batch template untouched (ETP-5850). Anything else, or an
+   * impossible day, is returned as it came.
    *
    * @param value the date as read from the document
    * @return the ISO date, or the trimmed input when it is not a recognised shape
@@ -121,14 +161,54 @@ final class OcrJson {
     if (trimmed.matches("\\d{4}-\\d{2}-\\d{2}")) {
       return trimmed;
     }
-    java.util.regex.Matcher m =
-        java.util.regex.Pattern.compile("(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})").matcher(trimmed);
-    if (!m.matches()) {
-      return trimmed;
+    Matcher m = NUMERIC_DATE.matcher(trimmed);
+    if (m.matches()) {
+      String year = m.group(3).length() == 2 ? "20" + m.group(3) : m.group(3);
+      return iso(year, Integer.parseInt(m.group(2)), Integer.parseInt(m.group(1)), trimmed);
     }
-    String year = m.group(3).length() == 2 ? "20" + m.group(3) : m.group(3);
-    return year + "-" + StringUtils.leftPad(m.group(2), 2, '0') + "-"
-        + StringUtils.leftPad(m.group(1), 2, '0');
+    String folded = Normalizer.normalize(trimmed, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}", "").toLowerCase(Locale.ROOT);
+    return writtenDate(folded, trimmed);
+  }
+
+  /**
+   * A date with the month in words: three tokens once the separators and the Spanish linking
+   * words are dropped, day-month-year or month-day-year, with a four-digit year. Tokenized
+   * rather than matched with one pattern: such a pattern is too complex for Sonar and can
+   * backtrack on document text (ETP-5850).
+   */
+  private static String writtenDate(String folded, String original) {
+    List<String> tokens = new ArrayList<>();
+    for (String token : DATE_SEPARATORS.matcher(folded).replaceAll(" ").split(" ")) {
+      if (!token.isEmpty() && !DATE_LINKS.contains(token)) {
+        tokens.add(token);
+      }
+    }
+    if (tokens.size() != 3 || !isNumber(tokens.get(2), 4, 4)) {
+      return original;
+    }
+    String year = tokens.get(2);
+    if (isNumber(tokens.get(0), 1, 2) && MONTHS.containsKey(tokens.get(1))) {
+      return iso(year, MONTHS.get(tokens.get(1)), Integer.parseInt(tokens.get(0)), original);
+    }
+    if (MONTHS.containsKey(tokens.get(0)) && isNumber(tokens.get(1), 1, 2)) {
+      return iso(year, MONTHS.get(tokens.get(0)), Integer.parseInt(tokens.get(1)), original);
+    }
+    return original;
+  }
+
+  private static boolean isNumber(String token, int minDigits, int maxDigits) {
+    return token.length() >= minDigits && token.length() <= maxDigits
+        && token.chars().allMatch(c -> c >= '0' && c <= '9');
+  }
+
+  /** {@code yyyy-MM-dd}, or {@code original} when the day or month cannot exist. */
+  private static String iso(String year, int month, int day, String original) {
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      return original;
+    }
+    return year + "-" + StringUtils.leftPad(String.valueOf(month), 2, '0') + "-"
+        + StringUtils.leftPad(String.valueOf(day), 2, '0');
   }
 
   /**

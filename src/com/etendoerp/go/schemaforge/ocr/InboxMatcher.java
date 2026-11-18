@@ -23,6 +23,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_NONE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.D_UNKNOWN;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ADDRESS_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CHECK;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CURRENCY_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DUPLICATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
@@ -36,14 +37,11 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LOCATION_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NOTICES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ORG_TAX_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RECEIVER;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_ID;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_SOURCE;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VERSION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
@@ -56,6 +54,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -78,17 +77,29 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
 public final class InboxMatcher {
 
   private static final int TWO_DECIMALS = 2;
-  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
 
   private final OcrLookups lookups;
+  private final String organizationId;
 
   /**
-   * Creates the matcher.
+   * Creates the matcher for the session's current organization.
    *
    * @param lookups the lookups of the document type
    */
   public InboxMatcher(OcrLookups lookups) {
+    this(lookups, null);
+  }
+
+  /**
+   * Creates the matcher.
+   *
+   * @param lookups        the lookups of the document type
+   * @param organizationId the organization of the document, which decides the default category of a
+   *                       new product ({@code null}: the session's current one)
+   */
+  public InboxMatcher(OcrLookups lookups, String organizationId) {
     this.lookups = lookups;
+    this.organizationId = organizationId;
   }
 
   /**
@@ -125,7 +136,7 @@ public final class InboxMatcher {
     String documentNo = OcrJson.str(extraction, "document_no");
     header.put(K_DUPLICATE, duplicate(vendor, documentNo, notices));
     String date = isoDate(extraction);
-    return new InboxLineMatcher(lookups).review(extraction.optJSONArray(OcrDocType.LINES_KEY),
+    return new InboxLineMatcher(lookups, organizationId).review(extraction.optJSONArray(OcrDocType.LINES_KEY),
         locationId, date);
   }
 
@@ -206,17 +217,33 @@ public final class InboxMatcher {
     }
   }
 
-  private static void putHeaderScalars(JSONObject header, JSONObject extraction, JSONArray lines)
+  private void putHeaderScalars(JSONObject header, JSONObject extraction, JSONArray lines)
       throws JSONException {
     BigDecimal printed = OcrJson.decimal(extraction, "total_amount");
-    boolean usePrinted = printed != null && printed.signum() > 0;
-    BigDecimal total = usePrinted ? printed : totalOfLines(lines);
+    // A printed total is any non-zero number, whatever its sign: a purchase invoice can be a credit
+    // document. Zero or absent means the document printed none.
+    boolean usePrinted = printed != null && printed.signum() != 0;
+    InboxTaxModes.stamp(lines, lookups);
+    JSONObject vendor = header.optJSONObject(K_VENDOR);
+    String vendorId = vendor != null && S_LINKED.equals(vendor.optString(K_STATE))
+        ? vendor.optString(K_ID) : null;
+    Optional<OcrLookups.DocCurrency> currency = lookups.documentCurrency(vendorId);
+    int scale = currency.map(OcrLookups.DocCurrency::scale).orElse(TWO_DECIMALS);
+    if (currency.isPresent()) {
+      header.put(K_CURRENCY_ID, currency.get().id());
+    }
+    BigDecimal total = usePrinted ? printed : totalOfLines(lines, scale);
+    BigDecimal storedTotal = total;
+    if (total != null && !usePrinted) {
+      storedTotal = total.setScale(scale, RoundingMode.HALF_UP);
+    }
     String date = isoDate(extraction);
     header.put(K_DOCUMENT_NO, OcrJson.str(extraction, "document_no"))
         .put(K_INVOICE_DATE, date == null ? JSONObject.NULL : date)
         .put(K_INVOICE_DATE_RAW, OcrJson.str(extraction, "invoice_date"))
-        .put(K_TOTAL_AMOUNT, InboxLineMatcher.number(total == null ? null
-            : total.setScale(TWO_DECIMALS, RoundingMode.HALF_UP)))
+        // The PRINTED total is kept exactly as read (a mismatch with the lines is shown, not hidden by
+        // rounding); only the computed one is rounded to the currency's scale.
+        .put(K_TOTAL_AMOUNT, InboxLineMatcher.number(storedTotal))
         .put(K_TOTAL_SOURCE, usePrinted ? TOTAL_PRINTED : TOTAL_LINES);
     if (!header.has(K_DUPLICATE)) {
       header.put(K_DUPLICATE, new JSONObject().put(K_STATE, D_NONE)
@@ -224,26 +251,12 @@ public final class InboxMatcher {
     }
   }
 
-  /** Sum of quantity x price x (1 + rate/100) over the lines that carry quantity and price; null if none. */
-  private static BigDecimal totalOfLines(JSONArray lines) {
-    BigDecimal sum = null;
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject line = lines.optJSONObject(i);
-      BigDecimal quantity = decimalOf(line, K_QUANTITY);
-      BigDecimal price = decimalOf(line, K_UNIT_PRICE);
-      if (quantity == null || price == null) {
-        continue;
-      }
-      BigDecimal rate = decimalOf(line, K_TAX_RATE);
-      BigDecimal factor = rate == null ? BigDecimal.ONE
-          : BigDecimal.ONE.add(rate.divide(HUNDRED));
-      BigDecimal amount = quantity.multiply(price).multiply(factor);
-      sum = sum == null ? amount : sum.add(amount);
-    }
-    return sum;
-  }
-
-  private static BigDecimal decimalOf(JSONObject line, String key) {
-    return OcrJson.decimal(line, key);
+  /**
+   * The total of the lines with the rule of GO's own invoice line ({@link InvoiceInboxTotals}: the
+   * discount, the two roundings, tax per rate); {@code null} when no line carries quantity and price.
+   */
+  private static BigDecimal totalOfLines(JSONArray lines, int scale) {
+    InvoiceInboxTotals.Totals totals = InvoiceInboxTotals.totals(lines, scale);
+    return totals == null ? null : totals.total();
   }
 }

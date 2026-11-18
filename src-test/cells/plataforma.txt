@@ -4,10 +4,14 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (617)
+# --- con mocks (644)
+com.etendoerp.go.modulescript.EnsureDocumentStatusTranslationsScriptTest
+com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.payment.CheckoutPromotionTermsTest
 com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
 com.etendoerp.go.payment.PromotionRecoveryTest
+com.etendoerp.go.accounts.AccountDemoExpiryHandlerTest
+com.etendoerp.go.accounts.AccountGroupKeyHandlerTest
 com.etendoerp.go.agentchat.AgentChatConversationsServletTest
 com.etendoerp.go.apps.AppsServletTest
 com.etendoerp.go.apps.JwtIssuerServiceTest
@@ -41,6 +45,7 @@ com.etendoerp.go.hubspot.StripeSubscriptionEventsTest
 com.etendoerp.go.llm.LlmDeciderTest
 com.etendoerp.go.mcp.Context7DocsClientTest
 com.etendoerp.go.mcp.McpActionBatchTest
+com.etendoerp.go.mcp.McpRoutineToolTest
 com.etendoerp.go.mcp.McpActionEnvelopeTest
 com.etendoerp.go.mcp.McpActionsCompactTest
 com.etendoerp.go.mcp.McpActionsViewTest
@@ -129,6 +134,7 @@ com.etendoerp.go.mcp.SelectorContextParamsTest
 com.etendoerp.go.mcp.ToolRegistryGenerateToolsTest
 com.etendoerp.go.mcp.ToolRegistryTest
 com.etendoerp.go.modulescript.EnsureLegacyPlanScriptTest
+com.etendoerp.go.modulescript.SeedAllowedPlanChangesScriptTest
 com.etendoerp.go.oauth2.ApiScopesTest
 com.etendoerp.go.oauth2.OAuth2AuthorizationCodeSupportTest
 com.etendoerp.go.oauth2.OAuth2AuthorizeSupportTest
@@ -201,6 +207,8 @@ com.etendoerp.go.payment.HostedCheckoutServiceTest
 com.etendoerp.go.payment.HostedCheckoutSessionPlanTest
 com.etendoerp.go.payment.PausedSubscriptionAlertTest
 com.etendoerp.go.payment.PlanCatalogServiceTest
+com.etendoerp.go.payment.PlanChangeCatalogTest
+com.etendoerp.go.payment.PlanChangeServiceTest
 com.etendoerp.go.payment.PlanNotAvailableExceptionTest
 com.etendoerp.go.payment.PlanPriceDerivationHandlerTest
 com.etendoerp.go.payment.PlanQuotaSchemaInvariantTest
@@ -212,10 +220,12 @@ com.etendoerp.go.payment.StripeListPagerTest
 com.etendoerp.go.payment.StripePriceServiceTest
 com.etendoerp.go.payment.StripeResponseTest
 com.etendoerp.go.payment.StripeSubscriptionPeriodReaderTest
+com.etendoerp.go.payment.SubscriptionBillingCalendarTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierPeriodTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierTest
 com.etendoerp.go.payment.SubscriptionLifecycleCorrelationTest
 com.etendoerp.go.payment.SubscriptionModelSwitchTest
+com.etendoerp.go.payment.SubscriptionPlanRolloverTest
 com.etendoerp.go.payment.SubscriptionServiceTest
 com.etendoerp.go.payment.SystemContextTest
 com.etendoerp.go.payment.TenantEnvironmentLifecycleServiceAdminModeTest
@@ -225,6 +235,7 @@ com.etendoerp.go.payment.TenantPaywallServiceTest
 com.etendoerp.go.payment.TenantPlanPreferenceFallbackAdminModeTest
 com.etendoerp.go.payment.TenantPlanServiceTest
 com.etendoerp.go.payment.WebhookPayloadSummaryTest
+com.etendoerp.go.payment.classic.SubscriptionPlanChangeActionHandlerTest
 com.etendoerp.go.payment.reconcile.BillingReconciliationProcessTest
 com.etendoerp.go.payment.reconcile.BillingReconciliationServiceTest
 com.etendoerp.go.payment.reconcile.ReconciliationAuditTest
@@ -233,6 +244,11 @@ com.etendoerp.go.payment.reconcile.ReconciliationRunLockTest
 com.etendoerp.go.payment.reconcile.ReconciliationSettingsTest
 com.etendoerp.go.payment.reconcile.ReconciliationSupportTest
 com.etendoerp.go.payment.reconcile.SubscriptionReconcilerTest
+com.etendoerp.go.payment.invoicing.PaymentLedgerTest
+com.etendoerp.go.payment.invoicing.PaymentMethodReaderTest
+com.etendoerp.go.payment.invoicing.PaymentStatusTest
+com.etendoerp.go.payment.invoicing.PaymentsApiServletTest
+com.etendoerp.go.payment.invoicing.StripeInvoicePaymentTest
 com.etendoerp.go.rest.AccountIdentityDalHelperTest
 com.etendoerp.go.rest.AccountRegistrationServiceTest
 com.etendoerp.go.rest.CompanyInvitationDalHelperTest
@@ -295,6 +311,7 @@ com.etendoerp.go.roles.overlap.TemplateRemovalTrackerTest
 com.etendoerp.go.schemaforge.AbstractNeoHandlerTest
 com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandlerTest
 com.etendoerp.go.schemaforge.AgentActionSupportTest
+com.etendoerp.go.schemaforge.AnonymousAttachmentStreamerTest
 com.etendoerp.go.schemaforge.BatchJobJdbcStoreSqlTest
 com.etendoerp.go.schemaforge.BatchJobServiceTest
 com.etendoerp.go.schemaforge.BatchRowGrouperTest
@@ -307,6 +324,10 @@ com.etendoerp.go.schemaforge.ComboReferenceSelectorExecutorTest
 com.etendoerp.go.schemaforge.DocActionIdempotencyTest
 com.etendoerp.go.schemaforge.DocTemplateConfigSupportTest
 com.etendoerp.go.schemaforge.DocTypeResolverTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReaderTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReportProcessTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReportTest
+com.etendoerp.go.schemaforge.DocumentPdfUsageTest
 com.etendoerp.go.schemaforge.ForeignOriginalTest
 com.etendoerp.go.schemaforge.HiddenMandatoryDefaultsTest
 com.etendoerp.go.schemaforge.InvoiceCompletionQuotaHookTest
@@ -387,6 +408,7 @@ com.etendoerp.go.schemaforge.NeoProcessServiceExtractErrorTest
 com.etendoerp.go.schemaforge.NeoProcessServiceMessageKeysTest
 com.etendoerp.go.schemaforge.NeoProcessServiceTest
 com.etendoerp.go.schemaforge.NeoProcessServiceValidationTest
+com.etendoerp.go.schemaforge.NeoPropertyPathsTest
 com.etendoerp.go.schemaforge.NeoPseudoSpecDispatcherTest
 com.etendoerp.go.schemaforge.NeoPublicApiUsageTest
 com.etendoerp.go.schemaforge.NeoQuotaCreateCheckTest
@@ -394,6 +416,7 @@ com.etendoerp.go.schemaforge.NeoQuotaWriteGateTest
 com.etendoerp.go.schemaforge.NeoReadPredicatesTest
 com.etendoerp.go.schemaforge.NeoReferenceActivenessTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipTest
+com.etendoerp.go.schemaforge.NeoReferenceSelectorValidationTest
 com.etendoerp.go.schemaforge.NeoRequestBodyParserTest
 com.etendoerp.go.schemaforge.NeoRequestRouterTest
 com.etendoerp.go.schemaforge.NeoResponseTest
@@ -628,11 +651,15 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (46)
+# --- integración (BD) (51)
+com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
+com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
+com.etendoerp.go.mcp.McpPropertyPathFilterIntegrationTest
 com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest
 com.etendoerp.go.oauth2.PublicApiKeyStoreIntegrationTest
 com.etendoerp.go.onboarding.BusinessPartnerTransactionalSequenceIntegrationTest
+com.etendoerp.go.onboarding.OnboardingInitialPeriodStateTenantContextIntegrationTest
 com.etendoerp.go.payment.BillingEventStoreIntegrationTest
 com.etendoerp.go.payment.CheckoutRequestStoreIntegrationTest
 com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest
@@ -661,6 +688,7 @@ com.etendoerp.go.roles.UserRoleCompositionServiceRealAccessControlIntegrationTes
 com.etendoerp.go.schemaforge.DocActionIdempotencyIntegrationTest
 com.etendoerp.go.schemaforge.DocTemplateConfigStoreIntegrationTest
 com.etendoerp.go.schemaforge.NativeWriteIsolationIntegrationTest
+com.etendoerp.go.schemaforge.NeoPropertyPathsQueryIntegrationTest
 com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest
 com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest

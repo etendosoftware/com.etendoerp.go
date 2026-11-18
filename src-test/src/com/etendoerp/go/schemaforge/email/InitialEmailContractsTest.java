@@ -407,6 +407,22 @@ public class InitialEmailContractsTest {
         safetyStore.getAuditRecords().get(0).getIdempotencyKey());
   }
 
+  /** ETP-6223: a trial whose end was edited is keyed by its end too, so a new date re-arms it. */
+  @Test
+  public void demoTrialReminderOfAnEditedTrialIsDeduplicatedOnItsEndToo() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(new FakeProviderAdapter(), safetyStore);
+
+    asSystem(() -> assertSent(service.send("demo-trial-notice",
+        demoTrialCommand("demo-edited"))));
+
+    assertEquals("demo-trial-notice:demo-edited:demo-edited:"
+            + FixtureDemoTrialNoticeSource.TRIAL_STARTED_AT + "~"
+            + FixtureDemoTrialNoticeSource.TRIAL_ENDS_AT + ":reminder-3:v1",
+        safetyStore.getAuditRecords().get(0).getIdempotencyKey());
+  }
+
   @Test
   public void demoTrialReminderUsesTheEnvironmentLanguageAndTheSingularForOneDay()
       throws Exception {
@@ -1329,6 +1345,8 @@ public class InitialEmailContractsTest {
           DemoTrialNotice.expired(TRIAL_STARTED_AT, TRIAL_ENDS_AT));
       owe("demo-markup-name", "<b>Acme</b>", "es_ES",
           DemoTrialNotice.reminder(3, 3, TRIAL_STARTED_AT, TRIAL_ENDS_AT));
+      owe("demo-edited", "Acme Demo", "es_ES",
+          DemoTrialNotice.reminder(3, 3, TRIAL_STARTED_AT, TRIAL_ENDS_AT).withEditedTrialEnd());
     }
 
     void owe(String clientId, String environmentName, String language, DemoTrialNotice notice) {

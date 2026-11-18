@@ -34,6 +34,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -108,6 +109,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  /** The defaults endpoint's object of field values. */
+  private static final String KEY_DEFAULTS = "defaults";
+  /** The evaluate-display answer's map of field to read-only state. */
+  private static final String KEY_READ_ONLY = "readOnly";
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
   /** Reactivate, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -117,8 +123,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:RE} is unavailable on every quotation (ETP-6026). */
   static final String REASON_REACTIVATE_NOT_OFFERED = "The app does not offer Reactivate on a "
       + "quotation, so documentAction RE is refused on every quotation. A quotation Under "
-      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; to "
-      + "quote again after a voided or rejected one, create a new quotation.";
+      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; one "
+      + "Accepted by the customer from the portal (ETGO_AC) is converted with Convertquotation or "
+      + "createDraftInvoice; to quote again after a voided or rejected one, create a new "
+      + "quotation.";
   /** Void, a {@code documentAction} value the quotation window never offers (ETP-6026). */
   static final String DOC_ACTION_VOID = "VO";
   /** Close, a {@code documentAction} value the quotation window never offers (ETP-6026). */
@@ -134,7 +142,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   /** Why {@code documentAction:CL} is unavailable on every quotation (ETP-6026). */
   static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
       + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
-      + "accepted with Convertquotation or rejected with rejectQuotation.";
+      + "accepted with Convertquotation or rejected with rejectQuotation; one Accepted (ETGO_AC) "
+      + "is converted with Convertquotation or createDraftInvoice.";
   /** The 400 for any other value the window does not offer in the quotation's status (ETP-6026). */
   static final String MSG_ACTION_NOT_OFFERED = "ETGO_QuotationActionNotOffered";
   /**
@@ -185,36 +194,60 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private TotalDiscountService totalDiscountService;
 
   /**
-   * The order-header post-hook, plus, on the detail GET, the quotation's goods movements
-   * ({@code linkedShipments}, ETP-6002 IMP-3: shipments whose lines point at this quotation's lines)
-   * so its related documents list them — see {@link QuotationShipmentLinks}.
+   * The order-header post-hook, plus two quotation-only adjustments on the reject reason
+   * (ETP-6209): no default on a new quotation, and no Classic lock in evaluate-display.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     NeoResponse result = super.afterHandle(context);
-    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
-      return result;
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return withoutRejectReasonDefault(context, result);
     }
+    if (NeoEndpointType.EVALUATE_DISPLAY.equals(context.getEndpointType())) {
+      return withoutClassicRejectReasonLock(context, result);
+    }
+    return result;
+  }
+
+  /**
+   * A new quotation never gets a reject reason by default (ETP-6209). The field is editable since
+   * the seller sets the tenant's internal reason on a rejected quotation, and an editable
+   * table-reference field receives the defaults' first-option fallback: every new draft (app and
+   * MCP {@code etendo_defaults}) would carry the first reject reason, hidden by its display logic —
+   * the ETP-4006 regression. The reason is only ever set by the reject action or by the seller on
+   * a rejected quotation.
+   */
+  private static NeoResponse withoutRejectReasonDefault(NeoContext context, NeoResponse result) {
     NeoResponse effective = result != null ? result : context.getPreviousResult();
-    if (effective == null || effective.getBody() == null || effective.getHttpStatus() >= 400) {
+    JSONObject defaults = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_DEFAULTS);
+    if (defaults == null || !defaults.has(Order.PROPERTY_REJECTREASON)) {
       return result;
     }
-    JSONObject wrapper = effective.getBody().optJSONObject("response");
-    org.codehaus.jettison.json.JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
-    JSONObject rec = data == null || data.length() == 0 ? null : data.optJSONObject(0);
-    if (rec == null) {
-      return result;
-    }
-    QuotationShipmentLinks.enrich(rec, context.getRecordId());
+    defaults.remove(Order.PROPERTY_REJECTREASON);
+    defaults.remove(Order.PROPERTY_REJECTREASON + IDENTIFIER_SUFFIX);
     return NeoResponse.ok(effective.getBody());
   }
 
-  /** {@code linkedShipments} is injected on every detail record (ETP-6002). */
-  @Override
-  public java.util.Set<String> responseEnrichedFields() {
-    java.util.Set<String> fields = new java.util.LinkedHashSet<>(super.responseEnrichedFields());
-    fields.add(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
-    return fields;
+  /**
+   * The reject reason is editable on a rejected quotation in GO (ETP-6209): the seller sets the
+   * tenant's internal reason after a portal rejection. The window declares that rule itself
+   * ({@code decisions.json} {@code readOnlyLogic: @DocStatus@!'CJ'}). evaluate-display, however,
+   * answers the Classic column logic ({@code @DocStatus@='CJ'|@DocStatus@='CA'}: locked exactly once
+   * rejected), and the SPA ORs it with the window's, so the field stayed grey. The Classic row is
+   * shared and never edited; this quotation's answer drops that one key, so the window's own
+   * {@code readOnlyLogic} decides. Every other field keeps the AD answer.
+   */
+  private static NeoResponse withoutClassicRejectReasonLock(NeoContext context,
+      NeoResponse result) {
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    JSONObject readOnly = effective == null || effective.getBody() == null ? null
+        : effective.getBody().optJSONObject(KEY_READ_ONLY);
+    if (readOnly == null || !readOnly.has(Order.PROPERTY_REJECTREASON)) {
+      return result;
+    }
+    readOnly.remove(Order.PROPERTY_REJECTREASON);
+    return NeoResponse.ok(effective.getBody());
   }
 
   @Inject
@@ -367,7 +400,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
     return "The app does not offer documentAction " + value + " on a quotation in this status: "
         + "it sends a draft to evaluation (CO) and rejects one Under evaluation (RJ, or "
-        + "rejectQuotation); acceptance is the Convertquotation action.";
+        + "rejectQuotation); acceptance is the Convertquotation action, also on a quotation the "
+        + "customer Accepted from the portal (ETGO_AC), which can no longer be rejected.";
   }
 
   /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */
@@ -390,6 +424,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
         CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -474,6 +511,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    */
   private NeoResponse handleConvertQuotation(String quotationId) {
     try {
+      Order quotation = PortalKpiTelemetry.quotationOf(quotationId);
+      String statusBefore = quotation == null ? null : quotation.getDocumentStatus();
       Order newOrder = convertQuotationProcess.convertQuotationIntoSalesOrder(false, quotationId);
       log.info("[ETP-4027] Created sales order {} from quotation {} with quoted prices preserved",
           newOrder.getDocumentNo(), quotationId);
@@ -482,6 +521,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       // ETP-5051: the plan-quota check of the order created from the quotation and its lines.
       // Nothing is committed before this point, so a refusal rolls the conversion back whole.
       NeoQuotaCreateCheck.requireAllowedDocument(newOrder);
+      // ETP-6209 KPI: an app acceptance (not for one the portal already accepted), after commit.
+      PortalKpiTelemetry.appQuotationConverted(statusBefore, quotation);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
       result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());

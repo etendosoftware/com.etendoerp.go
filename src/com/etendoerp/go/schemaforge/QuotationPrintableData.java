@@ -51,6 +51,16 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
   static final String DOCUMENT = "sales-quotation";
   /** The line's per-product discount percentage ({@code buildQuotationData} reads the same key). */
   static final String DISCOUNT_FIELD = "discount";
+  /** Closed - Rejected: the only status whose printable carries a reject reason. */
+  private static final String STATUS_REJECTED = "CJ";
+  /**
+   * The first words of the line the customer portal appends to a rejected quotation's notes
+   * ({@code portal-quotation-decision.note*} in {@code emails_{es_ES,en_US}.properties}). Mirrors
+   * {@code PORTAL_REJECT_NOTE_PREFIXES} of {@code useQuotationPdf.js}.
+   */
+  static final List<String> PORTAL_NOTE_PREFIXES = List.of(
+      "Rechazado por el cliente desde el portal.", "Rejected by the customer from the portal.");
+  private static final List<String> PORTAL_REASON_MARKERS = List.of("Motivo:", "Reason:");
 
   @Override
   public String document() {
@@ -123,7 +133,10 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
         value(header, "businessPartner"), "—"));
     data.put("paymentMethod", orNull(value(header, "paymentMethod$_identifier")));
     data.put("paymentTerms", orNull(value(header, "paymentTerms$_identifier")));
-    data.put("notes", orNull(value(header, "description")));
+    String[] notesAndReason = notesAndRejectReason(header);
+    data.put("notes", orNull(notesAndReason[0]));
+    // ETP-6209: "Motivo: …" on a rejected quotation, see notesAndRejectReason.
+    data.put("rejectReason", orNull(notesAndReason[1]));
     data.put("lines", lines);
     data.put("netAmount", json(netAmount));
     data.put("taxAmount", json(grandTotal - netAmount));
@@ -141,6 +154,93 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
     data.put("orgGrandTotal", JSONObject.NULL);
     data.put("rateDecimals", coalesce(value(session, "currencyStandardPrecision"), 4));
     return data;
+  }
+
+  /**
+   * The quotation's notes and its printed reject reason — {@code quotationNotesAndRejectReason} of
+   * {@code useQuotationPdf.js}, line for line (ETP-6209 Part C, Jira comment 149518 point 5).
+   *
+   * <p>A rejected quotation ({@code CJ}) prints one observation line "Motivo: &lt;reason&gt;" with
+   * the customer's own portal reason only (the "Otros" text included), read from the portal's line
+   * in the notes, which is taken out of the notes so the observations never say "Motivo" twice. A
+   * quotation rejected without a portal reason (e.g. in the app) prints no reason. Other statuses
+   * keep their notes and print no reason.</p>
+   *
+   * <p><b>The tenant's reject reason ({@code rejectReason$_identifier}) is never printed:</b> it can
+   * be internal, and this is the PDF the customer downloads from the portal and receives by email
+   * (ETP-6209 QA).</p>
+   *
+   * @return {@code {notes, rejectReason}}, either {@code null}
+   */
+  static String[] notesAndRejectReason(JSONObject header) {
+    Object rawDescription = value(header, "description");
+    String description = rawDescription == null ? null : String.valueOf(rawDescription);
+    String notes = description == null || description.isEmpty() ? null : description;
+    if (!STATUS_REJECTED.equals(value(header, "documentStatus"))) {
+      return new String[] { notes, null };
+    }
+    return splitPortalNote(description);
+  }
+
+  /**
+   * The notes without the customer portal's decision line(s), for a copy of the quotation
+   * ({@link CloneOrderLinePriceHook}) and for the portal list's reference fallback
+   * ({@code PortalDocumentsEndpoint}), ETP-6209: the same detection as the printable. Notes with no
+   * portal line come back untouched; notes that were only portal lines come back {@code null}.
+   *
+   * @param description the quotation's notes
+   * @return the notes to keep
+   */
+  public static String withoutPortalNote(String description) {
+    if (description == null || java.util.Arrays.stream(description.split("\n", -1))
+        .map(String::trim).noneMatch(QuotationPrintableData::isPortalNoteLine)) {
+      return description;
+    }
+    return splitPortalNote(description)[0];
+  }
+
+  private static boolean isPortalNoteLine(String trimmedLine) {
+    return PORTAL_NOTE_PREFIXES.stream().anyMatch(trimmedLine::startsWith);
+  }
+
+  /**
+   * Takes the portal's note lines out of the notes.
+   *
+   * @return {@code {kept notes, portal reason}}, either {@code null}
+   */
+  private static String[] splitPortalNote(String description) {
+    StringBuilder kept = new StringBuilder();
+    String portalReason = null;
+    for (String line : (description == null ? "" : description).split("\n", -1)) {
+      String trimmed = line.trim();
+      if (isPortalNoteLine(trimmed)) {
+        String reason = reasonOfPortalNote(trimmed);
+        portalReason = reason != null ? reason : portalReason;
+      } else {
+        if (kept.length() > 0) {
+          kept.append('\n');
+        }
+        kept.append(line);
+      }
+    }
+    String keptNotes = kept.toString().trim();
+    return new String[] { keptNotes.isEmpty() ? null : keptNotes, portalReason };
+  }
+
+
+  /** The reason inside a portal note line: what follows its marker, without the closing period. */
+  private static String reasonOfPortalNote(String line) {
+    for (String marker : PORTAL_REASON_MARKERS) {
+      int at = line.indexOf(marker);
+      if (at >= 0) {
+        String reason = line.substring(at + marker.length()).trim();
+        if (reason.endsWith(".")) {
+          reason = reason.substring(0, reason.length() - 1).trim();
+        }
+        return reason.isEmpty() ? null : reason;
+      }
+    }
+    return null;
   }
 
   /** {@code getGrossLine} of {@code buildQuotationData}. */

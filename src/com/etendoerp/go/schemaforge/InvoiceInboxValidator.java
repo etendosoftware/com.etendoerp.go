@@ -22,10 +22,13 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DESCRIPTION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_HEADER;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INDEX;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_INVOICE_DATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_LINES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_MISSING;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_QUANTITY;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_RECEIVER;
@@ -35,6 +38,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TOTAL_AMOUNT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALID;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MAX_DOCUMENT_NO;
@@ -59,7 +63,10 @@ import com.etendoerp.go.schemaforge.ocr.ReceiverTaxIdCheck;
  * every edit (ETP-6050) apply the very same rules.
  *
  * <p>It answers with codes only: {@code vendor}, {@code invoiceDate}, {@code amount}, {@code lines},
- * {@code line[i].tax}, {@code line[i].product} (and {@code receiver} for a foreign receiver). The
+ * {@code line[i].tax}, {@code line[i].product}, {@code line[i].quantity}, {@code line[i].unitPrice}
+ * (and {@code receiver} for a foreign receiver). {@code i}
+ * is the line's stable {@code index} (ETP-6050: it survives deleting and adding lines), the position
+ * for a document whose lines carry none. The
  * error code follows the priority {@code FOREIGN_RECEIVER > REFERENCE_TOO_LONG > MISSING_FIELDS}.</p>
  */
 public final class InvoiceInboxValidator {
@@ -133,6 +140,28 @@ public final class InvoiceInboxValidator {
     return new Result(missing, missing.isEmpty() ? null : MISSING_FIELDS);
   }
 
+  /**
+   * Validates a document and adds what only the database can tell (ETP-6051): {@code extraMissing}
+   * are the codes of {@link InvoiceInboxLiveChecks}. They make a document that would otherwise be
+   * valid {@link #MISSING_FIELDS}; a foreign receiver or an over-long number keeps its own code and
+   * the extra codes join its {@code missing} list.
+   *
+   * @param document     the {@code CURRENT_DATA} object
+   * @param extraMissing the extra missing codes, may be {@code null}
+   * @return the verdict
+   */
+  public static Result validate(JSONObject document, List<String> extraMissing) {
+    Result base = validate(document);
+    if (extraMissing == null || extraMissing.isEmpty()
+        || FOREIGN_RECEIVER.equals(base.getErrorCode())) {
+      return base;
+    }
+    List<String> missing = new ArrayList<>(base.getMissing());
+    missing.addAll(extraMissing);
+    return new Result(missing, base.getErrorCode() == null ? MISSING_FIELDS
+        : base.getErrorCode());
+  }
+
   private static boolean isForeignReceiver(JSONObject header) {
     JSONObject receiver = header.optJSONObject(K_RECEIVER);
     return receiver != null && ReceiverTaxIdCheck.Status.MISMATCH.code()
@@ -146,7 +175,9 @@ public final class InvoiceInboxValidator {
     if (StringUtils.isBlank(stringOf(header, K_INVOICE_DATE))) {
       missing.add("invoiceDate");
     }
-    if (header.optDouble(K_TOTAL_AMOUNT, 0d) <= 0d) {
+    // The purchase invoice enforces no sign on its total (it is computed from the lines; a credit
+    // note is negative, a free one is zero): the total only has to exist.
+    if (!(header.opt(K_TOTAL_AMOUNT) instanceof Number)) {
       missing.add("amount");
     }
   }
@@ -172,13 +203,41 @@ public final class InvoiceInboxValidator {
     }
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.optJSONObject(i);
-      if (line == null || !taxComplete(line)) {
-        missing.add("line[" + i + "].tax");
-      }
-      if (line == null || !productComplete(line)) {
-        missing.add("line[" + i + "].product");
-      }
+      checkLine(line, lineId(line, i), missing);
     }
+  }
+
+  /** The stable {@code index} of a line, its position for a line that carries none. */
+  private static int lineId(JSONObject line, int position) {
+    boolean hasIndex = line != null && !line.isNull(K_INDEX);
+    return hasIndex ? line.optInt(K_INDEX, position) : position;
+  }
+
+  /** Adds, in order, what a line is missing: tax, product, quantity, unit price. */
+  private static void checkLine(JSONObject line, int id, List<String> missing) {
+    if (line == null) {
+      for (String field : new String[] { "tax", "product", "quantity", "unitPrice" }) {
+        missing.add(lineCode(id, field));
+      }
+      return;
+    }
+    if (!taxComplete(line)) {
+      missing.add(lineCode(id, "tax"));
+    }
+    if (!productComplete(line)) {
+      missing.add(lineCode(id, "product"));
+    }
+    if (!(line.opt(K_QUANTITY) instanceof Number)) {
+      missing.add(lineCode(id, "quantity"));
+    }
+    if (!(line.opt(K_UNIT_PRICE) instanceof Number)) {
+      missing.add(lineCode(id, "unitPrice"));
+    }
+  }
+
+  /** The code of a missing line field: {@code line[<id>].<field>}. */
+  private static String lineCode(int id, String field) {
+    return "line[" + id + "]." + field;
   }
 
   /** Resolved, or pending the vendor's address while the line prints a rate. */
@@ -189,16 +248,22 @@ public final class InvoiceInboxValidator {
         || (T_PENDING_VENDOR.equals(state) && !line.isNull(K_TAX_RATE) && line.has(K_TAX_RATE));
   }
 
-  /** Linked, or new with a description, a quantity above zero and a price of zero or more. */
+  /**
+   * Linked, or new with a name (the line description by default) and the category and the unit the
+   * product will be created with (ETP-6050, D8). Quantity and price are NOT part of it: they are
+   * checked for every line alike, linked or new.
+   */
   private static boolean productComplete(JSONObject line) {
     JSONObject product = line.optJSONObject(K_PRODUCT);
     String state = product == null ? "" : product.optString(K_STATE, "");
     if (S_LINKED.equals(state)) {
       return true;
     }
-    return S_NEW.equals(state) && StringUtils.isNotBlank(stringOf(line, K_DESCRIPTION))
-        && !line.isNull(K_QUANTITY) && line.optDouble(K_QUANTITY, 0d) > 0d
-        && !line.isNull(K_UNIT_PRICE) && line.optDouble(K_UNIT_PRICE, -1d) >= 0d;
+    JSONObject draft = product == null ? null : product.optJSONObject(K_NEW);
+    String name = StringUtils.defaultIfBlank(stringOf(draft, K_NAME), stringOf(line, K_DESCRIPTION));
+    return S_NEW.equals(state) && StringUtils.isNotBlank(name)
+        && StringUtils.isNotBlank(stringOf(draft, K_CATEGORY_ID))
+        && StringUtils.isNotBlank(stringOf(draft, K_UOM_ID));
   }
 
   private static String stringOf(JSONObject object, String key) {

@@ -79,6 +79,7 @@ import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.invoicing.PaymentLedger;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
@@ -92,6 +93,12 @@ import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
+import com.etendoerp.go.payment.PlanChangePreview;
+import com.etendoerp.go.payment.PlanChangeRefusedException;
+import com.etendoerp.go.payment.PlanChangeResult;
+import com.etendoerp.go.payment.PlanChangeService;
+import com.etendoerp.go.payment.PlanChangeTiming;
+import com.etendoerp.go.payment.StripeTransportException;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
@@ -106,8 +113,10 @@ import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -136,6 +145,7 @@ import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingDefaultContactCategoryService;
+import com.etendoerp.go.onboarding.OnboardingRemittanceSetupService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -198,6 +208,11 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/billing/offers — Server-owned billing offer projection
  *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
  *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
+ *   GET  /sws/go/billing/subscription/plan-changes — ETP-5053: the plan changes the shown
+ *        subscription may ask for, each with the tenant's usage against the target plan's quotas
+ *   POST /sws/go/billing/subscription/plan-change/preview — ETP-5053: what a plan change would
+ *        cost today (amount, card) before the customer confirms it
+ *   POST /sws/go/billing/subscription/plan-change — ETP-5053: upgrade now or schedule a downgrade
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -275,6 +290,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_PURCHASE_SELECTION_CHANGED = "PURCHASE_SELECTION_CHANGED";
   private static final String PURCHASE_SELECTION_CHANGED_MESSAGE =
       "The pending checkout changed. Please review the purchase again.";
+  private static final String FIELD_DISPLAY_PRICE = "displayPrice";
+  private static final String FIELD_BILLING_INTERVAL = "billingInterval";
+  private static final String FIELD_HAS_SUBSCRIPTION = "hasSubscription";
+  /** ETP-5053 — the timing of a plan change ({@code immediate} / {@code period_end}). */
+  private static final String FIELD_TIMING = "timing";
+  private static final String FIELD_EFFECTIVE_AT = "effectiveAt";
+  private static final String FIELD_QUOTAS = "quotas";
+  private static final String FIELD_PRORATION_DATE = "prorationDate";
+  /** ETP-5053 — the offered "change" that keeps the current plan, cancelling a pending downgrade. */
+  private static final String TIMING_KEEP = "keep";
+  private static final String NO_SUBSCRIPTION_MESSAGE = "No subscription for this account";
+  private static final String ACTION_BILLING_PLAN_CHANGE = "billing-plan-change";
+  private static final String ACTION_BILLING_PLAN_CHANGE_PREVIEW = "billing-plan-change-preview";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
       "The selected plan is no longer available. Reload the page to see the current plans.";
@@ -378,6 +406,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_VERIFY_EMAIL = "/verify-email";
   /** ETP-6081: the terms and conditions in force, public. */
   private static final String PATH_TERMS = "/terms";
+  /** ETP-6244: the Word document of a terms version, public like the terms themselves. */
+  private static final String PATH_TERMS_DOCUMENT = "/terms/document";
   private static final String FIELD_TERMS_VERSION = "termsVersion";
   /** ETP-6081: consent to promotional mail, asked in the terms dialog of the register screen. */
   private static final String FIELD_MARKETING_CONSENT = "marketingConsent";
@@ -471,6 +501,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_SUPPORT_SESSION = "supportSession";
   private static final String PATH_SUPPORT_HANDOFF = "/session/support-handoff";
   private static final String ACTION_SUPPORT_HANDOFF = "support handoff";
+  /** ETP-6152 — the operation named in the log when committing a session write fails. */
+  private static final String ACTION_SESSION_WRITE = "session write";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
@@ -506,6 +538,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
   OnboardingDefaultContactCategoryService onboardingDefaultContactCategoryService =
       new OnboardingDefaultContactCategoryService();
+  OnboardingRemittanceSetupService onboardingRemittanceSetupService =
+      new OnboardingRemittanceSetupService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
       new DevProvisioningFailureFixtureService();
@@ -518,6 +552,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
+  /** ETP-5053 — plan upgrades and downgrades; package-visible for tests. */
+  PlanChangeService planChangeService = new PlanChangeService();
   /** ETP-5051 — the one quota evaluator; package-visible for tests. */
   QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
   /**
@@ -533,6 +569,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
+  /** ETP-6322 — records each paid invoice for the ERP to invoice; package-visible for tests. */
+  PaymentLedger paymentLedger = new PaymentLedger();
   /**
    * ETP-5047 — one guard for the servlet's life. It reads {@link #tenantEnvironmentLifecycleService}
    * at every check, so a test that replaces that field keeps working.
@@ -634,6 +672,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, PATH_TERMS)) {
       handleTermsAndConditions(request, response);
+    } else if (isPath(path, PATH_TERMS_DOCUMENT)) {
+      handleTermsDocument(request, response);
     } else {
       return false;
     }
@@ -648,6 +688,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingOverview(request, response);
     } else if (isPath(path, "/billing/subscription")) {
       handleBillingSubscription(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-changes")) {
+      handleBillingPlanChanges(request, response);
     } else if (path != null && path.startsWith("/billing/purchases/")) {
       handleBillingPurchase(request, response);
     } else {
@@ -830,6 +872,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
+  /** The account page's own subscription: Customer Portal and plan changes (ETP-5053). */
+  private boolean dispatchBillingSubscriptionPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/billing/subscription/portal")) {
+      handleBillingPortal(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-change")) {
+      handleBillingPlanChange(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-change/preview")) {
+      handleBillingPlanChangePreview(request, response);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
   /** Onboarding, checkout and company invitations. */
   private boolean dispatchProvisioningPost(String path, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -841,8 +898,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleOnboarding(request, response);
     } else if (isPath(path, "/billing/purchases")) {
       handleBillingPurchaseCreate(request, response);
-    } else if (isPath(path, "/billing/subscription/portal")) {
-      handleBillingPortal(request, response);
+    } else if (dispatchBillingSubscriptionPost(path, request, response)) {
+      return true;
     } else if (isPath(path, "/billing/reactivation")) {
       handleSubscriptionReactivation(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
@@ -887,9 +944,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * second, public auth path for it would be a new surface to get wrong.
    *
    * <p>Returns {@code 200} with {@code { "plans": [ { planKey, name, description, displayPrice,
-   * currency, billingInterval } ] }}. An empty plan catalog is an empty array and a {@code 200}: "there
-   * is nothing on sale" is an answer, not a failure, and the caller has to render the same
-   * "checkout unavailable" state for it either way.
+   * currency, billingInterval, freeTrialDays, ... } ] }}. An empty plan catalog is an empty array
+   * and a {@code 200}: "there is nothing on sale" is an answer, not a failure, and the caller has
+   * to render the same "checkout unavailable" state for it either way.
    *
    * <p><b>Legacy price fallback.</b> While {@link PlanCatalogService#isLegacyFallbackActive()}
    * holds — a legacy price is configured and no plan carries a provider price — the list is exactly
@@ -910,8 +967,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           plans.put(item);
         }
       } else {
+        // Paid, provisioning or provisioned purchases only: the once-per-account free trial.
+        boolean accountHasPaid = !checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail()).isEmpty();
         for (Plan plan : planCatalogService.listPurchasablePlans()) {
-          JSONObject item = buildPlanJson(plan);
+          JSONObject item = buildPlanJson(plan, accountHasPaid);
           if (item != null) {
             plans.put(item);
           }
@@ -956,9 +1016,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ("Grandfathered plan ... sold only via the legacy price fallback ... etendo.go.checkout...")
     // and would put internal configuration keys in front of a buyer on the upgrade page.
     item.put("description", "");
-    item.put("displayPrice", displayPrice.toPlainString());
+    item.put(FIELD_DISPLAY_PRICE, displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, price.getCurrency());
-    item.put("billingInterval", StringUtils.defaultString(price.getInterval()));
+    item.put(FIELD_BILLING_INTERVAL, StringUtils.defaultString(price.getInterval()));
     return item;
   }
 
@@ -975,10 +1035,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * client cannot quote it, so offering it would produce a purchase whose price the buyer was
    * never shown. That is a plan catalog data defect, hence the warning.
    *
+   * <p>{@code freeTrialDays} is what checkout would grant this account on the plan (ETP-6082:
+   * monthly plans, once per account), so the page never announces a trial checkout refuses.
+   *
    * @param plan an active, sellable plan catalog row
+   * @param accountHasPaid whether the requesting account already paid a purchase
    * @return the JSON view, or null when the row cannot be quoted and must not be offered
    */
-  private JSONObject buildPlanJson(Plan plan) throws JSONException {
+  private JSONObject buildPlanJson(Plan plan, boolean accountHasPaid) throws JSONException {
     BigDecimal displayPrice = plan.getDisplayPrice();
     String currency = plan.getCurrencyCode();
     if (displayPrice == null || StringUtils.isBlank(currency)) {
@@ -992,13 +1056,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put("description", StringUtils.defaultString(plan.getDescription()));
     // A plain string, not a double: the amount crosses to a client that formats it, and a
     // binary float would quietly re-round a price on the way.
-    item.put("displayPrice", displayPrice.toPlainString());
+    item.put(FIELD_DISPLAY_PRICE, displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
-    item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
-    item.put("secondMonthFree", CheckoutPromotionTerms.isEligiblePlan(plan));
+    item.put(FIELD_BILLING_INTERVAL, StringUtils.defaultString(plan.getBillingInterval()));
+    item.put("freeTrialDays", CheckoutPromotionTerms.isEligible(plan, accountHasPaid)
+        ? CheckoutPromotionTerms.FREE_TRIAL_DAYS : 0);
     item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
     item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
-    item.put("quotas", buildPlanQuotasJson(plan));
+    item.put(FIELD_QUOTAS, buildPlanQuotasJson(plan));
     return item;
   }
 
@@ -1691,7 +1756,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           requestedSubscriptionClientId(request));
       if (purchase == null) {
         JSONObject result = new JSONObject();
-        result.put("hasSubscription", false);
+        result.put(FIELD_HAS_SUBSCRIPTION, false);
         writeResponse(response, HttpServletResponse.SC_OK, result);
         return;
       }
@@ -1753,7 +1818,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest purchase = findRequestedSubscription(authenticated, requestedClientId);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
-            "No subscription for this account", "No subscription for this account");
+            NO_SUBSCRIPTION_MESSAGE, NO_SUBSCRIPTION_MESSAGE);
         return;
       }
       JSONObject session;
@@ -1866,7 +1931,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       graceDaysRemaining = remainingSeconds <= 0 ? 0 : (int) ((remainingSeconds + 86399) / 86400);
     }
     JSONObject result = new JSONObject();
-    result.put("hasSubscription", true);
+    result.put(FIELD_HAS_SUBSCRIPTION, true);
     result.put("plan", live.getPlan());
     result.put("amountMinor", live.getAmountMinor());
     result.put(FIELD_CURRENCY, live.getCurrency());
@@ -1919,6 +1984,296 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("planName",
         plan == null ? JSONObject.NULL : StringUtils.defaultString(plan.getName()));
     result.put("planQuotas", quotas);
+    // ETP-5053 — the anniversary the quota year is counted from, and the downgrade pending at the
+    // provider, so the page can say "your plan changes to X on <date>" without calling Stripe.
+    Date quotaYear = subscription == null ? null : TenantQuotas.quotaYearAnchorOf(subscription);
+    result.put("quotaYearStart", quotaYear == null ? JSONObject.NULL
+        : quotaYear.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString());
+    result.put("pendingChange", pendingChangeJson(subscription));
+  }
+
+  /**
+   * ETP-5053 — the downgrade scheduled on a row ({@code PENDING_PLAN_ID} /
+   * {@code PENDING_EFFECTIVE_DATE}), or JSON null when nothing is pending or the row is closed.
+   */
+  private static Object pendingChangeJson(Subscription subscription) throws JSONException {
+    if (subscription == null || subscription.getEndDate() != null
+        || subscription.getPendingPlan() == null
+        || subscription.getPendingEffectiveDate() == null) {
+      return JSONObject.NULL;
+    }
+    JSONObject pending = planJson(subscription.getPendingPlan());
+    pending.put(FIELD_EFFECTIVE_AT, subscription.getPendingEffectiveDate().toInstant().toString());
+    pending.put(FIELD_TIMING, PlanChangeTiming.PERIOD_END.value());
+    return pending;
+  }
+
+  /** ETP-5053 — a catalog plan as the account page names it. */
+  private static JSONObject planJson(Plan plan) throws JSONException {
+    JSONObject json = new JSONObject();
+    json.put(FIELD_PLAN_KEY, plan.getSearchKey());
+    json.put("planName", StringUtils.defaultString(plan.getName()));
+    json.put(FIELD_BILLING_INTERVAL, StringUtils.defaultString(plan.getBillingInterval()));
+    json.put(FIELD_DISPLAY_PRICE, plan.getDisplayPrice() == null ? JSONObject.NULL
+        : plan.getDisplayPrice().toPlainString());
+    json.put(FIELD_CURRENCY, StringUtils.defaultString(plan.getCurrencyCode()));
+    return json;
+  }
+
+  /**
+   * GET /sws/go/billing/subscription/plan-changes — ETP-5053.
+   *
+   * <p>The plan changes the shown subscription may ask for (the same subscription
+   * {@code GET /billing/subscription} describes, or the environment named by {@code ?clientId=}
+   * for a "Mis empresas" row — ownership is the query's, as for the portal). Each offered target
+   * carries its timing ({@code immediate} / {@code period_end}), whether it changes the billing
+   * interval (the quota year then follows the provider's new period start, which flexible billing
+   * keeps on the same anchor), and the tenant's <em>current</em> usage measured
+   * against the target plan's quotas, so a downgrade into an exceeded quota shows its numbers
+   * before the customer confirms. No active Allowed plan changes row for a target means it is
+   * simply not listed.
+   */
+  private void handleBillingPlanChanges(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithPlatformContext(request, response, "billing-plan-changes", authenticated -> {
+      String requestedClientId = StringUtils.trimToNull(request.getParameter(FIELD_CLIENT_ID));
+      CheckoutRequest purchase = findRequestedSubscription(authenticated,
+          ZERO_ID.equals(requestedClientId) ? null : requestedClientId);
+      JSONObject result = new JSONObject();
+      if (purchase == null || purchase.getCreatedClient() == null) {
+        result.put(FIELD_HAS_SUBSCRIPTION, false);
+        result.put("changes", new JSONArray());
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+        return;
+      }
+      String clientId = purchase.getCreatedClient().getId();
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        Subscription subscription = subscriptionService.findOpen(clientId).orElse(null);
+        Plan current = subscription == null ? null : subscription.getPlan();
+        result.put(FIELD_HAS_SUBSCRIPTION, subscription != null);
+        result.put(FIELD_CLIENT_ID, clientId);
+        result.put("currentPlan", current == null ? JSONObject.NULL : planJson(current));
+        result.put("subscriptionStatus", subscription == null ? JSONObject.NULL
+            : StringUtils.defaultString(SubscriptionService.effectiveStatusOf(subscription)));
+        result.put("pendingChange", pendingChangeJson(subscription));
+        result.put("changes", offeredPlanChangesJson(clientId, subscription));
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /**
+   * ETP-5053 — the offered plan changes of {@link #handleBillingPlanChanges}. While a downgrade is
+   * pending the offer starts from that future plan (every plan reachable from it), and the current
+   * plan is always offered first as "keep": choosing it cancels the scheduled downgrade.
+   */
+  private JSONArray offeredPlanChangesJson(String clientId, Subscription subscription)
+      throws JSONException {
+    JSONArray changes = new JSONArray();
+    Plan current = subscription == null ? null : subscription.getPlan();
+    boolean pending = current != null && subscription.getPendingPlan() != null;
+    if (pending) {
+      JSONObject keep = planJson(current);
+      keep.put(FIELD_TIMING, TIMING_KEEP);
+      keep.put("intervalChange", false);
+      keep.put(FIELD_QUOTAS, new JSONArray());
+      changes.put(keep);
+    }
+    for (PlanChange change : planChangeService.allowedChanges(subscription)) {
+      if (!pending || !StringUtils.equals(change.getTargetPlan().getId(), current.getId())) {
+        changes.put(offeredPlanChangeJson(clientId, subscription, change));
+      }
+    }
+    return changes;
+  }
+
+  /** One offered target, with its timing, interval change and usage against its quotas. */
+  private JSONObject offeredPlanChangeJson(String clientId, Subscription subscription,
+      PlanChange change) throws JSONException {
+    Plan current = subscription.getPlan();
+    Plan target = change.getTargetPlan();
+    JSONObject item = planJson(target);
+    // The timing the change would apply with, which while a downgrade is pending is the row from
+    // the current plan, not the pending one the offer is read from.
+    item.put(FIELD_TIMING, planChangeService.timingOf(subscription, change).value());
+    item.put("intervalChange", current != null && !StringUtils.equalsIgnoreCase(
+        StringUtils.trimToEmpty(current.getBillingInterval()),
+        StringUtils.trimToEmpty(target.getBillingInterval())));
+    // Today's usage against the target plan's limits: the same evaluator and window as the page's
+    // own quotas, only the included quantities are the target's.
+    TenantQuotas against = TenantQuotas.of(clientId, subscription,
+        planCatalogService.listActiveQuotas(target));
+    item.put(FIELD_QUOTAS, QuotaItemJson.ofAll(evaluateQuotas(against)));
+    return item;
+  }
+
+  /**
+   * POST /sws/go/billing/subscription/plan-change — ETP-5053.
+   * Body: {@code { "planKey": "<VALUE of the target plan>", "clientId": "<optional>" }}.
+   *
+   * <p>Applies an upgrade now (the item is updated at the provider, prorated, and the row rolled
+   * over before answering) or schedules a downgrade for the end of the current billing period
+   * (recorded on the row as pending). Refusals carry the service's code: 404
+   * {@code NO_SUBSCRIPTION} / {@code PLAN_NOT_FOUND}, 409 {@code PLAN_CHANGE_NOT_ALLOWED} /
+   * {@code SUBSCRIPTION_NOT_CURRENT}, 503 {@code CHECKOUT_NOT_CONFIGURED}, 502
+   * {@code BILLING_PROVIDER_ERROR}. Repeating a request is idempotent: the same downgrade is
+   * reported {@code alreadyPending}, and an upgrade carries an idempotency key at the provider.
+   */
+  private void handleBillingPlanChange(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithPlatformContext(request, response, ACTION_BILLING_PLAN_CHANGE, authenticated -> {
+      PlanChangeRequest asked = readPlanChangeRequest(request, response, authenticated);
+      if (asked == null) {
+        return;
+      }
+      String clientId = asked.clientId();
+      try {
+        // The service runs its own client-0 writes as system; the request's DAL filter commits.
+        Long prorationDate = asked.body().optLong(FIELD_PRORATION_DATE, 0L) > 0L
+            ? asked.body().optLong(FIELD_PRORATION_DATE) : null;
+        PlanChangeResult changed = planChangeService.requestChange(clientId, asked.planKey(),
+            prorationDate);
+        writeResponse(response, HttpServletResponse.SC_OK, planChangeResultJson(changed,
+            clientId));
+      } catch (PlanChangeRefusedException e) {
+        EtendoGoDalHelper.rollbackDalChanges(ACTION_BILLING_PLAN_CHANGE, e, log);
+        log.warn("Plan change refused for tenant {}: {} ({})", clientId, e.getMessage(),
+            e.code());
+        writeError(response, planChangeStatusOf(e.code()), e.code(), e.getMessage(),
+            e.getMessage());
+      } catch (StripeTransportException e) {
+        EtendoGoDalHelper.rollbackDalChanges(ACTION_BILLING_PLAN_CHANGE, e, log);
+        log.error("The payment provider did not answer the plan change of tenant {}", clientId,
+            e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+            "Unable to change the plan", "Unable to change the plan");
+      }
+    });
+  }
+
+  /**
+   * POST /sws/go/billing/subscription/plan-change/preview — ETP-5053.
+   * Body: {@code { "planKey": "<VALUE of the target plan>", "clientId": "<optional>" }}.
+   *
+   * <p>What confirming the change would do, without doing it: the target plan with its
+   * {@code timing} and {@code effectiveAt}; for an upgrade also {@code amountDue} (major units, a
+   * plain string), {@code currency}, {@code prorationDate} (send it back with the change so the
+   * charge equals this amount) and {@code paymentMethod} ({@code { brand, last4 }} or null). A
+   * downgrade charges nothing today, so those are null. Refusals as for the change itself.
+   */
+  private void handleBillingPlanChangePreview(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithPlatformContext(request, response, ACTION_BILLING_PLAN_CHANGE_PREVIEW,
+        authenticated -> {
+          PlanChangeRequest asked = readPlanChangeRequest(request, response, authenticated);
+          if (asked == null) {
+            return;
+          }
+          String clientId = asked.clientId();
+          try {
+            writeResponse(response, HttpServletResponse.SC_OK, planChangePreviewJson(
+                planChangeService.previewChange(clientId, asked.planKey())));
+          } catch (PlanChangeRefusedException e) {
+            log.warn("Plan change preview refused for tenant {}: {} ({})", clientId,
+                e.getMessage(), e.code());
+            writeError(response, planChangeStatusOf(e.code()), e.code(), e.getMessage(),
+                e.getMessage());
+          } catch (StripeTransportException e) {
+            log.error("The payment provider did not answer the plan change preview of tenant {}",
+                clientId, e);
+            writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+                "Unable to preview the plan change", "Unable to preview the plan change");
+          }
+        });
+  }
+
+  /** ETP-5053 — a plan change request: the environment it acts on, the plan and the body. */
+  private record PlanChangeRequest(String clientId, String planKey, JSONObject body) {
+  }
+
+  /**
+   * Reads the plan and the environment a plan change (or its preview) names; writes the refusal
+   * and answers null when the body is unreadable, names no plan, or names no subscription of the
+   * account (ownership is the lookup's, as for the portal).
+   */
+  private PlanChangeRequest readPlanChangeRequest(HttpServletRequest request,
+      HttpServletResponse response, AuthenticatedAccount authenticated) throws IOException {
+    JSONObject body = readJsonBodyOrBadRequest(request, response);
+    if (body == null) {
+      return null;
+    }
+    String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+    if (planKey == null) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          "planKey is required", "Choose the plan to change to");
+      return null;
+    }
+    String requestedClientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
+    CheckoutRequest purchase = findRequestedSubscription(authenticated,
+        ZERO_ID.equals(requestedClientId) ? null : requestedClientId);
+    if (purchase == null || purchase.getCreatedClient() == null) {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND,
+          PlanChangeRefusedException.NO_SUBSCRIPTION, NO_SUBSCRIPTION_MESSAGE,
+          NO_SUBSCRIPTION_MESSAGE);
+      return null;
+    }
+    return new PlanChangeRequest(purchase.getCreatedClient().getId(), planKey, body);
+  }
+
+  /** ETP-5053 — the JSON of an applied, scheduled or cancelled plan change. */
+  static JSONObject planChangeResultJson(PlanChangeResult changed, String clientId)
+      throws JSONException {
+    JSONObject result = planJson(changed.targetPlan());
+    result.put(FIELD_TIMING, changed.timing().value());
+    result.put(FIELD_EFFECTIVE_AT, changed.effectiveAt().toString());
+    result.put("alreadyPending", changed.alreadyPending());
+    result.put("paymentRequired", changed.paymentRequired());
+    result.put("paymentUrl", changed.paymentUrl() == null ? JSONObject.NULL : changed.paymentUrl());
+    result.put("pendingCancelled", changed.pendingCancelled());
+    result.put(FIELD_CLIENT_ID, clientId);
+    return result;
+  }
+
+  /** ETP-5053 — the JSON of a plan change preview (see {@link #handleBillingPlanChangePreview}). */
+  static JSONObject planChangePreviewJson(PlanChangePreview preview) throws JSONException {
+    JSONObject result = planJson(preview.targetPlan());
+    result.put(FIELD_TIMING, preview.timing().value());
+    result.put(FIELD_EFFECTIVE_AT, preview.effectiveAt() == null ? JSONObject.NULL
+        : preview.effectiveAt().toString());
+    result.put("amountDue", preview.amountDue() == null ? JSONObject.NULL
+        : preview.amountDue().toPlainString());
+    result.put(FIELD_CURRENCY, preview.currency() == null ? JSONObject.NULL : preview.currency());
+    result.put(FIELD_PRORATION_DATE, preview.prorationDate() == null ? JSONObject.NULL
+        : preview.prorationDate());
+    if (preview.cardLast4() == null) {
+      result.put("paymentMethod", JSONObject.NULL);
+    } else {
+      JSONObject card = new JSONObject();
+      card.put("brand", preview.cardBrand() == null ? JSONObject.NULL : preview.cardBrand());
+      card.put("last4", preview.cardLast4());
+      result.put("paymentMethod", card);
+    }
+    return result;
+  }
+
+  /** ETP-5053 — the HTTP status of each plan change refusal code. */
+  static int planChangeStatusOf(String code) {
+    switch (StringUtils.defaultString(code)) {
+      case PlanChangeRefusedException.NO_SUBSCRIPTION:
+      case PlanChangeRefusedException.PLAN_NOT_FOUND:
+        return HttpServletResponse.SC_NOT_FOUND;
+      case PlanChangeRefusedException.PLAN_CHANGE_NOT_ALLOWED:
+      case PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT:
+        return HttpServletResponse.SC_CONFLICT;
+      case PlanChangeRefusedException.NOT_CONFIGURED:
+        return HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+      default:
+        return HttpServletResponse.SC_BAD_GATEWAY;
+    }
   }
 
   /**
@@ -2097,6 +2452,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Recorded in this event's transaction, which the result mark below commits: if applying
     // fails, it is rolled back with it and the redelivery records it again. Never throws.
     HubSpotOutbox.stripeEvent(type, event);
+    // ETP-6322 — the payment the ERP invoices, in the same transaction. Unlike the HubSpot row it
+    // may throw: the event is then marked failed and redelivered, so no payment is ever
+    // acknowledged without being kept.
+    paymentLedger.recordPayment(type, event);
     if (CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
       applyCheckoutPaid(eventId, type, event);
       return;
@@ -2794,8 +3153,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * GET /sws/go/terms?language=es_ES (ETP-6081).
    *
    * <p>Deliberately unauthenticated: the register screen shows the terms before any account
-   * exists. Returns only the text in force and its identity ({@code version}, {@code language},
-   * {@code content}, {@code publishedAt}); 404 when no version is published.
+   * exists. Returns only the identity of the version in force ({@code version}, {@code language},
+   * {@code null} for a version of every language, and {@code publishedAt}); its text is the Word
+   * document {@code /terms/document} serves. 404 when no version with a document is published.
    */
   private void handleTermsAndConditions(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -2817,6 +3177,46 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * GET /sws/go/terms/document?language=es_ES&amp;version=1.0 (ETP-6244).
+   *
+   * <p>Unauthenticated like {@code /terms}: the Word document attached in Classic to that version,
+   * for the register screen to show the version {@code /terms} named; an empty or missing
+   * {@code language} reads a version of every language. Only the
+   * {@code .docx} of an active, published {@code ETGO_TERMS} row is ever served; anything else,
+   * a malformed parameter included, is a 404.
+   */
+  private void handleTermsDocument(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Optional<byte[]> document = termsService.findDocument(
+          request.getParameter(FIELD_LANGUAGE), request.getParameter("version"));
+      if (document.isPresent()) {
+        writeTermsDocument(response, document.get());
+      } else {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "TERMS_DOCUMENT_NOT_FOUND",
+            "No terms document for this version", "No terms document for this version");
+      }
+    } catch (RuntimeException e) {
+      log.error("Could not read the terms and conditions document", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Writes a terms Word document as the whole body of a 200. */
+  static void writeTermsDocument(HttpServletResponse response, byte[] bytes) throws IOException {
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType(TermsAndConditionsService.DOCUMENT_CONTENT_TYPE);
+    response.setHeader(HEADER_CACHE_CONTROL, "no-cache");
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
   }
 
   /** The terms version an SSO body carries besides the credential, or {@code null}. */
@@ -3396,7 +3796,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               "Session changed concurrently; restore and retry");
           return;
         }
-        setSessionCookies(response, rotated);
+        commitAndSetSessionCookies(response, rotated);
         result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       } else {
         result.put(FIELD_TOKEN, sessionToken);
@@ -4153,6 +4553,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         calendarReviewService.confirm(session.clientId, userId);
       }
       EtendoGoDalHelper.commitDalChanges("calendar review", log);
+      // ETP-6230: after the commit; enqueue only.
+      AccountingKpiTelemetry.calendarReviewCompleted(session.clientId,
+          AccountingKpiTelemetry.REVIEW_FIRST_STEPS,
+          regenerate ? AccountingKpiTelemetry.TYPE_MODIFY : AccountingKpiTelemetry.TYPE_CONFIRM,
+          AccountingKpiTelemetry.SOURCE_FIRST_STEPS);
       // Same shape as the GET: the caller is the owner, or it would have been refused above.
       JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
       result.put("isOwner", true);
@@ -5512,6 +5917,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
     alertAttempt.committed = true;
     alertAttempt.stage = "committed";
+    if (paidUpgrade) {
+      // ETP-6230: productive signup, after the onboarding commit; enqueue only.
+      AccountingKpiTelemetry.productiveEnvironmentCreated(clientId);
+    }
     notifyProvisioningAlert(alertAttempt,
         com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK, null);
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
@@ -5531,6 +5940,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // costing schedule is activated (so the background costing never races the import).
     importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
         paidUpgrade);
+    // ETP-6148: after the sample data, the only source of a new tenant's bank account.
+    applyRemittanceSetupBestEffort(clientId, accountEmail);
     onboardingCostingScheduleService.activateSchedule(clientId);
     sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
     sendProgress(writer, "finalize", "done", "Environment ready");
@@ -5647,6 +6058,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("ETP-5791 default contact category could not be set for client {}; it keeps the "
           + "dataset default", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("default contact category", e, log);
+    }
+  }
+
+  /**
+   * ETP-6148 — with the {@code sepa-remittances} flag on for the receiving account, links the
+   * tenant's Bank accounts to the SEPA remittance payment methods (see
+   * {@link OnboardingRemittanceSetupService}). Runs after the commit and the sample data, in its own
+   * transaction; never fails the caller — on any failure only this step rolls back and the
+   * accounts stay without the remittance methods.
+   *
+   * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant — the
+   *     flag is per account, and this step runs as System
+   */
+  void applyRemittanceSetupBestEffort(String clientId, String accountEmail) {
+    try {
+      if (onboardingRemittanceSetupService.applyIfEnabled(clientId, accountEmail)) {
+        EtendoGoDalHelper.commitDalChanges("remittance setup", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("ETP-6148 remittance setup failed for client {}; its bank accounts stay without "
+          + "the remittance methods", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("remittance setup", e, log);
     }
   }
 
@@ -7174,7 +7608,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
       IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
           request.getHeader(HEADER_USER_AGENT), null);
-      setSessionCookies(response, issued);
+      commitAndSetSessionCookies(response, issued);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       JSONObject result = new JSONObject();
@@ -7271,7 +7705,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         // ETP-5351: the support logout frees the tenant and closes the audit row ('logout').
         supportAccessService.closeOnLogout(auth.getRecord());
       }
-      clearSessionCookies(response);
+      commitAndClearSessionCookies(response);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -7388,7 +7822,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         result.put(FIELD_ACCESS_DECISION, accessDecision.name());
       }
       // ETP-5051 — quotas at WARN or DENY, report-only like accessDecision: never refuses entry.
-      result.put("quotas", loginQuotas(entered.getRecord().getCtxClientId()));
+      result.put(FIELD_QUOTAS, loginQuotas(entered.getRecord().getCtxClientId()));
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
       retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());
@@ -7527,7 +7961,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
     if (rotated != null) {
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated);
     }
     return rotated;
   }
@@ -7738,7 +8172,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       IssuedGoSession issued = handoff.getSession();
       Account account = EtendoGoJwtDalHelper.findActiveAccountById(issued.getRecord().getAccountId());
 
-      setSessionCookies(response, issued);
+      commitAndSetSessionCookies(response, issued);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       JSONObject result = new JSONObject();
@@ -7830,12 +8264,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String rawRefresh = extractRefreshToken(request);
       IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
       if (rotated == null) {
-        clearSessionCookies(response);
+        commitAndClearSessionCookies(response);
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
@@ -7855,12 +8289,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+  /**
+   * Commits the session write, then sets the session + refresh cookies that point at it.
+   *
+   * <p>ETP-6152 — the session row is written through the request's DAL transaction, which the
+   * Etendo request filter only commits after this servlet returns, while the response is already
+   * on the wire. A client that sends its next request the moment this one answers (the SPA enters
+   * the environment and immediately reads the next screen) raced that commit and got a 401 for a
+   * session that did not exist yet, and the SPA logs out on a 401. Committing here, the one place
+   * every issued or rotated session goes through before its cookie is handed out, means a cookie is
+   * never sent for a row that has not landed. A failed commit throws, so the caller answers an error
+   * with no cookie instead of a 200. Writes made after this point run in a fresh transaction that
+   * the request filter commits as before.
+   */
+  private void commitAndSetSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+    EtendoGoDalHelper.commitDalChanges(ACTION_SESSION_WRITE, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
   }
 
-  private void clearSessionCookies(HttpServletResponse response) {
+  /**
+   * Commits the session write (a revocation), then clears the session + refresh cookies. ETP-6152:
+   * a session revoked by logout, or a refresh family revoked on replay, must not still resolve
+   * for a request that arrives right after this response.
+   */
+  private void commitAndClearSessionCookies(HttpServletResponse response) {
+    EtendoGoDalHelper.commitDalChanges(ACTION_SESSION_WRITE, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredSessionCookie());
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredRefreshCookie());
   }
@@ -7899,7 +8353,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
-    setSessionCookies(response, issued);
+    commitAndSetSessionCookies(response, issued);
     response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 

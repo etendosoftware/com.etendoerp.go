@@ -26,6 +26,7 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -224,6 +225,40 @@ public final class NeoDocumentPdf {
     // file, a status that stores nothing, a render error, the wait expired) keeps the stored
     // verdict, so the caller answers no_pdf / pdf_stale exactly as before.
     return renderOnRequest(target, entity, stored, NeoPrintAfterComplete::renderAndWait);
+  }
+
+  /**
+   * Whether a stored main PDF is a rendered cache older than its document: {@link #decide}'s
+   * {@code STALE} for a file and a record the caller has already loaded and authorized. Never
+   * renders, reads nothing. For a caller outside this package that serves the stored file itself
+   * and must not serve an outdated one: the customer portal after a confirmed decision changed the
+   * quotation (ETP-6209). It runs with no app session, so it judges the record's change only, never
+   * the session's branding.
+   *
+   * <p>It takes what the caller loaded instead of resolving the attachment target: that path checks
+   * the app role's window access and the session's tenant, which a portal request (authorized by
+   * its link, with no GO session) does not satisfy, so the check was refused and every stored PDF
+   * read as fresh (ETP-6209 live test: a rejected quotation's portal PDF kept its pre-decision
+   * version, without the "Motivo", until the app rendered it again).</p>
+   *
+   * @param fileWritten   the stored file's last write ({@code C_File.Updated})
+   * @param entity        the spec's document entity (whether its PDF is rendered by us)
+   * @param recordUpdated the document's last change, or {@code null} when unknown
+   * @return {@code true} only for a stale rendered cache
+   */
+  public static boolean isStoredStale(Date fileWritten, SFEntity entity, Date recordUpdated) {
+    if (fileWritten == null) {
+      return false;
+    }
+    JSONObject main = new JSONObject();
+    try {
+      main.put(KEY_ID, "stored");
+      main.put("updatedAt", fileWritten.toInstant().toString());
+    } catch (JSONException e) {
+      return false;
+    }
+    return decide(main, NeoPdfSourceConfig.sourceOf(entity), recordUpdated, null)
+        .getStatus() == Status.STALE;
   }
 
   /** A per-call render budget scope; closing it restores the previous one. Never throws. */

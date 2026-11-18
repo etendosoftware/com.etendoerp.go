@@ -76,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -281,6 +282,10 @@ public class McpToolRouter {
           // etendo-ai#53: the identity this call already runs under; reads only the context.
           case McpConstants.TOOL_NEO_WHOAMI:
             return McpWhoamiTool.handle(arguments, scopes);
+          // ETP-6236: every step is a call of this same router, under the same role and scopes.
+          case McpConstants.TOOL_NEO_ROUTINE:
+            return McpRoutineTool.route(arguments,
+                (stepTool, stepArgs) -> route(stepTool, stepArgs, scopes));
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
@@ -494,6 +499,8 @@ public class McpToolRouter {
     // ETP-5611: same default as the REST list — a child tab without orderBy follows the AD tab's
     // order-by instead of the random id order.
     NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
+    // ETP-6148: property-path fields, read and sorted exactly as on the REST list.
+    NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);
 
     // One read context for the customization's filter aliases and read predicates below.
     NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
@@ -507,7 +514,7 @@ public class McpToolRouter {
     if (filters != null && filters.length() > 0) {
       String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
           NeoReadPredicates.resolveFilterAliases(readCtx, NeoExtensionChannel.MCP),
-          appliedAliases, log);
+          appliedAliases, NeoPropertyPaths.of(fieldFilter), log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -630,6 +637,8 @@ public class McpToolRouter {
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
+    // ETP-6148: property-path fields, read exactly as on the REST GET by id.
+    NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);
 
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
@@ -855,9 +864,11 @@ public class McpToolRouter {
 
     // ETP-5802: a reference the agent set must not point at an inactive row. Checked right after
     // ownership, on the same ids-only body.
-    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
-    if (inactiveReference != null) {
-      return wrapAsErrorContent(inactiveReference);
+    // ETP-6176: ... and must be one the app's selector offers for this record.
+    JSONObject badReference = McpNotOfferedReference.refuse(sfEntity, adTab, null,
+        filteredBody.optString(McpConstants.PARAM_PARENT_ID, null), filteredBody, null, null);
+    if (badReference != null) {
+      return wrapAsErrorContent(badReference);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -1144,9 +1155,13 @@ public class McpToolRouter {
     // ETP-5802: same inactive-reference check as handleCreate. filteredBody here carries only the
     // keys the caller sent (no defaults pass runs on update, per the IMP-16 note below), so a field
     // the caller does not touch is never re-validated — CP-6 regression guard.
-    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
-    if (inactiveReference != null) {
-      return wrapAsErrorContent(inactiveReference);
+    // ETP-6176: then the callouts of the references this update changes are re-fired, exactly as
+    // the REST preflight does, and the selector check judges the record the update leaves behind.
+    JSONObject badReference = McpNotOfferedReference.refuse(sfEntity, adTab, recordId, null,
+        filteredBody, McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT,
+            recordId, filteredBody, adTab, sfEntity), dalEntityName);
+    if (badReference != null) {
+      return wrapAsErrorContent(badReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
@@ -1626,13 +1641,20 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
     Map<String, String> requiredWhenByField =
         McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
+    // CP-10b: resolved once and threaded through explicitly — the structured-address label
+    // translation must use the language THIS request wants, never Hibernate's ambient session
+    // language (see McpSchemaFieldBuilder#resolveSchemaFieldLabel).
+    String langCode = NeoLanguage.currentCode();
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
-        fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS, langCode);
     // ETP-5368: an entity whose caller-facing fields live in a second table gets them appended
     // here, before every projection below, so view:"create" and view:"full" cannot disagree about
     // whether an address has a country. Empty for every entity without a wrapper policy.
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
-        McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
+        McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS, langCode));
+    // ETP-6148: the property-path fields, read-only, at the same point and for the same reason.
+    McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
+        McpPathFieldSchema.build(sfEntity, dalEntity));
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // ETP-5473: what the entity's customization refuses a create without, although AD and
     // etendo_defaults do not say so. Flagged on the full array so every view agrees.
@@ -1641,7 +1663,7 @@ public class McpToolRouter {
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
-        McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+        McpSchemaFieldBuilder.loadFieldLabels(adTab, langCode));
     // ETP-5558: MCP_CONFIG.actions shapes the buttons here, before any projection, so view:"full"
     // and its fields:[...] whitelist describe the same buttons view:"actions" does. Shaping only
     // the actions view let a blind agent read Void off the full view of a payment and offer it.

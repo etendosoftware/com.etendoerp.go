@@ -49,11 +49,18 @@ final class PortalRateLimiter {
   static final Duration WINDOW = Duration.ofMinutes(1);
   /** Requests one caller may make per {@link #WINDOW}. */
   static final int MAX_REQUESTS_PER_WINDOW = 30;
+  /**
+   * Requests one caller may make per {@link #WINDOW} on the data reads ({@code /home},
+   * {@code /documents*}): a customer paging, filtering and opening documents makes several calls a
+   * minute where {@code /me} makes one per page load (ETP-6209 Part B).
+   */
+  static final int MAX_DATA_REQUESTS_PER_WINDOW = 120;
   /** Distinct callers tracked before the map is cleared wholesale. */
   static final int MAX_TRACKED_KEYS = 10_000;
 
   private final Map<String, Window> windows = new ConcurrentHashMap<>();
   private final Clock clock;
+  private final int maxRequests;
 
   PortalRateLimiter() {
     this(Clock.systemUTC());
@@ -64,7 +71,16 @@ final class PortalRateLimiter {
    *     only exercising the ceiling
    */
   PortalRateLimiter(Clock clock) {
+    this(clock, MAX_REQUESTS_PER_WINDOW);
+  }
+
+  /**
+   * @param clock time source
+   * @param maxRequests requests one caller may make per {@link #WINDOW}
+   */
+  PortalRateLimiter(Clock clock, int maxRequests) {
     this.clock = clock;
+    this.maxRequests = maxRequests;
   }
 
   /**
@@ -84,7 +100,7 @@ final class PortalRateLimiter {
         existing == null || existing.windowIndex != currentWindow
             ? new Window(currentWindow, 1)
             : new Window(currentWindow, existing.count + 1));
-    return updated.count <= MAX_REQUESTS_PER_WINDOW;
+    return updated.count <= maxRequests;
   }
 
   /** One caller's counter for one window. Immutable so {@code compute} stays atomic. */

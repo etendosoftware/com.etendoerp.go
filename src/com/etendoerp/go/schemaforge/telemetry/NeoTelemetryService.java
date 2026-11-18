@@ -91,6 +91,8 @@ public class NeoTelemetryService {
    * already sends; no record id of any kind (contact, category, organization) is ever allowed.
    */
   private static final String PROP_ACCOUNT_ID = "account_id";
+  /** ETP-6230: tenant owner is on an internal e-mail domain (a boolean, never the address). */
+  private static final String PROP_INTERNAL = "internal";
   private static final String PROP_IS_CUSTOMER = "is_customer";
   private static final String PROP_IS_VENDOR = "is_vendor";
   private static final String PROP_PREVIOUS_IS_CUSTOMER = "previous_is_customer";
@@ -122,6 +124,7 @@ public class NeoTelemetryService {
   private static final String PROP_PAIRS_UNCHECKED = "pairs_unchecked";
   private static final String PROP_PAIRS_SENT_TO_PANEL = "pairs_sent_to_panel";
   private static final String PROP_PRESELECTION_CHANGED = "preselection_changed";
+  private static final String PROP_ADJUSTED = "adjusted";
   /** Upper bound of the per-call bounce-pair counters: far above any real statement. */
   private static final double MAX_PAIRS = 1000000;
 
@@ -137,6 +140,7 @@ public class NeoTelemetryService {
       PROP_TOOL,
       PROP_VERB,
       PROP_ACCOUNT_ID,
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -161,6 +165,7 @@ public class NeoTelemetryService {
       PROP_PAIRS_UNCHECKED,
       PROP_PAIRS_SENT_TO_PANEL,
       PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED,
       "category",
       "channel",
       "count",
@@ -188,6 +193,7 @@ public class NeoTelemetryService {
   private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       PROP_CRITICAL,
       "supportRequested",
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -197,7 +203,8 @@ public class NeoTelemetryService {
       PROP_ADJACENT,
       PROP_PRESELECTED,
       PROP_CHOSEN_AMONG_ALTERNATIVES,
-      PROP_PRESELECTION_CHANGED));
+      PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();

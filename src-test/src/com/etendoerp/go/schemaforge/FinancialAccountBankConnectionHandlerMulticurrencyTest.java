@@ -77,6 +77,8 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * to. It is kept rather than deleted because the removed behavior was subtle and invisible from the
  * UI — a well-meaning reintroduction would silently break cross-currency transfers and
  * cross-currency reconciliation again.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
@@ -87,15 +89,23 @@ public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
   private static final String METHOD_CASH = "Efectivo";
 
   private FinancialAccountBankConnectionHandler handler;
+  /** ETP-6151: the {@code psd2-statement-import-settings} gate; ON by default in this class. */
+  private MockedStatic<Psd2ImportSettingsFlag> flagMock;
 
   @Before
   public void setUp() {
+    // ETP-6151: the cases of this class exercise the flag-ON behaviour; flag-OFF ones call flagOff().
+    flagMock = mockStatic(Psd2ImportSettingsFlag.class);
+    flagMock.when(Psd2ImportSettingsFlag::isEnabled).thenReturn(true);
     handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 
   @After
   public void clearMocks() {
+    if (flagMock != null) {
+      flagMock.close();
+    }
     Mockito.framework().clearInlineMocks();
   }
 
@@ -167,7 +177,10 @@ public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
     return new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
-        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID)
+        // ETP-6151: both import settings are required on link.
+        .put("importFromDate", "2026-01-01")
+        .put("statementGrouping", "1BD");
   }
 
   @SuppressWarnings("unchecked")

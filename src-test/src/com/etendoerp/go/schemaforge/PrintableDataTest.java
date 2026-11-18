@@ -208,7 +208,7 @@ class PrintableDataTest {
         + "\"customerAddressLines\":[\"Elm St 2\"],\"documentNo\":\"QT-1\",\"currencyCode\":\"USD\","
         + "\"invoiceDate\":\"2026-10-30\",\"validUntil\":\"2026-11-30\","
         + "\"customerName\":\"ACME Corp\",\"paymentMethod\":null,\"paymentTerms\":null,"
-        + "\"notes\":null,\"lines\":[{\"lineNo\":10,\"productCode\":\"—\","
+        + "\"notes\":null,\"rejectReason\":null,\"lines\":[{\"lineNo\":10,\"productCode\":\"—\","
         + "\"productName\":\"Gadget\",\"quantity\":4,\"unitPrice\":25,\"discount\":null,"
         + "\"taxName\":\"VAT 10%\",\"lineTotal\":100}],\"netAmount\":100,\"taxAmount\":10,"
         + "\"grandTotal\":110,\"grossAmount\":null,\"discountPerProduct\":null,"
@@ -217,6 +217,59 @@ class PrintableDataTest {
 
     assertJsonEquals(new JSONObject(expected), QuotationPrintableData.build(header, lines, session),
         "$");
+  }
+
+  @Test
+  @DisplayName("quotation notes and reject reason: the same answers as quotationNotesAndRejectReason")
+  void quotationNotesAndRejectReasonMatchTheBrowser() throws Exception {
+    // Mirrors the it.each table of useQuotationPdf.vitest.jsx, case for case.
+    String portalEs = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
+    String portalEn = "Rejected by the customer from the portal. Reason: Delivery too late.";
+    // Columns: status, description (null: JSON null), tenant reason, expected notes, expected reason.
+    // The tenant's reason is never printed (internal; the PDF reaches the customer).
+    String[][] cases = {
+        { "CJ", "Gracias por la oferta\n" + portalEs, null, "Gracias por la oferta",
+            "Precio demasiado alto" },
+        { "CJ", "Gracias\n" + portalEs, "Competencia", "Gracias", "Precio demasiado alto" },
+        { "CJ", "Rechazado por el cliente desde el portal. Motivo: Otros: Ya no lo necesitamos.",
+            null, null, "Otros: Ya no lo necesitamos" },
+        { "CJ", portalEn, null, null, "Delivery too late" },
+        { "CJ", "Nota interna", "Competencia", "Nota interna", null },
+        { "UE", portalEs, "Competencia", portalEs, null },
+        { "CJ", "", null, null, null },
+        { "CJ", null, null, null, null },
+        { "CO", null, null, null, null },
+    };
+    for (String[] c : cases) {
+      JSONObject header = new JSONObject().put("documentStatus", c[0])
+          .put("description", c[1] == null ? JSONObject.NULL : c[1]);
+      if (c[2] != null) {
+        header.put("rejectReason$_identifier", c[2]);
+      }
+
+      String[] result = QuotationPrintableData.notesAndRejectReason(header);
+
+      assertEquals(c[3], result[0], java.util.Arrays.toString(c) + " notes");
+      assertEquals(c[4], result[1], java.util.Arrays.toString(c) + " reason");
+    }
+  }
+
+  @Test
+  @DisplayName("withoutPortalNote: drops only the portal decision lines, leaves other notes untouched")
+  void withoutPortalNoteKeepsTheSellersNotes() {
+    String es = "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.";
+    String en = "Rejected by the customer from the portal. Reason: Delivery too late.";
+    // Columns: notes, expected notes.
+    String[][] cases = {
+        { "Gracias\n" + es, "Gracias" },
+        { es, null },
+        { "Nota\n" + es + "\n" + en, "Nota" },
+        { "Línea 1\n  Línea 2\n", "Línea 1\n  Línea 2\n" },
+        { null, null },
+    };
+    for (String[] c : cases) {
+      assertEquals(c[1], QuotationPrintableData.withoutPortalNote(c[0]), java.util.Arrays.toString(c));
+    }
   }
 
   @Test

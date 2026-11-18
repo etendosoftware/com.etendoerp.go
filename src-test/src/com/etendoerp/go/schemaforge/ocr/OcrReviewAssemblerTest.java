@@ -414,6 +414,30 @@ class OcrReviewAssemblerTest {
     }
 
     @Test
+    @DisplayName("a date with the month in words, as an invoice prints it, converts too (ETP-5850)")
+    void writtenDates() {
+      assertEquals("2026-01-15", OcrJson.toIsoDate("15 de enero de 2026"));
+      assertEquals("2026-09-03", OcrJson.toIsoDate("3 Septiembre 2026"));
+      assertEquals("2026-08-07", OcrJson.toIsoDate("07-ago-2026"));
+      assertEquals("2026-12-01", OcrJson.toIsoDate("1 dic. 2026"));
+      assertEquals("2026-01-15", OcrJson.toIsoDate("January 15, 2026"));
+      assertEquals("2026-02-15", OcrJson.toIsoDate("15 Feb 2026"));
+      assertEquals("15 de brumario de 2026", OcrJson.toIsoDate("15 de brumario de 2026"));
+      assertEquals("45 de enero de 2026", OcrJson.toIsoDate("45 de enero de 2026"));
+    }
+
+    @Test
+    @DisplayName("a written invoice date reaches invoiceDateIso and the toggle's sendValue as ISO")
+    void writtenDateInTheReview() throws JSONException {
+      JSONObject answer = run(extraction().put("invoice_date", "15 de enero de 2026"));
+      JSONObject date = decision(answer, "apply_invoiceDate");
+      assertEquals("15 de enero de 2026", date.getString("value"));
+      assertEquals("2026-01-15", date.getString("sendValue"));
+      assertEquals("2026-01-15",
+          answer.getJSONObject("documentData").getString("invoiceDateIso"));
+    }
+
+    @Test
     @DisplayName("the batch template sends them only as optional entries, with placeholders, no text")
     void templateOptional() throws JSONException {
       JSONObject header = run(extraction()).getJSONObject("batchTemplate").getJSONArray("operations")
