@@ -437,8 +437,8 @@ public class PortalServletTest {
             eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn(quotation);
         endpoint.when(() -> PortalDocumentsEndpoint.mainAttachment(any(),
             eq(PortalDocumentKind.QUOTATION), eq(QUOTATION_ID))).thenReturn((Attachment) c[0]);
-        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, QUOTATION_ID))
-            .thenReturn((Boolean) c[1]);
+        printable.when(() -> PortalPrintable.isStale(PortalDocumentKind.QUOTATION, quotation,
+            (Attachment) c[0])).thenReturn((Boolean) c[1]);
         printable.when(() -> PortalPrintable.renderAndFind(any(),
             eq(PortalDocumentKind.QUOTATION), eq(quotation))).thenReturn((Attachment) c[2]);
         streamer.when(() -> AnonymousAttachmentStreamer.stream(any(), any(), anyString()))
@@ -520,7 +520,7 @@ public class PortalServletTest {
     for (Object[] c : cases) {
       PortalDecisionService.RequestResult result = new PortalDecisionService.RequestResult(
           (PortalDecisionService.RequestOutcome) c[0], (PortalDecisionService.Blocked) c[1],
-          "ju\u2022\u2022\u2022@example.com");
+          "julia@example.com");
       when(decisionService.request(any(), any(), any(), any(), any())).thenReturn(result);
       Call call = new Call();
 
@@ -531,7 +531,7 @@ public class PortalServletTest {
       JSONObject body = new JSONObject(call.body.toString());
       if (c[3] == null) {
         assertEquals("sent", body.getString("state"));
-        assertEquals("ju\u2022\u2022\u2022@example.com", body.getString("maskedEmail"));
+        assertEquals("julia@example.com", body.getString("email"));
       } else {
         assertEquals(c[3], body.getString("error"));
       }
@@ -668,11 +668,26 @@ public class PortalServletTest {
     verifyNoInteractions(decisionService);
   }
 
+  @Test
+  public void aFailedPostIsLoggedUnderTheOperationOfItsRoute() {
+    // Columns: POST route, operation the failure's log line names.
+    String[][] cases = {
+        { "/decisions/confirm", "decision confirmation" },
+        { "/quotations/" + QUOTATION_ID + "/decision", "decision request" },
+        { "/renew", "renewal" },
+    };
+    for (String[] c : cases) {
+      assertEquals(c[0], c[1], PortalServlet.postOperation(c[0]));
+    }
+  }
+
   // ── /me ─────────────────────────────────────────────────────────────────────
 
   @Test
   public void meNamesTheEntryDocumentOnlyWhenItIsStillInScope() throws Exception {
     validLink();
+    // The user menu's email: the customer's address the portal already uses (the root send's To).
+    when(decisionService.confirmationRecipient(any())).thenReturn("julia@example.com");
     BaseOBObject visible = mock(BaseOBObject.class);
     // Columns: the entry document in scope?, expected entryDocument id or null.
     for (boolean inScope : new boolean[] { true, false }) {
@@ -685,6 +700,7 @@ public class PortalServletTest {
 
         JSONObject body = new JSONObject(call.body.toString());
         assertEquals("valid", body.getString("state"));
+        assertEquals("julia@example.com", body.getString("email"));
         if (inScope) {
           assertEquals("INV-1", body.getJSONObject("entryDocument").getString("id"));
           assertEquals("INVOICE", body.getJSONObject("entryDocument").getString("kind"));
