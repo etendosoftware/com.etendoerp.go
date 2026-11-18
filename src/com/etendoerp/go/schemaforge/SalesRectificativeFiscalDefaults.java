@@ -27,6 +27,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
@@ -50,7 +51,7 @@ import org.openbravo.module.sii.utils.SIIUtils;
  * #isTbaiConfigActive} lookup instead of a second, duplicate SQL constant here) since that part
  * was a genuine, behavior-neutral consolidation.
  *
- * <h2>Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields</h2>
+ * <h2>Server-side defaults of the STRUCTURAL SII, TicketBAI and VERI*FACTU rectificative fields</h2>
  *
  * Applied after every CRUD write of a SALES invoice's header (originally ETP-5747, brought into
  * this branch and adjusted for ETP-5745 CP-13/CP-14 — see "What it does not do" below).
@@ -70,26 +71,38 @@ import org.openbravo.module.sii.utils.SIIUtils;
  *
  * Only on a DRAFT, unprocessed sales invoice whose document type is flagged rectificative
  * ({@link RectificativeSupport#isRectificative(DocumentType)}), and never over a value already
- * chosen — except a non-rectificative {@code F*} VERI*FACTU code, which is replaced by the
- * document type's {@code R*} code:
+ * chosen — except the fields whose value is structural ("this is a correction") rather than a
+ * choice, which are ENFORCED:
  * <ul>
+ *   <li><b>SII</b> — only when the organization is enrolled in the SII ({@link #siiConfigActive}):
+ *   {@code aeatsiiClaveTipo = R} whatever it held (ETP-5747 CP-11: an invoice created through
+ *   {@code etendo_create} kept the AD default {@code F1}), {@code aeatsiiTipoRectif = I} (Por
+ *   diferencias) when blank. {@code aeatsiiMotivoRectif} is never touched. This is possible since
+ *   {@code EM_AEATSII_C_INV_RECT_CHK} only requires the motivo and type once the invoice is
+ *   processed ({@code PROCESSED = 'N' OR ...}, SII module, ETP-5747 CP-10); until then a draft
+ *   may hold {@code R} with no motivo.</li>
  *   <li><b>TicketBAI</b> — only when the invoice's organization has an active {@code tbai_config}:
  *   {@code tbaiIsreverseinvoice = Y}, {@code tbaiReverseinvoicetype = I} (Por diferencias) when
  *   blank.</li>
  *   <li><b>VERI*FACTU</b> — only when the legal entity has an active VERI*FACTU config that is in
- *   the system. {@code etvfacInvType} itself is NEVER written here (ETP-5745 CP-20 — see "What it
- *   does not do" below). Only once the invoice ALREADY carries an {@code R1}-{@code R5} code the
- *   user picked by hand, and {@code etvfacReverseinvtype} is blank, is the reverse type defaulted:
- *   the document type's reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
+ *   the system. {@code etvfacInvType} is never SET to a code (ETP-5745 CP-20 — see "What it does
+ *   not do" below), but a non-rectificative {@code F*} code — in practice the AD default {@code F1}
+ *   an insert stamps — is CLEARED to {@code null} (ETP-5747 CP-5/CP-11), so the record matches the
+ *   empty "Tipo de Factura" the doc-type callout
+ *   ({@link InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType}) and the SIF tab show until the
+ *   user picks {@code R1}-{@code R5}. An {@code R*} code is never touched. Only once the invoice
+ *   carries one, and {@code etvfacReverseinvtype} is blank, is the reverse type defaulted: the
+ *   document type's reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
  * </ul>
  *
  * <h2>What it does not do (ETP-5745 CP-14: no "motivo"/code is ever auto-picked)</h2>
  *
  * <ul>
- *   <li><b>SII is not defaulted here.</b> {@code EM_AEATSII_C_INV_RECT_CHK} requires
- *   {@code aeatsiiMotivoRectif} as soon as the SII type is {@code R}, and the motivo is a user
- *   choice. {@code aeatsiiClaveTipo}/{@code aeatsiiTipoRectif} ARE corrected server-side, but at
- *   completion time, by {@link RectificationFiscalCodeGuard} — not here.</li>
+ *   <li><b>SII's {@code aeatsiiMotivoRectif} is NOT defaulted</b> — the reason for the correction
+ *   is a user choice; {@link RectificationFiscalCodeGuard} blocks completion while it is
+ *   missing.</li>
+ *   <li><b>VERI*FACTU's {@code R1}-{@code R5} code is NOT picked</b> — it folds "correction" and
+ *   "for this reason" into one value (ETP-5745 CP-20); the field is left empty for the user.</li>
  *   <li><b>TicketBAI's {@code tbaiReverseinvoicecode} is NOT defaulted</b> — deliberately reverted
  *   in ETP-5745 CP-14. The original ETP-5747 version of this class auto-picked {@code R4} ("Resto")
  *   for it, which is exactly the kind of fiscal classification choice (why the invoice is being
@@ -97,7 +110,7 @@ import org.openbravo.module.sii.utils.SIIUtils;
  *   SII's {@code aeatsiiMotivoRectif} out of this class. The field is left blank; the dedicated
  *   completion-time guard ({@link RectificationFiscalCodeGuard}) blocks completion when it is still
  *   blank, naming the missing system in its message.</li>
- *   <li>It never clears a value: a non-rectificative invoice is left exactly as it is.</li>
+ *   <li>A non-rectificative invoice is left exactly as it is.</li>
  *   <li>Purchase invoices are out of scope: VERI*FACTU never sends a purchase, and TicketBAI's
  *   rectificative fields are sales-only (see {@link InvoiceCalloutHelper#applyRectificativeFieldsFromDocType}).</li>
  * </ul>
@@ -109,6 +122,12 @@ final class SalesRectificativeFiscalDefaults {
   static final String FIELD_TBAI_IS_REVERSE = "tbaiIsreverseinvoice";
   static final String FIELD_TBAI_REVERSE_TYPE = "tbaiReverseinvoicetype";
   static final String FIELD_VF_REVERSE_TYPE = "etvfacReverseinvtype";
+  static final String FIELD_VF_INV_TYPE = "etvfacInvType";
+  static final String FIELD_SII_CLAVE_TIPO = "aeatsiiClaveTipo";
+  static final String FIELD_SII_TIPO_RECTIF = "aeatsiiTipoRectif";
+
+  /** SII "Clave tipo factura" of a rectificative invoice. */
+  static final String SII_CLAVE_TIPO_RECTIFICATIVA = "R";
 
   /** TicketBAI / VERI*FACTU "Por diferencias" reverse type. */
   static final String REVERSE_TYPE_BY_DIFFERENCES = "I";
@@ -174,6 +193,9 @@ final class SalesRectificativeFiscalDefaults {
     if (orgId == null) {
       return applied;
     }
+    if (siiConfigActive(orgId)) {
+      applySii(invoice, applied);
+    }
     if (tbaiConfigActive(orgId)) {
       applyTbai(invoice, applied);
     }
@@ -189,6 +211,22 @@ final class SalesRectificativeFiscalDefaults {
         && DRAFT.equals(invoice.getDocumentStatus())
         && !Boolean.TRUE.equals(invoice.isProcessed())
         && RectificativeSupport.isRectificative(invoice.getTransactionDocument());
+  }
+
+  /**
+   * SII: {@code aeatsiiClaveTipo} is ENFORCED to {@code R} on a rectificative draft (as the
+   * doc-type callout and the completion guard do); {@code aeatsiiTipoRectif} is only DEFAULTED to
+   * {@code I} when blank. {@code aeatsiiMotivoRectif} is never touched.
+   */
+  private static void applySii(Invoice invoice, Map<String, Object> applied) {
+    if (!SII_CLAVE_TIPO_RECTIFICATIVA.equals(invoice.getAeatsiiClaveTipo())) {
+      invoice.setAeatsiiClaveTipo(SII_CLAVE_TIPO_RECTIFICATIVA);
+      applied.put(FIELD_SII_CLAVE_TIPO, SII_CLAVE_TIPO_RECTIFICATIVA);
+    }
+    if (StringUtils.isBlank(invoice.getAeatsiiTipoRectif())) {
+      invoice.setAeatsiiTipoRectif(REVERSE_TYPE_BY_DIFFERENCES);
+      applied.put(FIELD_SII_TIPO_RECTIF, REVERSE_TYPE_BY_DIFFERENCES);
+    }
   }
 
   /**
@@ -215,12 +253,19 @@ final class SalesRectificativeFiscalDefaults {
    * #applyVerifactuInvTypeFromDocType}'s javadoc: VERI*FACTU's {@code R1}-{@code R5} codes fold
    * "this is a correction" and "for this reason" into one value, so copying ANY code — even a
    * human-configured per-DocType one — still picks the user's reason for THIS invoice on their
-   * behalf. {@code etvfacInvType} is left completely alone here; only the REVERSE type is
-   * defaulted, and only once the user has ALREADY picked an {@code R1}-{@code R5} code by hand.
+   * behalf. {@code etvfacInvType} is never set to a code here: a non-rectificative {@code F*}
+   * value is cleared to {@code null} (ETP-5747 CP-5 — the AD default {@code F1} an insert stamps
+   * must not survive on a rectificative), and the REVERSE type is defaulted only once the user has
+   * ALREADY picked an {@code R1}-{@code R5} code by hand.
    */
   private static void applyVerifactu(Invoice invoice, DocumentType docType,
       Map<String, Object> applied) {
     String current = StringUtils.trimToNull(invoice.getEtvfacInvType());
+    // An F* code, or a blank-but-not-null value: both mean "nothing picked yet", stored as null.
+    if (invoice.getEtvfacInvType() != null && !isRectificativeCode(current)) {
+      invoice.setEtvfacInvType(null);
+      applied.put(FIELD_VF_INV_TYPE, JSONObject.NULL);
+    }
     if (isRectificativeCode(current) && StringUtils.isBlank(invoice.getEtvfacReverseinvtype())) {
       String reverseType = StringUtils.defaultIfBlank(docType.getEtvfacReverseInvType(),
           REVERSE_TYPE_BY_DIFFERENCES);

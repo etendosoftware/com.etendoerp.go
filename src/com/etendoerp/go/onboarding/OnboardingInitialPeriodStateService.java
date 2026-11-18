@@ -29,6 +29,7 @@ import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 
 /**
@@ -167,16 +168,19 @@ public class OnboardingInitialPeriodStateService {
     return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
   }
 
+  /**
+   * The marker is a client-0 row (see {@link #setClientPreference}) and the onboarding runs this
+   * step as the tenant, where the DAL write check refuses deleting it. The removal therefore runs as
+   * system, as in {@code TenantPlanService.retireProductivePreference}; the flush stays in the
+   * caller's context so nothing else pending in its session is flushed as system.
+   */
   private static void deleteClientPreference(String attribute, String clientId) {
-    OBContext.setAdminMode(true);
-    try {
+    SystemContext.run("clearing the " + attribute + " marker", () -> {
       for (Preference preference : clientPreferenceQuery(attribute, clientId).list()) {
         OBDal.getInstance().remove(preference);
       }
-      OBDal.getInstance().flush();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
+    OBDal.getInstance().flush();
   }
 
   /** Admin mode: the login-time check runs as the user entering the environment. */

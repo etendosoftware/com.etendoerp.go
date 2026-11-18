@@ -124,6 +124,7 @@ public class NeoTelemetryService {
   private static final String PROP_PAIRS_UNCHECKED = "pairs_unchecked";
   private static final String PROP_PAIRS_SENT_TO_PANEL = "pairs_sent_to_panel";
   private static final String PROP_PRESELECTION_CHANGED = "preselection_changed";
+  private static final String PROP_ADJUSTED = "adjusted";
   /** Upper bound of the per-call bounce-pair counters: far above any real statement. */
   private static final double MAX_PAIRS = 1000000;
 
@@ -164,6 +165,7 @@ public class NeoTelemetryService {
       PROP_PAIRS_UNCHECKED,
       PROP_PAIRS_SENT_TO_PANEL,
       PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED,
       "category",
       "channel",
       "count",
@@ -201,7 +203,8 @@ public class NeoTelemetryService {
       PROP_ADJACENT,
       PROP_PRESELECTED,
       PROP_CHOSEN_AMONG_ALTERNATIVES,
-      PROP_PRESELECTION_CHANGED));
+      PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();

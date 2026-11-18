@@ -2581,6 +2581,36 @@ class McpToolRouterSupportTest {
     }
 
     @Test
+    @DisplayName("a contact identity refusal keeps its field, fields and messageKeys at the top level (ETP-6175)")
+    void contactIdentityRefusalKeepsItsFieldsForTheAgent() throws Exception {
+      com.etendoerp.go.schemaforge.NeoContext ctx =
+          mock(com.etendoerp.go.schemaforge.NeoContext.class);
+      when(ctx.getHttpMethod()).thenReturn("POST");
+      when(ctx.getRequestBody()).thenReturn(new JSONObject().put("name", "Acme")
+          .put("etgoFirstname", "Ana"));
+      com.etendoerp.go.schemaforge.NeoResponse refusal;
+      try (MockedStatic<org.openbravo.dal.core.OBContext> context =
+               mockStatic(org.openbravo.dal.core.OBContext.class);
+           MockedStatic<org.openbravo.dal.service.OBDal> dal =
+               mockStatic(org.openbravo.dal.service.OBDal.class)) {
+        refusal = new com.etendoerp.go.schemaforge.BusinessPartnerHandler().handle(ctx);
+      }
+      assertNotNull(refusal);
+      String message = refusal.getBody().getJSONObject("error").getString("message");
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(refusal.getBody(), 400);
+
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals(400, envelope.getInt("status"));
+      assertEquals(message, envelope.getString("detail"));
+      assertEquals("FIELD_NOT_ALLOWED", envelope.getString("code"));
+      assertEquals("etgoFirstname", envelope.getString("field"));
+      assertEquals("etgoFirstname", envelope.getJSONArray("fields").getString(0));
+      assertEquals("ETGO_BPartnerCompanyPersonNamesNotAllowed",
+          envelope.getJSONArray("messageKeys").getString(0));
+    }
+
+    @Test
     @DisplayName("lifts the nested object's other keys instead of discarding them")
     void preservesHandlerDetail() throws Exception {
       JSONObject inner = new JSONObject();

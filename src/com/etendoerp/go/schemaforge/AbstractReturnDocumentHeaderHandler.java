@@ -77,7 +77,9 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
   /**
    * ETP-6179: answers {@code sifDefaults} for the factura rectificativa
    * {@code createReturnInvoice} would create from this return, creating nothing. Shared by both
-   * return headers: the direction comes from the return's own {@code IsSOTrx}.
+   * return headers: the direction comes from the return's own {@code IsSOTrx}. A return's
+   * rectificative preselects {@link InvoiceSifPreset#RETURN_RECTIFICATION_DEFAULT} (a purchase one
+   * has no rectification field, so it is moot there).
    */
   private static NeoResponse handleSifDefaults(NeoContext context) {
     String returnId = context.getRecordId();
@@ -96,7 +98,8 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
         return InvoiceSifPreset.previewResponse(new InvoiceSifPreset.Target(
             returnDoc.getOrganization(), returnDoc.getBusinessPartner(),
             ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc),
-            Boolean.TRUE.equals(returnDoc.isSalesTransaction()), null));
+            Boolean.TRUE.equals(returnDoc.isSalesTransaction()), null)
+            .withRectificationDefault(InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
       } finally {
         OBContext.restorePreviousMode();
       }

@@ -112,6 +112,37 @@ class InboxMatcherTest {
     return out;
   }
 
+  // ---------------------------------------------------------------- new-product defaults (ETP-6051)
+
+  @Test
+  @DisplayName("a line that is a new product is pre-filled, with the organization of the row")
+  void aNewProductLineIsPreFilledWithTheOrganizationOfTheRow() throws Exception {
+    lookups.products = List.of(List.of());
+    lookups.unitsByPrinted.put("kg", new Party("U-KG", "Kilogramo"));
+    lookups.defaultCategory = java.util.Optional.of(new Party("C-DEF", "General"));
+    JSONObject extraction = extraction();
+    extraction.getJSONArray(LINE_ITEMS).getJSONObject(0).put("unit", "kg");
+
+    JSONObject document = new InboxMatcher(lookups, "ROW-ORG").build(extraction);
+
+    JSONObject line = document.getJSONArray("lines").getJSONObject(0);
+    assertEquals("kg", line.getString("unitPrinted"));
+    JSONObject draft = line.getJSONObject("product").getJSONObject("new");
+    assertEquals("U-KG", draft.getString("uomId"));
+    assertEquals("ocr", draft.getString("uomSource"));
+    assertEquals("C-DEF", draft.getString("categoryId"));
+    assertEquals(List.of("ROW-ORG"), lookups.categoryOrganizations);
+  }
+
+  @Test
+  @DisplayName("a document from an extraction without the unit key still builds (the old shape)")
+  void anExtractionWithoutTheUnitKeyStillBuilds() throws Exception {
+    JSONObject line = build(extraction()).getJSONArray("lines").getJSONObject(0);
+
+    assertFalse(line.has("unitPrinted"));
+    assertEquals("linked", line.getJSONObject("product").getString(STATE));
+  }
+
   // ---------------------------------------------------------------- the happy path
 
   @Test

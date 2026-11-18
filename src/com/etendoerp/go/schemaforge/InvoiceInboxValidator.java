@@ -140,6 +140,28 @@ public final class InvoiceInboxValidator {
     return new Result(missing, missing.isEmpty() ? null : MISSING_FIELDS);
   }
 
+  /**
+   * Validates a document and adds what only the database can tell (ETP-6051): {@code extraMissing}
+   * are the codes of {@link InvoiceInboxLiveChecks}. They make a document that would otherwise be
+   * valid {@link #MISSING_FIELDS}; a foreign receiver or an over-long number keeps its own code and
+   * the extra codes join its {@code missing} list.
+   *
+   * @param document     the {@code CURRENT_DATA} object
+   * @param extraMissing the extra missing codes, may be {@code null}
+   * @return the verdict
+   */
+  public static Result validate(JSONObject document, List<String> extraMissing) {
+    Result base = validate(document);
+    if (extraMissing == null || extraMissing.isEmpty()
+        || FOREIGN_RECEIVER.equals(base.getErrorCode())) {
+      return base;
+    }
+    List<String> missing = new ArrayList<>(base.getMissing());
+    missing.addAll(extraMissing);
+    return new Result(missing, base.getErrorCode() == null ? MISSING_FIELDS
+        : base.getErrorCode());
+  }
+
   private static boolean isForeignReceiver(JSONObject header) {
     JSONObject receiver = header.optJSONObject(K_RECEIVER);
     return receiver != null && ReceiverTaxIdCheck.Status.MISMATCH.code()

@@ -64,6 +64,8 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  *       at an inactive row. Checked only once ownership passes, and only on the same caller-only
  *       field sets — {@code parentId} is not re-checked for activeness, since a parent is addressed
  *       structurally, not set as an ordinary FK/TableDir value.</li>
+ *   <li>{@link NeoReferenceSelectorValidation} (ETP-6176): every reference the request sets must be
+ *       one the app's own selector offers for the merged record (stored values plus the request).</li>
  * </ul>
  * The body is read, never modified: API keys are resolved to DAL property names on a copy, and the
  * server-owned tenant fields, which every write path drops, are left out.
@@ -103,7 +105,31 @@ final class NeoWritePreflight {
     if (refusal != null) {
       return toResponse(refusal);
     }
-    return activenessRefusalFor(adTab, fieldSets);
+    NeoResponse inactive = activenessRefusalFor(adTab, fieldSets);
+    if (inactive != null) {
+      return inactive;
+    }
+    return selectorRefusalFor(context, adTab, fieldSets, bodyParent != null ? bodyParent : queryParent);
+  }
+
+  /**
+   * The {@link NeoReferenceSelectorValidation} refusal (ETP-6176) for the first reference the
+   * app's selector would not offer, judged against the merged record; {@code null} to proceed.
+   */
+  private static NeoResponse selectorRefusalFor(NeoContext context, Tab adTab,
+      List<JSONObject> fieldSets, String parentId) {
+    for (JSONObject fieldSet : fieldSets) {
+      // Callout re-fire first (same order as the form): selector validation judges the record the
+      // update will leave behind, with the new product's tax, price list and the like in it.
+      NeoUpdateCalloutRefire.apply(context, fieldSet, adTab.getTable().getName());
+      NeoReferenceSelectorValidation.RefusedReference refused =
+          NeoReferenceSelectorValidation.findRefusedReference(context.getSfEntity(), adTab,
+              context.getRecordId(), parentId, fieldSet);
+      if (refused != null) {
+        return NeoInvalidReferenceResponse.build(refused);
+      }
+    }
+    return null;
   }
 
   /**
