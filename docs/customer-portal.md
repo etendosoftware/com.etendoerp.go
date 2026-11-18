@@ -170,6 +170,9 @@ link and the app's preview reuse it and the app's freshness rule applies.
 - **One render per document:** concurrent opens join the render in flight in this JVM; across
   nodes the worker's `pg_advisory_xact_lock` and re-check store one file. The request waits at most
   the worker's bound (40 s).
+- **Not MCP usage:** a PDF rendered for the portal is not counted in the monthly `server_render`
+  figure (`DocumentPdfUsage`, MCP renders only). A portal open that joins a render an MCP call
+  started counts once, as that MCP render; an MCP call that joins a portal render adds no count.
 - **Never a 500 for this:** not configured (no jsreport / printables location), not printable, not
   allowed, timed out or failed → the same 404 as before, and the page shows its data sheet with
   "PDF no disponible".
