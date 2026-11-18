@@ -25,14 +25,10 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
-import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
-import com.etendoerp.go.schemaforge.data.Account;
-import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
 
 /**
  * Resolves the identity from the session ({@code OBContext}) and the client's facts.
@@ -147,31 +143,11 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
   private static ClientFacts lookupClientFacts(String clientId) {
     OBContext.setAdminMode(true);
     try {
-      return new ClientFacts(ownerAccountId(clientId), tenantType(clientId));
+      return new ClientFacts(OwnerAccountResolver.findOwnerAccountId(clientId),
+          tenantType(clientId));
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  private static String ownerAccountId(String clientId) {
-    String ownerUserId = OwnerSupport.findOwnerUserId(clientId);
-    if (ownerUserId == null) {
-      // A legacy client with no owner flag: absent rather than guessed.
-      return null;
-    }
-    User owner = OBDal.getInstance().get(User.class, ownerUserId);
-    String email = owner == null ? null : StringUtils.trimToNull(owner.getEmail());
-    if (email == null) {
-      return null;
-    }
-    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where lower(account.email) = :email and account.active = true");
-    query.setNamedParameter("email", email.toLowerCase());
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    query.setMaxResult(1);
-    Account account = query.uniqueResult();
-    return account == null ? null : account.getId();
   }
 
   private static String tenantType(String clientId) {

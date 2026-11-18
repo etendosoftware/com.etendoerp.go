@@ -79,6 +79,9 @@ capture the identity on the calling thread (`NeoTelemetryIdentity.capture`) and 
 (`NeoTelemetryIdentity.runWith`); `McpUsageLogger` passes its row's client and user. A new emitter
 must do the same, or run on a thread that has the session.
 
+The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`
+(`OwnerAccountResolver`), so both sides send one `etgo_account_id`.
+
 **Open items.** The rule below that `account_id` is the only identifier a backend event may carry
 (PM legal rule, ETP-5791) predates this agreement: the issue owner must confirm that the agreement
 supersedes it. The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
