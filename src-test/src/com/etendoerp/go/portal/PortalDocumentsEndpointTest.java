@@ -224,7 +224,7 @@ public class PortalDocumentsEndpointTest {
   @Test
   public void notesThatAreOnlyThePortalDecisionLineLeaveTheReferenceEmpty() throws Exception {
     Invoice rejected = invoice("INV-8", null,
-        "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.", "ARI");
+        "Rechazado por el cliente desde el portal. Motivo: Precio demasiado alto.", null);
     query.when(() -> PortalDocumentQuery.list(any(), eq(PortalDocumentKind.INVOICE), any(),
         anyInt(), anyInt())).thenReturn(Collections.singletonList(rejected));
     query.when(() -> PortalDocumentQuery.invoiceSchedules(any(), any()))
