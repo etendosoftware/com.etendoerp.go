@@ -372,7 +372,7 @@ final class InvoiceInboxApply {
     if (!edit.dirty) {
       return InvoiceInboxReview.respond(row);
     }
-    InvoiceInboxValidator.Result verdict = InvoiceInboxValidator.validate(document);
+    InvoiceInboxValidator.Result verdict = InvoiceInboxLiveChecks.verdict(document, row);
     document.put(K_VALIDATION, verdict.toJson());
     String stored = document.toString();
     if (stored.getBytes(StandardCharsets.UTF_8).length > MAX_DOCUMENT_BYTES) {

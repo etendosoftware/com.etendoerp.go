@@ -63,6 +63,31 @@ class OcrConfigTest {
   }
 
   @Test
+  @DisplayName("the question asks for the unit of measure of each line and never for a discount")
+  void questionAsksForTheUnitAndNotForTheDiscount() {
+    String question = purchaseInvoice().getQuestion();
+
+    assertTrue(question.contains("line items (description, quantity, unit of measure, unit price)"));
+    assertFalse(question.contains("discount"), "the discount keys come from the schema alone");
+  }
+
+  @Test
+  @DisplayName("the line schema has a required, nullable string 'unit' that says it is not inferred")
+  void unitIsARequiredNullableStringOfEachLine() throws JSONException {
+    JSONObject line = purchaseInvoice().getSchema().getJSONObject("properties")
+        .getJSONObject("line_items").getJSONObject("items");
+
+    JSONObject unit = line.getJSONObject("properties").getJSONObject("unit");
+    assertEquals("[\"string\",\"null\"]", unit.getJSONArray("type").toString());
+    assertTrue(unit.getString("description").contains("Do not infer it"));
+    boolean required = false;
+    for (int i = 0; i < line.getJSONArray("required").length(); i++) {
+      required = required || "unit".equals(line.getJSONArray("required").getString(i));
+    }
+    assertTrue(required, "every property of a line is required (strict schema)");
+  }
+
+  @Test
   @DisplayName("the schema is strict: every object closed, every property required, nullable values")
   void strictSchema() throws JSONException {
     assertStrict(purchaseInvoice().getSchema());
