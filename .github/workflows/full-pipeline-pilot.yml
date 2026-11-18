@@ -668,7 +668,15 @@ jobs:
         id: core
         if: steps.changes.outputs.run == 'true'
         working-directory: etendo_core/schema_forge
-        run: echo "version=$(node -p "require('./package.json').dependencies['@etendosoftware/schema-forge-core']")" >> "$GITHUB_OUTPUT"
+        # The pin sits in devDependencies; scripts/public-api-e2e-ci.mjs reads it from either.
+        run: |
+          v="$(node -p "const p = require('./package.json'); (p.dependencies || {})['@etendosoftware/schema-forge-core'] || (p.devDependencies || {})['@etendosoftware/schema-forge-core'] || ''")"
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::@etendosoftware/schema-forge-core is pinned to '$v' in package.json, expected an exact x.y.z (the core's tag)."
+            exit 1
+          fi
+          echo "schema_forge_core: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Checkout schema_forge_core at the pinned version
         if: steps.changes.outputs.run == 'true'
