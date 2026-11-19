@@ -1705,11 +1705,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
    * ETP-5576 (MCP obs. 11): the keys this header injects on every GET record without a spec field
    * behind them — {@code followUp} and the subtype key — are declared, so an MCP
    * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
-   * response carries them.
+   * response carries them. ETP-6284 adds {@code hasManualTaxLines} (single-record GET).
    */
   @Test
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
-    assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype"),
+    assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype", "hasManualTaxLines"),
         new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
   }
 

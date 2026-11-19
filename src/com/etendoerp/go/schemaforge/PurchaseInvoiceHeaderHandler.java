@@ -301,6 +301,17 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   }
 
   /**
+   * ETP-6284: also declares {@code hasManualTaxLines} ({@link PurchaseInvoiceManualTaxLines}), so a
+   * {@code fields:[...]} read naming it is not reported as unknown.
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    Set<String> keys = new HashSet<>(super.responseEnrichedFields());
+    keys.add(PurchaseInvoiceManualTaxLines.FIELD);
+    return keys;
+  }
+
+  /**
    * Persists the origin-invoice / SII authorization data on writes, and on GET enriches every
    * record with the virtual fields the AP invoice screens need (transfer state, total-discount
    * adjustment, subtype, and — in detail view — linked receipts, origin invoice, docTypeLocked,
@@ -378,6 +389,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
+        PurchaseInvoiceManualTaxLines.enrich(rec, context.getRecordId()); // ETP-6284
       }
       DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);

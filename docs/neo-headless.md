@@ -6513,6 +6513,13 @@ is absent and a warning is logged. The reverse direction (order → invoices, `l
 `OrderInvoiceListSupport`) already joins through the invoice lines, for sales and purchase alike.
 Not declared in `responseEnrichedFields()`, like the other detail-only keys (§4.12.5).
 
+
+##### Manual tax lines of a purchase invoice — `hasManualTaxLines` (ETP-6284)
+
+A single-record `GET` of `purchase-invoice/header` carries `hasManualTaxLines` (boolean): whether the invoice has at least one active `C_InvoiceTax` row with `Recalculate = 'N'` — Classic's way of declaring an import with DUA (`PurchaseInvoiceManualTaxLines`, called explicitly by the `@NeoExtension(spec="purchase-invoice", entity="header")` customization; declared in its `responseEnrichedFields`). Fail-safe `false` on a DB error. Lists do not carry it.
+
+Why: a customs / forwarder import invoice (SII `F5`) usually has **no invoice lines**, only manual tax lines, and the core completes it — `C_Invoice_Post`'s `@InvoicesNeedLines@` check passes with an invoice line **or** a tax line. Nothing in NEO refuses that completion on any channel (REST single, batch, MCP all reach the same core process; `InvoiceCompletionLineGuard` only inspects existing lines). The only block was the SPA's Confirm button (`draftMode.disableWhenEmpty`); behind the `sii-import-dua` flag the purchase-invoice window lets it through when this field is true. No backend flag: the field is read-only and the completion rule is the core's.
+
 ##### Document exchange rate (ETP-5840)
 
 Five headers — `sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`,
