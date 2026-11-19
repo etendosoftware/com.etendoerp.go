@@ -66,7 +66,6 @@ public final class NeoAttachmentsDownloader {
 
   private static final Logger log = LogManager.getLogger(NeoAttachmentsDownloader.class);
 
-  private static final String ZIP_CONTENT_TYPE = "application/zip";
   private static final String ERR_IDS_REQUIRED = "ids must name at least one attachment";
 
   private NeoAttachmentsDownloader() {
@@ -103,7 +102,7 @@ public final class NeoAttachmentsDownloader {
       aim.download(attachmentId, buffer);
 
       response.setStatus(HttpServletResponse.SC_OK);
-      NeoDownloadHeaders.apply(response, attachment.getName(), attachment.getDataType());
+      NeoDownloadHeaders.apply(response, attachment.getName());
       byte[] bytes = buffer.toByteArray();
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
@@ -207,7 +206,7 @@ public final class NeoAttachmentsDownloader {
       byte[] bytes = buildAttachmentsZip(recordAttachments, requestedIds);
 
       response.setStatus(HttpServletResponse.SC_OK);
-      NeoDownloadHeaders.apply(response, "attachments_" + recordId + ".zip", ZIP_CONTENT_TYPE);
+      NeoDownloadHeaders.apply(response, "attachments_" + recordId + ".zip");
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
         out.write(bytes);
@@ -322,6 +321,7 @@ public final class NeoAttachmentsDownloader {
     NeoResponse error = NeoResponse.error(status, message);
     response.setStatus(error.getHttpStatus());
     if (error.getBody() != null) {
+      NeoDownloadHeaders.markPrivateJson(response);
       response.setContentType("application/json");
       response.setCharacterEncoding(StandardCharsets.UTF_8.name());
       response.getWriter().write(error.getBody().toString());

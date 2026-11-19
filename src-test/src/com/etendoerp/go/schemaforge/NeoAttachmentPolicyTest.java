@@ -390,4 +390,21 @@ public class NeoAttachmentPolicyTest {
     assertEquals("application/pdf", NeoAttachmentPolicy.inertMimeType("a.pdf"));
     assertEquals("image/png", NeoAttachmentPolicy.inertMimeType("a.PNG"));
   }
+
+  @Test
+  public void rejectsPngBytesNamedPdfWhateverTheDeclaredType() throws IOException {
+    // The declared Content-Type is not an input of the policy; the bytes decide.
+    File file = writeFile("photo.pdf", PNG_HEADER);
+    assertNotNull(NeoAttachmentPolicy.validateContent("photo.pdf", file));
+  }
+
+  @Test
+  public void acceptsOrdinaryMultiDotUnicodeAndDottedHostNames() throws IOException {
+    for (String name : Arrays.asList("informe.v2.final.pdf", "factura_año.pdf", "acme.com.pdf",
+        "www.empresa.com.factura.pdf", "v1..2.pdf", "script.py.pdf")) {
+      assertNull(name, NeoAttachmentPolicy.validateMetadata(name, 10));
+      assertNull(name, NeoAttachmentPolicy.validateContent(name,
+          writeFile(Integer.toHexString(name.hashCode()) + ".pdf", PDF_HEADER)));
+    }
+  }
 }

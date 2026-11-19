@@ -105,7 +105,7 @@ public final class NeoAttachmentPolicy {
    */
   static final long MAX_REQUEST_BYTES = BULK_MAX_FILES * MAX_FILE_BYTES + MULTIPART_MARGIN_BYTES;
 
-  /** Longest accepted file name, in characters (the C_File name column is 60 wide; this is a hard cap). */
+  /** Longest accepted file name, in characters: a hard cap on what a client may submit. */
   static final int MAX_FILE_NAME_LENGTH = 255;
 
   /** MIME type served for anything that is not an approved, inert type. */
@@ -119,7 +119,7 @@ public final class NeoAttachmentPolicy {
   private static final Set<String> ACTIVE_EXTENSIONS = Collections.unmodifiableSet(
       new LinkedHashSet<>(Arrays.asList("html", "htm", "xhtml", "shtml", "svg", "svgz", "js", "mjs",
           "php", "php3", "php4", "php5", "phtml", "jsp", "jspx", "asp", "aspx", "exe", "dll", "bat",
-          "cmd", "com", "scr", "msi", "sh", "ps1", "vbs", "hta", "jar", "war", "cgi", "pl", "py")));
+          "scr", "msi", "ps1", "vbs", "hta", "jar", "war")));
 
   /** Types whose content can render actively in a browser: always served as {@link #INERT_MIME}. */
   private static final Set<String> NEVER_INLINE_EXTENSIONS = Collections.unmodifiableSet(
@@ -448,7 +448,8 @@ public final class NeoAttachmentPolicy {
     if (!stripControlChars(fileName).equals(fileName)) {
       return "File name contains control characters";
     }
-    if (fileName.indexOf('/') >= 0 || fileName.indexOf('\\') >= 0 || fileName.contains("..")) {
+    if (fileName.indexOf('/') >= 0 || fileName.indexOf('\\') >= 0 || ".".equals(fileName)
+        || "..".equals(fileName)) {
       return "File name must not contain path components";
     }
     if (fileName.length() > MAX_FILE_NAME_LENGTH) {

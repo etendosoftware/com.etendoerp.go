@@ -33,7 +33,7 @@ public class NeoDownloadHeadersTest {
   @Test
   public void htmlStoredTypeIsNeverEchoed() {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    NeoDownloadHeaders.apply(response, "x.html", "text/html");
+    NeoDownloadHeaders.apply(response, "x.html");
     verify(response).setContentType("application/octet-stream");
     verify(response).setHeader("X-Content-Type-Options", "nosniff");
     verify(response).setHeader("Cache-Control", "no-store");
@@ -42,14 +42,14 @@ public class NeoDownloadHeadersTest {
   @Test
   public void storedTypeCannotOverrideExtensionType() {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    NeoDownloadHeaders.apply(response, "logo.svg", "image/svg+xml");
+    NeoDownloadHeaders.apply(response, "logo.svg");
     verify(response).setContentType("application/octet-stream");
   }
 
   @Test
   public void pdfKeepsItsTypeAndIsAttachmentWithSandboxCsp() {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    NeoDownloadHeaders.apply(response, "a.pdf", "application/pdf");
+    NeoDownloadHeaders.apply(response, "a.pdf");
     verify(response).setContentType("application/pdf");
     verify(response).setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
     verify(response).setHeader("Content-Disposition",
@@ -63,6 +63,14 @@ public class NeoDownloadHeadersTest {
     assertFalse(header.contains("\r"));
     assertFalse(header.contains("\n"));
     assertEquals(1, header.split("filename=\"", -1).length - 1);
+  }
+
+  @Test
+  public void markPrivateJsonSetsNoStoreAndNosniff() {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoDownloadHeaders.markPrivateJson(response);
+    verify(response).setHeader("Cache-Control", "no-store");
+    verify(response).setHeader("X-Content-Type-Options", "nosniff");
   }
 
   @Test

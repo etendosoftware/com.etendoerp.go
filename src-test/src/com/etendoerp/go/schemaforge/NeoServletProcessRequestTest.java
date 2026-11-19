@@ -195,6 +195,21 @@ class NeoServletProcessRequestTest {
     verify(response).setHeader("X-Content-Type-Options", "nosniff");
   }
 
+  /** ETP-4571 — the 5xx error path gets the same headers; a handler's own Cache-Control wins. */
+  @Test
+  void errorAndExplicitCachePolicyResponses() throws Exception {
+    servlet.writeResponse(response, NeoResponse.error(500, "boom"));
+    verify(response).setHeader("Cache-Control", "no-store");
+
+    HttpServletResponse own = org.mockito.Mockito.mock(HttpServletResponse.class);
+    when(own.getWriter()).thenReturn(new java.io.PrintWriter(new java.io.StringWriter()));
+    NeoResponse cached = NeoResponse.ok(new JSONObject());
+    cached.getHeaders().put("Cache-Control", "public, max-age=60");
+    servlet.writeResponse(own, cached);
+    verify(own).setHeader("Cache-Control", "public, max-age=60");
+    verify(own, org.mockito.Mockito.never()).setHeader("Cache-Control", "no-store");
+  }
+
   // ── ETP-6230: the request context the accounting KPI keeps on the servlet thread ───────────
 
   private static Object restRequestOnThisThread() throws Exception {

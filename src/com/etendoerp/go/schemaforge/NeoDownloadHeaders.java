@@ -38,16 +38,29 @@ final class NeoDownloadHeaders {
   /**
    * Sets the content type and the hardening headers of a download response.
    *
-   * @param response   the response being written
-   * @param fileName   the stored file name
-   * @param storedType the stored data type; deliberately ignored, kept so call sites state it
+   * <p>The stored data type is deliberately not a parameter: it is caller-influenced and never
+   * decides what a download is served as.</p>
+   *
+   * @param response the response being written
+   * @param fileName the stored file name
    */
-  static void apply(HttpServletResponse response, String fileName, String storedType) {
+  static void apply(HttpServletResponse response, String fileName) {
     response.setContentType(NeoAttachmentPolicy.inertMimeType(fileName));
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
     response.setHeader("Content-Disposition", contentDisposition(fileName));
+  }
+
+  /**
+   * Marks a private JSON response as non-cacheable and non-sniffable (SEC-12). Used by every
+   * writer that puts authenticated JSON on the wire.
+   *
+   * @param response the response being written
+   */
+  static void markPrivateJson(HttpServletResponse response) {
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("X-Content-Type-Options", "nosniff");
   }
 
   /**
@@ -59,7 +72,7 @@ final class NeoDownloadHeaders {
    */
   static String contentDisposition(String fileName) {
     String safe = fileName == null ? DEFAULT_NAME
-        : NeoAttachmentPolicy.sanitizeFileName(fileName).replace("\"", "_").replace("\\", "_");
+        : NeoAttachmentPolicy.sanitizeFileName(fileName).replace("\"", "_");
     String encoded = URLEncoder.encode(safe, StandardCharsets.UTF_8).replace("+", "%20");
     return "attachment; filename=\"" + safe + "\"; filename*=UTF-8''" + encoded;
   }

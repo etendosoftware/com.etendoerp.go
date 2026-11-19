@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -142,7 +141,8 @@ public final class AnonymousAttachmentStreamer {
       }
       byte[] fileData = Files.readAllBytes(file.toPath());
       response.setStatus(HttpServletResponse.SC_OK);
-      NeoDownloadHeaders.apply(response, attachment.getName(), attachment.getDataType());
+      NeoDownloadHeaders.apply(response,
+          StringUtils.defaultIfBlank(attachment.getName(), DEFAULT_FILE_NAME));
       response.setContentLength(fileData.length);
       response.getOutputStream().write(fileData);
       response.getOutputStream().flush();
@@ -240,20 +240,6 @@ public final class AnonymousAttachmentStreamer {
     } catch (IOException e) {
       log.warn("Could not delete temporary attachment directory {}: {}", parent, e.getMessage());
     }
-  }
-
-  static String contentDisposition(String fileName) {
-    String sanitized = sanitizeFileName(fileName);
-    String encoded = URLEncoder.encode(sanitized, StandardCharsets.UTF_8).replace("+", "%20");
-    return "attachment; filename=\"" + sanitized + "\"; filename*=UTF-8''" + encoded;
-  }
-
-  static String sanitizeFileName(String fileName) {
-    String normalized = StringUtils.trimToNull(fileName);
-    if (normalized == null) {
-      return DEFAULT_FILE_NAME;
-    }
-    return normalized.replaceAll("[\\\\/:*?\"<>|\\r\\n]", "_");
   }
 
   static void writePlainError(HttpServletResponse response, int status, String message)
