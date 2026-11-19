@@ -73,8 +73,13 @@ final class PaymentTermRefusals {
     JSONObject params = rangeParams().put("value", days);
     String message = "The number of days (" + F_DAYS + ") must be between " + MIN_DAYS + " and "
         + MAX_DAYS + "; got " + days + ".";
+    // ETP-5850: refused without a hint, an agent stored the 400 days in the contact's unrelated
+    // consumptionDays as a "workaround". The term cannot exist; the user decides what to do.
+    String hint = "No payment term can have " + days + " days. Tell the user and ask for a term "
+        + "between " + MIN_DAYS + " and " + MAX_DAYS + " days; do not store the number in any "
+        + "other field.";
     return refusal(HttpServletResponse.SC_BAD_REQUEST, CODE_DAYS_OUT_OF_RANGE,
-        MSG_DAYS_OUT_OF_RANGE, message, params, null);
+        MSG_DAYS_OUT_OF_RANGE, message, params, hint);
   }
 
   static NeoResponse duplicate(long days, PaymentTerm existing) throws JSONException {
