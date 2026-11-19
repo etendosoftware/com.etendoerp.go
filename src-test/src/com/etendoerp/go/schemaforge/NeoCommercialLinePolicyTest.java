@@ -62,12 +62,18 @@ public class NeoCommercialLinePolicyTest {
 
   private static final double DELTA = 0.001;
 
-  // ── injectLineGrossAmountIfMissing ────────────────────────────────────────
-
+  /** Every entry point treats a missing body as nothing to do, without an NPE. */
   @Test
-  public void testInjectLineGross_nullBody_doesNotThrow() {
+  public void testEveryEntryPointToleratesANullBody() {
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(null);
+    NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(null, false, "Net PL");
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(null);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
+    NeoCommercialLinePolicy.injectCommercialAmounts(null);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(null, mockTransactionalLineEntity(), false);
   }
+
+  // ── injectLineGrossAmountIfMissing ────────────────────────────────────────
 
   /**
    * Client already sent a non-zero lineGrossAmount → must not be overwritten.
@@ -197,11 +203,6 @@ public class NeoCommercialLinePolicyTest {
   // ── normalizeOrderLineSelectorPriceMapping ────────────────────────────────
 
   @Test
-  public void testNormalize_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(null, false, "Net PL");
-  }
-
-  @Test
   public void testNormalize_taxIncludedPriceList_grossUnitPricePreserved() throws Exception {
     JSONObject body = new JSONObject().put("grossUnitPrice", 12.10);
 
@@ -229,11 +230,6 @@ public class NeoCommercialLinePolicyTest {
   }
 
   // ── injectGrossAmountIfMissing (invoice lines) ────────────────────────────
-
-  @Test
-  public void testInjectGross_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.injectGrossAmountIfMissing(null);
-  }
 
   /** Non-numeric quantity → NumberFormatException is swallowed, nothing injected. */
   @Test
@@ -321,11 +317,6 @@ public class NeoCommercialLinePolicyTest {
   }
 
   // ── injectLineNetAmountIfMissing ──────────────────────────────────────────
-
-  @Test
-  public void testInjectLineNet_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
-  }
 
   /** Non-numeric quantity → NumberFormatException swallowed, nothing injected. */
   @Test
@@ -465,11 +456,6 @@ public class NeoCommercialLinePolicyTest {
   }
 
   // ── ETP-4855: injectCommercialAmounts ordering ────────────────────────────
-
-  @Test
-  public void testInjectCommercialAmounts_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.injectCommercialAmounts(null);
-  }
 
   /**
    * ETP-4855 regression guard — THE ordering test.
@@ -748,12 +734,6 @@ public class NeoCommercialLinePolicyTest {
       assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
       obDal.verifyNoInteractions();
     }
-  }
-
-  /** {@code body == null} must not throw. */
-  @Test
-  public void testInjectProductDerivedUom_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(null, mockTransactionalLineEntity(), false);
   }
 
   /**

@@ -449,6 +449,7 @@ public class GoodsShipmentHeaderHandlerTest {
       ctx.setPreviousResult(NeoResponse.ok(body));
 
       assertNull(new GoodsShipmentHeaderHandler().afterHandle(ctx));
+      assertFalse("nothing is annotated when the status cannot be read", item.has("invoiceStatus"));
     }
   }
 
@@ -534,6 +535,9 @@ public class GoodsShipmentHeaderHandlerTest {
       // All individual exceptions are swallowed; afterHandle completes and returns 200 OK.
       NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
       assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertSame(body, result.getBody());
+      assertEquals(0, item.getInt("invoiceStatus"));
     }
   }
 
@@ -563,6 +567,7 @@ public class GoodsShipmentHeaderHandlerTest {
       ctx.setPreviousResult(NeoResponse.ok(body));
 
       assertNull(new GoodsShipmentHeaderHandler().afterHandle(ctx));
+      assertFalse("nothing is annotated when the status cannot be read", item.has("invoiceStatus"));
     }
   }
 
@@ -673,6 +678,8 @@ public class GoodsShipmentHeaderHandlerTest {
       // and afterHandle returns NeoResponse.ok(body) — not null.
       NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
       assertNotNull(result);
+      assertSame(body, result.getBody());
+      assertEquals(0, item.getInt("invoiceStatus"));
     }
   }
 

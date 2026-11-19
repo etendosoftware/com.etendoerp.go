@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -116,20 +117,30 @@ class DocTypeResolverTest {
     @Test
     @DisplayName("Handles null body gracefully")
     void nullBodyNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(null, mock(Tab.class), mock(NeoContext.class));
-      // no exception
+      Tab adTab = mock(Tab.class);
+      NeoContext ctx = mock(NeoContext.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(null, adTab, ctx);
+      verifyNoInteractions(adTab, ctx);
     }
 
     @Test
     @DisplayName("Handles null adTab gracefully")
     void nullTabNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(new JSONObject(), null, mock(NeoContext.class));
+      JSONObject body = new JSONObject();
+      NeoContext ctx = mock(NeoContext.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, null, ctx);
+      verifyNoInteractions(ctx);
+      assertEquals(0, body.length());
     }
 
     @Test
     @DisplayName("Handles null context gracefully")
     void nullContextNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(new JSONObject(), mock(Tab.class), null);
+      JSONObject body = new JSONObject();
+      Tab adTab = mock(Tab.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, null);
+      verifyNoInteractions(adTab);
+      assertEquals(0, body.length());
     }
 
     @Test

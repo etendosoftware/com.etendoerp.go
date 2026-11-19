@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -103,7 +104,12 @@ public class NeoFavoritesServletTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
       servlet.doGet(req, resp);
-      // No exception propagated — error is handled
+
+      // Handled: the transaction is rolled back, the caller gets a 500, and admin mode is left.
+      verify(obDal).rollbackAndClose();
+      verify(resp).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      verify(resp, never()).setStatus(HttpServletResponse.SC_OK);
+      ctxMock.verify(OBContext::restorePreviousMode);
     }
   }
 
