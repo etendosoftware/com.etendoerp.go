@@ -54,6 +54,7 @@ final class InvoiceLineLinker {
   /** Named-parameter keys shared by the native statements below. */
   private static final String PARAM_INOUT_LINE_ID = "inoutLineId";
   private static final String PARAM_USER_ID = "userId";
+  private static final String PARAM_INVOICE_LINE_ID = "invoiceLineId";
 
   private InvoiceLineLinker() {
   }
@@ -278,7 +279,7 @@ final class InvoiceLineLinker {
             + "  AND M_InOutLine_ID IS NULL")
         .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
         .setParameter(PARAM_USER_ID, userId)
-        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INVOICE_LINE_ID, invoiceLineId)
         .executeUpdate();
     if (updated > 0) {
       return;
@@ -301,7 +302,7 @@ final class InvoiceLineLinker {
             + "  WHERE mt.m_inoutline_id = iol.m_inoutline_id "
             + "    AND mt.c_invoiceline_id = il.c_invoiceline_id)")
         .setParameter(PARAM_USER_ID, userId)
-        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INVOICE_LINE_ID, invoiceLineId)
         .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
         .executeUpdate();
   }
@@ -322,13 +323,13 @@ final class InvoiceLineLinker {
             + "SET M_InOutLine_ID = NULL, Updated = now(), UpdatedBy = :userId "
             + "WHERE C_InvoiceLine_ID = :invoiceLineId AND M_InOutLine_ID = :inoutLineId")
         .setParameter(PARAM_USER_ID, currentUserIdOrSystem())
-        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INVOICE_LINE_ID, invoiceLineId)
         .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
         .executeUpdate();
     OBDal.getInstance().getSession()
         .createNativeQuery("DELETE FROM " + matchTable.tableName()
             + " WHERE c_invoiceline_id = :invoiceLineId AND m_inoutline_id = :inoutLineId")
-        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter(PARAM_INVOICE_LINE_ID, invoiceLineId)
         .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
         .executeUpdate();
   }
