@@ -35,6 +35,7 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -61,6 +62,8 @@ import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.PausedSubscriptionAlert;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
+import com.etendoerp.go.payment.invoicing.PaymentLedger;
+import com.etendoerp.go.payment.invoicing.PaymentMethodReader;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
@@ -108,6 +111,8 @@ import com.etendoerp.go.schemaforge.data.Account;
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  * @covers com.etendoerp.go.payment.PausedSubscriptionAlert
+ * @covers com.etendoerp.go.payment.invoicing.PaymentLedger
+ * @covers com.etendoerp.go.payment.invoicing.PaymentLedgerStore
  */
 public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
@@ -150,6 +155,13 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   @Before
   public void useAKnownWebhookSecret() {
     System.setProperty(WEBHOOK_SECRET_PROPERTY, SECRET);
+    // ETP-6322 — a paid invoice asks Stripe for its payment method; these tests stay offline.
+    servlet.paymentLedger = new PaymentLedger(new PaymentMethodReader() {
+      @Override
+      public JSONObject read(String invoiceId) {
+        return null;
+      }
+    });
   }
 
   /**
@@ -373,6 +385,38 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     assertEquals("PAYMENT", hubSpotEvent(email, "EVENT_TYPE"));
     assertEquals("in_" + invoiceEvent, hubSpotEvent(email, "EVENT_KEY"));
     assertEquals("1", hubSpotEvent(email, "COUNT(*) OVER ()"));
+  }
+
+  /**
+   * ETP-6322 — a paid invoice of an Etendo purchase is recorded for the ERP to invoice, in the
+   * event's own transaction, with the account's address as the billing address. A redelivery
+   * records nothing more, and the payment starts its history as {@code RECORDED}.
+   */
+  @Test
+  public void testAPaidInvoiceIsRecordedForTheErpOnce() throws Exception {
+    String email = newEmail("erp-payment");
+    String requestId = createRequest(email);
+    String invoiceEvent = newEventId();
+    String invoice = "{\"id\":\"" + invoiceEvent + "\",\"type\":\"" + INVOICE_PAID + "\","
+        + "\"created\":1792000000,\"data\":{\"object\":{\"id\":\"in_" + invoiceEvent + "\","
+        + "\"amount_paid\":2200,\"currency\":\"eur\",\"billing_reason\":\"subscription_create\","
+        + "\"parent\":{\"subscription_details\":{\"subscription\":\"sub_" + requestId + "\","
+        + "\"metadata\":{\"request_id\":\"" + requestId + "\"}}}}}}";
+
+    assertEquals(200, deliver(invoice).status);
+    assertEquals(200, deliver(invoice).status);
+
+    String invoiceId = "in_" + invoiceEvent;
+    assertEquals("1", erpPayment(invoiceId, "COUNT(*) OVER ()"));
+    assertEquals("PENDING_INVOICE", erpPayment(invoiceId, "p.STATUS"));
+    assertEquals("NEW", erpPayment(invoiceId, "p.PAYMENT_TYPE"));
+    assertEquals(0, new BigDecimal("22").compareTo(
+        new BigDecimal(erpPayment(invoiceId, "p.AMOUNT_PAID"))));
+    assertEquals("EUR", erpPayment(invoiceId, "p.CURRENCY"));
+    assertEquals(email, erpPayment(invoiceId, "p.BILLING_EMAIL"));
+    assertNotNull("the purchase names the account", erpPayment(invoiceId, "p.ETGO_ACCOUNT_ID"));
+    assertEquals("RECORDED", erpPayment(invoiceId, "(SELECT string_agg(e.EVENT_TYPE, ',')"
+        + " FROM ETGO_PAYMENT_EVENT e WHERE e.ETGO_PAYMENT_ID = p.ETGO_PAYMENT_ID)"));
   }
 
   /**
@@ -1312,6 +1356,13 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     return value == null ? null : value.toString();
   }
 
+  private static String erpPayment(String invoiceId, String column) {
+    Object value = OBDal.getInstance().getSession().createNativeQuery("SELECT " + column
+        + " FROM ETGO_PAYMENT p WHERE p.STRIPE_INVOICE_ID = :invoice")
+        .setParameter("invoice", invoiceId).setMaxResults(1).getSingleResult();
+    return value == null ? null : value.toString();
+  }
+
   private String newEmail(String label) {
     return REQUEST_MARKER + label + "-" + UUID.randomUUID().toString().replace("-", "")
         + "@example.test";
@@ -1498,6 +1549,17 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
               + " (SELECT ETGO_ACCOUNT_ID FROM ETGO_ACCOUNT WHERE EMAIL LIKE :marker)");
       deleteHubSpotEvents.setParameter("marker", REQUEST_MARKER + "%");
       deleteHubSpotEvents.executeUpdate();
+
+      // ETP-6322 — the payments the webhook recorded for the ERP (their events cascade).
+      NativeQuery deletePayments = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("DELETE FROM ETGO_PAYMENT WHERE STRIPE_INVOICE_ID LIKE :invoices"
+              + " OR STRIPE_SUBSCRIPTION_ID LIKE :subscriptions OR ETGO_ACCOUNT_ID IN"
+              + " (SELECT ETGO_ACCOUNT_ID FROM ETGO_ACCOUNT WHERE EMAIL LIKE :marker)");
+      deletePayments.setParameter("invoices", "in_" + EVENT_MARKER + "%");
+      deletePayments.setParameter("subscriptions", "sub_" + REQUEST_MARKER + "%");
+      deletePayments.setParameter("marker", REQUEST_MARKER + "%");
+      deletePayments.executeUpdate();
 
       NativeQuery deleteAccounts = OBDal.getInstance()
           .getSession()
