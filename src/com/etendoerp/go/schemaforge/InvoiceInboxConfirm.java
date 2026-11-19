@@ -121,10 +121,10 @@ final class InvoiceInboxConfirm {
       return stop.refusal() != null ? stop.refusal() : failed(rowId, stop.detail());
     } catch (InvoiceSifPreset.Refused e) {
       OBDal.getInstance().rollbackAndClose();
-      return failed(rowId, InvoiceInboxFailureDetail.refused(messageOf(e.toResponse())));
+      return failed(rowId, InvoiceInboxFailureDetail.ofRefusal(messageOf(e.toResponse())));
     } catch (Exception e) {
       // Classified and sanitized as any NEO failure: no SQL, paths or stack frames reach the row.
-      return failed(rowId, InvoiceInboxFailureDetail.refused(messageOf(
+      return failed(rowId, InvoiceInboxFailureDetail.ofRefusal(messageOf(
           NeoErrorResponses.fromException(e, "POST", "Inbox confirm " + rowId, null))));
     }
     // The invoice is completed and committed: from here nothing may answer a failure.

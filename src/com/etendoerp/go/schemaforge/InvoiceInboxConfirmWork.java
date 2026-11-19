@@ -372,7 +372,7 @@ final class InvoiceInboxConfirmWork {
       InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, OBContext.getOBContext());
     } catch (OBException e) {
       // The message is built by the completion (already translated): it cannot be an identifier.
-      throw new Stop(InvoiceInboxFailureDetail.refused(e.getMessage()));
+      throw new Stop(InvoiceInboxFailureDetail.ofRefusal(e.getMessage()));
     } catch (IllegalStateException e) {
       log.warn("Inbox confirm: the completion failed: {}", e.getMessage());
       throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.COMPLETION_ERROR));
@@ -476,7 +476,9 @@ final class InvoiceInboxConfirmWork {
     params[i++] = InvoiceInboxFailureDetail.P_REASON;
     params[i++] = reason;
     params[i++] = InvoiceInboxFailureDetail.P_MISSING;
-    params[i] = missingOf(result);
+    List<String> missing = missingOf(result);
+    // an empty list stays out of the params, exactly as the former null did
+    params[i] = missing.isEmpty() ? null : missing;
     return InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.STEP_FAILED, params);
   }
 
@@ -490,14 +492,14 @@ final class InvoiceInboxConfirmWork {
     return id;
   }
 
-  /** The names of the missing fields the failed operation reported; null when none. */
+  /** The names of the missing fields the failed operation reported; empty when none. */
   private static List<String> missingOf(JSONObject failure) {
     JSONObject error = failure.optJSONObject(K_ERROR);
     JSONObject detail = error == null ? null : error.optJSONObject("detail");
     JSONObject nested = detail == null ? null : detail.optJSONObject(K_ERROR);
     JSONArray fields = nested == null ? null : nested.optJSONArray("fields");
     if (fields == null || fields.length() == 0) {
-      return null;
+      return new ArrayList<>();
     }
     List<String> names = new ArrayList<>();
     for (int i = 0; i < fields.length(); i++) {

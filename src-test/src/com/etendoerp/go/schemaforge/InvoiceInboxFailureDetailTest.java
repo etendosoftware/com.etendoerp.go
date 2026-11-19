@@ -77,7 +77,7 @@ class InvoiceInboxFailureDetailTest {
       assertFalse(InvoiceInboxFailureDetail.of(code, "message", "m", "reason", "r", "step",
           "vendor").text().isBlank(), code);
     }
-    assertEquals("The period is closed", InvoiceInboxFailureDetail.refused("The period is closed")
+    assertEquals("The period is closed", InvoiceInboxFailureDetail.ofRefusal("The period is closed")
         .text());
     assertFalse(InvoiceInboxFailureDetail.of("step_failed", "name", null).params()
         .containsKey("name"));
@@ -94,7 +94,7 @@ class InvoiceInboxFailureDetailTest {
   void truncationKeepsTheJsonValid() throws Exception {
     String huge = "é\"\\ \n x".repeat(1000);
     String[] stored = {
-        InvoiceInboxFailureDetail.refused(huge).stored(),
+        InvoiceInboxFailureDetail.ofRefusal(huge).stored(),
         InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.STEP_FAILED, "step", "product",
             "name", huge, "reason", huge, "missing", List.of("a", "b")).stored(),
         InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.STEP_FAILED, "step", "line", "n",
@@ -115,7 +115,7 @@ class InvoiceInboxFailureDetailTest {
   @Test
   @DisplayName("a value that fits is stored untouched")
   void aShortValueIsNotTouched() {
-    InvoiceInboxFailureDetail.Detail detail = InvoiceInboxFailureDetail.refused("short");
+    InvoiceInboxFailureDetail.Detail detail = InvoiceInboxFailureDetail.ofRefusal("short");
 
     assertEquals("{\"v\":1,\"code\":\"refused\",\"params\":{\"message\":\"short\"},"
         + "\"text\":\"short\"}", detail.stored());

@@ -85,7 +85,7 @@ class InvoiceInboxConfirmFailureTest {
   @Test
   @DisplayName("the row becomes ERROR / CONFIRM_FAILED with the reason, scoped to the readable clients, and commits")
   void recordsTheFailureAndCommits() {
-    InvoiceInboxFailureDetail.Detail reason = InvoiceInboxFailureDetail.refused(
+    InvoiceInboxFailureDetail.Detail reason = InvoiceInboxFailureDetail.ofRefusal(
         "The invoice could not be created: x");
     InvoiceInboxConfirmFailure.recordFailure("ROW-1", reason);
 
@@ -110,8 +110,8 @@ class InvoiceInboxConfirmFailureTest {
   @DisplayName("a reason longer than the 2000-character column is shortened in its text and params, never cut as JSON; null is an empty message")
   void theReasonIsCappedWithoutBreakingTheJson() throws Exception {
     InvoiceInboxConfirmFailure.recordFailure("ROW-1",
-        InvoiceInboxFailureDetail.refused("x".repeat(5000)));
-    InvoiceInboxConfirmFailure.recordFailure("ROW-2", InvoiceInboxFailureDetail.refused(null));
+        InvoiceInboxFailureDetail.ofRefusal("x".repeat(5000)));
+    InvoiceInboxConfirmFailure.recordFailure("ROW-2", InvoiceInboxFailureDetail.ofRefusal(null));
 
     ArgumentCaptor<Object> detail = ArgumentCaptor.forClass(Object.class);
     verify(query, org.mockito.Mockito.atLeastOnce()).setParameter(eq("detail"), detail.capture());
@@ -131,7 +131,7 @@ class InvoiceInboxConfirmFailureTest {
     when(query.executeUpdate()).thenThrow(new IllegalStateException("db down"));
 
     assertDoesNotThrow(() -> InvoiceInboxConfirmFailure.recordFailure("ROW-1",
-        InvoiceInboxFailureDetail.refused("reason")));
+        InvoiceInboxFailureDetail.ofRefusal("reason")));
 
     verify(dal).rollbackAndClose();
     verify(dal, never()).commitAndClose();

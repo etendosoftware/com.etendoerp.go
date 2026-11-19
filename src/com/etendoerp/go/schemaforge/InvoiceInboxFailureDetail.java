@@ -122,6 +122,41 @@ final class InvoiceInboxFailureDetail {
     String stored() {
       return serialize(code, params, text());
     }
+
+    private static String serialize(String code, Map<String, Object> params, String text) {
+      JSONObject paramsJson = toJson(params);
+      String shownText = StringUtils.defaultString(text);
+      try {
+        for (int attempt = 0; attempt < 200; attempt++) {
+          String json = assemble(code, paramsJson, shownText);
+          int over = json.length() - MAX_STORED;
+          if (over <= 0) {
+            return json;
+          }
+          String longest = longestString(paramsJson, shownText);
+          if (longest == null) {
+            paramsJson = dropBulk(paramsJson);
+            continue;
+          }
+          // Cut the longest string by half the overflow (shared with its equals): the strings shrink
+          // geometrically, so the text and the params stay readable instead of one being wiped.
+          int length = K_TEXT.equals(longest) ? shownText.length()
+              : paramsJson.getString(longest).length();
+          int[] others = longestOthers(paramsJson, shownText, longest);
+          int cut = Math.max(1, over / (2 * (others[1] + 1)));
+          // never wipe a string while it can still shrink: keep a readable stub first
+          cut = length > MIN_KEPT ? Math.min(cut, length - MIN_KEPT) : length;
+          if (K_TEXT.equals(longest)) {
+            shownText = shorten(shownText, cut);
+          } else {
+            paramsJson.put(longest, shorten(paramsJson.getString(longest), cut));
+          }
+        }
+        return assemble(code, new JSONObject(), "");
+      } catch (JSONException e) {
+        throw new IllegalStateException("Could not serialize the failure detail", e);
+      }
+    }
   }
 
   /**
@@ -142,7 +177,7 @@ final class InvoiceInboxFailureDetail {
   }
 
   /** The reason of text that arrives already built from outside (completion, preset, pipeline). */
-  static Detail refused(String message) {
+  static Detail ofRefusal(String message) {
     return of(REFUSED, P_MESSAGE, StringUtils.defaultString(message));
   }
 
@@ -203,41 +238,6 @@ final class InvoiceInboxFailureDetail {
   }
 
   // ── Serialization that never cuts the JSON ──────────────────────────────────────────────────
-
-  private static String serialize(String code, Map<String, Object> params, String text) {
-    JSONObject paramsJson = toJson(params);
-    String shownText = StringUtils.defaultString(text);
-    try {
-      for (int attempt = 0; attempt < 200; attempt++) {
-        String json = assemble(code, paramsJson, shownText);
-        int over = json.length() - MAX_STORED;
-        if (over <= 0) {
-          return json;
-        }
-        String longest = longestString(paramsJson, shownText);
-        if (longest == null) {
-          paramsJson = dropBulk(paramsJson);
-          continue;
-        }
-        // Cut the longest string by half the overflow (shared with its equals): the strings shrink
-        // geometrically, so the text and the params stay readable instead of one being wiped.
-        int length = K_TEXT.equals(longest) ? shownText.length()
-            : paramsJson.getString(longest).length();
-        int[] others = longestOthers(paramsJson, shownText, longest);
-        int cut = Math.max(1, over / (2 * (others[1] + 1)));
-        // never wipe a string while it can still shrink: keep a readable stub first
-        cut = length > MIN_KEPT ? Math.min(cut, length - MIN_KEPT) : length;
-        if (K_TEXT.equals(longest)) {
-          shownText = shorten(shownText, cut);
-        } else {
-          paramsJson.put(longest, shorten(paramsJson.getString(longest), cut));
-        }
-      }
-      return assemble(code, new JSONObject(), "");
-    } catch (JSONException e) {
-      throw new IllegalStateException("Could not serialize the failure detail", e);
-    }
-  }
 
   /**
    * The strings other than {@code except} ({@code text} stands for the text): the length of the
@@ -356,7 +356,7 @@ final class InvoiceInboxFailureDetail {
       case STEP_PRODUCT:
         return "new product '" + string(params, P_NAME) + "'";
       default:
-        return "creation";
+        return STEP_CREATION;
     }
   }
 
