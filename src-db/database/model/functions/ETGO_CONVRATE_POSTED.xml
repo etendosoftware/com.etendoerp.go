@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_CONVRATE_POSTED">
+    <function name="ETGO_CONVRATE_POSTED" type="CHAR" volatility="STABLE">
+      <parameter name="p_c_conversion_rate_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_client_id character varying;
+  v_currency_id character varying;
+  v_currency_to_id character varying;
+  v_valid_from timestamp without time zone;
+  v_valid_to timestamp without time zone;
+  v_found NUMERIC;
+BEGIN
+  -- ETP-6365: 'Y' when the accounting of the rate's client holds entries of its currency pair, in
+  -- either direction, dated on one of the days the range covers. Read by the virtual column
+  -- C_Conversion_Rate.EM_Etgo_Used_In_Accounting and by ETGO_CONVRATE_STATUS, and called directly
+  -- by the conversion-rates customization to decide whether a range may still be edited.
+  --
+  -- Day granularity on purpose: a posting carries a DateAcct (a day) while a manual range starts
+  -- at a minute. A range that starts at 09:00 still "covers" the postings dated that day for the
+  -- user, so it is reported as used and locked, stricter than core's C_CONVERSION_RATE_TRG check.
+  --
+  -- TOTAL: a read of a list must never fail because of one row, so every edge case answers 'N'.
+  IF p_c_conversion_rate_id IS NULL THEN
+    RETURN 'N';
+  END IF;
+
+  SELECT cr.ad_client_id, cr.c_currency_id, cr.c_currency_id_to, cr.validfrom, cr.validto
+    INTO v_client_id, v_currency_id, v_currency_to_id, v_valid_from, v_valid_to
+    FROM c_conversion_rate cr
+   WHERE cr.c_conversion_rate_id = p_c_conversion_rate_id;
+
+  IF v_client_id IS NULL OR v_valid_from IS NULL THEN
+    RETURN 'N';
+  END IF;
+
+  SELECT COUNT(*)
+    INTO v_found
+    FROM (SELECT 1
+            FROM fact_acct f
+            JOIN c_acctschema s ON s.c_acctschema_id = f.c_acctschema_id
+           WHERE f.ad_client_id = v_client_id
+             AND f.dateacct >= TRUNC(v_valid_from)
+             AND f.dateacct <= COALESCE(v_valid_to, TO_DATE('31-12-9999', 'DD-MM-YYYY'))
+             AND ((f.c_currency_id = v_currency_id AND s.c_currency_id = v_currency_to_id)
+               OR (f.c_currency_id = v_currency_to_id AND s.c_currency_id = v_currency_id))
+           LIMIT 1) used;
+
+  IF v_found > 0 THEN
+    RETURN 'Y';
+  END IF;
+  RETURN 'N';
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'N';
+END ETGO_CONVRATE_POSTED
+]]></body>
+    </function>
+  </database>

@@ -9570,6 +9570,84 @@ and the contact-type rules.
 `backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
 after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
 
+#### 5.3.7 Currency conversion — manual ranges (`ConversionRateHandler`, ETP-6365)
+
+`handlers/ConversionRateHandler`, bound with
+`@NeoExtension(spec = "conversion-rates", entity = "conversionRate")` (no `Java_Qualifier`).
+The window (AD window 116, `C_Conversion_Rate`) was read-only; it is now "Conversión de divisas" /
+"Currency Conversion" and lets a user keep **manual** rates for the currencies the downloader of
+`com.smf.currency.conversionrate` does not fetch (a currency is *automatic* when an active
+`SMFCR_RULE` of the client, or of System, has the organization currency at either end). The
+entity's `ISPOST`/`ISPUT`/`ISPATCH`/`ISDELETE` are now `Y`, so MCP no longer lists the spec as
+read-only. `ValidFrom`/`ValidTo` became DateTime (reference 16) through
+`com.etendoerp.go.template`'s `configScript.xml`; NEO serialises them as server-local wall clock
+`yyyy-MM-dd'T'HH:mm:ss` (ETP-5100).
+
+**Every write is served by the customization itself**, on REST single, REST batch and MCP
+(`etendo_create` / `etendo_update` / `etendo_delete` / `etendo_batch`) — no channel divergence.
+It validates everything first, then writes on the request's session and only flushes: the channel
+commits, and on any failure the session is rolled back (`NeoErrorResponses.rollbackUnlessBatchOwned`),
+so a rate is never left without its inverse.
+
+| Operation | Body | What the server does |
+|---|---|---|
+| create (`POST`) | `{toCurrency, multipleRateBy, validFromDate}` — `toCurrency` an id or an ISO code; `validFromDate` `yyyy-MM-dd'T'HH:mm[:ss]` (seconds dropped; a bare date is 00:00) | origin = organization currency of the request (`OBCurrencyUtils.getOrgCurrency`, else the client's), organization `*` of the tenant, `conversionRateType` `S`, not synced, open end (written as 9999-12-31, what core stores for an empty one). Closes every open range of the pair that started earlier at `validFromDate − 1 minute` (both directions), then inserts the rate (org → X, multiply X, divide 1/X) **and** its inverse (X → org, multiply 1/X, divide X). Answers the forward row in the generic `{response:{status:0,data:[row]}}` shape |
+| update (`PATCH`/`PUT`) | `multipleRateBy` and/or `validFromDate` | applied to both rows (the twin gets 1/X; a legacy range without its inverse gets one). Moving the start re-closes the range this one closed (the one ending exactly a minute before the old start) at `newStart − 1 minute`. `currency`/`toCurrency`/`validToDate` with another value → 400 |
+| delete | — | deletes both rows; the range it had closed is **not** reopened |
+
+A range is the pair of rows with the same `ValidFrom`/`ValidTo`; `ValidTo` empty or in year 2999+
+means open. Refusals, all before anything is written (Spanish/English text in
+`messages/neo_hints_*.properties`, key in `error.messageKeys`):
+
+| Key | Status | When |
+|---|---|---|
+| `ETGO_ConvRateCurrencyRequired` | 400 | no `toCurrency` |
+| `ETGO_ConvRateCurrencyInvalid` | 400 | unknown, inactive, or another tenant's currency |
+| `ETGO_ConvRateOrgCurrency` | 400 | `toCurrency` is the organization currency |
+| `ETGO_ConvRateAutoCurrency` | 400 | the currency is downloaded automatically |
+| `ETGO_ConvRateInvalidRate` | 400 | rate missing, not a number, or ≤ 0 |
+| `ETGO_ConvRateInvalidValidFrom` | 400 | start missing or not a date |
+| `ETGO_ConvRateFieldNotEditable` | 400 | an update changes a fixed field |
+| `ETGO_ConvRateOverlap` | 409 | the new (or moved) range falls inside a closed range, or does not start after the start of the range in force — "Ya existe una tasa de conversión para EUR → CHF en las fechas indicadas." Also the translation of core's 20504 |
+| `ETGO_ConvRateSyncedLocked` | 409 | update/delete of a downloaded row (also the translation of `SMFCR_CannotDeleteSyncedRate`) |
+| `ETGO_ConvRateUsedLocked` | 409 | update/delete of a range used in accounting (also the translation of core's `C_CONVERSION_RATE_TRG` `@20506@`) |
+| `ETGO_ConvRateNoOrgCurrency` | 422 | the organization has no currency |
+
+**States — two virtual columns** on `C_Conversion_Rate`, listed, filtered and sorted like any
+other column (REST through core's `AdvancedQueryBuilder`, MCP through `_computedColumns`):
+
+| Property (column) | Values | Function |
+|---|---|---|
+| `etgoRateStatus` (`EM_Etgo_Rate_Status`, String) | `CURRENT` — the range contains now; `POSTED` — not current and used in accounting; `UNUSED` — neither | `ETGO_CONVRATE_STATUS` |
+| `etgoUsedInAccounting` (`EM_Etgo_Used_In_Accounting`, Yes/No) | `true` when `FACT_ACCT` of the client holds entries of the pair (either direction: entry currency X with an accounting schema in the other) dated on a day the range covers | `ETGO_CONVRATE_POSTED` |
+
+A range may be edited or deleted only when it is manual and `etgoUsedInAccounting` is false — i.e.
+`UNUSED`, or `CURRENT` without postings. **Why virtual (`Computation_Mode = 'V'`) and not stored:**
+`CURRENT` depends on `now()`, the textbook case that cannot be stored; `etgoUsedInAccounting` would
+need a stored dependency on `FACT_ACCT` whose resolver maps one posting to every range of its pair
+covering its date (several rows, a range join) and puts an enqueue trigger on the hottest table of
+the accounting, for a list of a few dozen rows read on demand. Both functions are total.
+
+**Actions** (`actionContracts`, read-only, not tied to a record — REST
+`POST /sws/neo/conversion-rates/conversionRate/new/action/<name>`, MCP `etendo_action` with
+`id: "_"`):
+
+| Action | Parameters | Answer (`response.data`) |
+|---|---|---|
+| `manualCurrencyOptions` | — | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; `name`/`symbol` in the request language |
+| `previewManualRate` | `toCurrency`, `multipleRateBy`, `validFromDate` | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey}` with the refusal a create would get. Writes nothing |
+| `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now (latest start wins); `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
+
+On MCP `etendo_create`, `resolveServerCreateFields` fills `currency`, `conversionRateType` and
+`divideRateBy` before the mandatory pre-check, and `etendo_schema(view:"create")` lists them as
+server-defaulted while `toCurrency`, `multipleRateBy` and `validFromDate` are `userRequired`.
+
+**Not changed here:** the rate a document picks (`NeoExchangeRateService`, `CurrencyOptionsHandler`
+still compare `ValidFrom` with a date at 00:00, so a manual range that starts later in the day is
+not seen until the next day) — pending a product decision. The reads of `SMFCR_RULE` /
+`SMFCR_SYNC_LOG` are guarded by the runtime model, but `com.etendoerp.go` declares no dependency on
+`com.smf.currency.conversionrate` (the spec's `EM_SMFCR_Is_Synced` field already requires it).
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:

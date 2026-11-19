@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_CONVRATE_STATUS">
+    <function name="ETGO_CONVRATE_STATUS" type="VARCHAR" volatility="STABLE">
+      <parameter name="p_c_conversion_rate_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_valid_from timestamp without time zone;
+  v_valid_to timestamp without time zone;
+BEGIN
+  -- ETP-6365: the state of a conversion range, read by the virtual column
+  -- C_Conversion_Rate.EM_Etgo_Rate_Status:
+  --   CURRENT - the range contains the current moment (it may still be used in accounting: see
+  --             ETGO_CONVRATE_POSTED, which decides whether it is locked);
+  --   POSTED  - not current, and the accounting holds entries of its pair on the days it covers;
+  --   UNUSED  - neither.
+  -- It depends on now(), so it cannot be a stored computed column (see docs/neo-headless.md).
+  -- TOTAL: every edge case answers 'UNUSED' rather than failing the list read.
+  IF p_c_conversion_rate_id IS NULL THEN
+    RETURN 'UNUSED';
+  END IF;
+
+  SELECT cr.validfrom, cr.validto
+    INTO v_valid_from, v_valid_to
+    FROM c_conversion_rate cr
+   WHERE cr.c_conversion_rate_id = p_c_conversion_rate_id;
+
+  IF v_valid_from IS NULL THEN
+    RETURN 'UNUSED';
+  END IF;
+
+  IF v_valid_from <= now()
+     AND COALESCE(v_valid_to, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= now() THEN
+    RETURN 'CURRENT';
+  END IF;
+
+  IF ETGO_CONVRATE_POSTED(p_c_conversion_rate_id) = 'Y' THEN
+    RETURN 'POSTED';
+  END IF;
+  RETURN 'UNUSED';
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'UNUSED';
+END ETGO_CONVRATE_STATUS
+]]></body>
+    </function>
+  </database>
