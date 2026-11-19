@@ -109,8 +109,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     final boolean offersClassicPending;
     /**
      * Whether a line pends by its own movement links ({@link #byDirectLinks}, ETP-6002 CP-22)
-     * instead of by what its order line delivered. Such a policy also gives
-     * {@code availableInvoices} rows (with {@code detail}) their pending {@code amount}.
+     * instead of by what its order line delivered.
      */
     final boolean pendsByDirectLinks;
 
@@ -147,6 +146,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   }
 
   static final String PARAM_INVOICE_ID = "invoiceId";
+  /** {@code availableInvoices}: unit price x pending quantity over the invoice's pending lines. */
+  static final String KEY_AMOUNT = "amount";
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_INVOICES = 50;
   private static final String INVOICE = "Invoice";
@@ -187,23 +188,22 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         "Lists the completed " + invoice + "s of this " + doc + "'s business partner and "
             + "currency with a line still to " + (sales ? "ship" : "receive") + ": {data:[{id, "
             + "documentNo, date, businessPartner, businessPartner$_identifier, currency, "
-            + "pendingLines, order}], hasMore, limit, scanLimit}, newest created first; order is "
-            + "the invoice's order id or null." + which + " hasMore true means the list may be "
+            + "pendingLines, order, amount}], hasMore, limit, scanLimit}, newest created first; "
+            + "order is the invoice's order id or null; amount is unit price x pendingQuantity "
+            + "summed over the lines with a positive pending, at the invoice currency's precision "
+            + "(the import popup's row total)." + which + " hasMore true means the list may be "
             + "incomplete. limit (1 to " + ImportListing.MAX_LIMIT + "), offset and "
             + "includeCovered are optional; with limit or offset the answer adds offset and "
-            + "nextOffset (page on while hasMore); detail adds creationDate"
-            + (sales ? " and amount (unit price x pendingQuantity summed over the lines with a "
-                + "positive pending, at the invoice currency's precision: the import popup's row "
-                + "total)" : "")
-            + ". includeCovered also lists the invoices with nothing left, at pendingLines 0. "
+            + "nextOffset (page on while hasMore); detail adds creationDate. "
+            + "includeCovered also lists the invoices with nothing left, at pendingLines 0. "
             + "Step 1." + flow,
         ImportListing.listParams(MAX_INVOICES, "creationDate (ISO instant, UTC)"))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + invoice + " to " + (sales ? "ship" : "receive") + " here: "
             + "{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity, "
-            + "invoicedQuantity, orderLine, linked, inDraftDocuments"
-            + (sales ? ", unitPrice" : "") + "}], hasMore:false}, where "
+            + "invoicedQuantity, orderLine, linked, inDraftDocuments, unitPrice}], hasMore:false}, "
+            + "where unitPrice is the invoice line's net unit price and "
             + pendingRule + "; orderLine is that order line id or null, linked whether the invoice "
             + "line already points at a " + doc + " line, and inDraftDocuments the document "
             + "numbers of the OTHER draft " + doc + "s holding its order line. Only the lines with "
@@ -279,9 +279,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         return null;
       }
       JSONObject row = availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
-      if (request.detail && policy.pendsByDirectLinks && !classic) {
-        row.put("amount", DirectLinkPending.pendingAmount(invoice, lines));
-      }
+      // ETP-5828 QA UI-9: both directions, with or without detail, the popup's row total.
+      row.put(KEY_AMOUNT, DirectLinkPending.pendingAmount(invoice, lines));
       return row;
     }, request);
   }
@@ -349,10 +348,9 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       ImportListing.putNullable(row, "orderLine", state.orderLineId);
       row.put("linked", line.getGoodsShipmentLine() != null);
       row.put("inDraftDocuments", new JSONArray(state.draftDocuments));
-      if (policy.pendsByDirectLinks && !classic) {
-        // ETP-6002 CP-27: the popup's row total follows the loaded lines, priced like an order's.
-        ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
-      }
+      // ETP-6002 CP-27, both directions since ETP-5828 QA UI-9: the popup's row total follows the
+      // loaded lines, priced like an order's.
+      ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
       rows.put(row);
     }
     return completePage(rows);

@@ -341,7 +341,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   /**
    * Goods receipt (the popup's rule): a linked line has 0, any other its quantity minus what the
    * OTHER draft receipts hold of its order line; neither delivered nor the target's own draft is
-   * deducted.
+   * deducted. ETP-5828 QA UI-9: the lines carry their unit price and the availableInvoices row its
+   * amount (unit price x that pending), as on a goods shipment.
    */
   @Test
   public void availableInvoiceLines_receipt_deductsOnlyOtherDrafts_neverDelivered()
@@ -350,11 +351,16 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     OrderLine bought = orderLine("olA", 10, product("p1", "Agua", true), "10", "6", "8");
     OrderLine linkedOl = orderLine("olB", 20, product("p2", "Pan", true), "4", "0", "4");
     OrderLine overHeld = orderLine("olC", 30, product("p3", "Sal", true), "5", "0", "5");
-    invoice(probe, "inv1", false,
-        line("il1", 10, bought.getProduct(), "8", bought, false),
-        line("il2", 20, linkedOl.getProduct(), "4", linkedOl, true),
-        line("il3", 30, product("p4", "Té", false), "3", null, false),
+    InvoiceLine water = line("il1", 10, bought.getProduct(), "8", bought, false);
+    InvoiceLine tea = line("il3", 30, product("p4", "Té", false), "3", null, false);
+    when(water.getUnitPrice()).thenReturn(bd("1.5"));
+    when(tea.getUnitPrice()).thenReturn(bd("2"));
+    Invoice inv1 = invoice(probe, "inv1", false, water,
+        line("il2", 20, linkedOl.getProduct(), "4", linkedOl, true), tea,
         line("il4", 40, overHeld.getProduct(), "5", overHeld, false));
+    Currency euro = inv1.getCurrency();
+    when(euro.getStandardPrecision()).thenReturn(2L);
+    probe.candidates = List.of(inv1);
     probe.holdings.add(new DraftHolding("olA", "t1", "DR-1", bd("3")));
     probe.holdings.add(new DraftHolding("olA", "other", "DR-2", bd("2")));
     probe.holdings.add(new DraftHolding("olC", "other", "DR-2", bd("9")));
@@ -374,7 +380,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
         strings(all.getJSONObject(0).getJSONArray("inDraftDocuments")));
     assertFalse("receipt drafts are read on the purchase side", probe.holdingsSales);
     assertNull("the receipt keeps its rule: the follow-up is not read", probe.followUpSales);
-    assertFalse("nor a unit price", all.getJSONObject(0).has("unitPrice"));
+    assertEquals("1.5", all.getJSONObject(0).get("unitPrice").toString());
+    assertEquals("6 x 1.5 + 3 x 2, the lines at 0 left out, with or without detail", "15.00",
+        rows(run(probe, INVOICES, null, RECEIPT)).getJSONObject(0).get("amount").toString());
   }
 
   /**
@@ -571,7 +579,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals(2, plain.getJSONObject(0).getInt("pendingLines"));
     assertEquals("o1", plain.getJSONObject(0).getString("order"));
     assertFalse("no detail, no creationDate", plain.getJSONObject(0).has("creationDate"));
-    assertFalse("no detail, no amount", plain.getJSONObject(0).has("amount"));
+    assertEquals("the amount without detail too (ETP-5828 QA UI-9)", "10.01",
+        plain.getJSONObject(0).get("amount").toString());
     assertEquals("scanned with the target's partner, direction and currency",
         Arrays.asList(PARTNER, true, CURRENCY),
         Arrays.asList(probe.lastPartner, probe.lastSales, probe.lastCurrency));
@@ -775,9 +784,6 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     assertEquals("server: the other draft holds all of inv1", List.of(),
         ids(rows(run(probe, INVOICES, "{\"pendingBasis\":\"server\"}", RECEIPT))));
-    assertFalse("the receipt rows keep no amount, even with detail (ETP-6002 is sales only)",
-        rows(run(probe, INVOICES, "{\"includeCovered\":true,\"detail\":true}", RECEIPT))
-            .getJSONObject(0).has("amount"));
     assertFalse("the server rule reads the drafts", probe.holdingsSales);
   }
 

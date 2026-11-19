@@ -83,12 +83,10 @@ final class OrderInvoiceListing {
         ? handler.findCandidateOrders(partnerId, sales, currencyId, request.scan)
         : handler.findCandidateOrders(partnerId, sales, currencyId, request.offset, request.scan);
     Function<Order, Map<String, BigDecimal>> pendingOf = pendingLookup(candidates, sales);
-    // ETP-6099: with detail, the lines THIS invoice already holds are not selectable in the popup.
-    Set<String> importedHere = request.detail ? handler.orderLinesOnInvoice(invoice.getId())
-        : Set.of();
-    return handler.discover(candidates, order -> availableOrderRow(order, partnerId,
-        ImportOrderLinesIntoInvoiceHandler.selectableOnly(pendingOf.apply(order), importedHere),
-        request), request);
+    // ETP-5828 QA UI-7: a line counts while its pending (drafts deducted, this invoice included)
+    // is above zero, also when this invoice already holds part of it.
+    return handler.discover(candidates,
+        order -> availableOrderRow(order, partnerId, pendingOf.apply(order), request), request);
   }
 
   /**
@@ -119,11 +117,10 @@ final class OrderInvoiceListing {
 
   /**
    * One {@code availableOrders} row, or {@code null} when the order has nothing pending (with
-   * {@code includeCovered}: nothing pending even before drafts, ETP-6099). With {@code detail} the
-   * {@code pending} map holds only the selectable lines
-   * ({@link ImportOrderLinesIntoInvoiceHandler#selectableOnly}), so an order whose remaining lines
-   * are all on this invoice comes at {@code pendingLines} 0 and is listed only with
-   * {@code includeCovered} (its lines are held by a draft: this one).
+   * {@code includeCovered}: nothing pending even before drafts, ETP-6099). The {@code pending} map
+   * is the drafts-deducted pending, this invoice's own lines included, with or without
+   * {@code detail}: a line partly on this invoice still counts for what is left of it (ETP-5828
+   * QA UI-7), so {@code pendingLines} and {@code amount} match the expanded order.
    */
   private JSONObject availableOrderRow(Order order, String partnerId,
       Map<String, BigDecimal> pending, ImportListing.ListRequest request) throws JSONException {
@@ -177,10 +174,12 @@ final class OrderInvoiceListing {
   }
 
   /**
-   * The lines of the order that can still be invoiced here. With {@code includeCovered} (a sales
-   * invoice only, ETP-5828) also the lines with nothing left, at {@code pendingQuantity} 0: the
+   * The lines of the order that can still be invoiced here. With {@code includeCovered} (both
+   * directions since ETP-6099) also the lines with nothing left, at {@code pendingQuantity} 0: the
    * import popup shows them greyed out as already imported, and so reads every line it shows, with
-   * its price, from this ONE call instead of a second request per order.
+   * its price, from this ONE call instead of a second request per order. A line with nothing left
+   * that OTHER draft invoices hold is returned at 0 with {@code inDraftInvoices} even without
+   * {@code includeCovered} (ETP-5828 QA MCP-3), so the caller can say which draft took it.
    */
   NeoResponse availableOrderLines(Invoice invoice, Order order, boolean includeCovered,
       boolean detail) throws JSONException {
@@ -200,13 +199,12 @@ final class OrderInvoiceListing {
         handler.draftInvoicesHolding(lineIds, sales, invoice.getId());
     JSONArray rows = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
-      BigDecimal left = pending.get(ol.getId());
-      if (left == null && includeCovered && OrderImportListing.isListedLine(ol)) {
-        left = BigDecimal.ZERO;
-      }
+      List<OrderInvoicePending.DraftInvoiceRef> drafts = holders.get(ol.getId());
+      BigDecimal left = listedPending(ol, pending.get(ol.getId()),
+          includeCovered || (drafts != null && !drafts.isEmpty()));
       if (left != null) {
         JSONObject row = OrderImportListing.availableLineRow(order, ol, left);
-        putDraftHolders(row, holders.get(ol.getId()));
+        putDraftHolders(row, drafts);
         if (detail) {
           OrderImportListing.putLineDetail(row, ol);
           row.put(ImportOrderLinesIntoInvoiceHandler.KEY_IMPORTED_HERE,
@@ -216,6 +214,17 @@ final class OrderInvoiceListing {
       }
     }
     return handler.completePage(rows);
+  }
+
+  /**
+   * The {@code pendingQuantity} a line is listed at: its pending, or 0 for a listed line with
+   * nothing left when {@code showCovered}; {@code null} leaves the line out.
+   */
+  private static BigDecimal listedPending(OrderLine ol, BigDecimal pending, boolean showCovered) {
+    if (pending != null) {
+      return pending;
+    }
+    return showCovered && OrderImportListing.isListedLine(ol) ? BigDecimal.ZERO : null;
   }
 
   /** {@code inDraftInvoices} on a line row, only when another draft holds the line. */

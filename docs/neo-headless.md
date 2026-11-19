@@ -6133,6 +6133,11 @@ this fix.
 > the server rule, `importOrderLines` in one call carrying the global discount), and the classic
 > rule of those two order actions was removed: `pendingBasis: "classic"` on them is a 400
 > `importInvalidParameter` on either direction.
+> **ETP-5828 (QA UI-8) closes it for the two remaining purchase popups as well:** the purchase
+> invoice's «Importar desde recibo» and the goods receipt's «Añadir desde Factura» stop sending
+> `pendingBasis: "classic"` (SPA change in schema_forge) and list with the server rule, like sales
+> and the MCP. The server still accepts `"classic"` on those four actions, so an older SPA build
+> keeps working; no current caller sends it.
 
 > **Scope parity for actions (ETP-5783).** Running a document action or a process needs
 > `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
@@ -14025,7 +14030,10 @@ shows per line (ETP-5828, UI/MCP parity), and `inDraftInvoices` when OTHER draft
 direction hold part of the line: `[{id, documentNo, quantity}]` of those drafts by document number (`quantity`: what that draft's active lines hold of the order line, ETP-5828 QA OBS-2: the popup also names the draft holding PART of a still selectable line, «1 en factura borrador X»), this
 invoice left out, absent when none (ETP-5828 QA UI-4: the popup says «en factura borrador X»
 instead of a bare «ya importado» for a line taken by another draft, and the agent can tell the user
-the same). Only the listed lines are looked up, and only drafts of the session's client and the
+the same). **ETP-5828 QA MCP-3:** a line whose whole pending other draft invoices hold is returned at
+`pendingQuantity` 0 with its `inDraftInvoices` even without `includeCovered`, so the agent can say
+which draft took it instead of finding the line missing; a line at 0 with no other draft holding it
+(fully invoiced, or held only by THIS invoice) still needs `includeCovered`. Only the listed lines are looked up, and only drafts of the session's client and the
 role's readable organizations are named (`OrderInvoicePending.DRAFT_HOLDERS_HQL`: the document
 number reaches the caller); a draft outside them still counts in `pendingQuantity`, so such a line
 just carries no `inDraftInvoices`. **On a sales invoice only** (ETP-5828, the import popup reads these actions instead of the order GETs): `availableOrders` takes an optional `limit` (1–1000, default 50; the scan reads `max(200, limit)` candidates), looks only at orders that still have an active product line with `orderedQuantity ≠ invoicedQuantity` (a necessary condition of having something pending, so no listable order is skipped) and lists them newest created first (`creationDate desc`, the order the popup always used); `availableOrderLines` takes an optional `includeCovered` (default `false`) that also returns the order's lines with nothing left at `pendingQuantity` 0 (every active line except the Total Discount line), which the popup greys out as already imported. Both parameters are declared only in the sales contract; a purchase invoice keeps its order-date scan of 200 / 50 rows and ignores them. The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
@@ -14253,14 +14261,15 @@ candidates with nothing pending are read but not listed. Before ETP-6099 only th
 `pendingQuantity: 0`, which the popups grey out; before, only the sales invoice's `availableOrderLines` took it) and
 `detail`. The pending quantity is the server's rule (drafts deducted, ETP-5709), also where a popup used to
 compute it in the browser without drafts — except under `pendingBasis: "classic"`, which the two purchase receipt/invoice
-popups send (see *`pendingBasis`* below; the purchase invoice's order popup stopped sending it in ETP-5828, QA MCP-2).
+popups sent until ETP-5828 QA UI-8 (see *`pendingBasis`* below; the purchase invoice's order popup stopped sending it in
+ETP-5828, QA MCP-2).
 
 | Action (target) | "Covered" candidate / line | `detail` adds |
 |---|---|---|
-| `availableOrders` (invoice) | an order whose pending before drafts (ordered − invoiced) is all held by draft invoices; `amount` 0 (with `detail`: also one whose pending lines are all on this invoice, see next column) | `creationDate` (`globalDiscount` as before, always). With `detail`, `pendingLines` and `amount` count only the lines the popup leaves selectable — pending > 0 and not `importedHere` (an active line of THIS invoice is linked to the order line) — so an order whose remaining lines are all on this invoice is not listed (pending is quantity-based, so a line partly on this invoice still has some left, but the popup greys it out); an order left at 0 is listed only with `includeCovered`. Without `detail` the count, the amount (and the MCP default answer) are unchanged |
-| `availableOrderLines` (invoice) | any listed line with nothing left (unchanged rule of ETP-5828) | `listPrice`, `grossUnitPrice`, `tax`, `description`, `orderedQuantity`, `invoicedQuantity` of the order line — what the purchase popup's client-side import posts — and `importedHere` (this invoice has an active line linked to the order line; the line stays listed with its pending) |
+| `availableOrders` (invoice) | an order whose pending before drafts (ordered − invoiced) is all held by draft invoices; `amount` 0 | `creationDate` (`globalDiscount` as before, always). `pendingLines` and `amount` count every line with a pending > 0 (drafts deducted, THIS invoice's own lines included), with or without `detail`: a line this invoice already holds in part still counts for what is left of it, so the folded row matches the expanded order (ETP-5828 QA UI-7; between ETP-6099 and it, `detail` left out every line on this invoice, which hid a purchase order whose only remaining line was partly here and under-stated `amount`) |
+| `availableOrderLines` (invoice) | any listed line with nothing left (unchanged rule of ETP-5828); a line other drafts hold entirely is returned at 0 with `inDraftInvoices` even without `includeCovered` (QA MCP-3) | `listPrice`, `grossUnitPrice`, `tax`, `description`, `orderedQuantity`, `invoicedQuantity` of the order line — what the purchase popup's client-side import posts — and `importedHere` (this invoice has an active line linked to the order line; the line stays listed with its pending) |
 | `availableShipments` / `availableReceipts` | a movement with something pending before drafts (with `detail`: also one whose pending lines are all greyed, see next column) | `creationDate`, `order`, `orderDocumentNo` (the popup's `#order`). No `amount` (product decision): the popup computes the total from the lines once expanded, never an approximated price. With `detail`, `pendingLines` counts only the lines the popup leaves selectable — pending > 0, not `importedHere` and, on the sales side (`RectificativeImportPolicy.excludesLinesInvoicedElsewhere`, set by the header), not `invoicedElsewhere` — so a listed document never turns out empty when expanded; a document left at 0 is listed only with `includeCovered`. Without `detail` the count (and the MCP default answer) is unchanged |
-| `availableShipmentLines` / `availableReceiptLines` | any line with a quantity | `movementQuantity`, `orderLine`, `orderLineDiscount` (%), `importedHere` (this invoice has a line linked to the movement line or to its order line), `invoicedElsewhere` (an active line of another invoice, any status, is linked to the movement line) |
+| `availableShipmentLines` / `availableReceiptLines` | any line with a quantity. With or without `detail`, a line OTHER draft invoices hold (linked to the movement line or to its order line, the two arms the pending deducts) carries `inDraftDocuments`: their document numbers, absent when none (ETP-5828 QA UI-8, the key the movement popups already read; drafts of the session's client and readable organizations only) | `movementQuantity`, `orderLine`, `orderLineDiscount` (%), `importedHere` (this invoice has a line linked to the movement line or to its order line), `invoicedElsewhere` (an active line of another invoice, any status, is linked to the movement line) |
 | `availableReturns` | not invoiced in full (`invoiceStatus` < 100) and, on sales, in the invoice's currency — what the popups list | `creationDate`, `order`, `sourceDocumentNo` (the shipments / receipts it returns, comma separated). No `amount`: the popup shows the source number instead |
 | `availableReturnLines` | any line with a quantity | `movementQuantity` (positive), `orderLine`, `orderLineDiscount`, `blockedReason`: `null` when offered, else `orderLineInvoiced` / `creditedInFull` (sales) or `importedHere` (purchase) |
 | `availableOriginInvoices` | an invoice whose lines are all imported here | `creationDate`, `amount`: Σ over EVERY listed line of the invoice, imported ones included, of `unitPrice` × \|quantity\|, unsigned, at its currency's precision (the popup's row total; the popup negates it) |
@@ -14280,10 +14289,10 @@ movement lines itself with `invoiceLineId`, no import action is added). Candidat
 partner and direction, in the target's currency when it has one, newest created first, accepted by the header's policy
 (`ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE`: the goods shipment leaves out rectificatives —
 `SalesInvoiceHeaderHandler.isRectificativeDocType`; the goods receipt an invoice with a negative grand total). Row:
-`{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines, order}`, listed when a line
+`{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines, order, amount}`, listed when a line
 has something pending (`includeCovered`: also the others, so the popup can say "all already imported"). Lines: active,
 not the total-discount line, line order; `{id, lineNo, product, product$_identifier, uOM, pendingQuantity,
-invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
+invoicedQuantity, orderLine, linked, inDraftDocuments, unitPrice}`, where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
 - **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
@@ -14309,12 +14318,13 @@ header order's line of the same product (the last one wins, as the popup). `pend
   `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
 
 Only lines with something pending unless `includeCovered`. The line keys are always present (new actions, nothing to
-keep compatible). On the goods receipt `availableInvoices` takes `detail` only for `creationDate`; on the goods
-shipment (ETP-6002 CP-27) `detail` also adds `amount` — unit price (`C_InvoiceLine.PriceActual`) × `pendingQuantity`
-summed over the lines with a positive pending, at the invoice currency's standard precision — the same figure
-`availableOrders` gives an order, and what the shipment's «Añadir desde Factura» row shows (it used to show 0,00);
-its `availableInvoiceLines` rows add `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
-once they are loaded. The goods receipt's rows carry neither.
+keep compatible). `availableInvoices` takes `detail` only for `creationDate`. Every row carries `amount` — unit price
+(`C_InvoiceLine.PriceActual`) × `pendingQuantity` summed over the lines with a positive pending (the same per-line
+pending `availableInvoiceLines` returns), at the invoice currency's standard precision, no global discount — the same
+figure `availableOrders` gives an order, and what the «Añadir desde Factura» row shows (it used to show 0,00); every
+`availableInvoiceLines` row carries `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
+once they are loaded. Goods shipment since ETP-6002 CP-27 (`amount` then only with `detail`); goods receipt, and
+`amount` without `detail`, since ETP-5828 QA UI-9.
 
 **Invoice-line link of a goods-shipment line (ETP-6002 CP-22).** `invoiceLineId` on a `goods-shipment/goodsShipmentLine`
 create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDirectives`): MCP no longer reports it in
@@ -14398,9 +14408,9 @@ were loaded; the classic `pendingLines` says it up front.
 qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING` 80 → 79, the class removed from `legacyHandlers` in
 `scripts/extension-guardrails-allowlist.json`.
 
-**Channels.** REST and MCP reach the same delegates. One divergence is declared (§4.12.9): `pendingBasis: "classic"`
-is REST-only (undeclared in the contracts), so the SPA's purchase receipt/invoice popups list with the classic rule and the MCP with the
-server rule.
+**Channels.** REST and MCP reach the same delegates. `pendingBasis: "classic"` is REST-only (undeclared in the
+contracts). Since ETP-5828 QA UI-8 the SPA's purchase receipt/invoice popups no longer send it, so they list with the
+server rule like the MCP; the parameter stays accepted for compatibility (§4.12.9).
 
 #### 4.12.35 Discoverability: which actions apply to a document now, and what its values mean (ETP-5714)
 

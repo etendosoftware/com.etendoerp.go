@@ -104,12 +104,17 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     OBDal.getInstance().rollbackAndClose();
   }
 
-  /** The candidate queries of the return and origin invoice imports resolve against the model. */
+  /**
+   * The candidate queries of the return and origin invoice imports, and the draft-invoice holders
+   * of a receipt / shipment line (ETP-5828 QA UI-8), resolve against the model.
+   */
   @Test
   public void rectificativeImportQueriesResolveAgainstTheRealModel() {
     org.hibernate.Session session = OBDal.getInstance().getSession();
     session.createQuery(ImportInOutLinesIntoInvoiceHandler.candidateReturnsHql(),
         ShipmentInOut.class);
+    session.createQuery(ImportInOutLinesIntoInvoiceHandler.DRAFT_INVOICES_HOLDING_LINES_HQL,
+        Object[].class);
     for (boolean withCurrency : new boolean[] {false, true}) {
       session.createQuery(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(withCurrency),
           Invoice.class);
