@@ -497,6 +497,11 @@ public class NeoSelectorService {
       ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
           SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
     }
+    if ("Y".equals(safeContextParams.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG))
+        && StringUtils.isNotBlank(contextOrganizationId)) {
+      // ETP-5086: first-option fallback ranks candidates by closeness to the context organization
+      ctxFilterParams.put(SelectorQueryExecutor.PARAM_PREFER_ORG, contextOrganizationId);
+    }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);

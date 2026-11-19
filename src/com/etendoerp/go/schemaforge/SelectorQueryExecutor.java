@@ -59,7 +59,24 @@ final class SelectorQueryExecutor {
   /** Aux out-field suffix carrying the per-locator storage bin of a stock-breakdown selector. */
   private static final String AUX_SUFFIX_LOC = "_LOC";
 
+  /**
+   * ETP-5086: extra filter param carrying the organization the first-option fallback ranks rows by
+   * (see {@link SelectorOrgFilter#buildOrgProximityOrder}); not a bindable HQL parameter. Honoured
+   * by the simple and plain rich queries; custom-HQL and value-paged selectors keep display order.
+   */
+  static final String PARAM_PREFER_ORG = "selectorPreferOrgId";
+
   private SelectorQueryExecutor() {
+  }
+
+  /** The org-proximity ORDER BY prefix ({@code "CASE ... END, "}) and its params, or {@code null}. */
+  private static SelectorQueryBuilder.HqlWithParams orgPreferenceOrder(SelectorMeta meta, String alias,
+      Map<String, Object> extraFilterParams) {
+    Object orgId = extraFilterParams != null ? extraFilterParams.get(PARAM_PREFER_ORG) : null;
+    if (orgId == null) {
+      return null;
+    }
+    return SelectorOrgFilter.buildOrgProximityOrder(meta.entityName, alias, orgId.toString());
   }
 
   static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
@@ -98,8 +115,9 @@ final class SelectorQueryExecutor {
     @SuppressWarnings("unchecked")
     Set<String> searchMatchIds = extraFilterParams != null
         ? (Set<String>) extraFilterParams.get(PARAM_SEARCH_MATCH_IDS) : null;
-    Map<String, Object> safeExtraParams = withoutKey(withoutKey(extraFilterParams, PARAM_LANGUAGE),
-        PARAM_SEARCH_MATCH_IDS);
+    SelectorQueryBuilder.HqlWithParams orgOrder = orgPreferenceOrder(meta, "e", extraFilterParams);
+    Map<String, Object> safeExtraParams = withoutKey(withoutKey(withoutKey(extraFilterParams,
+        PARAM_LANGUAGE), PARAM_SEARCH_MATCH_IDS), PARAM_PREFER_ORG);
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
@@ -148,9 +166,13 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = whereStr + " ORDER BY e." + meta.displayProperty + ", e.id";
+    String dataWhere = whereStr + ORDER_BY + (orgOrder != null ? orgOrder.getHql() + ", " : "") + "e."
+        + meta.displayProperty + ", e.id";
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
+    if (orgOrder != null) {
+      NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, orgOrder.getParams());
+    }
     if (StringUtils.isNotBlank(search)) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));
       dataQuery.setNamedParameter(PARAM_SEARCH_LOOSE, SelectorOrgFilter.searchLoosePattern(search));
@@ -196,6 +218,8 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    SelectorQueryBuilder.HqlWithParams orgOrder = orgPreferenceOrder(meta, "e", extraFilterParams);
+    extraFilterParams = withoutKey(extraFilterParams, PARAM_PREFER_ORG);
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
       return executeCustomHqlQuery(meta, search, limit, offset, validationFilter,
           contextOrganizationId, extraFilterParams);
@@ -230,10 +254,13 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = effectiveWhere + ORDER_BY + alias + "." + meta.displayProperty + ", " + alias
-        + ".id";
+    String dataWhere = effectiveWhere + ORDER_BY + (orgOrder != null ? orgOrder.getHql() + ", " : "")
+        + alias + "." + meta.displayProperty + ", " + alias + ".id";
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
+    if (orgOrder != null) {
+      NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, orgOrder.getParams());
+    }
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));

@@ -1,0 +1,121 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.codehaus.jettison.json.JSONObject;
+import org.junit.Test;
+
+/**
+ * ETP-5086: organization context and org-proximity ordering of the combo first-option fallback.
+ */
+public class NeoFallbackOrganizationTest {
+
+  private static NeoContext ctx(String bodyOrg, String parentId) throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    if (bodyOrg != null) {
+      body.put("organization", bodyOrg);
+    }
+    when(ctx.getRequestBody()).thenReturn(body);
+    Map<String, String> query = new HashMap<>();
+    if (parentId != null) {
+      query.put("parentId", parentId);
+    }
+    when(ctx.getQueryParams()).thenReturn(query);
+    return ctx;
+  }
+
+  @Test
+  public void bodyOrgIsUsed() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    NeoDefaultsService.putFallbackOrganization(params, ctx("ORG1", "P1"));
+    assertEquals("ORG1", params.get("AD_Org_ID"));
+    assertFalse(params.containsKey("parentId"));
+    assertEquals("Y", params.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+  }
+
+  @Test
+  public void parentIdIsUsedWithoutBodyOrg() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    NeoDefaultsService.putFallbackOrganization(params, ctx(null, "P1"));
+    assertEquals("P1", params.get("parentId"));
+    assertFalse(params.containsKey("AD_Org_ID"));
+    assertEquals("Y", params.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+  }
+
+  @Test
+  public void orgZeroFallsBackToParentId() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    NeoDefaultsService.putFallbackOrganization(params, ctx("0", "P1"));
+    assertEquals("P1", params.get("parentId"));
+    assertFalse(params.containsKey("AD_Org_ID"));
+  }
+
+  @Test
+  public void orgZeroWithoutParentAddsNothing() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    NeoDefaultsService.putFallbackOrganization(params, ctx("0", null));
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void noSourceKeepsTodaysBehaviour() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    NeoDefaultsService.putFallbackOrganization(params, ctx(null, null));
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void existingAdOrgIdIsNotOverridden() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("AD_Org_ID", "CALLER");
+    NeoDefaultsService.putFallbackOrganization(params, ctx("ORG1", "P1"));
+    assertEquals("CALLER", params.get("AD_Org_ID"));
+    assertFalse(params.containsKey("parentId"));
+    assertFalse(params.containsKey(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+  }
+
+  @Test
+  public void proximityOrderRanksOrgThenAncestorThenStar() {
+    SelectorQueryBuilder.HqlWithParams order = SelectorOrgFilter.buildOrgProximityOrder("e",
+        Arrays.asList("CHILD", "PARENT", "0"));
+    assertEquals("CASE WHEN e.organization.id = :selectorPrefOrg0 THEN 0"
+        + " WHEN e.organization.id = :selectorPrefOrg1 THEN 1"
+        + " WHEN e.organization.id = '0' THEN 3 ELSE 2 END", order.getHql());
+    assertEquals("CHILD", order.getParams().get("selectorPrefOrg0"));
+    assertEquals("PARENT", order.getParams().get("selectorPrefOrg1"));
+  }
+
+  @Test
+  public void proximityOrderIsNullWithoutOrg() {
+    assertNull(SelectorOrgFilter.buildOrgProximityOrder("e", Collections.singletonList("0")));
+    assertNull(SelectorOrgFilter.buildOrgProximityOrder("e", Collections.emptyList()));
+  }
+}

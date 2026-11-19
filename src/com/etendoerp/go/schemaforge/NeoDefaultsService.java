@@ -1461,15 +1461,19 @@ public class NeoDefaultsService {
     return params;
   }
 
+  /** Context param asking the selector to rank candidates by closeness to the context org (ETP-5086). */
+  static final String PARAM_PREFER_CONTEXT_ORG = "preferContextOrg";
+
   /**
-   * ETP-5086: gives the combo first-option fallback an organization context so the selector
-   * prefers the target record's organization tree (plus {@code *}) instead of picking the
-   * alphabetically-first row across every readable organization. The organization comes from the
-   * record being created (request body), then the parent record (via {@code parentId}), then the
-   * session's current organization. Organization {@code 0} carries no preference and is skipped.
+   * ETP-5086: gives the combo first-option fallback an organization context, so the selector
+   * restricts candidates to the target record's organization tree (plus {@code *}) and ranks them
+   * by closeness to that organization (exact org, nearest ancestor, {@code *}) before the display
+   * name. The organization comes from the record being created (request body), else from the
+   * parent record (via {@code parentId}). Organization {@code 0} carries no preference. With
+   * neither source, nothing is added and the fallback behaves as before.
    */
-  private static void putFallbackOrganization(Map<String, String> params, NeoContext ctx) {
-    if (ctx == null) {
+  static void putFallbackOrganization(Map<String, String> params, NeoContext ctx) {
+    if (ctx == null || params.containsKey("AD_Org_ID") || params.containsKey("parentId")) {
       return;
     }
     String orgId = null;
@@ -1477,19 +1481,19 @@ public class NeoDefaultsService {
     if (requestBody != null) {
       orgId = StringUtils.trimToNull(requestBody.optString("organization", null));
     }
-    Map<String, String> queryParams = ctx.getQueryParams();
-    if (orgId == null && queryParams != null) {
-      String parentId = StringUtils.trimToNull(queryParams.get("parentId"));
-      if (parentId != null) {
-        params.put("parentId", parentId);
-      }
+    if ("0".equals(orgId)) {
+      orgId = null;
     }
-    if (orgId == null && !params.containsKey("parentId") && ctx.getObContext() != null
-        && ctx.getObContext().getCurrentOrganization() != null) {
-      orgId = ctx.getObContext().getCurrentOrganization().getId();
-    }
-    if (orgId != null && !"0".equals(orgId)) {
+    if (orgId != null) {
       params.put("AD_Org_ID", orgId);
+      params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
+      return;
+    }
+    Map<String, String> queryParams = ctx.getQueryParams();
+    String parentId = queryParams != null ? StringUtils.trimToNull(queryParams.get("parentId")) : null;
+    if (parentId != null) {
+      params.put("parentId", parentId);
+      params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
     }
   }
 
