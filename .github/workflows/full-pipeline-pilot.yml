@@ -45,6 +45,8 @@ name: Full Pipeline Pilot
 # the Bitbucket modules listed in jenkinsExtraModules.txt and com.etendoerp.jenkins.pipelines;
 # DD_API_KEY (optional, EU site) sends the metrics; SONAR_TOKEN/SONAR_HOST_URL publish the analysis
 # and SONAR_READ_TOKEN (the analysis token gets 403 on measures) reads the coverage to compare.
+# The scanner timeouts come from the organization variables SONAR_SOCKET_TIMEOUT and
+# SONAR_RESPONSE_TIMEOUT (seconds; unset, 60), to raise without a PR when SonarQube is slow (ETP-6390).
 
 # Only what reaches main: the daily cut (mergeblock/*), a hotfix (hotfix/*) and the push to main.
 # Feature branches keep the mini pipeline (mini-pipeline.yml) on their PRs into develop.
@@ -180,7 +182,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
-          args: -Dsonar.coverage.jacoco.xmlReportPaths=${{ steps.jacoco.outputs.xml }}
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=${{ steps.jacoco.outputs.xml }} -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
 
   go-tests:
     name: Go tests + Sonar + coverage
@@ -319,7 +321,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           projectBaseDir: etendo_core/modules/com.etendoerp.go
-          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
 
       # Fails the job when the coverage is below the minimum, more than the tolerance below main, or
       # cannot be evaluated (--context ci), and when this analysis's quality gate failed

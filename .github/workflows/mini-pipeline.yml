@@ -249,7 +249,8 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           projectBaseDir: etendo_core/modules/com.etendoerp.go
-          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
+          # Timeouts from the organization variables, as in the full pipeline (ETP-6390).
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
 
       # Same rule as Jenkins' Compare Coverage Results; fails the job on a drop, or when the
       # coverage cannot be evaluated (--context ci), and when this analysis's quality gate failed
