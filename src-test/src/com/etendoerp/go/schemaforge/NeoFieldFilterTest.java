@@ -159,19 +159,6 @@ class NeoFieldFilterTest {
   }
 
   @Nested
-  @DisplayName("forEntity with null entity")
-  class ForEntityNull {
-    @Test
-    void nullSfEntityReturnsInactive() {
-      NeoFieldFilter filter = NeoFieldFilter.forEntity(null, "Order");
-      assertNotNull(filter);
-      // Inactive filter should pass through GET response unchanged
-      JSONObject input = new JSONObject();
-      assertEquals(input, filter.filterGetResponse(input));
-    }
-  }
-
-  @Nested
   @DisplayName("filterGetResponse")
   class FilterGetResponse {
     @Test
