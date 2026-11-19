@@ -57,8 +57,10 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * <p><b>The rule.</b> If the app allows it, the API allows it; if the app does not, the API does
  * not. A reference the request sets is accepted only when the selector the UI shows for that field
  * — validation rule, selector policies and organization scoping, all of it, through
- * {@link NeoSelectorService#offersValue} — lists it. Ownership ({@link NeoReferenceOwnership}) and
- * activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
+ * {@link NeoSelectorService#offersValue} — lists it. When the entity serves the field's selector
+ * from its own SELECTOR customization, that customization is the selector the UI shows, so it is
+ * the one asked ({@link NeoCustomizedSelectorCheck}, ETP-6377). Ownership
+ * ({@link NeoReferenceOwnership}) and activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
  *
  * <p><b>Context.</b> The UI resolves a selector against the whole form. Here the form is the
  * <i>merged record</i>: the parent record (child tabs; found through {@code parentId} or the
@@ -158,7 +160,7 @@ public final class NeoReferenceSelectorValidation {
   private static RefusedReference check(SFEntity sfEntity, Column column, Property property,
       String id, Map<String, String> context) {
     String key = property.getName();
-    Optional<Boolean> offered = NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+    Optional<Boolean> offered = offeredByTheAppSelector(sfEntity, column, key, id, context);
     if (Boolean.TRUE.equals(offered.orElse(null))) {
       return null;
     }
@@ -166,6 +168,24 @@ public final class NeoReferenceSelectorValidation {
         offered.isPresent() ? "not offered" : "not verifiable");
     return new RefusedReference(key, property.getTargetEntity().getName(), id,
         offered.isPresent());
+  }
+
+  /**
+   * The selector the app shows for the field: the entity's own SELECTOR customization when it
+   * serves the field (ETP-6377), otherwise the generic selector.
+   */
+  private static Optional<Boolean> offeredByTheAppSelector(SFEntity sfEntity, Column column,
+      String key, String id, Map<String, String> context) {
+    switch (NeoCustomizedSelectorCheck.offers(sfEntity, key, id, context)) {
+      case OFFERED:
+        return Optional.of(Boolean.TRUE);
+      case NOT_OFFERED:
+        return Optional.of(Boolean.FALSE);
+      case UNVERIFIABLE:
+        return Optional.empty();
+      default:
+        return NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+    }
   }
 
   /**

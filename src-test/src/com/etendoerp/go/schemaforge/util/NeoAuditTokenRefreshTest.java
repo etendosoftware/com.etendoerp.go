@@ -448,6 +448,10 @@ class NeoAuditTokenRefreshTest {
         // The MCP DEFAULTS endpoint: a GET that resolves field defaults. Not a write, and there is
         // no record whose token could be corrected.
         "com/etendoerp/go/mcp/McpToolRouter.java",
+        // ETP-6377: runs an entity's SELECTOR hook chain (a GET) during write validation only to
+        // read which ids it offers. Its response never reaches the caller, and a selector has no
+        // record whose token could be corrected.
+        "com/etendoerp/go/schemaforge/NeoCustomizedSelectorCheck.java",
         // ETP-5415: the single point that actually calls afterHandle, and deliberately NOT a
         // refresh site. It does not own the response — the two channels correct different things
         // (REST patches the NeoResponse object, MCP patches the body in place when the handler

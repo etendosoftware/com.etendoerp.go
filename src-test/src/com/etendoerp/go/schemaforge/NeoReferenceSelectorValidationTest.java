@@ -63,6 +63,7 @@ import org.openbravo.service.json.DataToJsonConverter;
  * {@code businessPartner} (the contact/order address must belong to that partner).
  *
  * @covers com.etendoerp.go.schemaforge.NeoReferenceSelectorValidation
+ * @covers com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NeoReferenceSelectorValidationTest {
@@ -453,6 +454,56 @@ public class NeoReferenceSelectorValidationTest {
         org.openbravo.model.ad.domain.Validation.class);
     when(validation.getValidationCode()).thenReturn(code);
     return validation;
+  }
+
+  /**
+   * ETP-6377: a customization that serves the field's selector is the selector the UI shows. It
+   * offers the value, so the write passes even though the generic selector (here: a payment method
+   * with no financial account) would not list it.
+   */
+  @Test
+  public void testTheEntityCustomizationOffersWhatTheGenericSelectorWouldNot() throws Exception {
+    offers(Boolean.FALSE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.OFFERED)) {
+      assertNull(check(new JSONObject().put(ADDRESS, ADDRESS_ID)));
+      selectorStatic.verify(() -> NeoSelectorService.offersValue(any(), any(Column.class),
+          anyString(), anyString(), any()), never());
+    }
+  }
+
+  /** A customization that serves the whole list without the value refuses it, verified. */
+  @Test
+  public void testTheEntityCustomizationRefusesWhatItDoesNotList() throws Exception {
+    offers(Boolean.TRUE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.NOT_OFFERED)) {
+      NeoReferenceSelectorValidation.RefusedReference refused = check(
+          new JSONObject().put(ADDRESS, ADDRESS_ID));
+      assertEquals(ADDRESS, refused.fieldName());
+      assertTrue(refused.isVerified());
+    }
+  }
+
+  /** A customization that cannot answer refuses the write unverified: still fail closed. */
+  @Test
+  public void testAnUnverifiableCustomizationFailsClosed() throws Exception {
+    offers(Boolean.TRUE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.UNVERIFIABLE)) {
+      NeoReferenceSelectorValidation.RefusedReference refused = check(
+          new JSONObject().put(ADDRESS, ADDRESS_ID));
+      assertEquals(ADDRESS, refused.fieldName());
+      assertFalse(refused.isVerified());
+    }
+  }
+
+  private static MockedStatic<NeoCustomizedSelectorCheck> customization(
+      NeoCustomizedSelectorCheck.Answer answer) {
+    MockedStatic<NeoCustomizedSelectorCheck> custom = mockStatic(NeoCustomizedSelectorCheck.class);
+    custom.when(() -> NeoCustomizedSelectorCheck.offers(any(), anyString(), anyString(), any()))
+        .thenReturn(answer);
+    return custom;
   }
 
   private NeoReferenceSelectorValidation.RefusedReference check(JSONObject fields) {

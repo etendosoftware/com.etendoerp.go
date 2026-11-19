@@ -73,9 +73,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
    * The invoices this receipt's "Import from invoice" popup offers (ETP-6099): the ones whose grand
    * total is not negative, as the popup always filtered them. Pending keeps the popup's rule (ETP-6099
    * product decision): a linked line 0, any other its quantity minus what OTHER draft receipts hold
-   * of its order line; the delivered quantity is NOT deducted. Its popup asks for
-   * {@code pendingBasis: "classic"} (ETP-6099 follow-up), offered here only: a linked line 0, any
-   * other its invoiced quantity, no draft deducted, exactly as before ETP-6099.
+   * of its order line; the delivered quantity is NOT deducted. {@code pendingBasis: "classic"}
+   * (ETP-6099 follow-up) is still offered here only: a linked line 0, any other its invoiced
+   * quantity, no draft deducted, exactly as before ETP-6099; the popup stopped asking for it in
+   * ETP-5828 (QA UI-8) and lists with the rule above.
    */
   static final ImportInvoiceLinesIntoInOutHandler.SourcePolicy INVOICE_IMPORT_POLICY =
       new ImportInvoiceLinesIntoInOutHandler.SourcePolicy(
