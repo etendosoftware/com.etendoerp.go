@@ -27,7 +27,7 @@ name: Full Pipeline Pilot
 #   public-api   ETP-6370: schema_forge's public API suite (gateway/e2e) on its own environment,
 #                signed in as GOAdmin of GOClient; on a PR only when the diff touches more than
 #                docs and tests (always on a push).
-#   cell-report  after go-tests and integration: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
+#   cell-report  after every test job: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
 #                com.etendoerp.jenkins.pipelines), the run summary and, when the DD_API_KEY secret
 #                exists, the run sent to Datadog as etendo.ci.pilot.* metrics. Reporting only: it
 #                never turns the run red.
@@ -745,7 +745,9 @@ jobs:
 
   cell-report:
     name: Cell report
-    needs: [route, go-tests, integration]
+    # public-api too, though it reads only the Go and E2E results: the run's duration and the job
+    # durations sent to Datadog are measured here, and a job still running would be left out of both.
+    needs: [route, go-tests, integration, public-api]
     if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
