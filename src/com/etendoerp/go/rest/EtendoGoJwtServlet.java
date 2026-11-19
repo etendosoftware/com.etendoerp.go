@@ -3085,12 +3085,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return passwordHash == null ? AUTH_METHOD_LINK : FIELD_PASSWORD;
   }
 
+  /** Work done for an authenticated login/session-create request, still in admin mode. */
+  @FunctionalInterface
+  private interface AuthenticatedLoginAction {
+    void run(Account account) throws JSONException, IOException;
+  }
+
   /**
-   * POST /sws/go/login
-   * Body: { "email": "...", "password": "..." }
-   * Returns 200 with new session token on success, 401 on invalid credentials.
+   * Shared flow of /login and /session: parses the JSON body, checks email and local password
+   * (coded 400/401 on failure so the front maps them to the right message) and runs the action
+   * in admin mode for the matching account.
    */
-  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+  private void handleCredentialLogin(HttpServletRequest request, HttpServletResponse response,
+      String label, String serverErrorMessage, AuthenticatedLoginAction action)
       throws IOException {
     JSONObject body;
     try {
@@ -3100,7 +3107,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
-
     String email;
     String password;
     try {
@@ -3123,30 +3129,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             INVALID_CREDENTIALS, INVALID_CREDENTIALS);
         return;
       }
-
-      String sessionToken = generateToken();
-      EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
-
-      JSONObject accountJson = buildAccountJson(account);
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_TOKEN, sessionToken);
-      result.put(FIELD_ACCOUNT, accountJson);
-
-      writeResponse(response, HttpServletResponse.SC_OK, result);
+      action.run(account);
     } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("login", e, log);
-      log.error("Database error during login", e);
+      EtendoGoDalHelper.rollbackDalChanges(label, e, log);
+      log.error("Database error during {}", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_LOGIN_SERVER_ERROR,
-          "Login failed due to a server error", "Login failed due to a server error");
+          serverErrorMessage, serverErrorMessage);
     } catch (JSONException e) {
-      log.error("JSON error building login response", e);
+      log.error("JSON error building {} response", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
           INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * POST /sws/go/login
+   * Body: { "email": "...", "password": "..." }
+   * Returns 200 with new session token on success, 401 on invalid credentials.
+   */
+  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    handleCredentialLogin(request, response, "login", "Login failed due to a server error",
+        account -> {
+          String sessionToken = generateToken();
+          EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
+
+          JSONObject result = new JSONObject();
+          result.put(FIELD_STATUS, STATUS_SUCCESS);
+          result.put(FIELD_TOKEN, sessionToken);
+          result.put(FIELD_ACCOUNT, buildAccountJson(account));
+
+          writeResponse(response, HttpServletResponse.SC_OK, result);
+        });
   }
 
   /**
@@ -7639,49 +7655,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionCreate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    JSONObject body;
-    try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
-      return;
-    }
-
-    String email;
-    String password;
-    try {
-      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString(FIELD_PASSWORD);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_EMAIL_PASSWORD);
-      return;
-    }
-
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
-      if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
-          || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
-        return;
-      }
-
-      IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-          request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
-    } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
-      log.error("Database error during session create", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Session creation failed due to a server error");
-    } catch (JSONException e) {
-      log.error("JSON error building session response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    handleCredentialLogin(request, response, "session create",
+        "Session creation failed due to a server error", account -> {
+          IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
+              request.getHeader(HEADER_USER_AGENT), null);
+          writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+        });
   }
 
   /**

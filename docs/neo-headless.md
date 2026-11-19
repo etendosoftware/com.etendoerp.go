@@ -2562,7 +2562,14 @@ invoice, decide the cents:
   the invoice are untouched: this is only the scale of the inbox's own amounts.
 - **Input scales** (HALF_UP, stored): `quantity` 4, `unitPrice` 6 (the price scale of GO), `discount` 4,
   `taxRate` 2; the price after the discount `unit6` stays at 6 decimals.
-The shared fixture `invoice-inbox-totals.json` carries optional `scale` per case and `tax.docTaxAmount`
+The rule exists in three copies (SPA `invoiceInboxReviewModel.js`, `InvoiceInboxTotals`, the Etendo engine). Each
+repo owns its own cases: here `src-test/resources/com/etendoerp/go/schemaforge/ocr/invoice-inbox-totals-cases.json`,
+read from the classpath by `InvoiceInboxTotalsTest`; the SPA keeps `invoice-inbox-totals.json` for its Vitest.
+The Java test no longer reads the SPA's file (the flag `ETGO_REQUIRE_SPA_FIXTURE` is gone). The two case files are
+independent copies that nothing keeps in sync automatically: a change to the rounding rule must update both. What
+still guards agreement is each repo's own cases, the DB-backed engine-vs-model integration tests
+(`InvoiceInboxConfirmIntegrationTest`) and the check at confirm time (`InvoiceInboxConfirmVerify`: refuses beyond
+one minimal unit per distinct tax). Cases carry optional `scale` per case and `tax.docTaxAmount`
 per line, and `docTaxAmount` on the expected tax rows of a line-based tax.
 
 **`ADJUSTED`** is sticky (only ever set) and decided in ONE place, `InvoiceInboxAdjustedPolicy`. An
@@ -2721,16 +2728,33 @@ failure never touches its neighbours. Hidden from MCP like the other four action
   `InvoiceCompletionService.completeInvoiceOrThrow`. A failure anywhere rolls ALL of it back (no half-created
   invoice, vendor or product; the bytes of the attachment are on disk, which is not transactional, so an
   orphan file can remain, as in the intake). Then, in a NEW transaction, the row becomes `ERROR` /
-  `CONFIRM_FAILED` with the translated reason in `ERROR_DETAIL`, and the answer is 422 `confirm_failed` with
-  `error.detail`. A `block` plan quota is a 403 `QUOTA_EXCEEDED` and records nothing. Editing the row
+  `CONFIRM_FAILED` with the reason in `ERROR_DETAIL`, and the answer is 422 `confirm_failed` with
+  `error.detail` (the English text), `error.detailCode` and `error.detailParams` (`error.code` stays the
+  envelope's `confirm_failed`). A `block` plan quota is a 403 `QUOTA_EXCEEDED` and records nothing. Editing the row
   (`apply`) re-validates the edited document: a valid one moves a `CONFIRM_FAILED` row back to
   `PENDING_REVIEW`, an invalid one makes it `ERROR` with the validation code (`MISSING_FIELDS`, ...); either
-  way the detail is cleared. `ERROR_DETAIL` is stored as the reason was produced, in English today (the
-  inbox message keys have no `AD_MESSAGE` rows yet, so the English defaults of `InvoiceInboxMessages` apply)
-  and the SPA shows it as it is; it never carries SQL, file paths or stack frames (exceptions are classified
-  and sanitized as any NEO failure, completion refusals are the translated business message, and a batch
-  failure is prefixed with its step: new vendor, new vendor address, new product 'X', invoice header, line N,
-  plus the missing field names when the pipeline reports them).
+  way the detail is cleared.
+
+  **`ERROR_DETAIL` stores an identifier, not translated text** (`InvoiceInboxFailureDetail`; same column,
+  varchar 2000, no model or AD change): the compact JSON
+  `{"v":1,"code":"<code>","params":{...},"text":"<English default>"}`, so the SPA translates by `code` with
+  `params` in the user's language. Codes: `no_lookups`, `completion_error`, `no_vendor_category`,
+  `no_product_sequence`, `no_file`, `attach_failed`, `currency_mismatch`, `total_mismatch {invoice, document}`,
+  `step_failed {step, n?, name?, reason, missing?[]}` (`step` is `vendor`, `vendorAddress`, `header`, `line`,
+  `product` or `creation`; `n` is the 1-based line, `name` the new product, `reason` the pipeline's own
+  message, `missing` the field names it reports), `search_key_exists {step, n?, name?}` and the catch-all
+  `refused {message}` for text that arrives already built from outside (the `OBException` message of the
+  completion, an SIF preset refusal, a classified NEO failure): that one cannot be an identifier, the raw
+  message is kept in `params.message`. If the value would exceed 2000 characters, only `text` and the string
+  values of `params` are shortened (with `...`), never the JSON itself: the stored value always parses.
+  Rows written before this change hold legacy free text (a value that does not start with `{` or lacks `v` and
+  `code`): readers return it as it is. The review answer returns `errorDetail` as the raw stored string (back
+  compatible) and adds `errorInfo {code, params}` only when the value parses as this JSON. MCP, the list and
+  `etendo_get` return the raw JSON string, which includes the English `text`. Our own confirm messages have no
+  `AD_MESSAGE` row, so they are always English: the language leak seen before came only from outside text
+  (the completion's `OBException`, the pipeline's message, user data), now carried in `refused.message` /
+  `step_failed.reason`. It never carries SQL, file paths or stack frames (exceptions are classified and
+  sanitized as any NEO failure, and a batch failure names its step).
 - **After the commit nothing fails the confirm.** Once `completeInvoiceOrThrow` returns, the telemetry is
   emitted and the answer is built in its own guard; if building it fails the answer is the idempotent shape
   (`alreadyConfirmed: true`, `invoice.id` only), never 422 for an invoice that exists.
@@ -2785,9 +2809,25 @@ failure never touches its neighbours. Hidden from MCP like the other four action
   currency scale (the rule of the SPA banner, `InvoiceInboxSummary.totalMismatch`; the currency is the
   stored one, else the one derived as the worker does: vendor purchase price list, organization, client;
   a missing, null, non-numeric or non-finite printed total never warns, and amounts round HALF_UP). The review answer gains
-  `errorDetail` (when set) and `totalMismatch`; it already carried `currency`. The confirm answer carries
+  `errorDetail` (when set, the raw stored string; see the identifier format above), `errorInfo` (when it parses) and `totalMismatch`; it already carried `currency`. The confirm answer carries
   `totalMismatch` too (computed from the stored document at confirm time) so the toast can mention it.
   Rows saved before this change have them empty until their next save.
+- **Totals of a confirmed row (2026-11-18, owner decision).** The review panel's big Total is always the
+  total computed from the lines (never the printed one, which only drives the non-blocking mismatch
+  banner); the stored `GRANDTOTAL` column of a PENDING row is also the LINES total (owner decision "the lines always
+  win", 2026-11-18): `InvoiceInboxSummary.syncFrom` stores `InvoiceInboxTotals.totals(lines, scale)` at the
+  decimals of the document currency (HALF_UP), on every worker persist and every review edit, whatever the
+  `totalSource`; only a document with no usable line falls back to `header.totalAmount` (printed, or empty).
+  `header.totalAmount`, `totalSource` and the `TOTAL_MISMATCH` rule are unchanged. Rows already stored keep
+  their old value until their next save (no data-fix: the feature is unreleased, behind the flag). The batch
+  confirm dialog's "Importe total" sums these list values, so it sums what will really be created. For a CONFIRMED row the Total is the grand total of the
+  created invoice: (1) the `review` answer's `invoice` block carries `grandTotal` (`C_Invoice.GrandTotal`
+  read at read time, `null` when the engine set none), so rows confirmed before this change also show it;
+  (2) `InvoiceInboxConfirmWork.link()` sets the row's `GRANDTOTAL` to the invoice's grand total in the same
+  transaction, and nothing rewrites it afterwards (`InvoiceInboxSummary.syncFrom` only runs for rows being
+  processed or edited, never for a confirmed one). `TOTAL_MISMATCH` is left as it was at confirm (it records
+  that the document diverged; nothing reads it for a confirmed row). Rows confirmed BEFORE this change keep
+  their old list value (the feature is unreleased behind the flag, no data-fix); their panel is already right.
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
@@ -6200,9 +6240,10 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | error classification (ETP-5782) — a captured write failure classified `500` | REST `500 server_error`, sanitized | MCP keeps its existing write answer (`422`) | the MCP write path answered every DAL failure 422 before ETP-5782; only the classified 4xx/503 changed it. A 500-class failure keeps the old answer rather than turn a 422 into a 500 for agents. |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
+| target record ownership of PUT/PATCH/DELETE (ETP-5880) | `NeoWritePreflight` runs `NeoActionRecordGuard.updateRefusalFor`/`writeRefusalFor` before the customization: another tenant's id answers `404 Record not found`, same as an unknown id | same guard on REST `/batch` delete (`BatchService.deleteRecord`) and on MCP `etendo_update`/`etendo_delete` (`McpToolRouter`) | no divergence. Structural, no entity names; tab-less entities leave ownership to their customization. Tests: `NeoWritePreflightTest`, `McpToolRouterRouteTest`, `BatchServiceTest`. |
 | reference ownership (ETP-5785, §4.3.7) | checked before FK-name resolution (parent), defaults, the injectors and the customization | checked in `BatchService.createRecord`, after `preprocessBatchOperation` and before the customization | a foreign or missing reference is refused on both and nothing is written. In batch, the preprocessor's injectors (`McpLinePriceInjector`, `McpBillToInjector`) run first and may read the referenced parent or partner, because the preprocessor is also where FK names become ids, which the check needs. What they read never reaches the response, but a refusal the preprocessor raises on that read is answered instead of the unknown-reference body |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
-| line creation of receipts, shipments and invoices (ETP-5713, ETP-6002) | the lines CRUD, which is what most of the SPA's "Add from ..." modals post one line at a time (the SALES invoice "Añadir desde pedido" no longer does: since ETP-6002 it calls `importOrderLines`, like the MCP): **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse **REST-only behaviour (ETP-6002):** a REST CRUD create of a sales invoice line carrying `salesOrderLine` (and no `goodsShipmentLine` / `sourceInvoiceLineId`, not on a rectificative) has `goodsShipmentLine` bound by `SalesInvoiceShipmentLineResolver` (the first allocation of `OrderLineMovementAllocation`, no split); MCP and `etendo_batch` refuse `salesOrderLine` as `read_only_field`, so they never reach it and use `importOrderLines`, which applies the same rule and splits |
+| line creation of receipts, shipments and invoices (ETP-5713, ETP-6002) | the lines CRUD, which is what most of the SPA's "Add from ..." modals post one line at a time (the SALES invoice "Añadir desde pedido" no longer does: since ETP-6002 it calls `importOrderLines`, like the MCP): **not capped** by the server (the modal limits the quantity client-side; the exception is a goods shipment line linked to a sales invoice line, capped on every channel since ETP-6002 CP-30, §4.12.34), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse **REST-only behaviour (ETP-6002):** a REST CRUD create of a sales invoice line carrying `salesOrderLine` (and no `goodsShipmentLine` / `sourceInvoiceLineId`, not on a rectificative) has `goodsShipmentLine` bound by `SalesInvoiceShipmentLineResolver` (the first allocation of `OrderLineMovementAllocation`, no split); MCP and `etendo_batch` refuse `salesOrderLine` as `read_only_field`, so they never reach it and use `importOrderLines`, which applies the same rule and splits |
 | linking a sales rectificative from a **return line** (ETP-6002) | REST single and `/sws/neo/batch`: a `sales-invoice/lines` create whose `goodsShipmentLine` is a return line links the rectificative (`C_Invoice_Reverse`) to the completed, same-partner invoices that billed the original shipment line (`SalesRectificativeLineLinkSupport`) | **unreachable on MCP** (`etendo_create`, `etendo_batch`): `goodsShipmentLine` is curated read-only on `sales-invoice/lines` (`ETGO_SF_FIELD` `isreadonly=Y`, no `MCP_CONFIG` override), so `applyWriteGates` answers `422 read_only_field` before the pre-hook runs — the same refusal as the ETP-5713 row above | declared, field curation unchanged. The other link source, `sourceInvoiceLineId`, works on every channel: it is a create directive of `SalesInvoiceLineHandler`, so MCP accepts it (not reported in `unknownFields`) and `etendo_schema(view:"create")` publishes it. An agent rectifying from a return uses `createReturnInvoice` (§4.12.33), which links by itself |
 | availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
 | a second factura rectificativa of a return (ETP-5712) | **refused 409** `returnInvoiceAlreadyExists` when the return already has a non-voided one; the button is also hidden on screen (`hasReturnInvoice`), so the SPA never sends the flag | the same 409. **Return to vendor** (`return-to-vendor-shipment`): `allowDuplicate:true` is declared in its `createReturnInvoice` contract and creates a second one on purpose (e.g. one per origin invoice). **Customer return** (`return-material-receipt`, since ETP-6026): no way past it — the flag is not declared (MCP answers 422 `unknownParameters`) and is not read on REST, so the 409 always holds, as on the screen | the purchase side keeps an MCP-only capability the screen does not offer, kept deliberately (ETP-5381 said a return may legitimately have more than one); strict: only a JSON boolean `true` (a string or number is 422). The sales side matches the screen exactly (ETP-6026 AC 2). See §4.12.33 |
@@ -6305,6 +6346,7 @@ Other MCP-only refusals declared in §4.12.6:
 | contact `searchKey` on create (ETP-5852, M-107) | the SPA never sends it (the form hides it); `handle()` puts the name as a placeholder and `afterHandle()` replaces it with the contact's number | the same, but the placeholder is put before the MCP mandatory pre-check (`resolveServerCreateFields`) and the field is declared server-resolved, so `etendo_create` no longer demands it; a value the agent sent is replaced too and reported in `searchKeyNote` |
 | AD list selector whose validation rule names its table, e.g. `AD_Ref_List.Value IN (…)` (ETP-5852, M-173) | 500 `could not extract ResultSet`: the criteria query aliases `ad_ref_list` as `this_` | the table name is rewritten to the query alias (`ListReferenceSelectorExecutor#qualifyListTable`), so `etsgSifTerritory` lists Araba, Bizkaia and Gipuzkoa |
 | `etendo_list(parentId)` on a child whose parent link the spec excludes, e.g. `open-close-period-control/documents` (ETP-5852, M-118) | n/a | the parent link stays filterable (`McpQuerySupport#buildWhereFromFilters` drops it from the excluded set), so `parentId` scopes the list instead of a 422 `unknown_filter_field` on `period` |
+| `etendo_list` filter on a list field (a column with a list reference: `documentStatus`, the invoice inbox `status`...) with a value outside its codes, e.g. `status:"pending"` (ETP-5850) | answers an empty list | 422 `validation_error` on the field, `available` = its codes, for equality and every `in` value (`McpHqlConditions#requireAllowedValue`, `Property#getAllowedValues`); it matched no row, so the empty answer read as "there is none". Case matters. Ranges (`gt`/`lt`) and `contains` are not checked |
 | `orderBy` on a value many rows share (ETP-5852, M-188) | the grid's own sort | `id` is appended as the last key (`McpQuerySupport#withIdTieBreak`), so tied rows keep one order across pages; an order that already names `id` is sent as is |
 | labels in a create refusal's `missingFields` (ETP-5852, M-245) | n/a | the form's label in the session language, the one `etendo_schema` shows (`McpSchemaResponseHints#localizeLabels`), instead of the `AD_Column` name |
 | contact address created without `name` (ETP-5852, M-168) | the SPA always sends one: city and address line, else region and country, else "Location" | the same rule on the server (`ContactsLocationAddressHandler#addressName`, MCP only; the "." MCP's defaults pass puts in the body does not count as sent), instead of the AD default "." Whatever the source (sent, MCP display name, default), the stored name is capped at the 60 characters of `C_BPartner_Location.Name`, trailing ", " or spaces trimmed (ETP-6206, `ContactAddressName`; on every channel, on create and on update) |
@@ -7655,7 +7697,11 @@ That costs a couple of dozen tokens once and lets the agent link any record it l
 including the rows of a 100-record `etendo_list`, which deliberately carries no URLs of its own.
 
 **`etendo_get` and `etendo_create` add a ready-made `url`** to the record they return — the two moments
-an agent hands the user a link.
+an agent hands the user a link — and, next to it, **`urlNote`** (ETP-5850): the link opens only for
+users of the app (login required) and must never be sent to a customer or supplier; a customer's
+link to their documents is the contacts action `portalLink`. The discover `hint` says the same.
+Asked for "the portal link of customer X, to send by WhatsApp", the agent handed over the contact's
+record url in every pilot run, a link the customer cannot open.
 
 Two rules keep the links honest, and both are enforced in code:
 
@@ -8894,7 +8940,7 @@ Touching both header handlers migrated them (touch rule, §5.3.a): `GoodsShipmen
 
 **Consequence, by design:** a sales invoice line created from an order before this change with no `M_InOutLine_ID` and no `M_MatchSI` row stops showing its shipment (local DB: 1 line, 1 invoice — `I/32`, QA Testing; no data-fix).
 
-  **"How much of this movement line is invoiced" readers, both directions.** Every reader that computes the invoiced quantity of a movement line reads the match table of the movement's direction as well as the column: the Goods Receipt header `invoiceStatus` (`GoodsReceiptHeaderHandler`, fixed to `M_MatchInv` via `InOutInvoiceLinks.matchedQtyPerInOutLineSql(MatchTable.PURCHASE, …)` — it read `M_MatchSI` before, so a second partial receipt showed *Facturado 0 %*); the pending-to-invoice quantity behind the *¿Registrar factura?* prompt, *Crear Factura* availability and the duplicate-invoice guard (`NeoInvoiceSupport.computePendingQtyPerLine*`, both `includeDrafts` variants); and the line enrichment `orderQuantity` / `invoicedQuantity` shared by Goods Shipment and Goods Receipt lines (`AbstractInOutLineHandler`). The last two serve both directions, so they pick the table per row from `m_inout.issotrx` (`InOutInvoiceLinks.matchedQtyByMovementDirectionExpr` / `matchedSourceInvoiceQtyByMovementDirectionExpr`, a `CASE` over `MatchTable.forSalesTransaction`) — structure, not identity. The column arm and the match arm are combined with `GREATEST`, never added: a completed first movement is linked by both the column and the match row `M_INOUT_POST` writes for it. The line `invoicedQuantity` is also capped at `ABS(MovementQty)`, like the receipt header, since core can over-match a movement line (e.g. *Add from order*). The Goods Shipment header was already reading `M_MatchSI` and is unchanged.
+  **"How much of this movement line is invoiced" readers, both directions.** Every reader that computes the invoiced quantity of a movement line reads the match table of the movement's direction as well as the column: the Goods Receipt header `invoiceStatus` (`GoodsReceiptHeaderHandler`, fixed to `M_MatchInv` via `InOutInvoiceLinks.matchedQtyPerInOutLineSql(MatchTable.PURCHASE, …)` — it read `M_MatchSI` before, so a second partial receipt showed *Facturado 0 %*); the pending-to-invoice quantity behind the *¿Registrar factura?* prompt, *Crear Factura* availability and the duplicate-invoice guard (`NeoInvoiceSupport.computePendingQtyPerLine*`, both `includeDrafts` variants); and the line enrichment `orderQuantity` / `invoicedQuantity` shared by Goods Shipment and Goods Receipt lines (`AbstractInOutLineHandler`). The last two serve both directions, so they pick the table per row from `m_inout.issotrx` (`InOutInvoiceLinks.matchedQtyByMovementDirectionExpr` / `matchedSourceInvoiceQtyByMovementDirectionExpr`, a `CASE` over `MatchTable.forSalesTransaction`) — structure, not identity. The column arm and the match arm are combined with `GREATEST`, never added: a completed first movement is linked by both the column and the match row `M_INOUT_POST` writes for it. The line `invoicedQuantity` is also capped at `ABS(MovementQty)`, like the receipt header, since core can over-match a movement line (e.g. *Add from order*). The Goods Shipment header was already reading `M_MatchSI`; since ETP-6002 it also caps each line at `ABS(MovementQty)` before summing (`GoodsShipmentHeaderHandler#buildInvoiceStatusSql`, `SUM(LEAST(GREATEST(msi, direct, ol), ABS(movementqty)))`), as the receipt header and the line enrichment do. The direct arm reads the whole invoice line, so a first partial shipment line linked by the column counted the full invoiced quantity: two lines of 1 on one invoice line of 2, plus a loose line of 5, read 43% (3 of 7) instead of 29% (2 of 7). The header now reaches 100% only when every line is invoiced up to what it moved, which is when `computePendingQtyPerLine` leaves nothing to invoice (up to `ROUND`: a header at 99.5% or more still reads 100). The list column's sort and filter go through the AD column `InvoiceStatus` (core `C_GETINVOICESTATUSFROMSHIPMENT`, `M_MatchSI` only), not this SQL, so they can disagree with the shown percentage.
 
   **Each aggregate is scoped to the requested movement (ETP-5653).** The `% invoiced` of a header aggregated the whole match/`C_InvoiceLine` table and kept the requested rows only at the outer `WHERE`, which the planner cannot push into an aggregated sub-query — every read walked the instance's entire invoice set. The shipment/receipt header now resolves the requested movement's lines once in a `WITH shipment_lines` / `receipt_lines` CTE and restricts each aggregation arm to that set on its own grouping key (`m_inoutline_id`); `NeoInvoiceSupport`'s `direct_qty` arm does the same with `m_inout_id = ?` (its match arm is already a correlated per-line lookup, ETP-5576, and its order-line arms were already scoped). The filter sits on the `GROUP BY` key, so it keeps or drops whole groups and never changes a sum: results are byte-identical, only the plan changes (index scans via `m_inoutline → c_invoiceline → c_invoice`, no `Seq Scan` on `c_invoice`/`c_invoiceline`). The helper's second argument is that `SELECT m_inoutline_id …` set.
 
@@ -10262,6 +10308,24 @@ start through its period end — further narrowed by BOTH `dateFrom` and `dateTo
 real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+**`generate_profit_loss`: dates without a year, and month/quarter columns (ETP-5850).** Two
+P&L-only parameters, so an agent can answer "how did we do this quarter" and "each month of the
+quarter" the way the SPA's interactive report shows them (ETP-6239's Total / Month / Quarter views):
+- `yearId` is optional when BOTH `dateFrom` and `dateTo` are given: the dates alone bound the
+  range (no year bind in the SQL). An agent often cannot pick the year id itself: a tenant can have
+  two years with the same name, one per calendar. With one date or none, `year_id_required` (400)
+  as before. Balance Sheet keeps `yearId` required (its only bound).
+- `breakdown` = `none` (default) | `month` | `quarter`. Every row gains `byPeriod` (period key ->
+  amount) and `meta` gains `breakdown` and `periods` (`key`, `dateFrom`, `dateTo`, in order). Keys
+  are `2026-07` for a month and `2026-07/2026-09` for a quarter. Periods are counted from the
+  range's first month (`dateFrom`, or the year's first period start), so a July-June year's first
+  quarter is July-September; the first and last slices are clipped to the range. Each slice is the
+  same query over its dates with every row kept, so every row of the total has a value per column.
+  Refused with 400: an unknown value (`breakdown_invalid`), with `compareTo`
+  (`breakdown_with_compare`), more than 24 periods (`breakdown_too_many_periods`, each period is
+  one more query), or an inverted or empty range (`breakdown_range_invalid`).
+- The SPA's Node report engines are untouched: the breakdown is computed in Java for this tool.
 
 **Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
 bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
@@ -14275,6 +14339,43 @@ summed over the lines with a positive pending, at the invoice currency's standar
 `availableOrders` gives an order, and what the shipment's «Añadir desde Factura» row shows (it used to show 0,00);
 its `availableInvoiceLines` rows add `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
 once they are loaded. The goods receipt's rows carry neither.
+
+**Quantity cap of a goods-shipment line against its invoice line (ETP-6002 CP-30).** `GoodsShipmentLineHandler#handle`
+calls `ShipmentLineInvoiceCap`, so the rule holds on REST single, `/batch`, MCP and the window. The pending is the one of
+`InvoicePendingResolver` (`SALES`, every document type) read through `DirectLinkPending.pendingByLine`, after
+`lockSource` on each invoice (in id order) and a flush, so two lines of one `/batch` see each other.
+
+**What the lock guarantees.** The pre-hook alone cannot serialize two single creates: outside a batch the insert commits
+inside the write, which releases the lock before the line is linked, and an unlinked line does not count as moved. So
+`GoodsShipmentLineHandler#afterHandle` (`ShipmentLineInvoiceCap.linkUnderCap`) takes the invoice lock again, writes the
+link, and re-checks under that lock with `InvoicePendingResolver#remainingByLine` (`QtyInvoiced - moved` and the order
+line's remainder, without the floor at 0). Of two racing creates that together exceed what is pending, exactly one keeps
+its line. The other finds the excess: its link is undone, its line deleted, that removal committed, and it is answered
+the same 422. Which one stays depends on the binding cap, not on who locks first: under the invoice line's own cap the
+first to lock stays, because the other line is not linked yet; under the order line's cap the first to lock already sees
+both draft lines, removes itself, and the second stays. The removed line therefore exists for the moment between its
+insert and its re-check. If the link, the re-check
+or the removal fails, the failure is logged and answered as a 500. Inside `/batch` the caller owns the transaction: the
+lock is held from the first pre-hook and a refusal rolls the whole batch back.
+
+| Write | Outcome |
+|---|---|
+| Create with `invoiceLineId`, quantity above 0 and up to the pending | created and linked |
+| Create with `invoiceLineId`, quantity above the pending, or nothing pending | 422 `importQuantityExceedsPending` (`error.product`, `requested`, `pending`, `sourceLineId`), nothing persisted, no link |
+| Create with `invoiceLineId` and a quantity of 0 or below | the same 422 and keys, plus `error.quantityNotPositive: true`; the message is `The quantity of <product> must be greater than 0.` (SPA key `backendError.importQuantityMustBePositive`) |
+| Create with `invoiceLineId` and no `movementQuantity` | takes the pending, whatever the callout cascade proposed (MCP: `ATTR_CLIENT_PROVIDED_FIELDS` says the caller did not send it); nothing pending is the same 422 |
+| Create on an invoice that is not completed | the resolver carries no line, so nothing is pending: the same 422 |
+| Update of `movementQuantity` on a line linked through `C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI` | up to pending + what the line holds, for EVERY linked invoice line; above it the same 422, with that maximum in `error.pending` and `error.maximumAllowed` |
+| Update of a linked line to a negative quantity | the same 422, with `error.quantityNotPositive: true` and the "must be greater than 0" message |
+| Update that lowers the quantity, down to 0, or leaves it unchanged | allowed |
+| Update of a line whose linked invoice is no longer completed | that invoice does not cap a positive quantity |
+| Update without `movementQuantity`; a line with no invoice link; a non-numeric quantity; an `invoiceLineId` that is not the caller's own | unchanged, no cap |
+
+`etendo_batch` answers these refusals with the same `code` and details: `McpBatchEnvelope` keeps what the failing
+operation's `error` carries, without changing the envelope's `status`, `error` and `detail`.
+
+A line with no invoice link is the supported way of shipping extra units. The goods receipt line is not capped
+(`AbstractInOutLineHandler` and `GoodsReceiptLineHandler` are unchanged).
 
 **Invoice-line link of a goods-shipment line (ETP-6002 CP-22).** `invoiceLineId` on a `goods-shipment/goodsShipmentLine`
 create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDirectives`): MCP no longer reports it in

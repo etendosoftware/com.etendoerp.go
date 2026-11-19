@@ -330,7 +330,7 @@ class ReportSelectorsServletTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-        "bpartner", "product", "warehouse", "project", "org",
+        "bpartner", "product", "product-all", "warehouse", "project", "org",
         "account", "acctschema", "accounting", "year", "currency", "tax"
     })
     @DisplayName("returns 200 with valid JSON for each selector type")
@@ -389,6 +389,52 @@ class ReportSelectorsServletTest {
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+    }
+
+    @Test
+    @DisplayName("product-all has no stock clause (services/unstocked items) while product keeps it")
+    void productAllHasNoStockScope() throws Exception {
+      for (String type : new String[] { "product-all", "product" }) {
+        configureAuthenticatedGet(type);
+        when(request.getParameter("warehouseIds")).thenReturn("AA11BB22");
+        when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+        when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3" });
+        servlet.doGet(request, response);
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(session, times(2)).createNativeQuery(sql.capture());
+        for (String q : sql.getAllValues()) {
+          assertEquals(type.equals("product"), q.contains("m_storage_detail"), type + ": " + q);
+        }
+        clearInvocations(session);
+      }
+    }
+
+    @Test
+    @DisplayName("product-all scopes by the role's orgs on m_product.ad_org_id")
+    void productAllBindsRoleOrgsOnProduct() throws Exception {
+      configureAuthenticatedGet("product-all");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3", "D4E5F6" });
+
+      servlet.doGet(request, response);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      for (String q : sql.getAllValues()) {
+        assertTrue(q.contains("m_product.ad_org_id IN (:roleOrgIds)"), q);
+      }
+      verify(dataQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
+    }
+
+    @Test
+    @DisplayName("product-all accepts ids (no 400) and resolves exactly those rows")
+    void productAllAcceptsIds() throws Exception {
+      configureAuthenticatedGet("product-all");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22"));
     }
 
     @Test

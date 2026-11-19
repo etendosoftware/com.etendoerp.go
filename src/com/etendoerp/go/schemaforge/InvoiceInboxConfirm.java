@@ -118,14 +118,14 @@ final class InvoiceInboxConfirm {
       return e.toResponse();
     } catch (InvoiceInboxConfirmWork.Stop stop) {
       OBDal.getInstance().rollbackAndClose();
-      return stop.refusal() != null ? stop.refusal() : failed(rowId, stop.getMessage());
+      return stop.refusal() != null ? stop.refusal() : failed(rowId, stop.detail());
     } catch (InvoiceSifPreset.Refused e) {
       OBDal.getInstance().rollbackAndClose();
-      return failed(rowId, messageOf(e.toResponse()));
+      return failed(rowId, InvoiceInboxFailureDetail.ofRefusal(messageOf(e.toResponse())));
     } catch (Exception e) {
       // Classified and sanitized as any NEO failure: no SQL, paths or stack frames reach the row.
-      return failed(rowId, messageOf(NeoErrorResponses.fromException(e, "POST",
-          "Inbox confirm " + rowId, null)));
+      return failed(rowId, InvoiceInboxFailureDetail.ofRefusal(messageOf(
+          NeoErrorResponses.fromException(e, "POST", "Inbox confirm " + rowId, null))));
     }
     // The invoice is completed and committed: from here nothing may answer a failure.
     InvoiceInboxTelemetry.documentConfirmed(done.adjusted, clientId);
@@ -154,11 +154,18 @@ final class InvoiceInboxConfirm {
   }
 
   /** The refusal after a failed unit: the failure is recorded in a new transaction first. */
-  private static NeoResponse failed(String rowId, String reason) {
+  private static NeoResponse failed(String rowId, InvoiceInboxFailureDetail.Detail reason) {
     InvoiceInboxConfirmFailure.recordFailure(rowId, reason);
+    // error.code is the envelope's own ("confirm_failed"), so the identifier travels as
+    // detailCode / detailParams next to the English detail.
+    JSONObject details = InvoiceInboxEditGate.details("detail", reason.text());
+    try {
+      details.put("detailCode", reason.code()).put("detailParams", reason.paramsJson());
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the confirm failure details", e);
+    }
     return InvoiceInboxEditGate.refuse(422, CODE_CONFIRM_FAILED,
-        InvoiceInboxMessages.CONFIRM_FAILED, InvoiceInboxEditGate.details("detail", reason),
-        "reason", reason);
+        InvoiceInboxMessages.CONFIRM_FAILED, details, "reason", reason.text());
   }
 
   private static NeoResponse success(String rowId, InvoiceInboxConfirmWork.Done done)

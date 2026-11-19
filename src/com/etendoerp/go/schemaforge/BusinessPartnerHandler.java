@@ -41,10 +41,12 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.portal.PortalContactShare;
 import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -373,8 +375,22 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     return null;
   }
 
+  /**
+   * ETP-5850: the {@code portalLink} action ({@link ContactPortalLinkAction}). Declaring it lists
+   * {@code contacts} in {@code etendo_action}.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return ContactPortalLinkAction.CONTRACTS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext ctx) {
+    NeoResponse portalLink = ContactPortalLinkAction.handle(ctx,
+        contactId -> new PortalContactShare().share(contactId));
+    if (portalLink != null) {
+      return portalLink;
+    }
     if (ctx != null && ctx.getEndpointType() == NeoEndpointType.SELECTOR) {
       // A SELECTOR request is never a write, so falling through to the isWrite check below
       // (when this isn't a Payment Method field) already returns null for it — no separate
