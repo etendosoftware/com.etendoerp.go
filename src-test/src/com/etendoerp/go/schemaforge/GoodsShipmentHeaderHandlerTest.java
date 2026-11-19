@@ -26,6 +26,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -717,6 +718,9 @@ public class GoodsShipmentHeaderHandlerTest {
 
       NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
       assertNotNull(result);
+      assertSame(body, result.getBody());
+      assertEquals(0, item.getInt("invoiceStatus"));
+      verify(mockPs).setString(1, "shipment-5");
     }
   }
 

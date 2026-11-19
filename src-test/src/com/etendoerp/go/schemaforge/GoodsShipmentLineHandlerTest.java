@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -392,24 +393,18 @@ public class GoodsShipmentLineHandlerTest {
       NeoResponse result = new GoodsShipmentLineHandler().afterHandle(ctx);
 
       assertNotNull("Should return ok response even when DB is unavailable", result);
-      assertNotNull(result.getBody());
+      assertSame(body, result.getBody());
+      assertFalse("no enrichment without line data", line.has("invoicedQuantity"));
     }
   }
 
   /**
-   * afterHandle() GET must return null when an exception escapes the outer try block
-   * (e.g. collectIds or NeoHandlerUtils itself throws unexpectedly).
+   * afterHandle() GET must return null when an exception escapes the outer try block: here the
+   * data array holds a value that is not a record, so reading it as one throws.
    */
   @Test
   public void testAfterHandleGetReturnsNullOnUnexpectedException() throws Exception {
-    // Build a context whose previousResult body is deliberately corrupt so that
-    // the JSON deserialization inside the enrichment loop throws and the outer
-    // catch block returns null.
-    JSONObject corruptLine = new JSONObject();
-    // id is present so collectIds works, but put a non-object where a JSONObject
-    // is expected to trigger a runtime error inside the loop.
-    corruptLine.put("id", "x");
-    JSONArray dataArr = new JSONArray().put(corruptLine);
+    JSONArray dataArr = new JSONArray().put("not-a-record");
     JSONObject body = new JSONObject()
         .put("response", new JSONObject().put("data", dataArr));
 
@@ -419,13 +414,9 @@ public class GoodsShipmentLineHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      // Throw from getConnection so fetchLineData returns empty and we reach
-      // NeoResponse.ok(body) normally — this validates the happy path succeeds
       when(dal.getConnection()).thenThrow(new RuntimeException("simulate DB error"));
 
-      NeoResponse result = new GoodsShipmentLineHandler().afterHandle(ctx);
-      // fetchLineData swallowed the exception and returned empty map → ok() is returned
-      assertNotNull(result);
+      assertNull(new GoodsShipmentLineHandler().afterHandle(ctx));
     }
   }
 

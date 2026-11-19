@@ -18,12 +18,16 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +36,9 @@ import java.util.Set;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
@@ -259,9 +265,20 @@ public class ProductCategoryDefaultHandlerTest {
     }
   }
 
+  /** The restrictions the conflict query was built with, as Hibernate renders them. */
+  private static List<String> restrictionsOf(OBCriteria<ProductCategory> crit) {
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    verify(crit, atLeastOnce()).add(captor.capture());
+    List<String> rendered = new ArrayList<>();
+    for (Criterion criterion : captor.getAllValues()) {
+      rendered.add(criterion.toString());
+    }
+    return rendered;
+  }
+
   /**
    * Editing the record that IS already the default (a no-op re-save) must be allowed: the
-   * criteria excludes the current record id, so it never conflicts with itself.
+   * conflict query excludes the edited record id, so it never conflicts with itself.
    */
   @Test
   public void testHandleAllowsUpdateWhenExistingDefaultIsSameRecord() throws JSONException {
@@ -271,18 +288,18 @@ public class ProductCategoryDefaultHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       ProductCategory current = categoryWithClient("CLIENT1");
       when(dal.get(ProductCategory.class, "pc-1")).thenReturn(current);
-      // Criteria excludes pc-1 itself (Restrictions.ne on id), so no conflicts are returned.
-      stubCriteria(dal, Collections.emptyList());
+      OBCriteria<ProductCategory> crit = stubCriteria(dal, Collections.emptyList());
 
       JSONObject body = new JSONObject().put("default", true);
       assertNull(new ProductCategoryDefaultHandler().handle(patchCtx("pc-1", body)));
       msgMock.verifyNoInteractions();
+      assertTrue(restrictionsOf(crit).contains("id<>pc-1"));
     }
   }
 
   /**
-   * A conflicting default that belongs to a DIFFERENT client never blocks the request — the
-   * guard is scoped per client.
+   * A default that belongs to a DIFFERENT client never blocks the request: the conflict query is
+   * scoped to the edited record's client, not to the session's.
    */
   @Test
   public void testHandleAllowsUpdateWhenConflictingDefaultInDifferentClient() throws JSONException {
@@ -292,13 +309,15 @@ public class ProductCategoryDefaultHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       ProductCategory current = categoryWithClient("CLIENT1");
       when(dal.get(ProductCategory.class, "pc-1")).thenReturn(current);
-      // The criteria itself is scoped by CLIENT1, so a conflict in CLIENT2 would never be
-      // returned by a correctly-filtered query — simulate that by stubbing an empty result.
-      stubCriteria(dal, Collections.emptyList());
+      OBCriteria<ProductCategory> crit = stubCriteria(dal, Collections.emptyList());
 
       JSONObject body = new JSONObject().put("default", true);
-      assertNull(new ProductCategoryDefaultHandler().handle(patchCtx("pc-1", body)));
+      NeoContext ctx = methodCtx("PATCH", "pc-1", body, obContextWithClient("CLIENT2"));
+      assertNull(new ProductCategoryDefaultHandler().handle(ctx));
       msgMock.verifyNoInteractions();
+      List<String> restrictions = restrictionsOf(crit);
+      assertTrue(restrictions.contains("client.id=CLIENT1"));
+      assertFalse(restrictions.contains("client.id=CLIENT2"));
     }
   }
 

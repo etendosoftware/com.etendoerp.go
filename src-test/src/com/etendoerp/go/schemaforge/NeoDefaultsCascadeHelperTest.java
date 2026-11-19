@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -1746,24 +1747,49 @@ public class NeoDefaultsCascadeHelperTest {
   // executeCalloutCascadeForCreate
   // ===================================================================
 
+  /**
+   * Without an explicit snapshot, every key already in the body counts as submitted by the
+   * caller and is protected: the Business Partner callout's "F2" must not replace the "R" the
+   * body carries.
+   */
   @Test
-  public void testExecuteCalloutCascadeForCreatePopulatesProtectedFields() throws Exception {
-    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
-      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+  public void testExecuteCalloutCascadeForCreateProtectsEveryBodyKeyWithoutSnapshot()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo bpCalloutInfo = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SiiAutoSetSIIKEYByDefault",
+          "inpcbpartnerid", "BusinessPartner");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(bpCalloutInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("aeatsiiClaveTipo")))
           .thenReturn(null);
 
-      Tab adTab = mock(Tab.class);
+      JSONObject calloutResponseBody = new JSONObject().put("updates", new JSONObject()
+          .put("aeatsiiClaveTipo", new JSONObject().put("value", "F2")));
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
       NeoContext ctx = mock(NeoContext.class);
       JSONObject body = new JSONObject();
-      body.put("documentNo", "DOC-001");
       body.put("businessPartner", "BP001");
+      body.put("aeatsiiClaveTipo", "R");
 
       NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()));
+      assertEquals("R", body.getString("aeatsiiClaveTipo"));
+      assertEquals("BP001", body.getString("businessPartner"));
     }
   }
 
   @Test
-  public void testExecuteCalloutCascadeForCreateEmptyBody() throws Exception {
+  public void testExecuteCalloutCascadeForCreateEmptyBodyRunsNoCallout() throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
       calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
           .thenReturn(null);
@@ -1773,9 +1799,13 @@ public class NeoDefaultsCascadeHelperTest {
       JSONObject body = new JSONObject();
 
       NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()), never());
+      assertEquals(0, body.length());
     }
   }
 
+  /** A failure while resolving callouts is non-fatal: the body stays as submitted. */
   @Test
   public void testExecuteCalloutCascadeForCreateHandlesException() throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
@@ -1788,6 +1818,10 @@ public class NeoDefaultsCascadeHelperTest {
       body.put("field1", "val1");
 
       NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()), never());
+      assertEquals("{\"field1\":\"val1\"}", body.toString());
+      verify(ctx, never()).setSupersededDefaults(any());
     }
   }
 
