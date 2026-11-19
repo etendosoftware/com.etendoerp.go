@@ -68,6 +68,8 @@ public final class McpRecordUrls {
   static final String KEY_RECORD_URL_TEMPLATE = "recordUrlTemplate";
   /** Key holding a single record's link in a {@code etendo_get} / {@code etendo_create} result. */
   static final String KEY_URL = "url";
+  /** Key holding what a record link is for, next to {@link #KEY_URL} (ETP-5850). */
+  static final String KEY_URL_NOTE = "urlNote";
 
   private static final String KEY_DATA = "data";
   private static final String KEY_ID = "id";
@@ -75,9 +77,21 @@ public final class McpRecordUrls {
   /** The shape of a record link, in the placeholder form an agent can fill in itself. */
   static final String RECORD_URL_TEMPLATE = "{baseUrl}/{spec}/{id}";
 
+  /**
+   * ETP-5850: asked for "the portal link of customer X, to send it by WhatsApp", the agent handed
+   * over the contact's record url every time: it opens only after logging in to the app, so the
+   * customer gets a dead link. The note says what the url is for, where the agent reads it.
+   */
+  static final String URL_NOTE = "Opens this record in the Etendo Go app, for its users only "
+      + "(login required). Never send it to a customer or supplier: to share documents with a "
+      + "customer, use the portal link (contacts action portalLink).";
+
   static final String APP_HINT = "Build a link to any record as " + RECORD_URL_TEMPLATE
       + ", where {spec} is the spec name you pass to the tools and {id} is the record id. "
-      + "Only a spec's primaryEntity has a page of its own — link a line record to its header.";
+      + "Only a spec's primaryEntity has a page of its own — link a line record to its header. "
+      + "These links open only for users of the app (login required): never send one to a "
+      + "customer or supplier; a customer's link to their documents is the contacts action "
+      + "portalLink.";
 
   private McpRecordUrls() {
   }
@@ -143,6 +157,7 @@ public final class McpRecordUrls {
     String url = buildRecordUrl(specName, id);
     if (url != null) {
       flatResult.put(KEY_URL, url);
+      flatResult.put(KEY_URL_NOTE, URL_NOTE);
     }
   }
 

@@ -81,24 +81,6 @@ class AbstractAccountTreeReportHandlerTest {
 
   @ParameterizedTest(name = "{0}")
   @MethodSource("handlers")
-  @DisplayName("declares only yearId as required")
-  void reportParametersDeclaresOnlyYearIdRequired(AbstractAccountTreeReportHandler handler) {
-    List<NeoReportParam> params = handler.reportParameters().orElseThrow();
-
-    NeoReportParam yearId = params.stream().filter(p -> "yearId".equals(p.getName()))
-        .findFirst().orElseThrow();
-    assertTrue(yearId.isRequired());
-
-    long otherRequiredCount = params.stream()
-        .filter(p -> !"yearId".equals(p.getName()))
-        .filter(NeoReportParam::isRequired)
-        .count();
-    assertEquals(0, otherRequiredCount, "only yearId may be required — referenceYearId is "
-        + "conditionally required (compareTo), which the schema cannot express");
-  }
-
-  @ParameterizedTest(name = "{0}")
-  @MethodSource("handlers")
   @DisplayName("declares accountLevel as a closed C/D/E/S set")
   void reportParametersDeclaresAccountLevelEnum(AbstractAccountTreeReportHandler handler) {
     NeoReportParam accountLevel = handler.reportParameters().orElseThrow().stream()

@@ -51,6 +51,25 @@ final class McpRequestRefusals {
   }
 
   /**
+   * A filter value outside the closed set of a list field (ETP-5850). Such a value matches no row,
+   * so it answered 200 with nothing, which an agent reads as "there is none": filtering the invoice
+   * inbox on {@code status: "pending"} answered "no documents" while one was pending. The set is
+   * the column's list reference, the codes the field holds.
+   *
+   * @param key       the filter key as the caller spelled it
+   * @param value     the refused value
+   * @param available the field's codes, sorted
+   * @return the exception to throw
+   */
+  static McpRoutingException invalidFilterValue(String key, String value,
+      List<String> available) {
+    return McpRoutingException.unprocessable(
+        "Value '" + value + "' is not one of the values of '" + key + "'", key, available,
+        "No row can hold this value, so the filter would match nothing. Retry with one of the "
+            + "codes in 'available' (exact spelling), or 'in' for several.");
+  }
+
+  /**
    * {@code contains} on a field that references another record (ETP-5848). The bare "works only on
    * text fields" left the agent to work out how to find, say, the invoices of a customer named X;
    * this names the step: find the referenced record with the field's own selector, then filter by

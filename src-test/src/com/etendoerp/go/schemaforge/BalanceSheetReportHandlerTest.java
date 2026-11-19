@@ -70,6 +70,24 @@ class BalanceSheetReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
+  @DisplayName("declares only yearId as required")
+  void reportParametersDeclaresOnlyYearIdRequired() {
+    List<NeoReportParam> params = handler.reportParameters().orElseThrow();
+
+    NeoReportParam yearId = params.stream().filter(p -> "yearId".equals(p.getName()))
+        .findFirst().orElseThrow();
+    assertTrue(yearId.isRequired());
+
+    long otherRequiredCount = params.stream()
+        .filter(p -> !"yearId".equals(p.getName()))
+        .filter(NeoReportParam::isRequired)
+        .count();
+    assertEquals(0, otherRequiredCount, "only yearId may be required (balance sheet has no "
+        + "date-only run, unlike profit and loss); referenceYearId is conditionally required "
+        + "(compareTo), which the schema cannot express");
+  }
+
+  @Test
   @DisplayName("declares dateFrom and fromReferenceDate as accepted but documents they have no effect")
   void reportParametersDocumentsUnusedDateParams() {
     List<NeoReportParam> params = handler.reportParameters().orElseThrow();
