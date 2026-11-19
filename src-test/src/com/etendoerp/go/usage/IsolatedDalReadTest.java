@@ -495,6 +495,48 @@ class IsolatedDalReadTest {
     awaitLatch(workerInterrupted);
   }
 
+  /**
+   * ETP-6386: a read that timed out while still queued leaves the queue, so repeated timeouts
+   * cannot fill the 64 slots and make reports get "refused".
+   */
+  @Test
+  void aTimedOutQueuedReadLeavesTheQueue() throws Exception {
+    CountDownLatch release = new CountDownLatch(1);
+    ExecutorService callers = Executors.newFixedThreadPool(IsolatedDalRead.WORKER_THREADS);
+    try {
+      // Occupy every worker, then let one more read wait in the queue and time out.
+      CountDownLatch started = new CountDownLatch(IsolatedDalRead.WORKER_THREADS);
+      for (int i = 0; i < IsolatedDalRead.WORKER_THREADS; i++) {
+        callers.submit(() -> IsolatedDalRead.call(() -> {
+          started.countDown();
+          awaitQuietly(release);
+          return "held";
+        }));
+      }
+      awaitLatch(started);
+
+      assertThrows(IllegalStateException.class, () -> IsolatedDalRead.call(() -> "queued", 100L));
+
+      Field field = IsolatedDalRead.class.getDeclaredField("EXECUTOR");
+      field.setAccessible(true);
+      java.util.concurrent.ThreadPoolExecutor pool =
+          ((java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ThreadPoolExecutor>)
+              field.get(null)).get();
+      assertEquals(0, pool.getQueue().size());
+    } finally {
+      release.countDown();
+      callers.shutdownNow();
+    }
+  }
+
+  private static void awaitQuietly(CountDownLatch latch) {
+    try {
+      latch.await(WAIT_SECONDS, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
   @Test
   void anAbandonedWorkerStopsAtItsNextCheck() {
     Thread.currentThread().interrupt();

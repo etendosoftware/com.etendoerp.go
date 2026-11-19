@@ -48,6 +48,8 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
 
   static final long TTL_MILLIS = 60_000L;
   static final int MAX_ENTRIES = 256;
+  /** After a failed or timed-out lookup, how long a client is not looked up again. */
+  static final long NEGATIVE_TTL_MILLIS = 30_000L;
   /** How long an event waits for the isolated lookup before it goes out without the facts. */
   static final long LOOKUP_TIMEOUT_MILLIS = 5_000L;
   private static final String SYSTEM_ID = "0";
@@ -79,6 +81,8 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
   private final Function<String, ClientFacts> lookup;
   private final LongSupplier millis;
   private final Map<String, CachedFacts> cache = new LinkedHashMap<>(16, 0.75f, true);
+  /** Clients whose lookup failed, with the instant their window ends (bounded like the cache). */
+  private final Map<String, Long> unavailable = new LinkedHashMap<>(16, 0.75f, true);
 
   RuntimeNeoTelemetryIdentityResolver(Function<String, ClientFacts> lookup, LongSupplier millis) {
     this.lookup = lookup;
@@ -131,6 +135,11 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
       if (cached != null && cached.until > now) {
         return cached.facts;
       }
+      Long retryAt = unavailable.get(clientId);
+      if (retryAt != null && retryAt > now) {
+        // A slow database must not make every event wait for the isolated read again.
+        return NO_FACTS;
+      }
     }
     // The lookup waits up to LOOKUP_TIMEOUT_MILLIS for an isolated worker: never hold the lock
     // across it, or one slow miss would serialize every emitter. Two concurrent misses of the same
@@ -143,10 +152,17 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
       facts = null;
     }
     if (facts == null) {
-      // Not cached: a failed lookup is retried on the next event instead of hiding the facts.
+      // Not cached as facts; the client is only skipped for NEGATIVE_TTL_MILLIS, then retried.
+      synchronized (this) {
+        unavailable.put(clientId, now + NEGATIVE_TTL_MILLIS);
+        if (unavailable.size() > MAX_ENTRIES) {
+          unavailable.remove(unavailable.keySet().iterator().next());
+        }
+      }
       return NO_FACTS;
     }
     synchronized (this) {
+      unavailable.remove(clientId);
       cache.put(clientId, new CachedFacts(facts, now + TTL_MILLIS));
       if (cache.size() > MAX_ENTRIES) {
         // Access order: the eldest entry is the least recently used one.

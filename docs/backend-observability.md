@@ -81,8 +81,11 @@ session and never on a sender thread: a failed query cannot poison a request's t
 sender thread never opens a session nothing closes, and the read ends with a rollback, so telemetry
 never writes (the tenant type can insert an `AD_Preference`; the rollback discards it). It waits at
 most 5 s; on a timeout or any failure the event goes out with `ad_user_id` and `ad_client_id` but
-without `etgo_account_id` and `tenant_type`, and nothing is cached, so the next event retries. The
-cache lock is not held during the lookup. System context (client or
+without `etgo_account_id` and `tenant_type`. The facts are not cached, but the client is skipped for
+30 s (a negative cache, also bounded to 256 clients) so a slow database does not make every event
+wait 5 s; after that the next event retries. The isolated read shares its 4 workers with the
+reports (a timed-out read is cancelled and removed from the queue). The cache lock is not held
+during the lookup. System context (client or
 user `0`) or no session means no identity: events from a scheduler or an anonymous endpoint go out
 without the ids.
 
