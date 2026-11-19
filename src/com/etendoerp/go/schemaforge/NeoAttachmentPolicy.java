@@ -105,6 +105,26 @@ public final class NeoAttachmentPolicy {
    */
   static final long MAX_REQUEST_BYTES = BULK_MAX_FILES * MAX_FILE_BYTES + MULTIPART_MARGIN_BYTES;
 
+  /** Longest accepted file name, in characters (the C_File name column is 60 wide; this is a hard cap). */
+  static final int MAX_FILE_NAME_LENGTH = 255;
+
+  /** MIME type served for anything that is not an approved, inert type. */
+  public static final String INERT_MIME = "application/octet-stream";
+
+  /**
+   * Extensions that execute or render actively when served or unpacked. One of them as an inner
+   * extension ({@code evil.html.pdf}) is refused: the double extension is the classic way to
+   * slip them past a last-extension check.
+   */
+  private static final Set<String> ACTIVE_EXTENSIONS = Collections.unmodifiableSet(
+      new LinkedHashSet<>(Arrays.asList("html", "htm", "xhtml", "shtml", "svg", "svgz", "js", "mjs",
+          "php", "php3", "php4", "php5", "phtml", "jsp", "jspx", "asp", "aspx", "exe", "dll", "bat",
+          "cmd", "com", "scr", "msi", "sh", "ps1", "vbs", "hta", "jar", "war", "cgi", "pl", "py")));
+
+  /** Types whose content can render actively in a browser: always served as {@link #INERT_MIME}. */
+  private static final Set<String> NEVER_INLINE_EXTENSIONS = Collections.unmodifiableSet(
+      new LinkedHashSet<>(Arrays.asList("svg", "xml")));
+
   /** How many leading bytes are read from the uploaded file to test its signature. */
   static final int SIGNATURE_PROBE_BYTES = 64;
 
@@ -275,6 +295,10 @@ public final class NeoAttachmentPolicy {
     if (sizeBytes > MAX_SIZE_BYTES) {
       return "File exceeds the maximum allowed size of " + MAX_SIZE_MB + " MB";
     }
+    String nameRejection = validateFileName(fileName);
+    if (nameRejection != null) {
+      return nameRejection;
+    }
     String extension = extensionOf(fileName);
     if (findType(extension) == null) {
       return "File type not allowed"
@@ -300,8 +324,15 @@ public final class NeoAttachmentPolicy {
     if (file == null || !file.isFile()) {
       return "Uploaded file could not be read";
     }
+    if (file.length() == 0) {
+      return "Uploaded file is empty";
+    }
     if (file.length() > MAX_SIZE_BYTES) {
       return "File exceeds the maximum allowed size of " + MAX_SIZE_MB + " MB";
+    }
+    String nameRejection = validateFileName(fileName);
+    if (nameRejection != null) {
+      return nameRejection;
     }
     String extension = extensionOf(fileName);
     AllowedType type = findType(extension);
@@ -398,7 +429,68 @@ public final class NeoAttachmentPolicy {
     if (sep >= 0) {
       trimmed = trimmed.substring(sep + 1);
     }
+    trimmed = stripControlChars(trimmed).trim();
     return trimmed.isEmpty() ? "attachment" : trimmed;
+  }
+
+  /**
+   * Refuses a file name that is unsafe as submitted: control characters, a path separator or
+   * {@code ..}, more than {@link #MAX_FILE_NAME_LENGTH} characters, or an active inner extension
+   * (double extension such as {@code evil.html.pdf}).
+   *
+   * @param fileName the submitted file name
+   * @return {@code null} when acceptable, otherwise the rejection message
+   */
+  static String validateFileName(String fileName) {
+    if (StringUtils.isBlank(fileName)) {
+      return null;
+    }
+    if (!stripControlChars(fileName).equals(fileName)) {
+      return "File name contains control characters";
+    }
+    if (fileName.indexOf('/') >= 0 || fileName.indexOf('\\') >= 0 || fileName.contains("..")) {
+      return "File name must not contain path components";
+    }
+    if (fileName.length() > MAX_FILE_NAME_LENGTH) {
+      return "File name exceeds " + MAX_FILE_NAME_LENGTH + " characters";
+    }
+    String[] parts = fileName.toLowerCase(Locale.ROOT).split("\\.", -1);
+    for (int i = 1; i < parts.length - 1; i++) {
+      if (ACTIVE_EXTENSIONS.contains(parts[i].trim())) {
+        return "File name has a disallowed inner extension: ." + parts[i].trim();
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The MIME type a download is served with, decided by the file name's extension against the
+   * policy and never by the stored (caller-influenced) type. SVG, XML and every type outside the
+   * allowlist come back as {@link #INERT_MIME}, so an approved-but-active type is never rendered.
+   *
+   * @param fileName the stored file name
+   * @return an inert MIME type, never {@code null}
+   */
+  public static String inertMimeType(String fileName) {
+    String extension = extensionOf(fileName);
+    AllowedType type = findType(extension);
+    if (type == null || type.mimeTypes.isEmpty() || NEVER_INLINE_EXTENSIONS.contains(extension)) {
+      return INERT_MIME;
+    }
+    return type.mimeTypes.get(0);
+  }
+
+  private static String stripControlChars(String value) {
+    StringBuilder out = new StringBuilder(value.length());
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (c == '\r' || c == '\n') {
+        out.append('_');
+      } else if (c >= 0x20 && c != 0x7F && !(c >= 0x80 && c <= 0x9F)) {
+        out.append(c);
+      }
+    }
+    return out.toString();
   }
 
   /** @return the lower-case extension without the dot, or an empty string when there is none. */

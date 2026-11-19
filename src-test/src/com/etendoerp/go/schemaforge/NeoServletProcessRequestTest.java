@@ -186,6 +186,15 @@ class NeoServletProcessRequestTest {
     assertEquals("ETVFAC_reversed_invoice", error.getJSONArray("messageKeys").getString(0));
   }
 
+  /** ETP-4571 (SEC-12): authenticated NEO JSON is never stored by a browser or proxy cache. */
+  @Test
+  void jsonResponsesCarryNoStore() throws Exception {
+    servlet.writeResponse(response, NeoResponse.error(409, "x"));
+
+    verify(response).setHeader("Cache-Control", "no-store");
+    verify(response).setHeader("X-Content-Type-Options", "nosniff");
+  }
+
   // ── ETP-6230: the request context the accounting KPI keeps on the servlet thread ───────────
 
   private static Object restRequestOnThisThread() throws Exception {

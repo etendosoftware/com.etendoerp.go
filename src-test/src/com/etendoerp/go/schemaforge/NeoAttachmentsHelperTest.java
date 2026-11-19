@@ -333,26 +333,11 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * Verifies default binary content type fallback when metadata is blank.
-   */
-  @Test
-  public void resolveContentTypeReturnsDefaultForBlankValues() throws Exception {
-    String fromNull = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, (Object) null);
-    String fromBlank = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "   ");
-    String fromValue = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "text/plain");
-
-    assertEquals("application/octet-stream", fromNull);
-    assertEquals("application/octet-stream", fromBlank);
-    assertEquals("text/plain", fromValue);
-  }
-
-  /**
    * Verifies that content disposition includes both ASCII and RFC 5987 entries.
    */
   @Test
-  public void buildContentDispositionIncludesAsciiAndUtf8Filename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "invoice 2026.pdf");
+  public void contentDispositionIncludesAsciiAndUtf8Filename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("invoice 2026.pdf");
 
     assertTrue(disposition.contains("filename=\"invoice 2026.pdf\""));
     assertTrue(disposition.contains("filename*=UTF-8''invoice%202026.pdf"));
@@ -362,9 +347,8 @@ public class NeoAttachmentsHelperTest {
    * Verifies that dangerous quotes in file names are normalized.
    */
   @Test
-  public void buildContentDispositionReplacesQuotesInFilename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "in\"voice\".pdf");
+  public void contentDispositionReplacesQuotesInFilename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("in\"voice\".pdf");
 
     assertTrue(disposition.contains("filename=\"in_voice_.pdf\""));
   }

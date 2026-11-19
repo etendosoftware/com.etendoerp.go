@@ -57,7 +57,6 @@ public final class AnonymousAttachmentStreamer {
 
   private static final Logger log = LogManager.getLogger(AnonymousAttachmentStreamer.class);
   private static final String DEFAULT_FILE_NAME = "document.pdf";
-  private static final String APPLICATION_PDF = "application/pdf";
   private static final int MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024;
   private static final String DEFAULT_ATTACH_METHOD = "Default";
   private static final String ERR_INVALID_FILE = "Stored document file is invalid";
@@ -143,9 +142,7 @@ public final class AnonymousAttachmentStreamer {
       }
       byte[] fileData = Files.readAllBytes(file.toPath());
       response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(StringUtils.defaultIfBlank(attachment.getDataType(),
-          APPLICATION_PDF));
-      response.setHeader("Content-Disposition", contentDisposition(attachment.getName()));
+      NeoDownloadHeaders.apply(response, attachment.getName(), attachment.getDataType());
       response.setContentLength(fileData.length);
       response.getOutputStream().write(fileData);
       response.getOutputStream().flush();
