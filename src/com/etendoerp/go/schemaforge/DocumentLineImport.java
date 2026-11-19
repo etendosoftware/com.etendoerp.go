@@ -114,6 +114,8 @@ final class DocumentLineImport {
   static final String KEY_SOURCE_LINE_ID = "sourceLineId";
   static final String KEY_QUANTITY = "quantity";
   static final String KEY_PRODUCT = "product";
+  private static final String KEY_REQUESTED = "requested";
+  private static final String KEY_PENDING = "pending";
   /** Start of the {@code etendo_action} id description of every import action. */
   static final String ID_OF_THE_DRAFT = "The id of the draft ";
   /**
@@ -369,10 +371,64 @@ final class DocumentLineImport {
         + " (quantities already in draft documents count as taken).";
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put(KEY_PRODUCT, product);
-    extra.put("requested", requested);
-    extra.put("pending", shown);
+    extra.put(KEY_REQUESTED, requested);
+    extra.put(KEY_PENDING, shown);
     extra.put(KEY_SOURCE_LINE_ID, sourceLineId);
     return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, message, extra);
+  }
+
+  /**
+   * The same refusal for a quantity of 0 or below (ETP-6002 CP-30): what is pending is not the
+   * problem, the sign is. Same status, code and keys as {@link #exceeds}, plus
+   * {@code quantityNotPositive: true}, which tells the sentences apart.
+   */
+  static ImportRefusal quantityNotPositive(String sourceLineId, String product,
+      BigDecimal requested, BigDecimal pending) {
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_PRODUCT, product);
+    extra.put(KEY_REQUESTED, requested);
+    extra.put(KEY_PENDING, pending.max(BigDecimal.ZERO));
+    extra.put(KEY_SOURCE_LINE_ID, sourceLineId);
+    extra.put("quantityNotPositive", true);
+    return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, "The quantity of " + product
+        + " must be greater than 0.", extra);
+  }
+
+  /**
+   * {@link #quantityNotPositive} for the edit of a line that already holds units: it keeps the
+   * {@code maximumAllowed} of {@link #exceedsLineMaximum}, so the shape of an edit refusal does not
+   * change; {@code quantityNotPositive} still selects the sentence.
+   */
+  static ImportRefusal quantityNotPositiveOnEdit(String sourceLineId, String product,
+      BigDecimal requested, BigDecimal maximum) {
+    BigDecimal shown = maximum.max(BigDecimal.ZERO);
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_PRODUCT, product);
+    extra.put(KEY_REQUESTED, requested);
+    extra.put(KEY_PENDING, shown);
+    extra.put("maximumAllowed", shown);
+    extra.put(KEY_SOURCE_LINE_ID, sourceLineId);
+    extra.put("quantityNotPositive", true);
+    return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, "The quantity of " + product
+        + " must be greater than 0.", extra);
+  }
+
+  /**
+   * The same refusal for the edit of a line that already holds units: {@code maximum} counts them,
+   * so it is not what is pending. {@code maximumAllowed} tells the two sentences apart.
+   */
+  static ImportRefusal exceedsLineMaximum(String sourceLineId, String product,
+      BigDecimal requested, BigDecimal maximum) {
+    BigDecimal shown = maximum.max(BigDecimal.ZERO);
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_PRODUCT, product);
+    extra.put(KEY_REQUESTED, requested);
+    extra.put(KEY_PENDING, shown);
+    extra.put("maximumAllowed", shown);
+    extra.put(KEY_SOURCE_LINE_ID, sourceLineId);
+    return new ImportRefusal(SC_UNPROCESSABLE, ERROR_EXCEEDS_PENDING, "Cannot save "
+        + plain(requested) + " of " + product + ": the maximum for this line is " + plain(shown)
+        + ".", extra);
   }
 
   /** The subset of {@code all} that {@code planned} selects, in {@code planned} order. */

@@ -243,6 +243,68 @@ public class DocumentLineImportTest {
     assertFalse(DocumentLineImport.fits(bd("-1"), bd("1")));
   }
 
+  /**
+   * ETP-6002 CP-30: the refusal of an edit of a line that already holds units is the same 422 as
+   * the import's, plus {@code maximumAllowed} — the maximum counts what the line holds, so it is
+   * not a pending, and the key tells the two apart ({@link DocumentLineImport#exceeds} has none).
+   * A negative maximum is never shown: it reads 0.
+   */
+  @Test
+  public void exceedsLineMaximum_carriesTheMaximumAllowedAndNeverANegativeOne() throws Exception {
+    ImportRefusal refusal = DocumentLineImport.exceedsLineMaximum("il-1", "Agua", bd("6"),
+        bd("5"));
+    assertEquals(422, refusal.response().getHttpStatus());
+    assertEquals(DocumentLineImport.ERROR_EXCEEDS_PENDING, refusal.code());
+    JSONObject error = errorOf(refusal);
+    assertEquals("Agua", error.getString("product"));
+    assertEquals("il-1", error.getString("sourceLineId"));
+    assertEquals(0, bd("6").compareTo(new BigDecimal(error.get("requested").toString())));
+    assertEquals(0, bd("5").compareTo(new BigDecimal(error.get("maximumAllowed").toString())));
+    assertEquals(0, bd("5").compareTo(new BigDecimal(error.get("pending").toString())));
+
+    JSONObject negative = errorOf(DocumentLineImport.exceedsLineMaximum("il-1", "Agua",
+        bd("-1"), bd("-3")));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(negative.get("maximumAllowed").toString())));
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(negative.get("pending").toString())));
+
+    assertFalse(errorOf(DocumentLineImport.exceeds("il-1", "Agua", bd("6"), bd("5")))
+        .has("maximumAllowed"));
+  }
+
+  /**
+   * ETP-6002 CP-30: a quantity of 0 or below is refused with the same 422 and code (consumers keep
+   * working) but says what is wrong, its sign, and carries {@code quantityNotPositive} so the SPA
+   * picks its own sentence. A negative pending is never shown.
+   */
+  @Test
+  public void quantityNotPositive_keepsTheCodeAndSaysTheQuantityMustBeAboveZero() throws Exception {
+    for (String requested : new String[] { "0", "-1" }) {
+      ImportRefusal refusal = DocumentLineImport.quantityNotPositive("il-1", "Agua",
+          bd(requested), bd("-2"));
+      assertEquals(requested, 422, refusal.response().getHttpStatus());
+      assertEquals(requested, DocumentLineImport.ERROR_EXCEEDS_PENDING, refusal.code());
+      assertEquals(requested, "The quantity of Agua must be greater than 0.",
+          refusal.getMessage());
+      JSONObject error = errorOf(refusal);
+      assertTrue(requested, error.getBoolean("quantityNotPositive"));
+      assertEquals(requested, "Agua", error.getString("product"));
+      assertEquals(requested, "il-1", error.getString("sourceLineId"));
+      assertEquals(requested, 0, BigDecimal.ZERO.compareTo(
+          new BigDecimal(error.get("pending").toString())));
+    }
+    assertFalse(errorOf(DocumentLineImport.exceeds("il-1", "Agua", bd("6"), bd("5")))
+        .has("quantityNotPositive"));
+
+    ImportRefusal edit = DocumentLineImport.quantityNotPositiveOnEdit("il-1", "Agua", bd("-1"),
+        bd("5"));
+    assertEquals(DocumentLineImport.ERROR_EXCEEDS_PENDING, edit.code());
+    assertEquals("The quantity of Agua must be greater than 0.", edit.getMessage());
+    assertTrue(errorOf(edit).getBoolean("quantityNotPositive"));
+    assertEquals(0, bd("5").compareTo(
+        new BigDecimal(errorOf(edit).get("maximumAllowed").toString())));
+  }
+
   // ── the preconditions ─────────────────────────────────────────────────────
 
   @Test

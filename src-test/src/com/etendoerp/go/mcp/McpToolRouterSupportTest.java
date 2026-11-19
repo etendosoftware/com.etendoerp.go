@@ -2283,6 +2283,35 @@ class McpToolRouterSupportTest {
       assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, out.getString("hint"));
     }
 
+    /**
+     * ETP-6002 CP-30: a coded refusal keeps its code and details through {@code etendo_batch}, as
+     * {@code etendo_create} answers them, and the envelope's own keys keep their values.
+     */
+    @Test
+    @DisplayName("keeps the code and details of a coded refusal, additively")
+    void keepsTheCodeAndDetailsOfARefusal() throws Exception {
+      JSONObject refusal = new JSONObject().put("status", 422)
+          .put("code", "importQuantityExceedsPending").put("message", "Cannot import 3 of P")
+          .put("product", "P").put("requested", 3).put("pending", 2).put("sourceLineId", "il-1");
+      JSONObject error = new JSONObject().put("status", 422)
+          .put("message", "Operation 'l1' rejected by server")
+          .put("detail", new JSONObject().put("error", refusal));
+      JSONObject body = new JSONObject().put("committed", false)
+          .put("failedAt", new JSONObject().put("index", 0).put("id", "l1")).put("error", error);
+
+      JSONObject out = McpBatchEnvelope.toMcpBatchFailure(body).getJSONObject("error");
+
+      assertEquals(422, out.getInt("status"));
+      assertEquals("validation_error", out.getString("error"));
+      assertEquals("Operation 'l1' rejected by server: Cannot import 3 of P",
+          out.getString("detail"));
+      assertEquals("importQuantityExceedsPending", out.getString("code"));
+      assertEquals("P", out.getString("product"));
+      assertEquals(3, out.getInt("requested"));
+      assertEquals(2, out.getInt("pending"));
+      assertEquals("il-1", out.getString("sourceLineId"));
+    }
+
     @Test
     @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
     void rewritesTheFailure() throws Exception {
