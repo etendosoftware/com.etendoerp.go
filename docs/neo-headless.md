@@ -3020,7 +3020,11 @@ everything is Classic's model.
     outstandingAmount (the most that can be remitted), currency (ISO), alreadyInRemittance,
     lineAmount + lineIds (only when already in it; a due with several open details has one line
     each)}], total}`, ordered by dueDate then documentNo. The dues already in this remittance are
-    always listed, even when its due date has moved before theirs. Candidates follow Classic's «Select Invoices and Orders» rules
+    always listed, even when its due date has moved before theirs. When matching dues are left out
+    only because they are expected after the remittance due date, the answer adds `laterDues` (how
+    many) and a `hint` to move the due date and never to select another customer's due instead
+    (ETP-5850: an agent dated the remittance before the invoice it was asked for and processed
+    another customer's due). Candidates follow Classic's «Select Invoices and Orders» rules
     without its default payment-method filter: unpaid, not cancelled, not invoice-paid, invoice
     schedules only, with a business partner, organization in the remittance org's child tree,
     expected date ≤ the remittance due date, direction from the account ↔ type-method link
@@ -9335,7 +9339,7 @@ defaults pass filled, so a create ends with the same values on every channel (se
 | Rule | When | Answer |
 |---|---|---|
 | `overduePaymentDaysRule` (`NetDays`) is required and a whole number: a JSON integer, an integral decimal (`12.0`) or a digit string (`"12"`) — normalized to a number in the body. `7.5`, `"7,5"`, `"abc"`, `"50% 30 / 50% 60"` are refused | create; update when the key is sent (an explicit `null` is refused) | 400, `ETGO_PaymentTermDaysInvalid`, code `payment_term_days_invalid` |
-| the days are within 0–365 | create; update only when the days change (a legacy out-of-range term stays editable) | 400, `ETGO_PaymentTermDaysOutOfRange`, code `payment_term_days_out_of_range` |
+| the days are within 0–365 | create; update only when the days change (a legacy out-of-range term stays editable) | 400, `ETGO_PaymentTermDaysOutOfRange`, code `payment_term_days_out_of_range`, with a `hint` to ask the user for a term in range and not to store the number in another field (ETP-5850: an agent wrote it into the contact's `consumptionDays`) |
 | no other **simple** term in the same client has the same days | create; update only when the days, `offsetMonthDue` or `fixedDueDate` change; only when the term being written is itself simple | 409, `ETGO_PaymentTermDaysDuplicate`, code `payment_term_days_duplicate` |
 | no other term of the same client has exactly this `name` (case-sensitive, untrimmed — the `C_PAYMENTTERM_NAME` unique constraint on `AD_Client_ID, AD_Org_ID, Name`) in the organization the record is saved in, active or not | create (after the name is derived); update only when the name changes. Runs after the days rules | 409, `ETGO_PaymentTermNameDuplicate`, code `payment_term_name_duplicate`, `fields: ["name"]` |
 
