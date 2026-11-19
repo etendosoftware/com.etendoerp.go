@@ -54,8 +54,8 @@ Collected with read-only requests on 2026-07-30.
 
 ## Automated evidence
 
-- `./gradlew test --tests com.etendoerp.go.schemaforge.NeoCsvExportServiceTest` — passed on 2026-07-30. This verifies the existing ETP-4560 classic-trigger mitigation; the full D3 trigger set was added afterwards by ETP-5032 (see SEC-04 above), which delivered the ETP-4568 scope.
-- `node --test packages/app-shell-core/src/lib/csv/__tests__/csvSerializer.test.js` — 23 tests passed on 2026-07-30. The standalone control/full-width fixtures were later made green by ETP-5032 (scope of ETP-4568); 66 tests pass.
+- `./gradlew test --tests com.etendoerp.go.schemaforge.NeoCsvExportServiceTest` — passed on 2026-07-30. This verifies the existing ETP-4560 classic-trigger mitigation; it does not close the remaining SEC-04 paths.
+- `node --test packages/app-shell-core/src/lib/csv/__tests__/csvSerializer.test.js` — 23 tests passed on 2026-07-30. The standalone control/full-width fixtures remain red requirements for ETP-4568.
 - `./gradlew test --tests com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationMatrixTest` —
   9 tests, 5 passed, 4 skipped, 0 failures on 2026-07-30. This is the **E5 deliverable**: the five
   passing tests reproduce SEC-11b by pinning the current insecure contract (a foreign attachment is
@@ -87,7 +87,7 @@ Collected with read-only requests on 2026-07-30.
 | ADR-0001 — backend-managed session | Accepted target on `feature/ETP-4575` / PR #777. Its cookie, CSRF, rotation, expiry, environment-switch and logout contracts match the PRD. Current staging remains legacy and is not marked closed. |
 | ADR-0002 — edge security headers | Proposed in `schema_forge`. Updated for the partial headers already live on production/staging and the missing experimental/API coverage. HSTS inventory is a release gate. |
 | ADR-0003 — attachment authorization | Proposed. Centralized parent-record authorization, normal RBAC, narrow admin scope, uniform `404` and the eight-scenario/six-operation matrix are normative for ETP-4570/4571. |
-| ADR-0004 — CSV neutralization | Accepted. Implemented by ETP-5032, which covers the ETP-4568 code scope (fiscal-monitor, standalone control, full-width); only the manual Excel/Calc/Sheets compatibility evidence remains open. |
+| ADR-0004 — CSV neutralization | Proposed. Updated to recognize ETP-4559/4560 as partial fixes while retaining fiscal-monitor, standalone control, full-width and compatibility-fixture scope for ETP-4568. |
 
 Security/architecture sign-off is still required before changing any ADR status to Accepted.
 
