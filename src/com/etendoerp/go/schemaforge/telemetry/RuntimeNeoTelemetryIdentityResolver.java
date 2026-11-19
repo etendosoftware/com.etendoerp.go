@@ -29,6 +29,7 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
+import com.etendoerp.go.usage.IsolatedDalRead;
 
 /**
  * Resolves the identity from the session ({@code OBContext}) and the client's facts.
@@ -47,6 +48,10 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
 
   static final long TTL_MILLIS = 60_000L;
   static final int MAX_ENTRIES = 256;
+  /** After a failed or timed-out lookup, how long a client is not looked up again. */
+  static final long NEGATIVE_TTL_MILLIS = 30_000L;
+  /** How long an event waits for the isolated lookup before it goes out without the facts. */
+  static final long LOOKUP_TIMEOUT_MILLIS = 5_000L;
   private static final String SYSTEM_ID = "0";
   private static final Logger log = LogManager.getLogger(RuntimeNeoTelemetryIdentityResolver.class);
 
@@ -61,12 +66,23 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
     }
   }
 
+  private static final class CachedFacts {
+    private final ClientFacts facts;
+    private final long until;
+
+    CachedFacts(ClientFacts facts, long until) {
+      this.facts = facts;
+      this.until = until;
+    }
+  }
+
   private static final ClientFacts NO_FACTS = new ClientFacts(null, null);
 
   private final Function<String, ClientFacts> lookup;
   private final LongSupplier millis;
-  private final Map<String, Long> expiry = new LinkedHashMap<>();
-  private final Map<String, ClientFacts> cache = new LinkedHashMap<>();
+  private final Map<String, CachedFacts> cache = new LinkedHashMap<>(16, 0.75f, true);
+  /** Clients whose lookup failed, with the instant their window ends (bounded like the cache). */
+  private final Map<String, Long> unavailable = new LinkedHashMap<>(16, 0.75f, true);
 
   RuntimeNeoTelemetryIdentityResolver(Function<String, ClientFacts> lookup, LongSupplier millis) {
     this.lookup = lookup;
@@ -112,12 +128,22 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
     return id == null || SYSTEM_ID.equals(id);
   }
 
-  private synchronized ClientFacts factsOf(String clientId) {
+  private ClientFacts factsOf(String clientId) {
     long now = millis.getAsLong();
-    Long until = expiry.get(clientId);
-    if (until != null && until > now) {
-      return cache.get(clientId);
+    synchronized (this) {
+      CachedFacts cached = cache.get(clientId);
+      if (cached != null && cached.until > now) {
+        return cached.facts;
+      }
+      Long retryAt = unavailable.get(clientId);
+      if (retryAt != null && retryAt > now) {
+        // A slow database must not make every event wait for the isolated read again.
+        return NO_FACTS;
+      }
     }
+    // The lookup waits up to LOOKUP_TIMEOUT_MILLIS for an isolated worker: never hold the lock
+    // across it, or one slow miss would serialize every emitter. Two concurrent misses of the same
+    // client both look up; the later store wins, which is harmless.
     ClientFacts facts;
     try {
       facts = lookup.apply(clientId);
@@ -126,21 +152,43 @@ final class RuntimeNeoTelemetryIdentityResolver implements NeoTelemetryIdentityR
       facts = null;
     }
     if (facts == null) {
-      // Not cached: a failed lookup is retried on the next event instead of hiding the facts.
+      // Not cached as facts; the client is only skipped for NEGATIVE_TTL_MILLIS, then retried.
+      synchronized (this) {
+        unavailable.put(clientId, now + NEGATIVE_TTL_MILLIS);
+        if (unavailable.size() > MAX_ENTRIES) {
+          unavailable.remove(unavailable.keySet().iterator().next());
+        }
+      }
       return NO_FACTS;
     }
-    if (cache.size() >= MAX_ENTRIES && !cache.containsKey(clientId)) {
-      String eldest = cache.keySet().iterator().next();
-      cache.remove(eldest);
-      expiry.remove(eldest);
+    synchronized (this) {
+      unavailable.remove(clientId);
+      cache.put(clientId, new CachedFacts(facts, now + TTL_MILLIS));
+      if (cache.size() > MAX_ENTRIES) {
+        // Access order: the eldest entry is the least recently used one.
+        cache.remove(cache.keySet().iterator().next());
+      }
     }
-    cache.put(clientId, facts);
-    expiry.put(clientId, now + TTL_MILLIS);
     return facts;
   }
 
-  /** The owner account and the tenant type of {@code clientId}, from the database. */
-  private static ClientFacts lookupClientFacts(String clientId) {
+  /**
+   * The owner account and the tenant type of {@code clientId}, from the database, read in its own
+   * session (ETP-6386). The emitting thread is a request thread (whose transaction a failed query
+   * would poison) or a sender thread (whose session nothing would ever close), and the tenant type
+   * can insert an {@code AD_Preference}: the isolated read ends with a rollback, so telemetry never
+   * persists anything. After {@link #LOOKUP_TIMEOUT_MILLIS}, or on any failure, there are no facts.
+   */
+  static ClientFacts lookupClientFacts(String clientId) {
+    try {
+      return IsolatedDalRead.call(() -> readClientFacts(clientId), LOOKUP_TIMEOUT_MILLIS);
+    } catch (IllegalStateException e) {
+      log.debug("Backend telemetry client facts not read: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  private static ClientFacts readClientFacts(String clientId) {
     OBContext.setAdminMode(true);
     try {
       return new ClientFacts(OwnerAccountResolver.findOwnerAccountId(clientId),

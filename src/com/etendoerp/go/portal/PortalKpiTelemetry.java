@@ -26,6 +26,7 @@ import org.openbravo.model.common.order.Order;
 import com.etendoerp.go.schemaforge.NeoBatchScope;
 import com.etendoerp.go.schemaforge.QuotationDecisions;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -110,7 +111,7 @@ public final class PortalKpiTelemetry {
         return;
       }
       send(NeoTelemetryEvents.BACKEND_PORTAL_DOCUMENT_SENT, typeProperties(link.getClientId(),
-          link.getDocumentKind()), link.getClientId());
+          link.getDocumentKind()), link.getClientId(), identityOf(link.getClientId()));
     } catch (RuntimeException e) {
       log.debug("Portal KPI telemetry: the sent event failed: {}", e.getMessage());
     }
@@ -133,7 +134,8 @@ public final class PortalKpiTelemetry {
     try {
       if (stampFirstDownload(session.getClientId(), documentId)) {
         send(NeoTelemetryEvents.BACKEND_PORTAL_DOCUMENT_DOWNLOADED,
-            typeProperties(session.getClientId(), kind), session.getClientId());
+            typeProperties(session.getClientId(), kind), session.getClientId(),
+            identityOf(session.getClientId()));
       }
     } catch (RuntimeException e) {
       log.debug("Portal KPI telemetry: the download stamp failed: {}", e.getMessage());
@@ -151,7 +153,7 @@ public final class PortalKpiTelemetry {
   static void portalQuotationDecided(boolean accepted, String clientId) {
     try {
       send(NeoTelemetryEvents.BACKEND_QUOTATION_DECIDED,
-          decidedProperties(accepted, SOURCE_PORTAL, clientId), clientId);
+          decidedProperties(accepted, SOURCE_PORTAL, clientId), clientId, identityOf(clientId));
     } catch (RuntimeException e) {
       log.debug("Portal KPI telemetry: the decided event failed: {}", e.getMessage());
     }
@@ -169,7 +171,10 @@ public final class PortalKpiTelemetry {
     try {
       String clientId = clientIdOf(quotation);
       Map<String, Object> properties = decidedProperties(accepted, SOURCE_APP, clientId);
-      afterCommit(() -> send(NeoTelemetryEvents.BACKEND_QUOTATION_DECIDED, properties, clientId));
+      // Captured here, on the request thread: afterCommit runs in a Hibernate afterCompletion.
+      NeoTelemetryIdentity identity = identityOf(clientId);
+      afterCommit(() -> send(NeoTelemetryEvents.BACKEND_QUOTATION_DECIDED, properties, clientId,
+          identity));
     } catch (RuntimeException e) {
       log.debug("Portal KPI telemetry: the decided event failed: {}", e.getMessage());
     }
@@ -318,11 +323,21 @@ public final class PortalKpiTelemetry {
     }
   }
 
-  private static void send(String event, Map<String, Object> properties, String clientId) {
+  /**
+   * The identity of the calling thread's session (ETP-6228): the sender has none and must never
+   * look anything up, so every public entry point captures it before any after-commit callback.
+   */
+  private static NeoTelemetryIdentity identityOf(String clientId) {
+    return telemetry().captureIdentity(clientId, null);
+  }
+
+  private static void send(String event, Map<String, Object> properties, String clientId,
+      NeoTelemetryIdentity identity) {
     try {
       SENDER.execute(() -> {
         try {
-          telemetry().emit(event, properties, clientId);
+          NeoTelemetryIdentity.runWith(identity, () -> telemetry().emit(event, properties,
+              clientId));
         } catch (RuntimeException e) {
           log.debug("Portal KPI telemetry: emit failed: {}", e.getMessage());
         }
