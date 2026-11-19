@@ -1929,11 +1929,11 @@ class EtendoGoJwtDalHelperTest {
      * null, because {@code InitialSetupUtility.insertUser} never sets it, so the account identity
      * lives entirely in {@code username}.
      */
-    private User environmentUser(String username) {
+    private User environmentUser(String username, Boolean active) {
       Client client = mock(Client.class);
       when(client.getId()).thenReturn(CLIENT_ID);
       User user = mock(User.class);
-      when(user.isActive()).thenReturn(Boolean.TRUE);
+      when(user.isActive()).thenReturn(active);
       when(user.getEmail()).thenReturn(null);
       when(user.getUsername()).thenReturn(username);
       when(user.getClient()).thenReturn(client);
@@ -1985,12 +1985,21 @@ class EtendoGoJwtDalHelperTest {
      */
     private Account resolve(String username, String registeredEmail, Account account,
         boolean clientOwned) {
+      return resolve(username, registeredEmail, account, clientOwned, Boolean.TRUE);
+    }
+
+    /**
+     * Same as {@link #resolve(String, String, Account, boolean)}, with the environment user's
+     * active flag under the caller's control.
+     */
+    private Account resolve(String username, String registeredEmail, Account account,
+        boolean clientOwned, Boolean userActive) {
       stubAccountLookups(obDal, registeredEmail, account);
       stubAccountLookups(readOnlyDal, registeredEmail, account);
       obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
       // Built before the stubbing call: environmentUser() stubs its own mocks, and Mockito forbids
       // that while an outer when(...) is still open.
-      User user = environmentUser(username);
+      User user = environmentUser(username, userActive);
       when(obDal.get(User.class, USER_ID)).thenReturn(user);
       when(account.getEmail()).thenReturn(registeredEmail);
       stubClientOwnership(clientOwned);
@@ -2054,21 +2063,21 @@ class EtendoGoJwtDalHelperTest {
     @Test
     @DisplayName("refuses an inactive environment user")
     void refusesInactiveUser() {
+      // Everything else on the happy path is in place (the account exists and owns the JWT's
+      // client), so the inactive flag is the only reason left to refuse the token.
       Account account = mock(Account.class);
-      stubAccountLookups(obDal, ACCOUNT_EMAIL, account);
-      User inactive = mock(User.class);
-      when(inactive.isActive()).thenReturn(Boolean.FALSE);
-      when(obDal.get(User.class, USER_ID)).thenReturn(inactive);
 
-      DecodedJWT jwt = mock(DecodedJWT.class);
-      Claim userClaim = mock(Claim.class);
-      when(userClaim.asString()).thenReturn(USER_ID);
-      when(jwt.getClaim("user")).thenReturn(userClaim);
+      assertNull(resolve(ACCOUNT_EMAIL, ACCOUNT_EMAIL, account, true, Boolean.FALSE));
+      verify(obDal, never()).createQuery(eq(User.class), anyString());
+    }
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
-        swsMock.when(() -> SecureWebServicesUtils.decodeToken(ENVIRONMENT_JWT)).thenReturn(jwt);
-        assertNull(EtendoGoJwtDalHelper.findActiveAccountByBearerToken(ENVIRONMENT_JWT));
-      }
+    @Test
+    @DisplayName("refuses an environment user whose active flag is unset")
+    void refusesUserWithUnsetActiveFlag() {
+      Account account = mock(Account.class);
+
+      assertNull(resolve(ACCOUNT_EMAIL, ACCOUNT_EMAIL, account, true, null));
+      verify(obDal, never()).createQuery(eq(User.class), anyString());
     }
 
     @Test
