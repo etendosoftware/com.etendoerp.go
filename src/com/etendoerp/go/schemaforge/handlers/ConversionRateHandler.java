@@ -50,16 +50,19 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code *} of the tenant, rate type {@code S}, not synced, open end; it inserts the rate AND its
  * inverse, and closes the range in force one minute before the new start (both directions). A
  * currency equal to the organization one, a downloaded currency (it has an {@code SMFCR_RULE}), a
- * rate that is not greater than zero, a missing start and a start inside another range are refused
- * before anything is written ({@link ConversionRateRefusal}).</p>
+ * rate that is not greater than zero, a missing start, a start later than the server's current
+ * minute and a start inside another range are refused before anything is written
+ * ({@link ConversionRateRefusal}).</p>
  *
  * <p><b>Update</b> ({@code PATCH}/{@code PUT}): only {@code multipleRateBy} (the inverse is
  * recomputed) and {@code validFromDate} (same overlap rules; the range closed by this one follows
- * it). <b>Delete</b> removes both rows and does not reopen the previous range. Both are refused on a
- * downloaded range and on one used in accounting (states, see {@link ConversionRateResponses}).</p>
+ * it). <b>Delete</b> removes both rows and does not reopen the previous range. Any manual range can
+ * be changed or deleted, used in accounting or not; only a downloaded range is refused. The writes
+ * bypass the database triggers ({@link ConversionRateTriggerBypass}); what they enforced is
+ * re-checked in {@link ConversionRateWrites}.</p>
  *
  * <p><b>Actions</b>: {@link ConversionRateActions}. Reads are the generic ones; the state columns
- * {@code etgoRateStatus} / {@code etgoUsedInAccounting} are virtual AD columns.</p>
+ * {@code etgoRateStatus} (CURRENT / HISTORIC) is a virtual AD column.</p>
  */
 @NeoExtension(spec = "conversion-rates", entity = "conversionRate")
 public class ConversionRateHandler extends AbstractNeoHandler {

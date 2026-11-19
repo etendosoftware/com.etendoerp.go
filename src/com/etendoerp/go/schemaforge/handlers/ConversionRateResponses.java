@@ -42,13 +42,8 @@ final class ConversionRateResponses {
 
   private static final Logger log = LogManager.getLogger(ConversionRateResponses.class);
 
-  /** Virtual column {@code EM_Etgo_Rate_Status}: CURRENT, POSTED or UNUSED. */
+  /** Virtual column {@code EM_Etgo_Rate_Status}: CURRENT or HISTORIC. */
   static final String F_STATUS = "etgoRateStatus";
-  /** Virtual column {@code EM_Etgo_Used_In_Accounting}. */
-  static final String F_USED_IN_ACCOUNTING = "etgoUsedInAccounting";
-
-  /** Core trigger C_CONVERSION_RATE_TRG: a range with postings cannot change or be deleted. */
-  static final String CORE_USED_RATE = "20506";
   /** Core ConversionRateEventHandler: two ranges of a pair overlap. */
   static final String CORE_OVERLAP = "20504";
   /** com.smf.currency.conversionrate: a downloaded row cannot be deleted. */
@@ -75,7 +70,6 @@ final class ConversionRateResponses {
     json.put(ConversionRateWrites.F_VALID_TO, row.getValidToDate() == null ? JSONObject.NULL
         : NeoDateFormat.toWireDateTime(row.getValidToDate()));
     json.put(F_STATUS, store.statusOf(row.getId()));
-    json.put(F_USED_IN_ACCOUNTING, store.isUsedInAccounting(row.getId()));
     JSONObject inner = new JSONObject();
     inner.put("status", 0);
     inner.put("data", new JSONArray().put(json));
@@ -93,9 +87,6 @@ final class ConversionRateResponses {
    */
   static NeoResponse failure(Throwable failure, String httpMethod, String[] pairIso) {
     String text = messagesOf(failure);
-    if (text.contains(CORE_USED_RATE)) {
-      return ConversionRateRefusal.conflict(ConversionRateRefusal.USED_LOCKED).toResponse();
-    }
     if (text.contains(SMF_SYNCED_DELETE.toLowerCase(Locale.ROOT))) {
       return ConversionRateRefusal.conflict(ConversionRateRefusal.SYNCED_LOCKED).toResponse();
     }

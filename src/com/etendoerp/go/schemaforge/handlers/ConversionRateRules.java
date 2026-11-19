@@ -119,6 +119,18 @@ final class ConversionRateRules {
     }
   }
 
+  /**
+   * Whether {@code validFrom} is later than the minute of {@code now}: a start in the current
+   * minute is accepted (up to {@code HH:mm:59}), a start in a later minute is not.
+   *
+   * @param validFrom a start, minute precision
+   * @param now       the server's current time
+   * @return {@code true} when the start is in the future
+   */
+  static boolean isFuture(LocalDateTime validFrom, LocalDateTime now) {
+    return validFrom.isAfter(now.truncatedTo(ChronoUnit.MINUTES));
+  }
+
   /** The end given to a range closed by one that starts at {@code from}. */
   static LocalDateTime closingInstant(LocalDateTime from) {
     return from.minusMinutes(1);

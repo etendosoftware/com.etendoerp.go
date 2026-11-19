@@ -25,7 +25,6 @@ import org.openbravo.dal.service.OBDal;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
@@ -109,12 +108,15 @@ public final class InvoiceExchangeRateValidator {
     return false;
   }
 
-  /** True if a general {@code C_Conversion_Rate} exists for the invoice date (core lookup). */
+  /**
+   * True if a general {@code C_Conversion_Rate} exists for the invoice date: the last range of the
+   * day, organization tree walked as core's {@code FinancialUtils} did (ETP-6365).
+   */
   private static boolean hasGeneralRate(Invoice invoice, Currency from, Currency to) {
-    if (to == null || invoice.getInvoiceDate() == null) {
+    if (from == null || to == null || invoice.getInvoiceDate() == null) {
       return false;
     }
-    return FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,
-        invoice.getOrganization(), invoice.getClient()) != null;
+    return ConversionRateLookup.orgTreeMultiplyRateOrNull(invoice.getInvoiceDate(), from.getId(),
+        to.getId(), invoice.getOrganization().getId(), invoice.getClient().getId()) != null;
   }
 }

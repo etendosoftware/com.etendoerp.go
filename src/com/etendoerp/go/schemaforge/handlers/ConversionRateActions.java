@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -51,6 +53,7 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  *   <li>{@value #PREVIEW_MANUAL_RATE}: what a create with the same parameters would do — the two
  *       rows it inserts and the rows it closes — or the refusal it would get, without writing.</li>
  *   <li>{@value #CURRENT_RATES}: one entry per currency with a range in force now.</li>
+ *   <li>{@value #SERVER_CLOCK}: the server's current minute, the default start of a new rate.</li>
  * </ul>
  */
 final class ConversionRateActions {
@@ -58,6 +61,7 @@ final class ConversionRateActions {
   static final String MANUAL_CURRENCY_OPTIONS = "manualCurrencyOptions";
   static final String PREVIEW_MANUAL_RATE = "previewManualRate";
   static final String CURRENT_RATES = "currentRates";
+  static final String SERVER_CLOCK = "serverClock";
 
   /** Optional boolean of {@value #MANUAL_CURRENCY_OPTIONS}. */
   static final String P_WITHOUT_RATES = "withoutRates";
@@ -98,7 +102,8 @@ final class ConversionRateActions {
                 + " currency, in either direction. Default false."))
         .withIdDescription(ID_NOT_USED));
     contracts.put(PREVIEW_MANUAL_RATE, NeoActionContract.read(PREVIEW_MANUAL_RATE,
-        "Dry run of a manual rate create; writes nothing. Returns {creates:[{fromIso, toIso,"
+        "Dry run of a manual rate create; writes nothing. validFromDate cannot be later than"
+            + " the server's current minute (see serverClock). Returns {creates:[{fromIso, toIso,"
             + " rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]} — the"
             + " two rows (rate and its inverse) the create inserts and the rows of the range in"
             + " force it closes one minute before validFromDate — or {creates:[], closes:[],"
@@ -119,6 +124,11 @@ final class ConversionRateActions {
             + " lastDownloadAt}]. lastDownloadAt (AUTO only) is the latest fully successful run"
             + " of the rate downloader, or the time the row was last written when there is no"
             + " such run.")
+        .withIdDescription(ID_NOT_USED));
+    contracts.put(SERVER_CLOCK, NeoActionContract.read(SERVER_CLOCK,
+        "Returns {now: yyyy-MM-ddTHH:mm:00}, the server's current minute (server-local wall clock,"
+            + " the time zone validFromDate is read in). A rate cannot start later than this"
+            + " minute: use it as the default validFromDate of a new rate.")
         .withIdDescription(ID_NOT_USED));
     return Collections.unmodifiableMap(contracts);
   }
@@ -148,6 +158,8 @@ final class ConversionRateActions {
       data = manualCurrencyOptions(store, params.optBoolean(P_WITHOUT_RATES, false));
     } else if (PREVIEW_MANUAL_RATE.equals(name)) {
       return wrap(preview(params, store));
+    } else if (SERVER_CLOCK.equals(name)) {
+      return wrap(serverClock(store));
     } else {
       data = currentRates(store);
     }
@@ -273,6 +285,13 @@ final class ConversionRateActions {
       rates.put(entry);
     }
     return rates;
+  }
+
+  /** {@code {now}}: the server's current minute, seconds zeroed, server-local wall clock. */
+  static JSONObject serverClock(ConversionRateStore store) throws JSONException {
+    LocalDateTime minute = store.now().truncatedTo(ChronoUnit.MINUTES);
+    return new JSONObject().put("now", NeoDateFormat.toWireDateTime(
+        ConversionRateStore.toDate(minute)));
   }
 
   /** The downloader's last successful run, unless the row itself is newer (or there is no run). */

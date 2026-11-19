@@ -324,10 +324,9 @@ public class CurrencyOptionsHandler implements NeoHandler {
       String orgCurrencyId, String orgId, String clientId, LocalDate orderDate) throws Exception {
 
     Connection conn = OBDal.getInstance().getConnection();
-    java.sql.Date sqlDate = java.sql.Date.valueOf(orderDate);
 
-    Map<String, double[]> rateMap = queryDirectRates(conn, orgCurrencyId, clientId, orgId, sqlDate);
-    mergeInverseRates(conn, orgCurrencyId, rateMap, clientId, orgId, sqlDate);
+    Map<String, double[]> rateMap = queryDirectRates(conn, orgCurrencyId, clientId, orgId, orderDate);
+    mergeInverseRates(conn, orgCurrencyId, rateMap, clientId, orgId, orderDate);
 
     JSONArray arr = new JSONArray();
     String orgIsoCode = resolveIsoCode(conn, orgCurrencyId);
@@ -391,7 +390,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
   }
 
   private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
-      String clientId, String orgId, java.sql.Date sqlDate) throws java.sql.SQLException {
+      String clientId, String orgId, LocalDate day) throws java.sql.SQLException {
     Map<String, double[]> rateMap = new LinkedHashMap<>();
     // Include the client's own rates and the shared system ('0') rates. Rows are collected into a
     // map keyed by currency (last write wins), so ad_client_id ASC writes the '0' row first and the
@@ -405,18 +404,18 @@ public class CurrencyOptionsHandler implements NeoHandler {
       + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
       + " AND cr.isactive = 'Y'"
       + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      // Last row per currency wins: the client's own over the system's, then the latest validfrom —
-      // the precedence NeoExchangeRateService#queryRate applies (ETP-5840: the list and the saved
-      // rate must agree).
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
+      // ETP-6365: the day rule of ConversionRateLookup (ValidFrom before the next day, ValidTo on
+      // or after the day). Last row per currency wins: rows are read System first, then the
+      // client's, each by ascending start — the client's own over the system's, then the latest
+      // range touching the day, the precedence NeoExchangeRateService#queryRate applies (ETP-5840:
+      // the list and the saved rate must agree). Same answer as before on 00:00 data.
+      + ConversionRateLookup.DAY_PREDICATE
+      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
+      ConversionRateLookup.bindDay(ps, 4, day);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           rateMap.put(rs.getString("cid"), new double[]{ rs.getDouble("multiplyrate") });
@@ -428,7 +427,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private void mergeInverseRates(Connection conn, String orgCurrencyId,
       Map<String, double[]> rateMap, String clientId, String orgId,
-      java.sql.Date sqlDate) throws java.sql.SQLException {
+      LocalDate day) throws java.sql.SQLException {
     Map<String, double[]> inverseMap = new LinkedHashMap<>();
     // Include the client's own rates and the shared system ('0') rates; ad_client_id ASC lets a
     // tenant rate override the system rate for the same currency (map keyed by currency, last wins).
@@ -441,15 +440,13 @@ public class CurrencyOptionsHandler implements NeoHandler {
       + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
       + " AND cr.isactive = 'Y'"
       + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
+      + ConversionRateLookup.DAY_PREDICATE
+      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
+      ConversionRateLookup.bindDay(ps, 4, day);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           String cid = rs.getString("cid");

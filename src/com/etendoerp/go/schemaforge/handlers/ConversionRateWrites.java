@@ -47,6 +47,17 @@ import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
  * at the end of the request, the batch at the end of the batch), and the caller rolls back on any
  * failure, so a range never ends up without its inverse.</p>
  *
+ * <p><b>Triggers off, their checks kept.</b> Every write runs through
+ * {@link ConversionRateTriggerBypass}, so core's {@code C_CONVERSION_RATE_TRG} and
+ * {@code C_CONVERSION_RATE_TRG3} do not run for them: any manual range can be changed or deleted,
+ * postings or not (only downloaded rows stay locked). What those triggers enforce and is still
+ * wanted is checked here instead ({@link #checkRow}): an end is never empty (an open range is
+ * written as 9999-12-31, what the trigger stores), the end is never before the start (the
+ * trigger's {@code @20505@}) and the two currencies differ (TRG3's {@code @SameCurrency@}). Left
+ * out on purpose: the trigger's {@code @20506@} "rate used in accounting" refusal, which is what
+ * the bypass is for. Core's Java {@code ConversionRateEventHandler} (overlap, 20504) is not a
+ * trigger and still runs at flush.</p>
+ *
  * <p><b>Order of the writes.</b> Core's {@code ConversionRateEventHandler} refuses (20504) a row
  * whose dates overlap another row of the pair at flush time, and Hibernate flushes inserts before
  * updates. A range that is being shortened is therefore written and flushed first, then the new or
@@ -71,6 +82,7 @@ class ConversionRateWrites {
   private static final Set<String> FIXED_REFERENCES = Set.of(F_CURRENCY, F_TO_CURRENCY);
 
   private final ConversionRateStore store;
+  private final ConversionRateTriggerBypass bypass;
   private String fromIso;
   private String toIso;
 
@@ -84,7 +96,12 @@ class ConversionRateWrites {
   }
 
   ConversionRateWrites(ConversionRateStore store) {
+    this(store, new ConversionRateTriggerBypass());
+  }
+
+  ConversionRateWrites(ConversionRateStore store, ConversionRateTriggerBypass bypass) {
     this.store = store;
+    this.bypass = bypass;
   }
 
   /** The {@code [from, to]} ISO codes of the pair being written, for a database refusal. */
@@ -118,7 +135,7 @@ class ConversionRateWrites {
       throw ConversionRateRefusal.badRequest(ConversionRateRefusal.AUTO_CURRENCY, toIso);
     }
     BigDecimal rate = requireRate(body.opt(F_RATE));
-    LocalDateTime validFrom = requireValidFrom(body.opt(F_VALID_FROM));
+    LocalDateTime validFrom = requirePastValidFrom(body.opt(F_VALID_FROM));
     return new CreateRequest(clientId, orgCurrency, to, rate, validFrom);
   }
 
@@ -143,6 +160,10 @@ class ConversionRateWrites {
    * @return the forward row (organization currency to the other one)
    */
   ConversionRate applyCreate(CreatePlan createPlan) {
+    return bypass.run(() -> writeCreate(createPlan));
+  }
+
+  private ConversionRate writeCreate(CreatePlan createPlan) {
     for (Close close : createPlan.plan().closes()) {
       writeEnd(close);
     }
@@ -172,28 +193,38 @@ class ConversionRateWrites {
     checkEditable(row);
     rejectFixedFields(row, body);
     BigDecimal rate = body.has(F_RATE) ? requireRate(body.opt(F_RATE)) : null;
-    LocalDateTime newFrom = body.has(F_VALID_FROM) ? requireValidFrom(body.opt(F_VALID_FROM))
+    LocalDateTime newFrom = body.has(F_VALID_FROM) ? requirePastValidFrom(body.opt(F_VALID_FROM))
         : null;
 
     List<Range> ranges = rangesOf(row);
     Range target = targetOf(ranges, row);
+    Plan move = null;
     if (newFrom != null && !newFrom.equals(target.validFrom())) {
-      moveStart(ranges, target, newFrom);
+      move = planMove(ranges, target, newFrom);
     }
-    if (rate != null) {
-      writeRate(row, target, rate);
-    }
-    flush();
-    return row;
+    Plan plannedMove = move;
+    return bypass.run(() -> {
+      if (plannedMove != null) {
+        moveStart(plannedMove, target, newFrom);
+      }
+      if (rate != null) {
+        writeRate(row, target, rate);
+      }
+      return row;
+    });
   }
 
-  private void moveStart(List<Range> ranges, Range target, LocalDateTime newFrom) {
+  private Plan planMove(List<Range> ranges, Range target, LocalDateTime newFrom) {
     List<Range> others = new ArrayList<>(ranges);
     others.remove(target);
     Plan plan = ConversionRateRules.planMove(others, target, newFrom);
     if (plan.overlap()) {
       throw ConversionRateRefusal.overlapOf(fromIso, toIso);
     }
+    return plan;
+  }
+
+  private void moveStart(Plan plan, Range target, LocalDateTime newFrom) {
     Close adjacent = plan.closes().isEmpty() ? null : plan.closes().get(0);
     boolean shrinksAdjacent = adjacent != null
         && adjacent.newValidTo().isBefore(adjacent.range().validTo());
@@ -202,7 +233,9 @@ class ConversionRateWrites {
       flush();
     }
     for (String id : target.rowIds()) {
-      store.rate(id).setValidFromDate(ConversionRateStore.toDate(newFrom));
+      ConversionRate moved = store.rate(id);
+      moved.setValidFromDate(ConversionRateStore.toDate(newFrom));
+      checkRow(moved);
     }
     flush();
     if (adjacent != null && !shrinksAdjacent) {
@@ -240,24 +273,45 @@ class ConversionRateWrites {
     rememberPair(row);
     checkEditable(row);
     Range target = targetOf(rangesOf(row), row);
-    for (String id : target.rowIds()) {
-      OBDal.getInstance().remove(store.rate(id));
-    }
-    flush();
+    bypass.run(() -> {
+      for (String id : target.rowIds()) {
+        OBDal.getInstance().remove(store.rate(id));
+      }
+      return null;
+    });
   }
 
   // --- shared --------------------------------------------------------------------------------
 
   /**
-   * A range can be changed or deleted only while it is manual and not used in accounting — that
-   * is, while its state is {@code UNUSED}, or {@code CURRENT} without postings.
+   * Every manual range can be changed or deleted, used in accounting or not: a posted document
+   * keeps the rate it was posted with. Only a downloaded row is locked.
    */
   void checkEditable(ConversionRate row) {
     if (store.isSynced(row)) {
       throw ConversionRateRefusal.conflict(ConversionRateRefusal.SYNCED_LOCKED);
     }
-    if (store.isUsedInAccounting(row.getId())) {
-      throw ConversionRateRefusal.conflict(ConversionRateRefusal.USED_LOCKED);
+  }
+
+  /**
+   * What core's triggers enforced on a row and still holds with them bypassed: an end is set (an
+   * open range is 9999-12-31), the end is not before the start ({@code @20505@}) and the two
+   * currencies differ ({@code @SameCurrency@}). A violation is a planning bug, never a user
+   * input — the input is refused before anything is written — so it fails the write (rolled back).
+   *
+   * @throws IllegalStateException when the row breaks one of them
+   */
+  static void checkRow(ConversionRate row) {
+    String broken = null;
+    if (row.getValidToDate() == null || row.getValidFromDate() == null) {
+      broken = "has no start or no end";
+    } else if (row.getValidToDate().before(row.getValidFromDate())) {
+      broken = "ends before it starts";
+    } else if (row.getCurrency().getId().equals(row.getToCurrency().getId())) {
+      broken = "converts a currency to itself";
+    }
+    if (broken != null) {
+      throw new IllegalStateException("Conversion rate " + row.getId() + " " + broken);
     }
   }
 
@@ -316,7 +370,9 @@ class ConversionRateWrites {
 
   private void writeEnd(Close close) {
     for (String id : close.range().rowIds()) {
-      store.rate(id).setValidToDate(ConversionRateStore.toDate(close.newValidTo()));
+      ConversionRate closed = store.rate(id);
+      closed.setValidToDate(ConversionRateStore.toDate(close.newValidTo()));
+      checkRow(closed);
     }
   }
 
@@ -337,6 +393,7 @@ class ConversionRateWrites {
     // end, so core's overlap check (ConversionRateEventHandler) compares a real date at flush.
     rate.setValidToDate(ConversionRateStore.toDate(validTo != null ? validTo
         : ConversionRateRules.OPEN_END));
+    checkRow(rate);
     OBDal.getInstance().save(rate);
     return rate;
   }
@@ -370,10 +427,17 @@ class ConversionRateWrites {
     return rate;
   }
 
-  private static LocalDateTime requireValidFrom(Object raw) {
+  /**
+   * A valid start that is not later than the server's current minute: a range never starts in
+   * the future, so a rate is in force the moment it is saved.
+   */
+  private LocalDateTime requirePastValidFrom(Object raw) {
     LocalDateTime validFrom = ConversionRateRules.parseValidFrom(raw);
     if (validFrom == null) {
       throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_VALID_FROM);
+    }
+    if (ConversionRateRules.isFuture(validFrom, store.now())) {
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FUTURE_START);
     }
     return validFrom;
   }

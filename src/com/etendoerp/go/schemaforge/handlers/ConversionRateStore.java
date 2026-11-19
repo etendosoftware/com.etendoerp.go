@@ -67,8 +67,7 @@ class ConversionRateStore {
   static final String TABLE_RULE = "SMFCR_Rule";
   static final String TABLE_SYNC_LOG = "SMFCR_Sync_Log";
   static final String STATUS_CURRENT = "CURRENT";
-  static final String STATUS_POSTED = "POSTED";
-  static final String STATUS_UNUSED = "UNUSED";
+  static final String STATUS_HISTORIC = "HISTORIC";
   static final String SYSTEM_ID = "0";
 
   private static final String COL_ID = "c_currency_id";
@@ -330,15 +329,15 @@ class ConversionRateStore {
     return entity.hasProperty(PROP_SYNCED) && Boolean.TRUE.equals(row.get(PROP_SYNCED));
   }
 
-  /** {@code ETGO_CONVRATE_POSTED}: whether the accounting uses the range of this row. */
-  boolean isUsedInAccounting(String rateId) {
-    return "Y".equals(callFunction("SELECT etgo_convrate_posted(?)", rateId));
-  }
-
-  /** {@code ETGO_CONVRATE_STATUS}: CURRENT, POSTED or UNUSED. */
+  /** {@code ETGO_CONVRATE_STATUS}: CURRENT or HISTORIC. */
   String statusOf(String rateId) {
     String status = callFunction("SELECT etgo_convrate_status(?)", rateId);
-    return status != null ? status : STATUS_UNUSED;
+    return status != null ? status : STATUS_HISTORIC;
+  }
+
+  /** The server's current wall-clock time; a seam for unit tests. */
+  LocalDateTime now() {
+    return LocalDateTime.now();
   }
 
   private String callFunction(String sql, String rateId) {

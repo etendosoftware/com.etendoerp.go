@@ -30,8 +30,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
@@ -283,12 +281,10 @@ final class PaymentCurrencyConverter {
     if (invoice.getInvoiceDate() == null) {
       return null;
     }
-    ConversionRate rate = FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,
-        invoice.getOrganization(), invoice.getClient());
-    if (rate == null) {
-      return null;
-    }
-    BigDecimal multiplyRate = rate.getMultipleRateBy();
+    // ETP-6365: the last range of the invoice day, organization tree walked as core did.
+    BigDecimal multiplyRate = ConversionRateLookup.orgTreeMultiplyRateOrNull(
+        invoice.getInvoiceDate(), from.getId(), to.getId(), invoice.getOrganization().getId(),
+        invoice.getClient().getId());
     return multiplyRate != null && multiplyRate.signum() != 0 ? multiplyRate : null;
   }
 
