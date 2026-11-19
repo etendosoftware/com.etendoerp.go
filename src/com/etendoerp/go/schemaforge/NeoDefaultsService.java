@@ -1457,7 +1457,40 @@ public class NeoDefaultsService {
       params.put("IsSOTrx", soTrx);
       params.put("isSOTrx", soTrx);
     }
+    putFallbackOrganization(params, ctx);
     return params;
+  }
+
+  /**
+   * ETP-5086: gives the combo first-option fallback an organization context so the selector
+   * prefers the target record's organization tree (plus {@code *}) instead of picking the
+   * alphabetically-first row across every readable organization. The organization comes from the
+   * record being created (request body), then the parent record (via {@code parentId}), then the
+   * session's current organization. Organization {@code 0} carries no preference and is skipped.
+   */
+  private static void putFallbackOrganization(Map<String, String> params, NeoContext ctx) {
+    if (ctx == null) {
+      return;
+    }
+    String orgId = null;
+    JSONObject requestBody = ctx.getRequestBody();
+    if (requestBody != null) {
+      orgId = StringUtils.trimToNull(requestBody.optString("organization", null));
+    }
+    Map<String, String> queryParams = ctx.getQueryParams();
+    if (orgId == null && queryParams != null) {
+      String parentId = StringUtils.trimToNull(queryParams.get("parentId"));
+      if (parentId != null) {
+        params.put("parentId", parentId);
+      }
+    }
+    if (orgId == null && !params.containsKey("parentId") && ctx.getObContext() != null
+        && ctx.getObContext().getCurrentOrganization() != null) {
+      orgId = ctx.getObContext().getCurrentOrganization().getId();
+    }
+    if (orgId != null && !"0".equals(orgId)) {
+      params.put("AD_Org_ID", orgId);
+    }
   }
 
   static Object resolveFirstComboOption(Column col, NeoContext ctx) {
