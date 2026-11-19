@@ -370,6 +370,7 @@ com.etendoerp.go.schemaforge.NeoCrudHandlerTest
 com.etendoerp.go.schemaforge.NeoCsvExportServiceTest
 com.etendoerp.go.schemaforge.NeoCurrencyPrecisionTest
 com.etendoerp.go.schemaforge.NeoCurrencyTotalsTest
+com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheckTest
 com.etendoerp.go.schemaforge.NeoDefaultTenantGuardTest
 com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelperTest
 com.etendoerp.go.schemaforge.NeoDefaultsEndpointTest
