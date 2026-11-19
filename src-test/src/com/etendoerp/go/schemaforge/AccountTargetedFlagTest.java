@@ -29,15 +29,18 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
@@ -59,41 +62,75 @@ import dev.openfeature.sdk.ProviderEvaluation;
 import dev.openfeature.sdk.Value;
 
 /**
- * The {@code bank-bounce-suggestions} gate: the {@code ETGO_ACCOUNT} email of the request user
- * reaches the provider as targeting key and as both email attributes, a targeted account reads on
- * and any other account off, and every way of not knowing the account — no {@link OBContext}, no
- * account behind the user, an account without email, a failed lookup — reads off, never on.
+ * The per-account flag readers {@link BankBounceSuggestionsFlag} ({@code bank-bounce-suggestions})
+ * and {@link Psd2ImportSettingsFlag} ({@code psd2-statement-import-settings}): the
+ * {@code ETGO_ACCOUNT} email of the request user reaches the provider as targeting key and as both
+ * email attributes, a targeted account reads on and any other account off, and every way of not
+ * knowing the account — no {@link OBContext}, no account behind the user, an account without email,
+ * a failed lookup — reads off, never on. Both classes are independent copies of the same reader, so
+ * every case runs on each of them.
  *
  * <p>End to end through the real {@link GoFeatureFlags} and, where the account resolution is what
  * is under test, the real {@link GoAccountResolver} over a mocked {@link OBContext} and
  * {@link OBDal}. {@code Openbravo.properties} is mocked empty and a JVM {@code -D} override of the
- * flag is lifted for each case (and put back after it), so neither a developer's local override nor
+ * flags is lifted for each case (and put back after it), so neither a developer's local override nor
  * a forced run can leak into the "unset" assertion (same isolation as {@code InvoiceInboxFlagTest}).
  *
  * @covers com.etendoerp.go.schemaforge.BankBounceSuggestionsFlag
+ * @covers com.etendoerp.go.schemaforge.Psd2ImportSettingsFlag
  */
-class BankBounceSuggestionsFlagTest {
+class AccountTargetedFlagTest {
 
-  private static final String FLAG_KEY = "bank-bounce-suggestions";
-  private static final String FLAG_PROPERTY = "etendo.go.flags.bank-bounce-suggestions";
   /** {@code GoFeatureFlags.OPENFEATURE_DOMAIN}: package-private there, so named here. */
   private static final String OPENFEATURE_DOMAIN = "etendo-go";
   private static final String ACCOUNT_EMAIL = "Ana.Garcia@Example.com";
   private static final String ACCOUNT_EMAIL_LOWERCASE = "ana.garcia@example.com";
 
+  /**
+   * One flag reader under test.
+   *
+   * @param key           the flag key the reader is expected to ask for
+   * @param registeredKey the key as registered in {@link GoFeatureFlags}
+   * @param reader        the reader's {@code isEnabled()}
+   */
+  private record Flag(String key, String registeredKey, Supplier<Boolean> reader) {
+    String property() {
+      return "etendo.go.flags." + key;
+    }
+
+    @Override
+    public String toString() {
+      return key;
+    }
+  }
+
+  static Stream<Flag> flags() {
+    return Stream.of(
+        new Flag("bank-bounce-suggestions", GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS,
+            BankBounceSuggestionsFlag::isEnabled),
+        new Flag("psd2-statement-import-settings",
+            GoFeatureFlags.FLAG_PSD2_STATEMENT_IMPORT_SETTINGS, Psd2ImportSettingsFlag::isEnabled));
+  }
+
+  static Stream<Arguments> flagsAndNonBooleanValues() {
+    return flags().flatMap(flag -> Stream.of("maybe", "on", "enabled", "2")
+        .map(value -> Arguments.of(flag, value)));
+  }
+
   private MockedStatic<OBPropertiesProvider> propertiesMock;
-  /** The JVM's own value of the flag property (a {@code -D} override), restored after each case. */
-  private String jvmOverride;
+  /** The JVM's own value of each flag property (a {@code -D} override), restored after a case. */
+  private final Map<String, String> jvmOverrides = new HashMap<>();
 
   /**
    * Isolates each case from the machine's configuration: clears a {@code -D} override of the
-   * flag (kept to restore it) and serves an empty {@code Openbravo.properties}.
+   * flags (kept to restore it) and serves an empty {@code Openbravo.properties}.
    */
   @BeforeEach
   void isolateFromOpenbravoProperties() {
     // A -D override outranks every other source, so "unset" means unset here too; it is put back
     // afterwards so the rest of the JVM still runs with it.
-    jvmOverride = System.clearProperty(FLAG_PROPERTY);
+    flags().forEach(flag -> jvmOverrides.put(flag.property(),
+        System.clearProperty(flag.property())));
     OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
     when(provider.getOpenbravoProperties()).thenReturn(new Properties());
     propertiesMock = mockStatic(OBPropertiesProvider.class);
@@ -101,23 +138,26 @@ class BankBounceSuggestionsFlagTest {
   }
 
   /**
-   * Restores the JVM's own {@code -D} override of the flag, if it had one, and closes the
+   * Restores the JVM's own {@code -D} override of the flags, if they had one, and closes the
    * properties mock.
    */
   @AfterEach
   void clearOverride() {
-    if (jvmOverride != null) {
-      System.setProperty(FLAG_PROPERTY, jvmOverride);
-    } else {
-      System.clearProperty(FLAG_PROPERTY);
-    }
+    jvmOverrides.forEach((property, value) -> {
+      if (value != null) {
+        System.setProperty(property, value);
+      } else {
+        System.clearProperty(property);
+      }
+    });
     propertiesMock.close();
   }
 
   /** The flag key is the registered one. */
-  @Test
-  void theFlagKeyIsTheRegisteredOne() {
-    assertEquals(FLAG_KEY, GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void theFlagKeyIsTheRegisteredOne(Flag flag) {
+    assertEquals(flag.key(), flag.registeredKey());
   }
 
   // ---------------------------------------------------------------- evaluation context
@@ -126,11 +166,12 @@ class BankBounceSuggestionsFlagTest {
    * What a hosted provider receives: the account email as targeting key and {@code Email}, and
    * lowercased as {@code email} (the Datadog rule spelling). A per-account rule matches it.
    */
-  @Test
-  void theAccountEmailReachesTheProviderAndATargetedAccountReadsOn() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void theAccountEmailReachesTheProviderAndATargetedAccountReadsOn(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    boolean enabled = withCurrentAccount(ACCOUNT_EMAIL, provider);
+    boolean enabled = withCurrentAccount(flag, ACCOUNT_EMAIL, provider);
 
     assertTrue(enabled);
     assertEquals(1, provider.contexts.size());
@@ -142,23 +183,25 @@ class BankBounceSuggestionsFlagTest {
   }
 
   /** An account the rule does not target reads off. */
-  @Test
-  void anAccountTheRuleDoesNotTargetReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void anAccountTheRuleDoesNotTargetReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    assertFalse(withCurrentAccount("someone.else@example.com", provider));
+    assertFalse(withCurrentAccount(flag, "someone.else@example.com", provider));
     assertEquals(1, provider.contexts.size(), "it was evaluated, and answered off");
   }
 
   /** The account is resolved the way {@code PortalLinkPolicy} resolves it: the request user's. */
-  @Test
-  void theAccountOfTheRequestUserIsResolvedFromTheContext() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void theAccountOfTheRequestUserIsResolvedFromTheContext(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
 
-    boolean enabled = withResolvedAccount(contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> account,
-        provider);
+    boolean enabled = withResolvedAccount(flag, contextOfUser(ACCOUNT_EMAIL_LOWERCASE),
+        () -> account, provider);
 
     assertTrue(enabled);
     assertEquals(ACCOUNT_EMAIL, provider.contexts.get(0).getTargetingKey());
@@ -167,41 +210,47 @@ class BankBounceSuggestionsFlagTest {
   // ---------------------------------------------------------------- no account means off
 
   /** No ob context reads off with no identity. */
-  @Test
-  void noOBContextReadsOffWithNoIdentity() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void noOBContextReadsOffWithNoIdentity(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    assertFalse(withResolvedAccount(null, () -> fail("no lookup without a context"), provider));
+    assertFalse(withResolvedAccount(flag, null, () -> fail("no lookup without a context"),
+        provider));
     assertNoIdentity(provider);
   }
 
   /** No account behind the user reads off. */
-  @Test
-  void noAccountBehindTheUserReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void noAccountBehindTheUserReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    assertFalse(withResolvedAccount(contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> null, provider));
+    assertFalse(withResolvedAccount(flag, contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> null,
+        provider));
     assertNoIdentity(provider);
   }
 
   /** An account with a null email reads off. */
-  @Test
-  void anAccountWithANullEmailReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void anAccountWithANullEmailReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(null);
 
-    assertFalse(withResolvedAccount(contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> account,
+    assertFalse(withResolvedAccount(flag, contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> account,
         provider));
     assertNoIdentity(provider);
   }
 
   /** A failed account query reads off. */
-  @Test
-  void aFailedAccountQueryReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void aFailedAccountQueryReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    boolean enabled = assertDoesNotThrow(() -> withResolvedAccount(
+    boolean enabled = assertDoesNotThrow(() -> withResolvedAccount(flag,
         contextOfUser(ACCOUNT_EMAIL_LOWERCASE), () -> {
           throw new IllegalStateException("database unavailable");
         }, provider));
@@ -211,13 +260,14 @@ class BankBounceSuggestionsFlagTest {
   }
 
   /** A failure reading the user reads off. */
-  @Test
-  void aFailureReadingTheUserReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void aFailureReadingTheUserReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
     OBContext context = mock(OBContext.class);
     when(context.getUser()).thenThrow(new IllegalStateException("session gone"));
 
-    boolean enabled = assertDoesNotThrow(() -> withResolvedAccount(context,
+    boolean enabled = assertDoesNotThrow(() -> withResolvedAccount(flag, context,
         () -> fail("no lookup without a user"), provider));
 
     assertFalse(enabled);
@@ -225,46 +275,49 @@ class BankBounceSuggestionsFlagTest {
   }
 
   /** No user in the context reads off. */
-  @Test
-  void noUserInTheContextReadsOff() {
-    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void noUserInTheContextReadsOff(Flag flag) {
+    CapturingProvider provider = new CapturingProvider(flag.key(), false, ACCOUNT_EMAIL_LOWERCASE);
 
-    assertFalse(withResolvedAccount(mock(OBContext.class), () -> fail("no lookup without a user"),
-        provider));
+    assertFalse(withResolvedAccount(flag, mock(OBContext.class),
+        () -> fail("no lookup without a user"), provider));
     assertNoIdentity(provider);
   }
 
   // ---------------------------------------------------------------- fail closed
 
   /** An unset flag reads off. */
-  @Test
-  void anUnsetFlagReadsOff() {
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void anUnsetFlagReadsOff(Flag flag) {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
       accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
 
-      assertFalse(BankBounceSuggestionsFlag.isEnabled());
+      assertFalse(flag.reader().get());
     }
   }
 
   /** A value that is not a boolean reads off. */
-  @ParameterizedTest
-  @ValueSource(strings = { "maybe", "on", "enabled", "2" })
-  void aValueThatIsNotABooleanReadsOff(String value) {
-    System.setProperty(FLAG_PROPERTY, value);
+  @ParameterizedTest(name = "{0} = {1}")
+  @MethodSource("flagsAndNonBooleanValues")
+  void aValueThatIsNotABooleanReadsOff(Flag flag, String value) {
+    System.setProperty(flag.property(), value);
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
       accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
 
-      assertFalse(BankBounceSuggestionsFlag.isEnabled(), value);
+      assertFalse(flag.reader().get(), value);
     }
   }
 
   /** A provider that fails reads off and does not throw. */
-  @Test
-  void aProviderThatFailsReadsOffAndDoesNotThrow() {
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("flags")
+  void aProviderThatFailsReadsOffAndDoesNotThrow(Flag flag) {
     // The failing provider would have matched this very account: a failure must still read off.
-    CapturingProvider provider = new CapturingProvider(true, ACCOUNT_EMAIL_LOWERCASE);
+    CapturingProvider provider = new CapturingProvider(flag.key(), true, ACCOUNT_EMAIL_LOWERCASE);
 
-    boolean enabled = assertDoesNotThrow(() -> withCurrentAccount(ACCOUNT_EMAIL, provider));
+    boolean enabled = assertDoesNotThrow(() -> withCurrentAccount(flag, ACCOUNT_EMAIL, provider));
 
     assertFalse(enabled);
   }
@@ -272,10 +325,11 @@ class BankBounceSuggestionsFlagTest {
   // ---------------------------------------------------------------- helpers
 
   /** Evaluates with {@link GoAccountResolver#currentAccountEmail()} stubbed to {@code email}. */
-  private static boolean withCurrentAccount(String email, FeatureProvider provider) {
+  private static boolean withCurrentAccount(Flag flag, String email,
+      FeatureProvider provider) {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
       accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(email);
-      return withProvider(provider, BankBounceSuggestionsFlag::isEnabled);
+      return withProvider(flag, provider, flag.reader());
     }
   }
 
@@ -285,8 +339,8 @@ class BankBounceSuggestionsFlagTest {
    * {@code account} supplies (or throws what it throws).
    */
   @SuppressWarnings("unchecked")
-  private static boolean withResolvedAccount(OBContext context, Supplier<Account> account,
-      FeatureProvider provider) {
+  private static boolean withResolvedAccount(Flag flag, OBContext context,
+      Supplier<Account> account, FeatureProvider provider) {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obContext.when(OBContext::getOBContext).thenReturn(context);
@@ -295,7 +349,7 @@ class BankBounceSuggestionsFlagTest {
       OBQuery<Account> query = mock(OBQuery.class);
       when(dal.createQuery(eq(Account.class), anyString())).thenReturn(query);
       when(query.uniqueResult()).thenAnswer(invocation -> account.get());
-      return withProvider(provider, BankBounceSuggestionsFlag::isEnabled);
+      return withProvider(flag, provider, flag.reader());
     }
   }
 
@@ -317,14 +371,16 @@ class BankBounceSuggestionsFlagTest {
    * Runs an evaluation with {@code provider} installed as the Etendo GO OpenFeature provider,
    * then puts the properties provider back.
    *
+   * @param flag       the flag under test
    * @param provider   the provider to install
    * @param evaluation what to evaluate
    * @param <T>        the result type
    * @return the evaluation's result
    */
-  private static <T> T withProvider(FeatureProvider provider, Supplier<T> evaluation) {
+  private static <T> T withProvider(Flag flag, FeatureProvider provider,
+      Supplier<T> evaluation) {
     // Initialise the OpenFeature client without resolving any account.
-    GoFeatureFlags.isEnabled(FLAG_KEY, FeatureFlagContext.environment());
+    GoFeatureFlags.isEnabled(flag.key(), FeatureFlagContext.environment());
     OpenFeatureAPI api = OpenFeatureAPI.getInstance();
     try {
       api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
@@ -367,11 +423,12 @@ class BankBounceSuggestionsFlagTest {
   }
 
   /**
-   * A boolean provider that records every evaluation context it receives for
-   * {@code bank-bounce-suggestions} and answers {@code true} only when the lowercase {@code email}
+   * A boolean provider that records every evaluation context it receives for {@code flagKey}
+   * and answers {@code true} only when the lowercase {@code email}
    * attribute equals {@code enabledForEmail} — a per-account rule. Or throws on every evaluation.
    */
   private static final class CapturingProvider implements FeatureProvider {
+    private final String flagKey;
     private final boolean fail;
     private final String enabledForEmail;
     private final List<EvaluationContext> contexts = new ArrayList<>();
@@ -379,10 +436,12 @@ class BankBounceSuggestionsFlagTest {
     /**
      * A capturing provider.
      *
+     * @param flagKey         the flag whose evaluations are recorded
      * @param fail            whether every evaluation throws
      * @param enabledForEmail the lowercase email the flag answers {@code true} for
      */
-    CapturingProvider(boolean fail, String enabledForEmail) {
+    CapturingProvider(String flagKey, boolean fail, String enabledForEmail) {
+      this.flagKey = flagKey;
       this.fail = fail;
       this.enabledForEmail = enabledForEmail;
     }
@@ -394,11 +453,11 @@ class BankBounceSuggestionsFlagTest {
      */
     @Override
     public Metadata getMetadata() {
-      return () -> "bank-bounce-suggestions-capturing-stub";
+      return () -> flagKey + "-capturing-stub";
     }
 
     /**
-     * Records the context of a {@code bank-bounce-suggestions} evaluation and answers {@code true}
+     * Records the context of a {@code flagKey} evaluation and answers {@code true}
      * only for the targeted email; throws when built to fail.
      *
      * @param key          the flag key
@@ -412,11 +471,11 @@ class BankBounceSuggestionsFlagTest {
       if (fail) {
         throw new IllegalStateException("control plane unreachable");
       }
-      if (FLAG_KEY.equals(key)) {
+      if (flagKey.equals(key)) {
         contexts.add(ctx);
       }
       String email = stringValue(ctx, FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE);
-      boolean match = FLAG_KEY.equals(key) && enabledForEmail.equals(email);
+      boolean match = flagKey.equals(key) && enabledForEmail.equals(email);
       return ProviderEvaluation.<Boolean>builder().value(match).reason("TARGETING_MATCH").build();
     }
 
