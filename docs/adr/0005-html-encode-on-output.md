@@ -55,8 +55,10 @@ site.
 | `PisReturnCallbackServlet` page | Constant HTML body | No stored data interpolated. |
 | SPA `ArtifactViewerPage.jsx` | `dangerouslySetInnerHTML` on highlighted JSON | Input is entity-escaped (`& < >`) before the highlighter adds its own spans. The only `dangerouslySetInnerHTML` in `app-shell/src`; guarded by an allowlist. |
 | SPA `MarkdownContent.jsx`, `ConversationView.jsx` | React nodes; links: http(s) only, internal paths via `assertInternalPath` | No raw HTML; `javascript:`/`data:` degrade to text. |
+| SPA `SupportChatContext.jsx` | Handles support-chat attachments and their MIME types; no HTML rendering | No `innerHTML`/`dangerouslySetInnerHTML`; nothing to encode. |
 | SPA `helpDocs.js` | `innerHTML` on a detached div, read back as `textContent` | Not rendered. |
 | SPA report iframe (`ReportDrawer.jsx`, `ReportViewerPage.jsx`) | Reads `contentDocument.body.innerHTML` | Read only; content comes from the encoded jsreport output. |
+| `schema_forge_core/packages` search (`innerHTML`, `dangerouslySetInnerHTML`) | Library code | No render sites found (only string mentions in `domain-boundary-check.js` and the CSV fixtures). |
 | Classic Etendo UI admin panels | `etendo_core`, not in these repos | **Open item.** Not changed here. Question for the issue owner: is a follow-up ticket wanted to audit them? |
 
 ## Guardrails

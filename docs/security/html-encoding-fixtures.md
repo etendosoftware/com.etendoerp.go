@@ -1,19 +1,26 @@
 # HTML encode-on-output fixtures
 
 Cross-runtime contract referenced by ADR-0005. Expected values are the text after encoding for an
-HTML element or attribute context. `EmailEncodeOnOutputTest` mirrors this table row for row.
+HTML element or quoted-attribute context. Both runtimes neutralise every markup and
+attribute-breakout character, but they spell some entities differently, so each runtime has its own
+column: Java `EmailEscape.escapeHtml`, and JavaScript `Handlebars.escapeExpression` (what `{{ }}`
+uses). Handlebars additionally encodes `=` and the backtick as `&#x3D;` / `&#x60;`; Java leaves them,
+which is safe because attribute values are always quoted.
 
-| Input description | Input | Expected output |
-|---|---|---|
-| Script tag | `<script>alert(document.cookie)</script>` | `&lt;script&gt;alert(document.cookie)&lt;/script&gt;` |
-| Image onerror | `<img src=x onerror=alert(1)>` | `&lt;img src=x onerror=alert(1)&gt;` |
-| Ampersand | `Tom & Jerry` | `Tom &amp; Jerry` |
-| Double quote (attribute breakout) | `" onmouseover="x` | `&quot; onmouseover=&quot;x` |
-| Single quote | `' onmouseover='x` | `&#39; onmouseover=&#39;x` |
-| Already encoded is encoded again | `&lt;` | `&amp;lt;` |
-| Unquoted attribute breakout | `x onmouseover=alert(1)>` | `x onmouseover=alert(1)&gt;` |
-| Plain text | `Normal Value` | `Normal Value` |
-| Empty / null | empty string / null | empty string |
+`EmailEncodeOnOutputTest` (Java) asserts the Java column; `report-templates-encode-on-output.test.js`
+in `schema_forge` and `schema_forge_core` assert the JavaScript column.
+
+| Input description | Input | Java | JavaScript (Handlebars) |
+|---|---|---|---|
+| Script tag | `<script>alert(document.cookie)</script>` | `&lt;script&gt;alert(document.cookie)&lt;/script&gt;` | same |
+| Image onerror | `<img src=x onerror=alert(1)>` | `&lt;img src=x onerror=alert(1)&gt;` | `&lt;img src&#x3D;x onerror&#x3D;alert(1)&gt;` |
+| Ampersand | `Tom & Jerry` | `Tom &amp; Jerry` | same |
+| Double quote (attribute breakout) | `" onmouseover="x` | `&quot; onmouseover=&quot;x` | `&quot; onmouseover&#x3D;&quot;x` |
+| Single quote | `' onmouseover='x` | `&#39; onmouseover=&#39;x` | `&#x27; onmouseover&#x3D;&#x27;x` |
+| Already encoded is encoded again | `&lt;` | `&amp;lt;` | same |
+| Unquoted attribute breakout | `x onmouseover=alert(1)>` | `x onmouseover=alert(1)&gt;` | `x onmouseover&#x3D;alert(1)&gt;` |
+| Plain text | `Normal Value` | same | same |
+| Empty / null | empty string / null | empty string | empty string |
 
 Emphasis (`**bold**`) is applied only after encoding, so `**<b>x</b>**` becomes
 `<strong>&lt;b&gt;x&lt;/b&gt;</strong>`.
@@ -38,6 +45,8 @@ whitespace/control characters and lower-casing. A rejected URL is never emitted 
 | vbscript | `vbscript:msgbox(1)` | rejected |
 | Empty / null | empty string / null | rejected |
 
-**Executable twins:** `EmailEncodeOnOutputTest` (Java) mirrors both tables row for row;
-`report-templates-encode-on-output.test.js` in `schema_forge` and `schema_forge_core` carries the
-template rules. Add a row HERE first, then to every test.
+The URL scheme allowlist is implemented in Java only (`EmailEscape.isSafeUrl`, used by the email
+layout): the jsreport templates take no stored data in `href`/`src`, and the guardrail tests keep it
+that way. **Executable twins:** `EmailEncodeOnOutputTest` (Java, both tables) and the two JS
+`report-templates-encode-on-output.test.js` suites (HTML table). Add a row HERE first, then to every
+test.

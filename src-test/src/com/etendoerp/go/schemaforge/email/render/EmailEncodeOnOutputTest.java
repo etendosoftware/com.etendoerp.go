@@ -44,21 +44,24 @@ public class EmailEncodeOnOutputTest {
       { "x onmouseover=alert(1)>", "x onmouseover=alert(1)&gt;" },
   };
 
-  /** URL fixtures: {input, "allowed" | "rejected"}; mirrors the URL table of the fixtures doc. */
-  private static final String[][] URL_FIXTURES = {
-      { "https://example.com/a?b=1&c=2", "allowed" },
-      { "http://example.com", "allowed" },
-      { "mailto:a@example.com", "allowed" },
-      { "/portal/doc/1", "allowed" },
-      { "relative/path?x=a:b", "allowed" },
-      { "javascript:alert(1)", "rejected" },
-      { "JaVa\tScript:alert(1)", "rejected" },
-      { "  javascript:alert(1)", "rejected" },
-      { "java\nscript:alert(1)", "rejected" },
-      { "data:text/html,<script>alert(1)</script>", "rejected" },
-      { "vbscript:msgbox(1)", "rejected" },
-      { "", "rejected" },
-      { null, "rejected" },
+  /** URL fixtures: {input, ALLOWED | REJECTED}; mirrors the URL table of the fixtures doc. */
+  private static final Boolean ALLOWED = Boolean.TRUE;
+  private static final Boolean REJECTED = Boolean.FALSE;
+
+  private static final Object[][] URL_FIXTURES = {
+      { "https://example.com/a?b=1&c=2", ALLOWED },
+      { "http://example.com", ALLOWED },
+      { "mailto:a@example.com", ALLOWED },
+      { "/portal/doc/1", ALLOWED },
+      { "relative/path?x=a:b", ALLOWED },
+      { "javascript:alert(1)", REJECTED },
+      { "JaVa\tScript:alert(1)", REJECTED },
+      { "  javascript:alert(1)", REJECTED },
+      { "java\nscript:alert(1)", REJECTED },
+      { "data:text/html,<script>alert(1)</script>", REJECTED },
+      { "vbscript:msgbox(1)", REJECTED },
+      { "", REJECTED },
+      { null, REJECTED },
   };
 
   @Test
@@ -70,21 +73,22 @@ public class EmailEncodeOnOutputTest {
 
   @Test
   public void urlFixturesMatchTheSchemeAllowlist() {
-    for (String[] fixture : URL_FIXTURES) {
-      assertEquals(String.valueOf(fixture[0]), "allowed".equals(fixture[1]),
-          EmailEscape.isSafeUrl(fixture[0]));
+    for (Object[] fixture : URL_FIXTURES) {
+      assertEquals(String.valueOf(fixture[0]), fixture[1],
+          EmailEscape.isSafeUrl((String) fixture[0]));
     }
   }
 
   @Test
-  public void layoutNeverEmitsAUnsafeCtaHref() {
-    for (String[] fixture : URL_FIXTURES) {
-      if (!"rejected".equals(fixture[1]) || fixture[0] == null || fixture[0].isEmpty()) {
+  public void layoutNeverEmitsAnUnsafeCtaHref() {
+    for (Object[] fixture : URL_FIXTURES) {
+      String url = (String) fixture[0];
+      if (!REJECTED.equals(fixture[1]) || url == null || url.isEmpty()) {
         continue;
       }
       String html = EmailLayout.render(EmailContent.builder().paragraph("Hi")
-          .cta("Open", fixture[0]).linkFallbackText("Or copy:").build());
-      assertFalse(fixture[0], html.contains("href="));
+          .cta("Open", url).linkFallbackText("Or copy:").build());
+      assertFalse(url, html.contains("href="));
     }
   }
 
