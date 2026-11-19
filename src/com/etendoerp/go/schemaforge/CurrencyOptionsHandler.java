@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -84,6 +85,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
   private static final String PARAM_DATE = "date";
   private static final String PARAM_ORGANIZATION = "organization";
   private static final String KEY_RATE = "rate";
+  /** The header property {@code currencyOptions} lists the values of (ETP-6365). */
+  static final String FIELD_CURRENCY = "currency";
 
   /**
    * The contract a document header that routes {@code currencyOptions} here publishes for agents
@@ -248,6 +251,62 @@ public class CurrencyOptionsHandler implements NeoHandler {
     return StringUtils.trimToNull(value);
   }
 
+  /**
+   * Whether the {@code currency} of a document header is one {@code currencyOptions} offers for
+   * the record being written (ETP-6365): the organization currency, or an active currency with a
+   * conversion range against it on any date, scoped like the action (the record's client or
+   * System, the record's organization or '0'). Empty for any other property, so the generic
+   * selector keeps deciding it.
+   *
+   * <p>The header customizations that route {@code currencyOptions} here answer
+   * {@link NeoHandler#offersReference} through this method, so the write validation of the header
+   * currency accepts exactly what the app's currency picker lists, on every channel, while the
+   * generic {@code Currency} selector keeps its EUR/USD/GBP allowlist for every other picker.
+   *
+   * <p>Scope: {@code organization} / {@code client} of the record (stored or sent), else the
+   * session's — the same fallback the action uses for a new record. Empty when the organization or
+   * its currency cannot be resolved (the generic selector then decides, as before). A database
+   * failure propagates, and the write is refused as not verifiable.
+   *
+   * @param propertyName the DAL property validated
+   * @param candidateId  the currency id the write sets
+   * @param mergedRecord the merged record, keyed by DAL property name and by column name
+   * @return {@code true}/{@code false} for the header currency, empty for any other property
+   */
+  static Optional<Boolean> offersHeaderCurrency(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    if (!FIELD_CURRENCY.equals(propertyName) || StringUtils.isBlank(candidateId)) {
+      return Optional.empty();
+    }
+    OBContext obCtx = OBContext.getOBContext();
+    String orgId = scopeOf(mergedRecord, PARAM_ORGANIZATION,
+        obCtx != null && obCtx.getCurrentOrganization() != null
+            ? obCtx.getCurrentOrganization().getId() : null);
+    String clientId = scopeOf(mergedRecord, "client",
+        obCtx != null && obCtx.getCurrentClient() != null ? obCtx.getCurrentClient().getId() : null);
+    String orgCurrencyId = orgId == null ? null : OBCurrencyUtils.getOrgCurrency(orgId);
+    if (orgCurrencyId == null) {
+      return Optional.empty();
+    }
+    if (orgCurrencyId.equals(candidateId)) {
+      return Optional.of(Boolean.TRUE);
+    }
+    try {
+      return Optional.of(selectableCurrencies(OBDal.getInstance().getConnection(), orgCurrencyId,
+          clientId, orgId).containsKey(candidateId));
+    } catch (java.sql.SQLException e) {
+      throw new IllegalStateException("Could not list the selectable currencies", e);
+    }
+  }
+
+  /** The record's value for {@code property}, else {@code fallback}. */
+  private static String scopeOf(Map<String, String> mergedRecord, String property,
+      String fallback) {
+    String value = mergedRecord == null ? null
+        : StringUtils.trimToNull(mergedRecord.get(property));
+    return value != null ? value : fallback;
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     return null;
@@ -304,7 +363,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * currency with no range at all is not offered; one whose ranges do not cover the reference date
    * is, with {@code rate: null} (ETP-5840 plan de pruebas, casos 8 / N2).
    */
-  private Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
+  private static Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
       String clientId, String orgId) throws java.sql.SQLException {
     Map<String, String> currencies = new LinkedHashMap<>();
     try (PreparedStatement ps = conn.prepareStatement(

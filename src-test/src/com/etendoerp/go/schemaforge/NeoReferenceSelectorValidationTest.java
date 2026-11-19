@@ -241,6 +241,50 @@ public class NeoReferenceSelectorValidationTest {
         new JSONObject().put(ADDRESS, ADDRESS_ID)));
   }
 
+  /**
+   * ETP-6365: when the entity's customization answers for a field whose picker is its own (a
+   * document header's currency, listed by {@code currencyOptions}), its answer replaces the
+   * generic selector's; when it defers ({@code Optional.empty()}), the generic selector decides.
+   */
+  @Test
+  public void testCustomizationAnswerReplacesTheGenericSelector() throws Exception {
+    Object[][] cases = {
+        // name, customization answer, generic selector answer, expected refused
+        { "customization offers what the generic selector refuses", Boolean.TRUE, Boolean.FALSE,
+            false },
+        { "customization refuses what the generic selector offers", Boolean.FALSE, Boolean.TRUE,
+            true },
+        { "customization defers, generic selector refuses", null, Boolean.FALSE, true },
+        { "customization defers, generic selector offers", null, Boolean.TRUE, false },
+    };
+    com.etendoerp.go.schemaforge.data.SFEntity sfEntity =
+        mock(com.etendoerp.go.schemaforge.data.SFEntity.class);
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      java.util.Optional<Boolean> customizationAnswer =
+          java.util.Optional.ofNullable((Boolean) c[1]);
+      NeoHandler customization = mock(NeoHandler.class);
+      when(customization.offersReference(eq(ADDRESS), eq(ADDRESS_ID), any()))
+          .thenReturn(customizationAnswer);
+      offers((Boolean) c[2]);
+
+      NeoReferenceSelectorValidation.RefusedReference refused;
+      try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
+          mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .forEntityQuietly(sfEntity)).thenReturn(customization);
+        refused = NeoReferenceSelectorValidation.findRefusedReference(sfEntity, tab, null, null,
+            new JSONObject().put(ADDRESS, ADDRESS_ID));
+      }
+
+      assertEquals(name, Boolean.TRUE.equals(c[3]), refused != null);
+      if (refused != null) {
+        assertEquals(name, ADDRESS, refused.fieldName());
+        assertTrue(name, refused.isVerified());
+      }
+    }
+  }
+
   /** The stored order ORD-1, holding {@code ADDRESS_ID} and {@code PARTNER_ID}. */
   private BaseOBObject storedOrder() {
     BaseOBObject stored = mock(BaseOBObject.class);

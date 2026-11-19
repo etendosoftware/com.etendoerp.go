@@ -1406,6 +1406,35 @@ values, the not-active-tracked exemption, no-session fail-open), the wiring case
 `NeoWritePreflightTest` (422 on an inactive reference, not re-checked once ownership already
 refused).
 
+#### A write never SETS a reference the app would not offer (ETP-6176) — fields with their own picker (ETP-6365)
+
+After ownership and activeness, `NeoReferenceSelectorValidation.findRefusedReference` (REST single
+and batch through `NeoWritePreflight`, MCP through `McpNotOfferedReference`) accepts a reference the
+write sets only when the app would offer it for the merged record; otherwise `422
+REFERENCE_NOT_ALLOWED` with `field`/`value`. By default "would offer" is the field's generic
+selector (`NeoSelectorService.offersValue`: validation rule, selector policies, organization scope).
+
+Some fields are not picked through their generic selector. A document header's `currency` (sales
+quotation, sales order, purchase order, sales and purchase invoice) is chosen from the header's own
+`currencyOptions` action — the organization currency plus every active currency with a conversion
+range against it on any date — while the generic `Currency` selector keeps the
+`CurrencyIsoAllowlistSelectorPolicy` EUR/USD/GBP allowlist for every other picker (the financial
+account form, for one). Judged by the generic selector, a CHF the header itself listed was refused
+on save. The entity's customization now answers for such a field through
+`NeoHandler#offersReference(propertyName, candidateId, record)` (default `Optional.empty()` = ask
+the generic selector; `true`/`false` replaces its answer), resolved with
+`NeoHandlerLookup.forEntityQuietly` — no entity is named in the validator. The order-family headers
+(`AbstractOrderHeaderHandler`) and both invoice headers answer it through
+`CurrencyOptionsHandler.offersHeaderCurrency`, the same `selectableCurrencies` query the action
+lists from, scoped by the record's (else the session's) client and organization. Consequence on
+every channel alike: a header currency with no range against the organization currency is refused,
+even EUR/USD/GBP — the app never offers it either. A failure while answering refuses the write as
+not verifiable (fail closed). No selector the UI shows changes, and `etendo_selectors` on a header
+`currency` still answers the generic allowlist; the header's offered list is `currencyOptions`.
+
+Tests: `NeoReferenceSelectorValidationTest` (customization answer replaces / defers to the
+selector), `CurrencyOptionsHandlerTest` (`offersHeaderCurrency`).
+
 #### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
 
 `POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the
@@ -6805,6 +6834,9 @@ client or system by ISO code, `rate: null` when none is configured for the date,
 (`DocumentCurrencyRate.ATTR_RATE_TYPE`) — the handler no longer guesses the document from the spec
 name. The ACTION sub-endpoint now passes the query string to the hooks
 (`NeoSubEndpointDispatcher`, as the defaults sub-endpoint already did, ETP-5680).
+ETP-6365: the write validation of the header `currency` accepts exactly what this action lists
+(`CurrencyOptionsHandler.offersHeaderCurrency`, answered through `NeoHandler#offersReference`;
+see §4.3.7 *A write never SETS a reference the app would not offer*).
 
 **Refusal body** (`DocumentRateMessages`):
 `{"error":{"status":422,"code":"exchange_rate_missing"|"exchange_rate_empty"|"exchange_rate_missing_on_complete","message":<translated text>,"messageKeys":[…],"messageParams":{…}}}`.

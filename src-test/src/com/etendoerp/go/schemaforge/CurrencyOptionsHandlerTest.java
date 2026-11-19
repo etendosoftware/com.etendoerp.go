@@ -474,6 +474,23 @@ public class CurrencyOptionsHandlerTest {
       }
     }
 
+    java.util.Optional<Boolean> offersHeaderCurrency(String property, String candidate,
+        Map<String, String> record) {
+      try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+           MockedStatic<OBCurrencyUtils> currencies = Mockito.mockStatic(OBCurrencyUtils.class)) {
+        obCtx.when(OBContext::getOBContext).thenReturn(obContext);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        currencies.when(() -> OBCurrencyUtils.getOrgCurrency(anyString())).thenReturn("EUR-ID");
+        java.util.Optional<Boolean> answer =
+            CurrencyOptionsHandler.offersHeaderCurrency(property, candidate, record);
+        ArgumentCaptor<String> org = ArgumentCaptor.forClass(String.class);
+        currencies.verify(() -> OBCurrencyUtils.getOrgCurrency(org.capture()), atMostOnce());
+        resolvedOrg = org.getAllValues().isEmpty() ? null : org.getValue();
+        return answer;
+      }
+    }
+
     /** The organization whose currency handle() asked for, or {@code null} when it did not. */
     String resolvedOrg;
   }
@@ -560,6 +577,50 @@ public class CurrencyOptionsHandlerTest {
     // new record (the record is looked up before any organization is considered).
     HandleRun untyped = new HandleRun();
     assertEquals(404, untyped.handle(currencyOptions("inv-1", null, null, null)).getHttpStatus());
+  }
+
+  // ---------------------------------------------------------------
+  // offersHeaderCurrency (ETP-6365)
+  // ---------------------------------------------------------------
+
+  /**
+   * ETP-6365: the write validation of a header {@code currency} accepts exactly what
+   * {@code currencyOptions} lists — the organization currency and every currency with a range
+   * against it, whatever its ISO code (a CHF range inserted in Classic) — and refuses a currency
+   * with no range at all, even an allowlisted one. Any other property defers to the generic
+   * selector. Scoped by the record's client and organization.
+   */
+  @Test
+  public void testOffersHeaderCurrencyMatchesTheListedCurrencies() throws Exception {
+    Map<String, String> record = Map.of("organization", "doc-org", "client", "doc-client");
+    Object[][] cases = {
+        // name, property, candidate, ranged currency the query lists (or null), expected
+        { "ranged non-allowlisted currency is offered", "currency", "CHF-ID", "CHF-ID",
+            java.util.Optional.of(Boolean.TRUE) },
+        { "currency with no range is refused", "currency", "GBP-ID", null,
+            java.util.Optional.of(Boolean.FALSE) },
+        { "organization currency is offered", "currency", "EUR-ID", null,
+            java.util.Optional.of(Boolean.TRUE) },
+        { "other property defers to the generic selector", "priceList", "PL-1", null,
+            java.util.Optional.empty() },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      HandleRun run = new HandleRun();
+      ResultSet listed = mock(ResultSet.class);
+      when(listed.next()).thenReturn(c[3] != null, false);
+      when(listed.getString(1)).thenReturn((String) c[3]);
+      when(listed.getString(2)).thenReturn("ISO");
+      when(run.ps.executeQuery()).thenReturn(listed);
+
+      assertEquals(name, c[4], run.offersHeaderCurrency((String) c[1], (String) c[2], record));
+    }
+
+    HandleRun scoped = new HandleRun();
+    scoped.offersHeaderCurrency("currency", "CHF-ID", record);
+    assertEquals("doc-org", scoped.resolvedOrg);
+    verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-client"));
+    verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-org"));
   }
 
   // ---------------------------------------------------------------

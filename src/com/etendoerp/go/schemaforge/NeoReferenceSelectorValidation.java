@@ -50,6 +50,7 @@ import org.openbravo.service.json.DataToJsonConverter;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Refuses a NEO write that SETS a reference to a record the app would not offer for it (ETP-6176).
@@ -59,6 +60,13 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * — validation rule, selector policies and organization scoping, all of it, through
  * {@link NeoSelectorService#offersValue} — lists it. Ownership ({@link NeoReferenceOwnership}) and
  * activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
+ *
+ * <p><b>A field with its own picker (ETP-6365).</b> When the entity's customization answers
+ * {@link NeoHandler#offersReference} for a field, its answer replaces the generic selector's: the
+ * field is picked in the app through the customization's own list, not through the selector. A
+ * document header's currency is the case — chosen from its {@code currencyOptions} action (every
+ * currency with a conversion range against the organization currency), while the generic
+ * {@code Currency} selector keeps its EUR/USD/GBP allowlist for every other picker.
  *
  * <p><b>Context.</b> The UI resolves a selector against the whole form. Here the form is the
  * <i>merged record</i>: the parent record (child tabs), overlaid by the stored record (updates),
@@ -133,6 +141,8 @@ public final class NeoReferenceSelectorValidation {
     BaseOBObject stored = StringUtils.isBlank(recordId) ? null : load(written, recordId);
     Set<String> changed = changedKeys(written, stored, requestFields);
     Map<String, String> context = null;
+    NeoHandler customization = null;
+    boolean customizationResolved = false;
     for (Property property : written.getProperties()) {
       String key = property.getName();
       boolean sent = requestFields.has(key);
@@ -145,7 +155,11 @@ public final class NeoReferenceSelectorValidation {
       if (context == null) {
         context = mergedContext(adTab, written, stored, parentId, requestFields);
       }
-      RefusedReference refused = check(sfEntity, column, property, id, context);
+      if (!customizationResolved) {
+        customization = NeoHandlerLookup.forEntityQuietly(sfEntity);
+        customizationResolved = true;
+      }
+      RefusedReference refused = check(sfEntity, customization, column, property, id, context);
       if (refused != null) {
         return refused;
       }
@@ -153,10 +167,19 @@ public final class NeoReferenceSelectorValidation {
     return null;
   }
 
-  private static RefusedReference check(SFEntity sfEntity, Column column, Property property,
-      String id, Map<String, String> context) {
+  /**
+   * Whether the app offers {@code id} for the property: the entity's customization answers when
+   * the field's picker is its own ({@link NeoHandler#offersReference}, ETP-6365), the field's
+   * generic selector otherwise.
+   */
+  private static RefusedReference check(SFEntity sfEntity, NeoHandler customization,
+      Column column, Property property, String id, Map<String, String> context) {
     String key = property.getName();
-    Optional<Boolean> offered = NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+    Optional<Boolean> offered = customization == null ? Optional.empty()
+        : customization.offersReference(key, id, context);
+    if (offered.isEmpty()) {
+      offered = NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+    }
     if (Boolean.TRUE.equals(offered.orElse(null))) {
       return null;
     }

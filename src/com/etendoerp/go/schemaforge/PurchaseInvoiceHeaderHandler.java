@@ -30,6 +30,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -141,6 +142,18 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
+  }
+
+  /**
+   * {@inheritDoc} ETP-6365: the header currency is picked from {@code currencyOptions} (routed by this header),
+   * so it is accepted when that action would list it ({@link
+   * CurrencyOptionsHandler#offersHeaderCurrency}) rather than through the generic
+   * {@code Currency} selector and its EUR/USD/GBP allowlist.
+   */
+  @Override
+  public Optional<Boolean> offersReference(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    return CurrencyOptionsHandler.offersHeaderCurrency(propertyName, candidateId, mergedRecord);
   }
 
   /**
