@@ -74,23 +74,20 @@ class NeoHandlerUpdatedFieldGuardTest {
    * Every entry needs a one-line reason and the ticket that should audit/resolve it.
    */
   private static final List<String> ALLOWLIST = Arrays.asList(
-      // ETP-5220: read-only dashboard/contact aggregation handlers — no PUT/PATCH branch
-      // observed in their own handle(). NOT verified against the generic NeoCrudHandler write
-      // path yet (a client could still PATCH the underlying entity through the generic CRUD
-      // servlet using the id these expose). Audit before assuming safe.
+      // ETP-5220: PERMANENT exemptions, audited. Each handler answers GET only (any other method
+      // gets a 405 from its own handle()) and returns aggregates or a cross-document feed — not
+      // editable records of an entity — so there is no PUT/PATCH round trip that needs the
+      // optimistic-concurrency "updated" token. If one ever gains a write path, fix it instead.
       "ContactsBpStatsHandler",
       "WidgetPendingAmountsHandler",
       "ContactsBpTrendHandler",
       "WidgetPendingTasksHandler",
       "WidgetKpisHandler",
       "WidgetRevenueTrendHandler",
-      "ProductStockWarehouseHandler",
-      "WidgetActivityHandler",
-      // ETP-5220: fix already exists on feature/ETP-5219 (adds pp.updated to PRICE_LIST_SQL +
-      // row mapping), not yet merged to develop as of this branch's base. Remove this entry
-      // once ETP-5219 lands on develop — the file will then genuinely contain "updated" and
-      // stop matching as a violation regardless, so a stale entry here is harmless, just untidy.
-      "ProductPriceHandler");
+      "WidgetActivityHandler");
+  // ProductStockWarehouseHandler (ETP-5220) and ProductPriceHandler (ETP-5219) are NOT listed:
+  // they now emit "updated" themselves. ProductStockWarehouseHandler is the one audited handler
+  // with a real write path (non-GET falls through to the generic CRUD handler for M_StorageDetail).
   // ETP-5483 — the 5 native-SQL "grouped listing" report handlers (Trial Balance, Journal
   // Entries, Balance Sheet, Profit & Loss, General Ledger) are NOT listed: they no longer match
   // the textual scope at all. Their "implements NeoHandler" and "GET".equals( branch live in the
@@ -196,20 +193,19 @@ class NeoHandlerUpdatedFieldGuardTest {
   }
 
   /**
-   * Sanity check: {@code ProductPriceHandler} is a genuine violation on THIS branch — its ETP-5219
-   * fix lives on a separate, not-yet-merged branch — and is covered only via the allowlist, same as
-   * the other 8 handlers, not because its source already contains {@code updated}.
+   * Sanity check: the handlers fixed under ETP-5219 / ETP-5220 are genuinely clean — their source
+   * contains the updated literal and they carry no allowlist entry.
    *
-   * @throws IOException if the source file cannot be read
+   * @throws IOException if a source file cannot be read
    */
   @Test
-  @DisplayName("ProductPriceHandler is covered by the allowlist, same as the other 8")
-  void testProductPriceHandlerIsCoveredByAllowlist() throws IOException {
-    Path file = findByClassName("ProductPriceHandler");
-    String source = sourceOf(file);
-    assertTrue(isInScope(source), "expected ProductPriceHandler to match the in-scope pattern");
-    assertTrue(ALLOWLIST.contains("ProductPriceHandler"),
-        "ProductPriceHandler lacks \"updated\" on this branch (fix lives on feature/ETP-5219, not "
-            + "yet merged) and must be allowlisted, not silently excluded");
+  @DisplayName("Fixed handlers emit updated and are not allowlisted")
+  void testFixedHandlersAreGenuinelyClean() throws IOException {
+    for (String name : Arrays.asList("ProductPriceHandler", "ProductStockWarehouseHandler")) {
+      String source = sourceOf(findByClassName(name));
+      assertTrue(isInScope(source), "expected " + name + " to match the in-scope pattern");
+      assertFalse(ALLOWLIST.contains(name), name + " emits updated and must not be allowlisted");
+      assertTrue(source.contains(UPDATED_LITERAL), name + " must contain the updated literal");
+    }
   }
 }
