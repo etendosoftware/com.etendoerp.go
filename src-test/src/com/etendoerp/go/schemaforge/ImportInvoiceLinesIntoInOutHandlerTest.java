@@ -182,6 +182,19 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       return held;
     }
 
+    /** The OTHER draft movement each invoice line's own link points at (ETP-5828). */
+    final Map<String, String> linkedDrafts = new java.util.HashMap<>();
+    List<String> linkedAsked;
+    String linkedTarget;
+
+    @Override
+    protected Map<String, String> draftMovementsLinkedTo(Collection<String> invoiceLineIds,
+        String targetId) {
+      linkedAsked = new ArrayList<>(invoiceLineIds);
+      linkedTarget = targetId;
+      return linkedDrafts;
+    }
+
     /** Every asked invoice carries the {@link #followUp} lines (only its own are ever read). */
     @Override
     protected Map<String, PendingResolver.Source> loadFollowUpSources(
@@ -307,14 +320,15 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     probe.followUp.put("il3", bd("4"));
     probe.holdings.add(new DraftHolding("o2", "t1", "DS-1", bd("3")));
     probe.holdings.add(new DraftHolding("o2", "other", "DS-2", bd("1")));
+    probe.linkedDrafts.put("il1", "DS-9");
 
     JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
 
     assertEquals("line order, no discount nor inactive line", List.of("il1", "il2", "il3"),
         ids(all));
     Object[][] expected = {
-        { "CP-22 / CP-14: shipped through the invoice-line link, not carried by the follow-up",
-            "0", List.of() },
+        { "CP-22 / CP-14: shipped through the invoice-line link, not carried by the follow-up; "
+            + "the other draft its link points at is named (ETP-5828)", "0", List.of("DS-9") },
         { "the follow-up's pending, whatever the order line delivered", "1", List.of("DS-2") },
         { "no order line", "4", List.of() },
     };
@@ -352,6 +366,7 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     OrderLine linkedOl = orderLine("olB", 20, product("p2", "Pan", true), "4", "0", "4");
     OrderLine overHeld = orderLine("olC", 30, product("p3", "Sal", true), "5", "0", "5");
     InvoiceLine water = line("il1", 10, bought.getProduct(), "8", bought, false);
+    probe.linkedDrafts.put("il2", "DR-9");
     InvoiceLine tea = line("il3", 30, product("p4", "Té", false), "3", null, false);
     when(water.getUnitPrice()).thenReturn(bd("1.5"));
     when(tea.getUnitPrice()).thenReturn(bd("2"));
@@ -378,6 +393,10 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     }
     assertEquals("the target's own draft is not named", List.of("DR-2"),
         strings(all.getJSONObject(0).getJSONArray("inDraftDocuments")));
+    assertEquals("ETP-5828: only the linked line's link is looked up, the target left out",
+        Arrays.asList(List.of("il2"), "t1"), Arrays.asList(probe.linkedAsked, probe.linkedTarget));
+    assertEquals("the other draft receipt its link points at is named", List.of("DR-9"),
+        strings(all.getJSONObject(1).getJSONArray("inDraftDocuments")));
     assertFalse("receipt drafts are read on the purchase side", probe.holdingsSales);
     assertNull("the receipt keeps its rule: the follow-up is not read", probe.followUpSales);
     assertEquals("1.5", all.getJSONObject(0).get("unitPrice").toString());

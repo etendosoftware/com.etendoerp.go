@@ -115,6 +115,8 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
         ShipmentInOut.class);
     session.createQuery(ImportInOutLinesIntoInvoiceHandler.DRAFT_INVOICES_HOLDING_LINES_HQL,
         Object[].class);
+    session.createQuery(ImportInvoiceLinesIntoInOutHandler.DRAFT_MOVEMENTS_LINKED_HQL,
+        Object[].class);
     for (boolean withCurrency : new boolean[] {false, true}) {
       session.createQuery(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(withCurrency),
           Invoice.class);

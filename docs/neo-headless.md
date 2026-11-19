@@ -14292,7 +14292,11 @@ partner and direction, in the target's currency when it has one, newest created 
 `{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines, order, amount}`, listed when a line
 has something pending (`includeCovered`: also the others, so the popup can say "all already imported"). Lines: active,
 not the total-discount line, line order; `{id, lineNo, product, product$_identifier, uOM, pendingQuantity,
-invoicedQuantity, orderLine, linked, inDraftDocuments, unitPrice}`, where `orderLine` is the line's order line or else the
+invoicedQuantity, orderLine, linked, inDraftDocuments, unitPrice}` (`inDraftDocuments`: the document numbers of the
+OTHER draft movements holding the line's order line and, since ETP-5828, of the OTHER active draft movement the line's
+own link `C_InvoiceLine.M_InOutLine_ID` points at, so a line without order line taken by another draft's «Añadir desde
+Factura» is named instead of showing a bare 0; a link to a completed movement adds no name; only in that lines
+action, read through `DRAFT_MOVEMENTS_LINKED_HQL` in the session's client and readable organizations), where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
 - **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
