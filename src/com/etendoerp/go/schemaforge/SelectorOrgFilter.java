@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
  */
 public final class SelectorOrgFilter {
 
+  private static final String ORGANIZATION_PROPERTY = "organization";
+
   private SelectorOrgFilter() {
   }
 
@@ -68,7 +70,7 @@ public final class SelectorOrgFilter {
     }
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
     OBContext ctx = OBContext.getOBContext();
-    if (entityDef == null || !entityDef.hasProperty("organization") || ctx == null) {
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY) || ctx == null) {
       return null;
     }
     List<String> chain = ctx.getOrganizationStructureProvider()
@@ -109,7 +111,7 @@ public final class SelectorOrgFilter {
   static SelectorQueryBuilder.HqlWithParams buildReadableOrgsPredicate(String entityName, String alias,
       boolean includeOrgZero) {
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
-    if (entityDef == null || !entityDef.hasProperty("organization")) {
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY)) {
       return null;
     }
     OBContext ctx = OBContext.getOBContext();
@@ -146,7 +148,7 @@ public final class SelectorOrgFilter {
       return null;
     }
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
-    if (entityDef == null || !entityDef.hasProperty("organization")) {
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY)) {
       return null;
     }
     OBContext ctx = OBContext.getOBContext();

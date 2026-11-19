@@ -79,6 +79,20 @@ final class SelectorQueryExecutor {
     return SelectorOrgFilter.buildOrgProximityOrder(meta.entityName, alias, orgId.toString());
   }
 
+  /** {@code " ORDER BY [<org proximity>, ]alias.display, alias.id"}; the id breaks display ties (ETP-5903). */
+  static String orderBy(SelectorQueryBuilder.HqlWithParams orgOrder, String alias,
+      String displayProperty) {
+    return ORDER_BY + (orgOrder != null ? orgOrder.getHql() + ", " : "") + alias + "."
+        + displayProperty + ", " + alias + ".id";
+  }
+
+  /** Binds the params of the org-proximity ORDER BY, when there is one. */
+  static void bindOrgOrder(OBQuery<BaseOBObject> query, SelectorQueryBuilder.HqlWithParams orgOrder) {
+    if (orgOrder != null) {
+      NeoSelectorExecutionHelper.bindNamedParameters(query, orgOrder.getParams());
+    }
+  }
+
   static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
       String validationFilter, String contextOrganizationId) throws Exception {
     return execute(meta, search, limit, offset, validationFilter, contextOrganizationId, null);
@@ -166,13 +180,10 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = whereStr + ORDER_BY + (orgOrder != null ? orgOrder.getHql() + ", " : "") + "e."
-        + meta.displayProperty + ", e.id";
+    String dataWhere = whereStr + orderBy(orgOrder, "e", meta.displayProperty);
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
-    if (orgOrder != null) {
-      NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, orgOrder.getParams());
-    }
+    bindOrgOrder(dataQuery, orgOrder);
     if (StringUtils.isNotBlank(search)) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));
       dataQuery.setNamedParameter(PARAM_SEARCH_LOOSE, SelectorOrgFilter.searchLoosePattern(search));
@@ -254,13 +265,10 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = effectiveWhere + ORDER_BY + (orgOrder != null ? orgOrder.getHql() + ", " : "")
-        + alias + "." + meta.displayProperty + ", " + alias + ".id";
+    String dataWhere = effectiveWhere + orderBy(orgOrder, alias, meta.displayProperty);
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
-    if (orgOrder != null) {
-      NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, orgOrder.getParams());
-    }
+    bindOrgOrder(dataQuery, orgOrder);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));

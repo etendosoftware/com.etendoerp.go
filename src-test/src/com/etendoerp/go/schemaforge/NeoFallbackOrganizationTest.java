@@ -31,6 +31,12 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 
 /**
  * ETP-5086: organization context and org-proximity ordering of the combo first-option fallback.
@@ -117,5 +123,57 @@ public class NeoFallbackOrganizationTest {
   public void proximityOrderIsNullWithoutOrg() {
     assertNull(SelectorOrgFilter.buildOrgProximityOrder("e", Collections.singletonList("0")));
     assertNull(SelectorOrgFilter.buildOrgProximityOrder("e", Collections.emptyList()));
+  }
+
+  @Test
+  public void orderByPutsProximityBeforeDisplayName() {
+    SelectorQueryBuilder.HqlWithParams order = SelectorOrgFilter.buildOrgProximityOrder("e",
+        Arrays.asList("CHILD", "PARENT"));
+    String withOrg = SelectorQueryExecutor.orderBy(order, "e", "name");
+    assertTrue(withOrg, withOrg.startsWith(" ORDER BY " + order.getHql() + ", e.name, e.id"));
+  }
+
+  @Test
+  public void orderByIsUnchangedWithoutPreference() {
+    assertEquals(" ORDER BY e.name, e.id", SelectorQueryExecutor.orderBy(null, "e", "name"));
+  }
+
+  @Test
+  public void selectorServiceForwardsPreferenceOnlyWithFlagAndOrg() {
+    Map<String, Object> filter = new HashMap<>();
+    Map<String, String> flagged = new HashMap<>();
+    flagged.put(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG, "Y");
+    NeoSelectorService.putOrgPreference(filter, flagged, "ORG1");
+    assertEquals("ORG1", filter.get(SelectorQueryExecutor.PARAM_PREFER_ORG));
+
+    Map<String, Object> noOrg = new HashMap<>();
+    NeoSelectorService.putOrgPreference(noOrg, flagged, null);
+    assertTrue(noOrg.isEmpty());
+
+    Map<String, Object> noFlag = new HashMap<>();
+    NeoSelectorService.putOrgPreference(noFlag, new HashMap<>(), "ORG1");
+    assertTrue(noFlag.isEmpty());
+  }
+
+  @Test
+  public void proximityOrderReadsTheParentListOfTheOrg() {
+    OBContext obContext = mock(OBContext.class);
+    OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+    when(obContext.getOrganizationStructureProvider()).thenReturn(osp);
+    when(osp.getParentList("CHILD", true)).thenReturn(Arrays.asList("CHILD", "PARENT", "0"));
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    when(modelProvider.getEntity("Calendar")).thenReturn(entity);
+    when(entity.hasProperty("organization")).thenReturn(true);
+    try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class);
+        MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+      ob.when(OBContext::getOBContext).thenReturn(obContext);
+      mp.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      SelectorQueryBuilder.HqlWithParams order = SelectorOrgFilter.buildOrgProximityOrder("Calendar",
+          "e", "CHILD");
+      assertEquals("CHILD", order.getParams().get("selectorPrefOrg0"));
+      assertEquals("PARENT", order.getParams().get("selectorPrefOrg1"));
+      assertNull(SelectorOrgFilter.buildOrgProximityOrder("Calendar", "e", "0"));
+    }
   }
 }
