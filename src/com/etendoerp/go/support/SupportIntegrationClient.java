@@ -123,7 +123,15 @@ final class SupportIntegrationClient {
 
   static void createAdkSession(String userId, String sessionId, String locale, String userEmail,
       String clientId, String environment) {
-    String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
+    createAdkSession(HTTP_CLIENT, ADK_BASE_URL, userId, sessionId, locale, userEmail, clientId,
+        environment);
+  }
+
+  /** Package-private: tests pass a stub {@code client} and the {@code adkBaseUrl} it answers for,
+   * instead of the shared client and the configured {@code support.adk.url}. */
+  static void createAdkSession(HttpClient client, String adkBaseUrl, String userId, String sessionId,
+      String locale, String userEmail, String clientId, String environment) {
+    String url = adkBaseUrl + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
       // The body IS the initial state dict directly — NOT wrapped in a "state" key.
       // Seeding it here (once, at session creation) is the only reliable channel:
@@ -149,7 +157,7 @@ final class SupportIntegrationClient {
           .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+      HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
       log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}, environment={}) → {}",
           sessionId, locale, userEmail, clientId, environment, resp.statusCode());
     } catch (InterruptedException e) {
@@ -166,6 +174,13 @@ final class SupportIntegrationClient {
 
   static String sendToAdk(String userId, String sessionId, String text, JSONArray attachments,
       JSONObject stateDelta) {
+    return sendToAdk(HTTP_CLIENT, ADK_BASE_URL, userId, sessionId, text, attachments, stateDelta);
+  }
+
+  /** Package-private: tests pass a stub {@code client} and the {@code adkBaseUrl} it answers for,
+   * instead of the shared client and the configured {@code support.adk.url}. */
+  static String sendToAdk(HttpClient client, String adkBaseUrl, String userId, String sessionId,
+      String text, JSONArray attachments, JSONObject stateDelta) {
     try {
       JSONArray parts = new JSONArray();
       parts.put(new JSONObject().put("text", text));
@@ -181,12 +196,12 @@ final class SupportIntegrationClient {
       if (stateDelta != null) body.put("stateDelta", stateDelta);
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(ADK_BASE_URL + "/run"))
+          .uri(URI.create(adkBaseUrl + "/run"))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
           .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
           .timeout(Duration.ofSeconds(120))
           .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+      HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
       if (resp.statusCode() != 200) {
         log.warn("ADK /run returned {}: {}", resp.statusCode(), resp.body());
         return null;

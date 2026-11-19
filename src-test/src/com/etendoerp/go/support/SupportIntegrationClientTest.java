@@ -21,15 +21,28 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Flow;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.openbravo.model.ad.access.User;
 
 /**
@@ -547,50 +560,162 @@ class SupportIntegrationClientTest {
   }
 
   // -------------------------------------------------------------------------
-  // HTTP-backed methods — no server is guaranteed to be listening at the
-  // configured localhost URLs in CI, so these tests only assert the
-  // try/catch wrapping the network call never lets an exception escape
-  // (this still exercises the JSON/request-building code ahead of the
-  // network call). See class-level notes in the test report for what is
-  // intentionally NOT covered here.
+  // ADK calls — sent through a stub HttpClient, so no test opens a connection
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("HTTP-backed methods do not throw")
-  class HttpBackedMethods {
+  @DisplayName("ADK session and /run calls")
+  class AdkCalls {
 
-    @Test
-    @DisplayName("createAdkSession swallows failures without throwing")
-    void createAdkSessionDoesNotThrow() {
-      assertDoesNotThrow(() ->
-          SupportIntegrationClient.createAdkSession(
-              "user1", "session1", "es", "user@example.com", "client1", "development"));
+    private static final String ADK = "http://adk.test";
+
+    private final HttpClient client = mock(HttpClient.class);
+
+    @SuppressWarnings("unchecked")
+    private HttpResponse<String> answer(int status, String body) throws Exception {
+      HttpResponse<String> response = mock(HttpResponse.class);
+      when(response.statusCode()).thenReturn(status);
+      when(response.body()).thenReturn(body);
+      doReturn(response).when(client).send(any(HttpRequest.class), any());
+      return response;
+    }
+
+    private HttpRequest sentRequest() throws Exception {
+      ArgumentCaptor<HttpRequest> request = ArgumentCaptor.forClass(HttpRequest.class);
+      verify(client).send(request.capture(), any());
+      return request.getValue();
     }
 
     @Test
-    @DisplayName("createAdkSession with null email still builds a valid request")
-    void createAdkSessionNullEmailDoesNotThrow() {
-      assertDoesNotThrow(() ->
-          SupportIntegrationClient.createAdkSession(
-              "user1", "session1", "es", null, "client1", "development"));
+    @DisplayName("createAdkSession POSTs the initial state (locale, email, client, environment) to the "
+        + "session's own URL")
+    void createAdkSessionPostsTheInitialState() throws Exception {
+      answer(200, "{}");
+
+      SupportIntegrationClient.createAdkSession(client, ADK, "user1", "session1", "es",
+          "user@example.com", "client1", "development");
+
+      HttpRequest request = sentRequest();
+      assertEquals("POST", request.method());
+      assertEquals(ADK + "/apps/agent/users/user1/sessions/session1", request.uri().toString());
+      assertEquals("application/json", request.headers().firstValue("Content-Type").orElse(null));
+      JSONObject state = new JSONObject(bodyOf(request));
+      assertEquals("es", state.getString("locale"));
+      assertEquals("user@example.com", state.getString("user_email"));
+      assertEquals("client1", state.getString("client_id"));
+      assertEquals("development", state.getString("environment"));
     }
 
     @Test
-    @DisplayName("sendToAdk (no attachments, no stateDelta) swallows failures without throwing")
-    void sendToAdkSimpleDoesNotThrow() {
-      assertDoesNotThrow(() ->
-          SupportIntegrationClient.sendToAdk("user1", "session1", "hello", null));
+    @DisplayName("createAdkSession leaves user_email out of the state when there is no email, and a "
+        + "failed call is logged, not thrown")
+    void createAdkSessionWithoutEmailAndFailingCallIsSwallowed() throws Exception {
+      when(client.send(any(HttpRequest.class), any())).thenThrow(new IOException("connection refused"));
+
+      SupportIntegrationClient.createAdkSession(client, ADK, "user1", "session1", "es", null,
+          "client1", "development");
+
+      JSONObject state = new JSONObject(bodyOf(sentRequest()));
+      assertFalse(state.has("user_email"));
+      assertEquals("client1", state.getString("client_id"));
     }
 
     @Test
-    @DisplayName("sendToAdk with attachments and stateDelta swallows failures without throwing")
-    void sendToAdkFullDoesNotThrow() throws Exception {
+    @DisplayName("sendToAdk POSTs the message to /run and answers the model's reply text; a non-200 "
+        + "answer or a failed call is a null reply")
+    void sendToAdkReturnsTheReplyAndNullOnFailure() throws Exception {
+      answer(200, "[{\"author\":\"agent\",\"content\":{\"role\":\"model\",\"parts\":"
+          + "[{\"text\":\"Hola\"}]}}]");
+
+      assertEquals("Hola", SupportIntegrationClient.sendToAdk(client, ADK, "user1", "session1",
+          "hello", null, null));
+
+      HttpRequest request = sentRequest();
+      assertEquals("POST", request.method());
+      assertEquals(ADK + "/run", request.uri().toString());
+      JSONObject body = new JSONObject(bodyOf(request));
+      assertEquals("agent", body.getString("appName"));
+      assertEquals("user1", body.getString("userId"));
+      assertEquals("session1", body.getString("sessionId"));
+      assertFalse(body.getBoolean("streaming"));
+      assertEquals("hello", body.getJSONObject("newMessage").getJSONArray("parts")
+          .getJSONObject(0).getString("text"));
+      assertFalse(body.has("stateDelta"), "no stateDelta is sent when none is given");
+
+      answer(503, "busy");
+      assertNull(SupportIntegrationClient.sendToAdk(client, ADK, "user1", "session1", "hello", null,
+          null));
+      when(client.send(any(HttpRequest.class), any())).thenThrow(new IOException("timeout"));
+      assertNull(SupportIntegrationClient.sendToAdk(client, ADK, "user1", "session1", "hello", null,
+          null));
+    }
+
+    @Test
+    @DisplayName("sendToAdk sends the attachments as parts after the text and the stateDelta as given; "
+        + "an interrupted call answers null and keeps the thread's interrupt flag")
+    void sendToAdkSendsAttachmentsAndStateDelta() throws Exception {
+      answer(200, "[]");
       JSONArray attachments = new JSONArray();
       attachments.put(new JSONObject().put("name", "a.txt").put("text", "hi"));
       JSONObject stateDelta = new JSONObject().put("human_takeover", false);
-      assertDoesNotThrow(() ->
-          SupportIntegrationClient.sendToAdk("user1", "session1", "hello", attachments, stateDelta));
+
+      SupportIntegrationClient.sendToAdk(client, ADK, "user1", "session1", "hello", attachments,
+          stateDelta);
+
+      JSONObject body = new JSONObject(bodyOf(sentRequest()));
+      JSONArray parts = body.getJSONObject("newMessage").getJSONArray("parts");
+      assertEquals("hello", parts.getJSONObject(0).getString("text"));
+      assertTrue(parts.length() > 1, "the attachment follows the text");
+      assertFalse(body.getJSONObject("stateDelta").getBoolean("human_takeover"));
+
+      when(client.send(any(HttpRequest.class), any())).thenThrow(new InterruptedException("stop"));
+      try {
+        assertNull(SupportIntegrationClient.sendToAdk(client, ADK, "user1", "session1", "hello",
+            null, null));
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
     }
+  }
+
+  /** Reads back the body a request was built with, as the client would send it. */
+  private static String bodyOf(HttpRequest request) {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    request.bodyPublisher().orElseThrow().subscribe(new Flow.Subscriber<ByteBuffer>() {
+      @Override
+      public void onSubscribe(Flow.Subscription subscription) {
+        subscription.request(Long.MAX_VALUE);
+      }
+
+      @Override
+      public void onNext(ByteBuffer item) {
+        byte[] bytes = new byte[item.remaining()];
+        item.get(bytes);
+        out.write(bytes, 0, bytes.length);
+      }
+
+      @Override
+      public void onError(Throwable throwable) {
+        throw new AssertionError(throwable);
+      }
+
+      @Override
+      public void onComplete() {
+        // Everything was collected in onNext.
+      }
+    });
+    return out.toString(StandardCharsets.UTF_8);
+  }
+
+  // -------------------------------------------------------------------------
+  // Jira calls — guarded by JiraConfig, which no test configures, so they
+  // return before any HTTP call
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("Jira calls do not throw")
+  class HttpBackedMethods {
 
     @Test
     @DisplayName("postJiraComment is a no-op when jiraKey is null or empty")
