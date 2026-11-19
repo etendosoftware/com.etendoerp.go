@@ -165,6 +165,32 @@ class ConversionRateStore {
   }
 
   /**
+   * The currencies that already have an active conversion rate of the client with
+   * {@code orgCurrencyId}, in either direction, on any date.
+   */
+  Set<String> currenciesWithRates(String clientId, String orgCurrencyId) {
+    Set<String> ids = new HashSet<>();
+    String sql = "SELECT DISTINCT CASE WHEN cr.c_currency_id = ? THEN cr.c_currency_id_to"
+        + " ELSE cr.c_currency_id END FROM c_conversion_rate cr"
+        + " WHERE cr.ad_client_id = ? AND cr.isactive = 'Y'"
+        + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)";
+    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+      ps.setString(1, orgCurrencyId);
+      ps.setString(2, clientId);
+      ps.setString(3, orgCurrencyId);
+      ps.setString(4, orgCurrencyId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          ids.add(rs.getString(1));
+        }
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException("Could not read the currencies with rates", e);
+    }
+    return ids;
+  }
+
+  /**
    * Every active currency of the system or of the client except {@code excludedId}, by ISO code,
    * named in the request language.
    */

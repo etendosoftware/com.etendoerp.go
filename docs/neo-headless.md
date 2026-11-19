@@ -9634,7 +9634,7 @@ the accounting, for a list of a few dozen rows read on demand. Both functions ar
 
 | Action | Parameters | Answer (`response.data`) |
 |---|---|---|
-| `manualCurrencyOptions` | — | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; `name`/`symbol` in the request language |
+| `manualCurrencyOptions` | optional `withoutRates` (boolean, default `false`; `"true"`/`"false"` accepted on the query string) | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; with `withoutRates: true` also minus every currency that already has an active `C_Conversion_Rate` row of the client with the organization currency, in either direction and on any date — the list of the "Nueva divisa" popup (a currency that already has rates gets a new range from its own "Nueva tasa · ISO" entry). `name`/`symbol` in the request language |
 | `previewManualRate` | `toCurrency`, `multipleRateBy`, `validFromDate` | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey}` with the refusal a create would get. Writes nothing |
 | `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now (latest start wins); `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
 

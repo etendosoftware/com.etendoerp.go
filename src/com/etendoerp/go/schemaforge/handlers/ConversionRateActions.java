@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.handlers;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -45,7 +46,8 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  * {@code etendo_action}). None of them is tied to a record — the id is ignored — and none writes.
  *
  * <ul>
- *   <li>{@value #MANUAL_CURRENCY_OPTIONS}: the currencies a manual rate can be created for.</li>
+ *   <li>{@value #MANUAL_CURRENCY_OPTIONS}: the currencies a manual rate can be created for;
+ *       with {@value #P_WITHOUT_RATES} only those with no rate yet.</li>
  *   <li>{@value #PREVIEW_MANUAL_RATE}: what a create with the same parameters would do — the two
  *       rows it inserts and the rows it closes — or the refusal it would get, without writing.</li>
  *   <li>{@value #CURRENT_RATES}: one entry per currency with a range in force now.</li>
@@ -56,6 +58,9 @@ final class ConversionRateActions {
   static final String MANUAL_CURRENCY_OPTIONS = "manualCurrencyOptions";
   static final String PREVIEW_MANUAL_RATE = "previewManualRate";
   static final String CURRENT_RATES = "currentRates";
+
+  /** Optional boolean of {@value #MANUAL_CURRENCY_OPTIONS}. */
+  static final String P_WITHOUT_RATES = "withoutRates";
 
   static final String ORIGIN_AUTO = "AUTO";
   static final String ORIGIN_MANUAL = "MANUAL";
@@ -84,7 +89,13 @@ final class ConversionRateActions {
         "Lists the currencies a MANUAL conversion rate can be created for:"
             + " [{id, isoCode, name, symbol}]. Excludes the organization currency and the"
             + " currencies whose rate is downloaded automatically every day (they have a"
-            + " download rule). Use an id or isoCode as toCurrency of etendo_create.")
+            + " download rule). With withoutRates:true it also excludes the currencies that"
+            + " already have any conversion rate with the organization currency (the \"new"
+            + " currency\" list); to add a range to one of those, use currentRates or etendo_list."
+            + " Use an id or isoCode as toCurrency of etendo_create.",
+        Param.optional(P_WITHOUT_RATES, NeoActionContract.TYPE_BOOLEAN,
+            "true to list only currencies with no conversion rate yet against the organization"
+                + " currency, in either direction. Default false."))
         .withIdDescription(ID_NOT_USED));
     contracts.put(PREVIEW_MANUAL_RATE, NeoActionContract.read(PREVIEW_MANUAL_RATE,
         "Dry run of a manual rate create; writes nothing. Returns {creates:[{fromIso, toIso,"
@@ -134,7 +145,7 @@ final class ConversionRateActions {
     }
     JSONArray data;
     if (MANUAL_CURRENCY_OPTIONS.equals(name)) {
-      data = manualCurrencyOptions(store);
+      data = manualCurrencyOptions(store, params.optBoolean(P_WITHOUT_RATES, false));
     } else if (PREVIEW_MANUAL_RATE.equals(name)) {
       return wrap(preview(params, store));
     } else {
@@ -160,22 +171,44 @@ final class ConversionRateActions {
       if (body != null && body.has(key)) {
         params.put(key, body.get(key));
       } else if (query != null && query.get(key) != null) {
-        params.put(key, query.get(key));
+        params.put(key, fromQuery(param, query.get(key)));
       }
     }
     return params;
   }
 
-  static JSONArray manualCurrencyOptions(ConversionRateStore store) throws JSONException {
+  /** A query-string value, typed: {@code "true"}/{@code "false"} become booleans. */
+  private static Object fromQuery(Param param, String raw) {
+    boolean isBoolean = NeoActionContract.TYPE_BOOLEAN.equals(param.getType());
+    if (isBoolean && ("true".equalsIgnoreCase(raw) || "false".equalsIgnoreCase(raw))) {
+      return Boolean.valueOf(raw);
+    }
+    return raw;
+  }
+
+  /**
+   * The currencies a manual rate can be created for.
+   *
+   * @param store        the reads
+   * @param withoutRates also leave out the currencies that already have a rate with the
+   *                     organization currency
+   * @return {@code [{id, isoCode, name, symbol}]}
+   * @throws JSONException if the body cannot be built
+   */
+  static JSONArray manualCurrencyOptions(ConversionRateStore store, boolean withoutRates)
+      throws JSONException {
     String clientId = store.currentClientId();
     String orgCurrencyId = store.orgCurrencyId();
     JSONArray options = new JSONArray();
     if (orgCurrencyId == null) {
       return options;
     }
-    Set<String> auto = store.autoCurrencyIds(clientId, orgCurrencyId);
+    Set<String> excluded = new HashSet<>(store.autoCurrencyIds(clientId, orgCurrencyId));
+    if (withoutRates) {
+      excluded.addAll(store.currenciesWithRates(clientId, orgCurrencyId));
+    }
     for (CurrencyInfo currency : store.activeCurrencies(clientId, orgCurrencyId)) {
-      if (!auto.contains(currency.id())) {
+      if (!excluded.contains(currency.id())) {
         options.put(currencyJson(currency, K_ID));
       }
     }
