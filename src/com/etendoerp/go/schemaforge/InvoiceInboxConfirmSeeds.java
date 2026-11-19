@@ -20,8 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -61,18 +59,6 @@ final class InvoiceInboxConfirmSeeds {
 
   /** The labels that identify the default country, as {@code DEFAULT_COUNTRY_LABEL_ALIASES}. */
   private static final List<String> DEFAULT_COUNTRY_ALIASES = List.of("espana", "spain");
-
-  /**
-   * Matches "Street[,] Number" — the overwhelmingly common order in the Spanish/European invoices
-   * this flow handles (e.g. {@code "Calle Mayor 45"}, {@code "Av. Libertador 1234"}). The number
-   * token may carry a single trailing letter (e.g. {@code "45B"}).
-   */
-  private static final Pattern TRAILING_NUMBER =
-      Pattern.compile("(?s)(.+?)[\\s,]+(\\d+[A-Za-z]?)\\s*$");
-
-  /** Matches "Number[,] Street" — the less common but still realistic reverse order. */
-  private static final Pattern LEADING_NUMBER =
-      Pattern.compile("(?s)^\\s*(\\d+[A-Za-z]?)[\\s,]+(.+)$");
 
   private InvoiceInboxConfirmSeeds() {
   }
@@ -170,6 +156,19 @@ final class InvoiceInboxConfirmSeeds {
    * The body of the {@code contacts/locationAddress} create; the {@code businessPartner} is the
    * parent of the operation.
    *
+   * <p>ETP-5806 follow-up: the {@code structured-address-for-sepa} flag mandates {@code
+   * streetName}, {@code buildingNumber} and {@code cityName} on every new {@code C_Location}, but
+   * only for the accounts where it is enabled, see {@link
+   * ContactsLocationAddressHandler#rejectUnusableCreatePayload}. When the flag is off for the
+   * current account, that validation does not run, so the original {@code addressLine1}-only body
+   * is still valid and the street/number split below is skipped on purpose, not just unneeded:
+   * sending those extra fields to an account whose handler does not expect them would be wrong.
+   * When the flag is on, the OCR extraction only ever prints one combined free-text line for the
+   * vendor address, so it is split into street and number the way a person reading the invoice
+   * would; a blank {@code buildingNumber} is left for {@link
+   * StructuredAddressComposer#effectiveBuildingNumber}'s own {@code "s/n"} fallback rather than
+   * invented here.
+   *
    * @param extracted the {@code vendor.extracted} block
    * @param countryId the resolved country (see {@link #countryId})
    * @return the body
@@ -181,16 +180,6 @@ final class InvoiceInboxConfirmSeeds {
     putIfPresent(body, "addressLine1", addressLine);
     putIfPresent(body, K_POSTAL_CODE, text(extracted, K_POSTAL_CODE));
     putIfPresent(body, "cityName", text(extracted, K_CITY));
-    // ETP-5806 follow-up — `structured-address-for-sepa` mandatorily requires streetName,
-    // buildingNumber and cityName on every NEW C_Location, but only for the account it is enabled
-    // for (ContactsLocationAddressHandler#rejectUnusableCreatePayload). While it is off for this
-    // account that check does not run, so the pre-ETP-5806 addressLine1-only body is still
-    // perfectly valid and this parsing is skipped — not just unneeded but actively undesirable,
-    // since it would send fields the handler does not expect from an unmigrated account. While it
-    // is on, the OCR extraction only ever prints ONE combined free-text line (`vendor_address`),
-    // so it is split into street + number the same way a human reading the invoice would; a blank
-    // buildingNumber is left for StructuredAddressComposer#effectiveBuildingNumber's own "s/n"
-    // fallback rather than invented here.
     if (StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail())) {
       String[] streetAndNumber = splitStreetAndNumber(addressLine);
       putIfPresent(body, "streetName", streetAndNumber[0]);
@@ -213,6 +202,18 @@ final class InvoiceInboxConfirmSeeds {
    *       {@link StructuredAddressComposer#effectiveBuildingNumber}).</li>
    * </ol>
    *
+   * <p>Implemented as a manual character scan rather than two regexes. The natural regex shape
+   * for each order — an unbounded free-text run immediately followed by an unbounded
+   * separator run, e.g. {@code (.+?)[\s,]+(\d+[A-Za-z]?)} — has two adjacent, non-possessive
+   * repetitions that can both match the same whitespace/comma characters, which is the textbook
+   * polynomial-backtracking shape (CWE-1333): on adversarial input such as a long run of
+   * separators with no number, the engine retries the split point up to {@code O(n)} times, each
+   * retry rescanning the remaining separator run, for {@code O(n^2)} total work. The OCR text this
+   * method parses is extracted from a scanned document and not meaningfully length- or
+   * content-bounded, so it is treated as adversarial input here. A single forward/backward scan is
+   * {@code O(n)} with no backtracking possible, and reproduces the exact split semantics the two
+   * regexes had.
+   *
    * @param addressLine the raw, possibly blank, printed address line
    * @return a 2-element array: {@code [streetName, buildingNumber]}, each possibly blank, never
    *     {@code null}
@@ -222,16 +223,104 @@ final class InvoiceInboxConfirmSeeds {
     if (StringUtils.isBlank(trimmed)) {
       return new String[] {"", ""};
     }
-    Matcher trailing = TRAILING_NUMBER.matcher(trimmed);
-    if (trailing.matches()) {
-      String street = StringUtils.stripEnd(trailing.group(1).trim(), ", ");
-      return new String[] {street, trailing.group(2)};
+    String[] trailing = trailingNumberSplit(trimmed);
+    if (trailing != null) {
+      return trailing;
     }
-    Matcher leading = LEADING_NUMBER.matcher(trimmed);
-    if (leading.matches()) {
-      return new String[] {leading.group(2).trim(), leading.group(1)};
+    String[] leading = leadingNumberSplit(trimmed);
+    if (leading != null) {
+      return leading;
     }
     return new String[] {trimmed, ""};
+  }
+
+  /**
+   * The "Street[,] Number" order: a trailing run of digits with an optional single trailing
+   * letter, preceded by a non-empty run of whitespace/comma separators, preceded by at least one
+   * more character. Mirrors the full-string match of the former
+   * {@code (.+?)[\s,]+(\d+[A-Za-z]?)\s*$} regex, without its backtracking shape.
+   *
+   * @param trimmed the already-trimmed, non-blank address line
+   * @return {@code [street, number]}, or {@code null} when the line does not end in that shape
+   */
+  private static String[] trailingNumberSplit(String trimmed) {
+    int length = trimmed.length();
+    int numberEnd = length;
+    if (numberEnd > 0 && isAsciiLetter(trimmed.charAt(numberEnd - 1))) {
+      numberEnd--;
+    }
+    int digitsStart = numberEnd;
+    while (digitsStart > 0 && isAsciiDigit(trimmed.charAt(digitsStart - 1))) {
+      digitsStart--;
+    }
+    if (digitsStart == numberEnd) {
+      return null;
+    }
+    int sepStart = digitsStart;
+    while (sepStart > 0 && isSeparator(trimmed.charAt(sepStart - 1))) {
+      sepStart--;
+    }
+    if (sepStart == digitsStart || sepStart == 0) {
+      return null;
+    }
+    String street = StringUtils.stripEnd(trimmed.substring(0, sepStart).trim(), ", ");
+    String number = trimmed.substring(digitsStart, length);
+    return new String[] {street, number};
+  }
+
+  /**
+   * The "Number[,] Street" order: a leading run of digits with an optional single trailing
+   * letter, followed by a non-empty run of whitespace/comma separators, followed by at least one
+   * more character. Mirrors the full-string match of the former
+   * {@code ^\s*(\d+[A-Za-z]?)[\s,]+(.+)$} regex, without its backtracking shape.
+   *
+   * @param trimmed the already-trimmed, non-blank address line
+   * @return {@code [street, number]}, or {@code null} when the line does not start in that shape
+   */
+  private static String[] leadingNumberSplit(String trimmed) {
+    int length = trimmed.length();
+    int digitsStart = 0;
+    while (digitsStart < length && isWhitespace(trimmed.charAt(digitsStart))) {
+      digitsStart++;
+    }
+    int numberEnd = digitsStart;
+    while (numberEnd < length && isAsciiDigit(trimmed.charAt(numberEnd))) {
+      numberEnd++;
+    }
+    if (numberEnd == digitsStart) {
+      return null;
+    }
+    if (numberEnd < length && isAsciiLetter(trimmed.charAt(numberEnd))) {
+      numberEnd++;
+    }
+    int sepEnd = numberEnd;
+    while (sepEnd < length && isSeparator(trimmed.charAt(sepEnd))) {
+      sepEnd++;
+    }
+    if (sepEnd == numberEnd || sepEnd == length) {
+      return null;
+    }
+    String number = trimmed.substring(digitsStart, numberEnd);
+    String street = trimmed.substring(sepEnd).trim();
+    return new String[] {street, number};
+  }
+
+  private static boolean isAsciiDigit(char c) {
+    return c >= '0' && c <= '9';
+  }
+
+  private static boolean isAsciiLetter(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+  }
+
+  /** Matches regex {@code \s} (ASCII, default flags): space, tab, newline, vertical tab, form
+   * feed or carriage return. */
+  private static boolean isWhitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == (char) 0x0B || c == '\f' || c == '\r';
+  }
+
+  private static boolean isSeparator(char c) {
+    return isWhitespace(c) || c == ',';
   }
 
   /** Lowercase with the accents removed, trimmed: the comparison of a printed country. */
