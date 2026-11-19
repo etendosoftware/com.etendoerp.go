@@ -64,6 +64,58 @@ class OwnerAccountResolverTest {
     }
   }
 
+  /** ETP-6386: "no owner" is an answer too: it is cached for the TTL, not looked up per call. */
+  @Test
+  void aNullAnswerIsCachedForTheTtl() {
+    AtomicLong now = new AtomicLong(1_000L);
+    OwnerAccountResolver.resetForTest(now::get);
+    try (Fixture f = new Fixture(null, null, null)) {
+      assertNull(OwnerAccountResolver.findOwnerAccountId("C1"));
+      assertNull(OwnerAccountResolver.findOwnerAccountId("C1"));
+      f.owner.verify(() -> OwnerSupport.findOwnerUserId("C1"), times(1));
+
+      now.addAndGet(OwnerAccountResolver.TTL_MILLIS + 1);
+      assertNull(OwnerAccountResolver.findOwnerAccountId("C1"));
+      f.owner.verify(() -> OwnerSupport.findOwnerUserId("C1"), times(2));
+    }
+  }
+
+  /** ETP-6386: a failed lookup throws and is not cached: the next call looks up again. */
+  @Test
+  void aFailedLookupIsNotCached() {
+    try (Fixture f = new Fixture("OWNER-USER", "owner@acme.test", null)) {
+      Account account = mock(Account.class);
+      when(account.getId()).thenReturn("ACCOUNT-OWNER");
+      when(f.query.uniqueResult()).thenThrow(new IllegalStateException("db down"))
+          .thenReturn(account);
+
+      org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+          () -> OwnerAccountResolver.findOwnerAccountId("C1"));
+
+      assertEquals("ACCOUNT-OWNER", OwnerAccountResolver.findOwnerAccountId("C1"));
+      f.obContext.verify(OBContext::restorePreviousMode, times(2));
+    }
+  }
+
+  /** ETP-6386: 256 entries at most, least recently used out first. */
+  @Test
+  void theCacheIsBoundedAndEvictsTheLeastRecentlyUsed() {
+    try (Fixture f = new Fixture(null, null, null)) {
+      int max = OwnerAccountResolver.MAX_ENTRIES;
+      for (int i = 0; i < max; i++) {
+        OwnerAccountResolver.findOwnerAccountId("E" + i);
+      }
+      OwnerAccountResolver.findOwnerAccountId("E0"); // a hit: E0 is now the most recent
+      OwnerAccountResolver.findOwnerAccountId("E" + max); // overflows: evicts E1
+      f.owner.verify(() -> OwnerSupport.findOwnerUserId(anyString()), times(max + 1));
+
+      OwnerAccountResolver.findOwnerAccountId("E0");
+      f.owner.verify(() -> OwnerSupport.findOwnerUserId(anyString()), times(max + 1));
+      OwnerAccountResolver.findOwnerAccountId("E1");
+      f.owner.verify(() -> OwnerSupport.findOwnerUserId(anyString()), times(max + 2));
+    }
+  }
+
   /** The owner flag decides: the account of the owner user, whoever else belongs to the client. */
   @Test
   void returnsTheAccountOfTheFlaggedOwner() {
