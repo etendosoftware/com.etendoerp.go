@@ -22,9 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -32,8 +30,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedStatic;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
 /**
@@ -511,12 +507,10 @@ class SupportIntegrationClientTest {
   @DisplayName("getUserEmail")
   class GetUserEmail {
 
-    private MockedStatic<OBDal> mockObDal(User user) {
-      OBDal obDal = mock(OBDal.class);
-      when(obDal.get(eq(User.class), anyString())).thenReturn(user);
-      MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(obDal);
-      return dalMock;
+    private SupportConversationStore storeFinding(User user) {
+      SupportConversationStore store = mock(SupportConversationStore.class);
+      when(store.findUser(anyString())).thenReturn(user);
+      return store;
     }
 
     @Test
@@ -524,9 +518,7 @@ class SupportIntegrationClientTest {
     void returnsEmailWhenPresent() {
       User user = mock(User.class);
       when(user.getEmail()).thenReturn("real@example.com");
-      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
-        assertEquals("real@example.com", SupportIntegrationClient.getUserEmail("100"));
-      }
+      assertEquals("real@example.com", SupportIntegrationClient.getUserEmail(storeFinding(user), "100"));
     }
 
     @Test
@@ -535,9 +527,7 @@ class SupportIntegrationClientTest {
       User user = mock(User.class);
       when(user.getEmail()).thenReturn("");
       when(user.getUsername()).thenReturn("goportal@example.com");
-      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
-        assertEquals("goportal@example.com", SupportIntegrationClient.getUserEmail("101"));
-      }
+      assertEquals("goportal@example.com", SupportIntegrationClient.getUserEmail(storeFinding(user), "101"));
     }
 
     @Test
@@ -546,17 +536,13 @@ class SupportIntegrationClientTest {
       User user = mock(User.class);
       when(user.getEmail()).thenReturn(null);
       when(user.getUsername()).thenReturn("admin");
-      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
-        assertNull(SupportIntegrationClient.getUserEmail("0"));
-      }
+      assertNull(SupportIntegrationClient.getUserEmail(storeFinding(user), "0"));
     }
 
     @Test
     @DisplayName("Returns null when the user is not found")
     void returnsNullWhenUserNotFound() {
-      try (MockedStatic<OBDal> dalMock = mockObDal(null)) {
-        assertNull(SupportIntegrationClient.getUserEmail("999"));
-      }
+      assertNull(SupportIntegrationClient.getUserEmail(storeFinding(null), "999"));
     }
   }
 

@@ -26,10 +26,6 @@ import java.util.Set;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
@@ -71,22 +67,17 @@ final class SupportAdfAttachmentCorrelator {
    * earlier comment on the same ticket) already legitimately linked to an earlier message: {@code
    * claimed} in {@link #correlateAttachments} only prevents double-matching within a single
    * webhook invocation, it has no memory of earlier invocations. */
-  static Set<String> findAlreadyLinkedAttachmentIds(String jiraKey) {
+  static Set<String> findAlreadyLinkedAttachmentIds(SupportConversationStore store, String jiraKey) {
     Set<String> ids = new HashSet<>();
-    OBContext.setAdminMode(true);
+    store.enterAdminMode();
     try {
-      SupportConversation conv = SupportJiraWebhookHandler.findConversationByJiraKey(jiraKey);
+      SupportConversation conv = store.findConversationByJiraKey(jiraKey);
       if (conv == null) return ids;
-      OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
-      crit.setFilterOnReadableClients(false);
-      crit.setFilterOnReadableOrganization(false);
-      crit.add(Restrictions.eq(SupportMessage.PROPERTY_CONVERSATION + ".id", conv.getId()));
-      crit.add(Restrictions.isNotNull(SupportMessage.PROPERTY_ATTACHMENTS));
-      for (SupportMessage msg : crit.list()) {
+      for (SupportMessage msg : store.listMessagesWithAttachments(conv.getId())) {
         collectAttachmentIds(msg.getAttachments(), ids);
       }
     } finally {
-      OBContext.restorePreviousMode();
+      store.restorePreviousMode();
     }
     return ids;
   }

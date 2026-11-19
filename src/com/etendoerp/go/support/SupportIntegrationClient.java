@@ -31,7 +31,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
@@ -110,8 +109,8 @@ final class SupportIntegrationClient {
    * Fall back to username when it looks like an email so those tickets still carry
    * a real reporter instead of silently dropping to the Jira default reporter.
    */
-  static String getUserEmail(String userId) {
-    User user = OBDal.getInstance().get(User.class, userId);
+  static String getUserEmail(SupportConversationStore store, String userId) {
+    User user = store.findUser(userId);
     if (user == null) return null;
     String email = user.getEmail();
     if (email != null && !email.isEmpty()) return email;

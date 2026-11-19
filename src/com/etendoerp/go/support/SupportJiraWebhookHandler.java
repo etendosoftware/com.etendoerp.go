@@ -43,11 +43,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.BoundedJsonParser;
@@ -106,7 +101,8 @@ final class SupportJiraWebhookHandler {
   private SupportJiraWebhookHandler() {
   }
 
-  static void handle(HttpServletRequest request, HttpServletResponse response) throws IOException {
+  static void handle(SupportConversationStore store, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
     if (!WEBHOOK_SECRET.isEmpty() && !WEBHOOK_SECRET.equals(request.getHeader(HEADER_WEBHOOK_SECRET))) {
       SupportConversationsServlet.writeError(response, HttpServletResponse.SC_UNAUTHORIZED, MSG_INVALID_SECRET);
       return;
@@ -114,12 +110,12 @@ final class SupportJiraWebhookHandler {
 
     JSONObject body = SupportConversationsServlet.parseBodySilent(request);
     JiraWebhookComment comment = (body != null && body.length() > 0)
-        ? parseStandardJiraWebhook(response, body)
-        : parseAutomationJiraWebhook(request, response);
+        ? parseStandardJiraWebhook(store, response, body)
+        : parseAutomationJiraWebhook(store, request, response);
     if (comment == null) return;
 
     try {
-      storeJiraWebhookComment(response, comment);
+      storeJiraWebhookComment(store, response, comment);
     } catch (Exception e) {
       log.error("Error processing Jira webhook", e);
       SupportConversationsServlet.writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -128,8 +124,8 @@ final class SupportJiraWebhookHandler {
 
   // --- Standard Jira system webhook (JSON body) ---
 
-  static JiraWebhookComment parseStandardJiraWebhook(HttpServletResponse response, JSONObject body)
-      throws IOException {
+  static JiraWebhookComment parseStandardJiraWebhook(SupportConversationStore store, HttpServletResponse response,
+      JSONObject body) throws IOException {
     JSONObject issue = body.optJSONObject("issue");
     if (issue == null) { writeIgnored(response); return null; }
     String jiraKey = issue.optString("key", "");
@@ -137,7 +133,7 @@ final class SupportJiraWebhookHandler {
 
     JSONObject comment = body.optJSONObject("comment");
     if (comment == null) {
-      handleJiraNonCommentEvent(response, issue, body, jiraKey);
+      handleJiraNonCommentEvent(store, response, issue, body, jiraKey);
       return null;
     }
 
@@ -151,27 +147,27 @@ final class SupportJiraWebhookHandler {
     String authorAccountId = author != null ? author.optString("accountId", "") : "";
     String authorName = author != null ? author.optString("displayName", DEFAULT_AGENT_NAME) : DEFAULT_AGENT_NAME;
     String text = extractAdfText(comment.opt("body")).trim();
-    ResolvedAttachments resolvedAttachments = resolveCommentAttachments(jiraKey, comment);
+    ResolvedAttachments resolvedAttachments = resolveCommentAttachments(store, jiraKey, comment);
     text = stripResolvedWikiMarkupTokens(text, resolvedAttachments.resolvedWikiMarkupTokens);
     return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, authorAccountId, text,
         resolvedAttachments.attachments);
   }
 
   /** No "comment" field: either an assignee-change-back-to-bot or a status transition to Done. */
-  static void handleJiraNonCommentEvent(HttpServletResponse response, JSONObject issue, JSONObject body,
-      String jiraKey) throws IOException {
+  static void handleJiraNonCommentEvent(SupportConversationStore store, HttpServletResponse response,
+      JSONObject issue, JSONObject body, String jiraKey) throws IOException {
     JSONObject fields = issue.optJSONObject("fields");
     if (fields != null) {
       JSONObject assignee = fields.optJSONObject("assignee");
       String assigneeEmail = assignee != null ? assignee.optString("emailAddress", "") : "";
       String assigneeName = assignee != null ? assignee.optString("displayName", "") : "";
       if (isBotIdentity(assigneeEmail, assigneeName)) {
-        handleAssigneeReset(response, jiraKey);
+        handleAssigneeReset(store, response, jiraKey);
         return;
       }
     }
     if (isStatusTransitionToDone(body.optJSONObject("changelog"))) {
-      handleTicketClosed(response, jiraKey);
+      handleTicketClosed(store, response, jiraKey);
       return;
     }
     writeIgnored(response);
@@ -197,8 +193,8 @@ final class SupportJiraWebhookHandler {
 
   // --- Jira Automation webhook (query params) ---
 
-  static JiraWebhookComment parseAutomationJiraWebhook(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+  static JiraWebhookComment parseAutomationJiraWebhook(SupportConversationStore store,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
     String jiraKey     = request.getParameter("issueKey");
     String commentId   = request.getParameter("commentId");
     String authorName  = nvl(request.getParameter("authorName"), DEFAULT_AGENT_NAME);
@@ -211,14 +207,14 @@ final class SupportJiraWebhookHandler {
     String action = nvl(request.getParameter("action"), "");
     if ("assignee_reset".equals(action)) {
       if (isBotIdentity(authorEmail, authorName)) {
-        handleAssigneeReset(response, jiraKey);
+        handleAssigneeReset(store, response, jiraKey);
       } else {
         SupportConversationsServlet.writeRaw(response, 200, "{\"status\":\"ignored_not_bot\"}");
       }
       return null;
     }
     if ("ticket_closed".equals(action)) {
-      handleTicketClosed(response, jiraKey);
+      handleTicketClosed(store, response, jiraKey);
       return null;
     }
     if (commentId == null) commentId = SupportConversationsServlet.newId();
@@ -233,25 +229,25 @@ final class SupportJiraWebhookHandler {
 
   // --- Persisting the comment as a support message ---
 
-  static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
-      throws IOException, JSONException {
+  static void storeJiraWebhookComment(SupportConversationStore store, HttpServletResponse response,
+      JiraWebhookComment comment) throws IOException, JSONException {
     if (isBotIdentity(comment.authorEmail, comment.authorName)) {
-      SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
+      SupportConversationsServlet.writeJson(store, response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
       return;
     }
     String text = comment.text == null ? "" : comment.text.trim();
     boolean hasAttachments = comment.attachments != null && comment.attachments.length() > 0;
     if (text.isEmpty() && !hasAttachments) {
-      SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "empty_body"));
+      SupportConversationsServlet.writeJson(store, response, 200, new JSONObject().put(FIELD_STATUS, "empty_body"));
       return;
     }
 
     String externalId = "jira:" + comment.jiraKey + ":" + comment.commentId;
-    OBContext.setAdminMode(true);
+    store.enterAdminMode();
     try {
-      SupportConversation conv = findConversationByJiraKey(comment.jiraKey);
+      SupportConversation conv = store.findConversationByJiraKey(comment.jiraKey);
       if (conv == null) {
-        SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
+        SupportConversationsServlet.writeJson(store, response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
         return;
       }
       // NOTE: there is deliberately NO "is this the reporter replying to their own ticket"
@@ -270,44 +266,23 @@ final class SupportJiraWebhookHandler {
       boolean isReporterReply = !comment.authorAccountId.isEmpty()
           && comment.authorAccountId.equals(conv.getJiraReporterAccountId());
       String sender = isReporterReply ? "user" : "human";
-      if (findMessageByExternalId(externalId) != null) {
+      if (store.findMessageByExternalId(externalId) != null) {
         // Already stored (Jira retry) — ack without duplicating.
-        SupportConversationsServlet.writeJson(response, 200,
+        SupportConversationsServlet.writeJson(store, response, 200,
             new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
         return;
       }
       Date ts = new Date();
-      insertJiraMessage(conv, sender, comment.authorName, text, ts, externalId, comment.attachments);
-      SupportConversationsServlet.updateConvSummary(conv.getId(), text, ts);
+      insertJiraMessage(store, conv, sender, comment.authorName, text, ts, externalId, comment.attachments);
+      SupportConversationsServlet.updateConvSummary(store, conv.getId(), text, ts);
       conv.setUnread(true);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
       log.info("Jira comment {} ({}) stored in conversation {}", comment.commentId, comment.authorName, conv.getId());
-      SupportConversationsServlet.writeJson(response, 200,
+      SupportConversationsServlet.writeJson(store, response, 200,
           new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
     } finally {
-      OBContext.restorePreviousMode();
+      store.restorePreviousMode();
     }
-  }
-
-  /** Jira webhooks arrive with no per-request tenant to scope to — these lookups must see every
-   * client's rows to resolve the ticket key / dedupe the external id. Package-private (not
-   * private): also called by {@link SupportAdfAttachmentCorrelator#findAlreadyLinkedAttachmentIds}. */
-  static SupportConversation findConversationByJiraKey(String jiraKey) {
-    OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
-    crit.setFilterOnReadableClients(false);
-    crit.setFilterOnReadableOrganization(false);
-    crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
-    crit.setMaxResults(1);
-    return (SupportConversation) crit.uniqueResult();
-  }
-
-  private static SupportMessage findMessageByExternalId(String externalId) {
-    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
-    crit.setFilterOnReadableClients(false);
-    crit.setFilterOnReadableOrganization(false);
-    crit.add(Restrictions.eq(SupportMessage.PROPERTY_EXTERNALID, externalId));
-    crit.setMaxResults(1);
-    return (SupportMessage) crit.uniqueResult();
   }
 
   /** Jira comments have no authenticated Etendo requester — tagged as system-created, same tenant
@@ -317,10 +292,10 @@ final class SupportJiraWebhookHandler {
    * {@code attachments} is the resolved {@code [{id, filename, mimeType}]} array (see
    * {@link #resolveCommentAttachments}), or {@code null} when the comment carried none — stored
    * as-is (null column), never as an empty-array string. */
-  private static void insertJiraMessage(SupportConversation conv, String sender, String authorName, String text,
-      Date ts, String externalId, JSONArray attachments) {
-    User systemUser = OBDal.getInstance().get(User.class, SupportConversationsServlet.SYSTEM_USER_ID);
-    SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
+  private static void insertJiraMessage(SupportConversationStore store, SupportConversation conv, String sender,
+      String authorName, String text, Date ts, String externalId, JSONArray attachments) {
+    User systemUser = store.findUser(SupportConversationsServlet.SYSTEM_USER_ID);
+    SupportMessage msg = store.newMessage();
     msg.setNewOBObject(true);
     msg.setId(SupportConversationsServlet.newId());
     msg.setClient(conv.getClient());
@@ -336,29 +311,26 @@ final class SupportJiraWebhookHandler {
     if (attachments != null && attachments.length() > 0) {
       msg.setAttachments(attachments.toString());
     }
-    OBDal.getInstance().save(msg);
+    store.saveMessage(msg);
   }
 
   // --- Jira automation side-effects triggered without a comment ---
 
-  static void handleAssigneeReset(HttpServletResponse response, String jiraKey) throws IOException {
+  static void handleAssigneeReset(SupportConversationStore store, HttpServletResponse response, String jiraKey)
+      throws IOException {
     try {
-      OBContext.setAdminMode(true);
+      store.enterAdminMode();
       try {
-        OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
-        crit.setFilterOnReadableClients(false);
-        crit.setFilterOnReadableOrganization(false);
-        crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
-        List<SupportConversation> matches = crit.list();
+        List<SupportConversation> matches = store.listConversationsByJiraKey(jiraKey);
         for (SupportConversation conv : matches) {
           conv.setHumanTakeover(false);
-          OBDal.getInstance().save(conv);
+          store.saveConversation(conv);
         }
         log.info("Human takeover reset via assignee event for Jira ticket {} ({} row(s))", jiraKey, matches.size());
-        SupportConversationsServlet.writeJson(response, 200,
+        SupportConversationsServlet.writeJson(store, response, 200,
             new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_JIRA_TICKET_KEY, jiraKey));
       } finally {
-        OBContext.restorePreviousMode();
+        store.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error resetting human takeover for ticket {}", jiraKey, e);
@@ -366,24 +338,25 @@ final class SupportJiraWebhookHandler {
     }
   }
 
-  static void handleTicketClosed(HttpServletResponse response, String jiraKey) throws IOException {
+  static void handleTicketClosed(SupportConversationStore store, HttpServletResponse response, String jiraKey)
+      throws IOException {
     try {
-      OBContext.setAdminMode(true);
+      store.enterAdminMode();
       try {
-        SupportConversation conv = findConversationByJiraKey(jiraKey);
+        SupportConversation conv = store.findConversationByJiraKey(jiraKey);
         if (conv == null) {
-          SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
+          SupportConversationsServlet.writeJson(store, response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
           return;
         }
         conv.setStatus("closed");
         conv.setUnread(true);
         conv.setLastActivity(new Date());
-        OBDal.getInstance().save(conv);
+        store.saveConversation(conv);
         log.info("Conversation {} closed via Jira ticket {} resolution", conv.getId(), jiraKey);
-        SupportConversationsServlet.writeJson(response, 200,
+        SupportConversationsServlet.writeJson(store, response, 200,
             new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
       } finally {
-        OBContext.restorePreviousMode();
+        store.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error closing conversation for ticket {}", jiraKey, e);
@@ -630,7 +603,8 @@ final class SupportJiraWebhookHandler {
    * SupportAdfAttachmentCorrelator#correlateAttachments(JSONArray, List, Date, Set)}). The
    * wiki-markup side needs none of that: an exact filename match is either found or it isn't.
    */
-  static ResolvedAttachments resolveCommentAttachments(String jiraKey, JSONObject comment) {
+  static ResolvedAttachments resolveCommentAttachments(SupportConversationStore store, String jiraKey,
+      JSONObject comment) {
     Object rawBody = comment.opt("body");
     List<String> mediaIds = new ArrayList<>();
     SupportAdfAttachmentCorrelator.collectAdfMediaIds(rawBody, mediaIds);
@@ -648,7 +622,7 @@ final class SupportJiraWebhookHandler {
 
     JSONArray resolved = new JSONArray();
     if (!mediaIds.isEmpty()) {
-      Set<String> alreadyLinkedIds = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds(jiraKey);
+      Set<String> alreadyLinkedIds = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds(store, jiraKey);
       JSONArray adfResolved =
           SupportAdfAttachmentCorrelator.correlateAttachments(issueAttachments, mediaIds, commentTime, alreadyLinkedIds);
       for (int i = 0; i < adfResolved.length(); i++) {
