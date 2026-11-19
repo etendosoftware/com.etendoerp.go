@@ -7656,7 +7656,11 @@ That costs a couple of dozen tokens once and lets the agent link any record it l
 including the rows of a 100-record `etendo_list`, which deliberately carries no URLs of its own.
 
 **`etendo_get` and `etendo_create` add a ready-made `url`** to the record they return — the two moments
-an agent hands the user a link.
+an agent hands the user a link — and, next to it, **`urlNote`** (ETP-5850): the link opens only for
+users of the app (login required) and must never be sent to a customer or supplier; a customer's
+link to their documents is the contacts action `portalLink`. The discover `hint` says the same.
+Asked for "the portal link of customer X, to send by WhatsApp", the agent handed over the contact's
+record url in every pilot run, a link the customer cannot open.
 
 Two rules keep the links honest, and both are enforced in code:
 
