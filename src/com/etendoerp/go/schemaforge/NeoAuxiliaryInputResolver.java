@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -97,6 +98,44 @@ final class NeoAuxiliaryInputResolver {
         log.debug("Could not compute auxiliary input {}: {}", auxIn.getName(), e.getMessage());
       }
     }
+  }
+
+  /**
+   * The tab's active auxiliary inputs whose code is a plain literal (no {@code @SQL=}, no
+   * {@code @token@}), keyed by auxiliary input name. Surrounding single quotes are stripped, and a
+   * literal that is empty once stripped ({@code ''}) is left out: it sets nothing.
+   *
+   * <p>These are the values Classic puts in a window's context on every form load — e.g. the Sales
+   * Quotation header's {@code isQuotation=Y} — and that validation rules read like any other field.
+   *
+   * @param adTab the tab whose auxiliary inputs to read; may be {@code null}
+   * @return name to literal value, in AD order; empty when the tab has none
+   */
+  static Map<String, String> literalValues(Tab adTab) {
+    Map<String, String> literals = new LinkedHashMap<>();
+    List<AuxiliaryInput> auxInputs = adTab == null ? null : adTab.getADAuxiliaryInputList();
+    if (auxInputs == null) {
+      return literals;
+    }
+    for (AuxiliaryInput auxIn : auxInputs) {
+      String value = Boolean.TRUE.equals(auxIn.isActive()) ? literalOf(auxIn.getValidationCode())
+          : null;
+      if (value != null && auxIn.getName() != null) {
+        literals.put(auxIn.getName(), value);
+      }
+    }
+    return literals;
+  }
+
+  private static String literalOf(String code) {
+    if (code == null || code.indexOf('@') >= 0) {
+      return null;
+    }
+    String value = code.trim();
+    if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
+      value = value.substring(1, value.length() - 1);
+    }
+    return value.isEmpty() ? null : value;
   }
 
   private static String evaluate(AuxiliaryInput auxIn, String windowId, VariablesSecureApp vars,
