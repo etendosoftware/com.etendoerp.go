@@ -29,6 +29,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -63,13 +64,15 @@ final class InvoiceInboxTelemetry {
   static void documentConfirmed(boolean adjusted, String accountId) {
     try {
       Map<String, Object> properties = properties(adjusted, accountId);
-      // The test seam is captured at enqueue time, so a queued event never drifts to a later seam.
-      // The runtime service is still built lazily on the sender thread, never on the request.
-      NeoTelemetryService seam = TELEMETRY_SERVICE.get();
+      // The service (test seam or runtime) is resolved on the request thread, so a queued event
+      // never drifts to a later seam. The runtime config reads properties only, no DAL.
+      NeoTelemetryService service = telemetry();
+      // ETP-6228: the sender has no session; the identity is captured here (ad_user_id).
+      NeoTelemetryIdentity identity = service.captureIdentity(accountId, null);
       SENDER.execute(() -> {
         try {
-          (seam != null ? seam : telemetry()).emit(NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED, properties,
-              accountId);
+          NeoTelemetryIdentity.runWith(identity, () -> service.emit(
+              NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED, properties, accountId));
         } catch (RuntimeException e) {
           log.debug("Invoice inbox telemetry: emit failed: {}", e.getMessage());
         }

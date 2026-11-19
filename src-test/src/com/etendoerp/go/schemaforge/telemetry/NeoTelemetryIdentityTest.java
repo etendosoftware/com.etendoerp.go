@@ -20,17 +20,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -40,6 +45,8 @@ import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
+
+import com.etendoerp.go.usage.IsolatedDalRead;
 
 /**
  * ETP-6228: the common identity of backend events.
@@ -171,21 +178,96 @@ class NeoTelemetryIdentityTest {
   }
 
   @Test
-  void aFailedLookupLeavesTheFactsOutAndIsRetried() {
+  void aFailedLookupLeavesTheFactsOutAndIsRetriedAfterTheNegativeWindow() {
     AtomicInteger lookups = new AtomicInteger();
+    AtomicLong now = new AtomicLong(1_000L);
     RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
         client -> {
           lookups.incrementAndGet();
           throw new IllegalStateException("db down");
-        }, System::currentTimeMillis);
+        }, now::get);
 
     NeoTelemetryIdentity identity = resolver.resolve("C1", "U1");
-    resolver.resolve("C1", "U1");
+    // ETP-6386: inside the negative window the lookup is not attempted again.
+    NeoTelemetryIdentity inWindow = resolver.resolve("C1", "U1");
 
     assertEquals("C1", property(identity, "ad_client_id"));
+    assertEquals("C1", property(inWindow, "ad_client_id"));
+    assertEquals("U1", property(inWindow, "ad_user_id"));
     assertNull(property(identity, "etgo_account_id"));
     assertNull(property(identity, "tenant_type"));
+    assertEquals(1, lookups.get());
+
+    now.addAndGet(RuntimeNeoTelemetryIdentityResolver.NEGATIVE_TTL_MILLIS + 1);
+    resolver.resolve("C1", "U1");
     assertEquals(2, lookups.get());
+  }
+
+  /** ETP-6386: the negative window is per client and a later success clears it. */
+  @Test
+  void theNegativeWindowIsPerClientAndEndsOnSuccess() {
+    AtomicInteger lookups = new AtomicInteger();
+    AtomicLong now = new AtomicLong(1_000L);
+    AtomicReference<Boolean> down = new AtomicReference<>(true);
+    RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+        client -> {
+          lookups.incrementAndGet();
+          return down.get() ? null
+              : new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER", "demo");
+        }, now::get);
+
+    resolver.resolve("C1", "U1");
+    resolver.resolve("C2", "U1");
+    assertEquals(2, lookups.get());
+
+    down.set(false);
+    now.addAndGet(RuntimeNeoTelemetryIdentityResolver.NEGATIVE_TTL_MILLIS + 1);
+    assertEquals("OWNER", property(resolver.resolve("C1", "U1"), "etgo_account_id"));
+    assertEquals("OWNER", property(resolver.resolve("C1", "U1"), "etgo_account_id"));
+    assertEquals(3, lookups.get());
+  }
+
+  /**
+   * ETP-6386: the runtime lookup runs in its own DAL session with a 5 s wait, never on the
+   * emitting thread's session (a request's transaction, or a sender thread that never closes it).
+   */
+  @Test
+  void theRuntimeLookupRunsInAnIsolatedRead() {
+    try (MockedStatic<IsolatedDalRead> isolated = Mockito.mockStatic(IsolatedDalRead.class)) {
+      isolated.when(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(), Mockito.eq(5_000L)))
+          .thenReturn(new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER-A", "demo"));
+      RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+          RuntimeNeoTelemetryIdentityResolver::lookupClientFacts, System::currentTimeMillis);
+
+      NeoTelemetryIdentity identity = resolver.resolve("C-ISOLATED", "U1");
+
+      assertEquals("OWNER-A", property(identity, "etgo_account_id"));
+      assertEquals("demo", property(identity, "tenant_type"));
+      isolated.verify(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(),
+          Mockito.eq(5_000L)));
+    }
+  }
+
+  /** ETP-6386: a timed-out isolated read yields no facts, is not cached, and the event still goes. */
+  @Test
+  void aTimedOutIsolatedLookupLeavesTheFactsOutAndIsRetriedAfterTheWindow() {
+    AtomicLong now = new AtomicLong(1_000L);
+    try (MockedStatic<IsolatedDalRead> isolated = Mockito.mockStatic(IsolatedDalRead.class)) {
+      isolated.when(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(), Mockito.anyLong()))
+          .thenThrow(new IllegalStateException("Isolated read timed out after 5000 ms"));
+      RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+          RuntimeNeoTelemetryIdentityResolver::lookupClientFacts, now::get);
+
+      NeoTelemetryIdentity identity = resolver.resolve("C-SLOW", "U1");
+      resolver.resolve("C-SLOW", "U1");
+      now.addAndGet(RuntimeNeoTelemetryIdentityResolver.NEGATIVE_TTL_MILLIS + 1);
+      resolver.resolve("C-SLOW", "U1");
+
+      assertEquals("C-SLOW", property(identity, "ad_client_id"));
+      assertNull(property(identity, "etgo_account_id"));
+      isolated.verify(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(),
+          Mockito.anyLong()), Mockito.times(2));
+    }
   }
 
   @Test
@@ -213,6 +295,92 @@ class NeoTelemetryIdentityTest {
 
     // C0 was evicted by the bound, so it is looked up again.
     assertEquals(RuntimeNeoTelemetryIdentityResolver.MAX_ENTRIES + 2, lookups.get());
+  }
+
+  /** ETP-6386: the lookup runs outside the lock, so a slow miss never blocks another client. */
+  @Test
+  void aSlowMissForOneClientDoesNotBlockAnotherClient() throws Exception {
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+        client -> {
+          if ("SLOW".equals(client)) {
+            entered.countDown();
+            try {
+              release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+          }
+          return new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER-" + client, "demo");
+        }, System::currentTimeMillis);
+    Thread slow = new Thread(() -> resolver.resolve("SLOW", "U1"));
+    slow.start();
+    try {
+      assertTrue(entered.await(5, TimeUnit.SECONDS));
+
+      NeoTelemetryIdentity fast = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+          Duration.ofSeconds(5), () -> resolver.resolve("FAST", "U1"));
+
+      assertEquals("OWNER-FAST", property(fast, "etgo_account_id"));
+    } finally {
+      release.countDown();
+      slow.join(5_000);
+    }
+  }
+
+  /** ETP-6386: access order, so a recently used client survives the 256 bound. */
+  @Test
+  void aRecentlyUsedClientSurvivesTheBound() {
+    AtomicInteger lookups = new AtomicInteger();
+    RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+        client -> {
+          lookups.incrementAndGet();
+          return new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER", "demo");
+        }, () -> 0L);
+    int max = RuntimeNeoTelemetryIdentityResolver.MAX_ENTRIES;
+    for (int i = 0; i < max; i++) {
+      resolver.resolve("C" + i, "U1");
+    }
+    resolver.resolve("C0", "U1"); // a hit: C0 is now the most recently used
+    resolver.resolve("C" + max, "U1"); // overflows the bound: evicts C1, not C0
+    assertEquals(max + 1, lookups.get());
+
+    resolver.resolve("C0", "U1");
+    assertEquals(max + 1, lookups.get(), "C0 was kept");
+    resolver.resolve("C1", "U1");
+    assertEquals(max + 2, lookups.get(), "C1 was the least recently used and was evicted");
+  }
+
+  /** ETP-6386: a system user never becomes ad_user_id, even for a real client. */
+  @Test
+  void aSystemUserOfARealClientCarriesNoUserId() {
+    NeoTelemetryIdentity identity = factsResolver().resolve("C1", "0");
+
+    assertNull(property(identity, "ad_user_id"));
+    assertEquals("C1", property(identity, "ad_client_id"));
+  }
+
+  /**
+   * ETP-6386: after commitAndClose the thread has no session (no OBContext); the facts still come
+   * from the isolated read, so the event carries etgo_account_id and tenant_type.
+   */
+  @Test
+  void anEmissionWithNoSessionStillCarriesTheClientFacts() {
+    try (MockedStatic<IsolatedDalRead> isolated = Mockito.mockStatic(IsolatedDalRead.class);
+        MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
+      ob.when(OBContext::getOBContext).thenReturn(null);
+      isolated.when(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(), Mockito.eq(5_000L)))
+          .thenReturn(new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER-A", "productive"));
+      RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+          RuntimeNeoTelemetryIdentityResolver::lookupClientFacts, System::currentTimeMillis);
+
+      NeoTelemetryIdentity identity = resolver.resolve("C-AFTER-COMMIT", null);
+
+      assertEquals("OWNER-A", property(identity, "etgo_account_id"));
+      assertEquals("productive", property(identity, "tenant_type"));
+      assertNull(property(identity, "ad_user_id"));
+    }
   }
 
   // ── doResolve: the session from OBContext ─────────────────────────────────────────────────
