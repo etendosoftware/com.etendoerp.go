@@ -130,6 +130,11 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
     // deployments; $insert_id lets Mixpanel drop a duplicate submission of the same emission.
     properties.put(PROP_ENVIRONMENT, config.getEnvironment());
     properties.put(PROP_INSERT_ID, event.getInsertId());
+    // ETP-6228: the common identity, last, so no emitter can set or replace its keys. Absent parts
+    // are absent, never guessed.
+    for (Map.Entry<String, Object> entry : event.getIdentity().toProperties().entrySet()) {
+      properties.put(entry.getKey(), entry.getValue());
+    }
 
     JSONObject payload = new JSONObject();
     payload.put("event", event.getName());

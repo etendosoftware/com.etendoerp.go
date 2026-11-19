@@ -53,6 +53,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Language;
 
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -288,6 +289,32 @@ class McpSessionManagerTest {
           }));
 
       assertEquals("resolvedClient", McpUsageTelemetry.currentTenant().getClientId());
+    }
+
+    /**
+     * ETP-6228: the Mixpanel identity is captured here, while the call's context and DAL session
+     * are live, for the call's own client and user, on success and on failure.
+     */
+    @Test
+    @DisplayName("captures the Mixpanel identity of the call's client and user, also when it fails")
+    void capturesTheIdentityOfTheCall() throws Exception {
+      NeoTelemetryIdentity identity = new NeoTelemetryIdentity(USER_ID, CLIENT_ID, "OWNER", "demo");
+      try (MockedStatic<McpUsageLogger> logger = mockStatic(McpUsageLogger.class)) {
+        logger.when(() -> McpUsageLogger.captureIdentity(CLIENT_ID, USER_ID)).thenReturn(identity);
+
+        McpSessionManager.executeInContext(USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID,
+            () -> "ok");
+        assertSame(identity, McpUsageTelemetry.currentIdentity());
+
+        McpUsageTelemetry.clearCurrentTenant();
+        assertSame(NeoTelemetryIdentity.NONE, McpUsageTelemetry.currentIdentity());
+
+        assertThrows(IllegalStateException.class, () -> McpSessionManager.executeInContext(
+            USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, () -> {
+              throw new IllegalStateException("boom");
+            }));
+        assertSame(identity, McpUsageTelemetry.currentIdentity());
+      }
     }
   }
 
