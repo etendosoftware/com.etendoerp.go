@@ -116,14 +116,18 @@ public final class IsolatedDalRead {
   }
 
   /**
-   * {@link #call(Supplier)} with another caller wait: the seam its timeout tests use.
+   * {@link #call(Supplier)} with another caller wait: for a caller that must not wait the default
+   * {@value #TIMEOUT_SECONDS} s (the backend telemetry identity waits 5 s) and for the tests of the
+   * timeout. Same contract otherwise, including the {@link IllegalStateException} on a timeout.
+   * Statements stay capped at {@value #STATEMENT_TIMEOUT_MS} ms whatever the wait.
    *
    * @param read the read
    * @param timeoutMillis how long the caller waits
    * @param <T> the result type
    * @return what {@code read} returned
+   * @throws IllegalStateException as {@link #call(Supplier)}
    */
-  static <T> T call(Supplier<T> read, long timeoutMillis) {
+  public static <T> T call(Supplier<T> read, long timeoutMillis) {
     return submit(read, timeoutMillis);
   }
 

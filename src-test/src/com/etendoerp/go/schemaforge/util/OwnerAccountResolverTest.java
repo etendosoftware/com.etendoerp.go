@@ -20,9 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
@@ -38,6 +42,27 @@ import com.etendoerp.go.schemaforge.data.Account;
  * @covers com.etendoerp.go.schemaforge.util.OwnerAccountResolver
  */
 class OwnerAccountResolverTest {
+
+  @BeforeEach
+  void freshCache() {
+    OwnerAccountResolver.resetForTest(null);
+  }
+
+  /** ETP-6386: an answer is cached for the TTL, then looked up again. */
+  @Test
+  void theAnswerIsCachedForTheTtlOnly() {
+    AtomicLong now = new AtomicLong(1_000L);
+    OwnerAccountResolver.resetForTest(now::get);
+    try (Fixture f = new Fixture("OWNER-USER", "owner@acme.test", "ACCOUNT-OWNER")) {
+      assertEquals("ACCOUNT-OWNER", OwnerAccountResolver.findOwnerAccountId("C1"));
+      assertEquals("ACCOUNT-OWNER", OwnerAccountResolver.findOwnerAccountId("C1"));
+      verify(f.query, times(1)).uniqueResult();
+
+      now.addAndGet(OwnerAccountResolver.TTL_MILLIS + 1);
+      OwnerAccountResolver.findOwnerAccountId("C1");
+      verify(f.query, times(2)).uniqueResult();
+    }
+  }
 
   /** The owner flag decides: the account of the owner user, whoever else belongs to the client. */
   @Test

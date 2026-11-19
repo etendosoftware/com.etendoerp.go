@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -41,6 +42,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.usage.IsolatedDalRead;
+
 /**
  * ETP-6228: the common identity of backend events.
  *
@@ -48,6 +51,7 @@ import org.openbravo.model.ad.system.Client;
  * @covers com.etendoerp.go.schemaforge.telemetry.RuntimeNeoTelemetryIdentityResolver
  * @covers com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService
  * @covers com.etendoerp.go.schemaforge.telemetry.MixpanelNeoTelemetrySink
+ * @covers com.etendoerp.go.usage.IsolatedDalRead
  */
 class NeoTelemetryIdentityTest {
 
@@ -186,6 +190,46 @@ class NeoTelemetryIdentityTest {
     assertNull(property(identity, "etgo_account_id"));
     assertNull(property(identity, "tenant_type"));
     assertEquals(2, lookups.get());
+  }
+
+  /**
+   * ETP-6386: the runtime lookup runs in its own DAL session with a 5 s wait, never on the
+   * emitting thread's session (a request's transaction, or a sender thread that never closes it).
+   */
+  @Test
+  void theRuntimeLookupRunsInAnIsolatedRead() {
+    try (MockedStatic<IsolatedDalRead> isolated = Mockito.mockStatic(IsolatedDalRead.class)) {
+      isolated.when(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(), Mockito.eq(5_000L)))
+          .thenReturn(new RuntimeNeoTelemetryIdentityResolver.ClientFacts("OWNER-A", "demo"));
+      RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+          RuntimeNeoTelemetryIdentityResolver::lookupClientFacts, System::currentTimeMillis);
+
+      NeoTelemetryIdentity identity = resolver.resolve("C-ISOLATED", "U1");
+
+      assertEquals("OWNER-A", property(identity, "etgo_account_id"));
+      assertEquals("demo", property(identity, "tenant_type"));
+      isolated.verify(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(),
+          Mockito.eq(5_000L)));
+    }
+  }
+
+  /** ETP-6386: a timed-out isolated read yields no facts, is not cached, and the event still goes. */
+  @Test
+  void aTimedOutIsolatedLookupLeavesTheFactsOutAndIsRetried() {
+    try (MockedStatic<IsolatedDalRead> isolated = Mockito.mockStatic(IsolatedDalRead.class)) {
+      isolated.when(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(), Mockito.anyLong()))
+          .thenThrow(new IllegalStateException("Isolated read timed out after 5000 ms"));
+      RuntimeNeoTelemetryIdentityResolver resolver = new RuntimeNeoTelemetryIdentityResolver(
+          RuntimeNeoTelemetryIdentityResolver::lookupClientFacts, System::currentTimeMillis);
+
+      NeoTelemetryIdentity identity = resolver.resolve("C-SLOW", "U1");
+      resolver.resolve("C-SLOW", "U1");
+
+      assertEquals("C-SLOW", property(identity, "ad_client_id"));
+      assertNull(property(identity, "etgo_account_id"));
+      isolated.verify(() -> IsolatedDalRead.call(Mockito.<Supplier<Object>>any(),
+          Mockito.anyLong()), Mockito.times(2));
+    }
   }
 
   @Test

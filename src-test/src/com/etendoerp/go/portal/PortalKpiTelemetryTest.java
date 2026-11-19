@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.timeout;
@@ -285,6 +286,9 @@ public class PortalKpiTelemetryTest {
     NeoTelemetryService watched = telemetry;
     PortalKpiTelemetry.portalQuotationDecided(true, SENTINEL_CLIENT);
     verify(watched, timeout(WAIT_MS)).emit(anyString(), anyMap(), eq(SENTINEL_CLIENT));
+    // ETP-6386: the identity is captured on the calling thread at the entry point, so a decision
+    // that later rolls back was captured too (a cached lookup), though never emitted.
+    verify(watched, atLeastOnce()).captureIdentity(anyString(), any());
     verifyNoMoreInteractions(watched);
     PortalKpiTelemetry.setTelemetryService(telemetry = mock(NeoTelemetryService.class));
   }
