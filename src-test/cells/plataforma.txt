@@ -649,7 +649,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (51)
+# --- integración (BD) (52)
 com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
 com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
@@ -698,6 +698,7 @@ com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest
 com.etendoerp.go.schemaforge.webhooks.McpFeedbackTriageWebhooksIntegrationTest
 com.etendoerp.go.session.JdbcGoSessionStoreIntegrationTest
 com.etendoerp.go.startup.TemplateRoleSyncStoreIntegrationTest
+com.etendoerp.go.support.DalSupportConversationStoreIntegrationTest
 com.etendoerp.go.usage.IsolatedDalReadIntegrationTest
 com.etendoerp.go.usage.UsageAggregationServiceIntegrationTest
 com.etendoerp.go.usage.quota.DalConsumptionReaderPeriodWindowIntegrationTest
