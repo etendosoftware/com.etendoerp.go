@@ -124,7 +124,7 @@ public class McpUsageTenantQaTest {
       servlet.doPost(request, response);
 
       ArgumentCaptor<McpUsageRow> row = ArgumentCaptor.forClass(McpUsageRow.class);
-      loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture()));
+      loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture(), org.mockito.ArgumentMatchers.any()));
       return row.getValue();
     }
   }

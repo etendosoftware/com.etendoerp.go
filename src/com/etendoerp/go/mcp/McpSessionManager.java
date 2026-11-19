@@ -82,6 +82,8 @@ public class McpSessionManager {
     OBContext previousContext = OBContext.getOBContext();
     String previousLanguage = null;
     boolean languageCaptured = false;
+    String telemetryClient = null;
+    boolean contextEntered = false;
     try {
       // Resolve org: if "0" (wildcard), find the first transactional org for this role
       String effectiveOrg = orgId != null ? orgId : DEFAULT_ORG;
@@ -108,6 +110,8 @@ public class McpSessionManager {
       OBContext context = SecureWebServicesUtils.createContext(
           userId, roleId, effectiveOrg, warehouseId, effectiveClient);
       OBContext.setOBContext(context);
+      telemetryClient = effectiveClient;
+      contextEntered = true;
       // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
       previousLanguage = NeoLanguage.captureRequestCode();
       languageCaptured = true;
@@ -127,6 +131,12 @@ public class McpSessionManager {
       }
       throw e;
     } finally {
+      // ETP-6228: the usage row's Mixpanel identity is resolved here, while this call's context and
+      // DAL session are still live (DalRequestFilter owns and closes the session), and not on the
+      // writer thread. Never throws; a cache miss costs a lookup on this thread.
+      if (contextEntered) {
+        McpUsageTelemetry.setCurrentIdentity(McpUsageLogger.captureIdentity(telemetryClient, userId));
+      }
       // Always restore previous context (even if null) to prevent cross-call leakage
       OBContext.setOBContext(previousContext);
       if (languageCaptured) {

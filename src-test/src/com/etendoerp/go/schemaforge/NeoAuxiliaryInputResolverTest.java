@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -41,6 +43,8 @@ import org.openbravo.model.ad.ui.Tab;
  * parent-value token, and the guard/skip paths); the {@code @SQL=} and
  * {@code Utility.getContext} branches require a running instance and are exercised
  * end-to-end via the schema_forge mocked E2E instead.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAuxiliaryInputResolver
  */
 class NeoAuxiliaryInputResolverTest {
 
@@ -136,5 +140,32 @@ class NeoAuxiliaryInputResolverTest {
     verify(vars).setSessionValue("100|LIT", "GLJ");
     verify(vars, never()).setSessionValue(eq("100|INACTIVE"), anyString());
     verify(vars, never()).setSessionValue(eq("100|EMPTY"), anyString());
+  }
+
+  @Test
+  @DisplayName("literalValues keeps plain literals only: no @SQL=, no @token@, no empty, no inactive")
+  void literalValuesKeepsOnlyPlainLiterals() {
+    Tab tab = tabWith(Arrays.asList(
+        auxInput("isQuotation", "Y", true),
+        auxInput("DOCBASETYPE", "'GLJ'", true),
+        auxInput("M_WAREHOUSE_ID", "''", true),
+        auxInput("FROM_SQL", "@SQL=SELECT 'Y' FROM DUAL", true),
+        auxInput("FROM_CONTEXT", "@M_Warehouse_ID@", true),
+        auxInput("INACTIVE", "N", false),
+        auxInput("NO_CODE", null, true)));
+
+    Map<String, String> literals = NeoAuxiliaryInputResolver.literalValues(tab);
+
+    Map<String, String> expected = new HashMap<>();
+    expected.put("isQuotation", "Y");
+    expected.put("DOCBASETYPE", "GLJ");
+    assertEquals(expected, literals);
+  }
+
+  @Test
+  @DisplayName("literalValues of a null tab or null list is empty")
+  void literalValuesOfNoTabIsEmpty() {
+    assertTrue(NeoAuxiliaryInputResolver.literalValues(null).isEmpty());
+    assertTrue(NeoAuxiliaryInputResolver.literalValues(tabWith(null)).isEmpty());
   }
 }
