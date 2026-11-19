@@ -42,6 +42,12 @@ public final class PortalLink {
    * it, its token is handed to the confirmation landing so the customer lands in the portal.
    */
   public static final String ORIGIN_DECISION = "DECISION";
+  /**
+   * {@code LINK_ORIGIN} of a link a user asked for from the contact (ETP-5850, the contacts
+   * {@code portalLink} action): no email carries it, its URL is handed to the user, who shares it.
+   * Not a send: the "sent with link" KPI counts {@link #ORIGIN_SEND} only.
+   */
+  public static final String ORIGIN_SHARED = "SHARED";
 
   private static final String RECIPIENT_SEPARATOR = ",";
 
