@@ -1161,9 +1161,10 @@ public class OnboardingAccountingWiringServiceTest {
   @Test
   public void testProvisionGlItemsForImportedChartNoOpsWhenLedgerNull() {
     OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
-    // No OBDal mocking at all — a real (unmocked) static touch would blow up this test if the
-    // null-ledger guard did not return immediately.
-    service.provisionGlItemsForImportedChart(mock(Client.class), null);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      service.provisionGlItemsForImportedChart(mock(Client.class), null);
+      obDal.verifyNoInteractions();
+    }
   }
 
   @Test

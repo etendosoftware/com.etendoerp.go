@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -447,12 +448,20 @@ public class AbstractInvoiceHeaderHandlerTest {
   // in isolation. The fix reads+strips it here, in handle() (the pre-hook), before the filter runs.
 
   @Test
-  public void captureOriginInvoice_readOnly_doesNotCapture() {
-    NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
+  public void captureOriginInvoice_readOnly_doesNotCapture() throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "inv-origin");
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").requestBody(body).build();
     handler.callCaptureOriginInvoice(ctx);
-    // Nothing to assert directly (no getter) — proven indirectly: persistOriginInvoice must be a
-    // no-op afterwards since capture never ran (originInvoiceCaptured stays false).
-    handler.callPersistOriginInvoice(NeoContext.builder().httpMethod("GET").recordId("inv-x").build());
+    // A read neither strips the field...
+    assertTrue(body.has("originInvoice"));
+    // ...nor leaves anything for persistOriginInvoice to write afterwards.
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      handler.callPersistOriginInvoice(
+          NeoContext.builder().httpMethod("GET").recordId("inv-x").build());
+      ctxMock.verifyNoInteractions();
+      dalMock.verifyNoInteractions();
+    }
   }
 
   @Test
@@ -2903,8 +2912,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "inv-boom")).thenThrow(new RuntimeException("DB down"));
 
-      // Must not throw.
+      // Must not throw, must not reach the rate table, and must leave admin mode.
       callAutoCreateOrUpdate("inv-boom");
+      verify(dal, never()).getConnection();
+      ctxMock.verify(OBContext::restorePreviousMode);
     }
   }
 

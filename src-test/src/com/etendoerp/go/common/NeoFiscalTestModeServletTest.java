@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
@@ -51,8 +52,12 @@ public class NeoFiscalTestModeServletTest {
       authMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
           .thenReturn(false);
 
-      servlet.doGet(req, resp);
-      // No exception — early return on auth failure, no OBContext/resolver access attempted.
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+        servlet.doGet(req, resp);
+        // Early return on auth failure: no OBContext/resolver access attempted, nothing written.
+        ctxMock.verifyNoInteractions();
+      }
+      verifyNoInteractions(resp);
     }
   }
 

@@ -1532,9 +1532,11 @@ class BusinessPartnerHandlerTest {
     requestBody.put("etgoEmail", "a@b.com");
     when(ctx.getRequestBody()).thenReturn(requestBody);
 
-    handler.afterHandle(ctx);
-    // No assertion beyond "did not throw" — reaching this line without an exception proves
-    // OBDal.getInstance() was never invoked in this unmocked-static context.
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      handler.afterHandle(ctx);
+      // The backfill is the only DAL work on this path: with neither flag sent it never starts.
+      mDal.verifyNoInteractions();
+    }
   }
 
   /**
@@ -1684,8 +1686,9 @@ class BusinessPartnerHandlerTest {
       when(obDalMock.getConnection()).thenThrow(new RuntimeException("connection pool exhausted"));
       mDal.when(OBDal::getInstance).thenReturn(obDalMock);
 
-      // Must not throw.
+      // Must not throw; the backfill was attempted and its failure absorbed.
       handler.afterHandle(ctx);
+      verify(obDalMock).getConnection();
     }
   }
 

@@ -260,5 +260,7 @@ public class DocumentDisabledReasonTest {
     when(conn.getConnection()).thenThrow(new IllegalStateException("no connection"));
 
     DocumentDisabledReason.markInvalidAccount("rec-1", conn);
+    // The write was attempted; its failure stays inside.
+    verify(conn).getConnection();
   }
 }

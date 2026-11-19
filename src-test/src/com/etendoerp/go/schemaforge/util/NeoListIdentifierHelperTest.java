@@ -89,9 +89,11 @@ public class NeoListIdentifierHelperTest {
   @Test
   public void enrichListIdentifiers_nullSfEntity_doesNothing() throws Exception {
     JSONObject response = new JSONObject();
-    response.put("response", new JSONObject().put("data", new JSONArray()));
-    // Must not throw
+    response.put("response", new JSONObject().put("data", new JSONArray()
+        .put(new JSONObject().put("id", "row-1"))));
+    String before = response.toString();
     NeoListIdentifierHelper.enrichListIdentifiers(response, null);
+    assertEquals(before, response.toString());
   }
 
   // ── sfEntity with null adTab ──────────────────────────────────────────────
