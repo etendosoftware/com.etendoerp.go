@@ -91,6 +91,7 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
   private static final String USER_ID = "47EAF009B7BB42BBB663C7BA1792D958";
   private static final String ROLE_ID = "9B8D736190724807AB256DC95F20EC5E";
   private static final String EUR = "102";
+  private static final String USD = "100";
   private static final String IVA_21 = "A5AE8250883C47498DA5BD73FB5376CB";
   private static final String UOM_METER = "54E1CF8449474628BEA191E0532EEC3E";
   private static final String CATEGORY = "EBAE46FD129049DEB26B948E160C6AD8";
@@ -208,6 +209,9 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
         + "c_invoice_id = :id", invoiceId));
     assertTrue("model " + model + " vs engine " + engine,
         model.subtract(engine).abs().compareTo(new BigDecimal("0.02")) <= 0);
+    // the list total of the confirmed row is the created invoice's grand total, not the printed one
+    assertEquals(0, new BigDecimal(text("SELECT grandtotal FROM etgo_incoming_document WHERE "
+        + "etgo_incoming_document_id = :id", id)).compareTo(engine));
     assertEquals(0, new BigDecimal(text("SELECT totallines FROM c_invoice WHERE c_invoice_id = :id",
         invoiceId)).compareTo(new BigDecimal("20.00").multiply(new BigDecimal("0.875"))
             .add(new BigDecimal("22.00")).add(new BigDecimal("100.10"))));
@@ -262,6 +266,8 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
       JSONObject error = response.getBody().getJSONObject("error");
       assertEquals("confirm_failed", error.getString("code"));
       assertEquals("The period is closed", error.getString("detail"));
+      assertEquals("refused", error.getString("detailCode"));
+      assertEquals("The period is closed", error.getJSONObject("detailParams").getString("message"));
       // nothing the unit created survived: the whole rollback, the sequence included
       assertEquals(0L, scalar("SELECT count(*) FROM c_bpartner WHERE name LIKE '" + marker
           + "%'"));
@@ -278,8 +284,9 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
           + "etgo_incoming_document_id = :id", id));
       assertEquals("CONFIRM_FAILED", text("SELECT error_code FROM etgo_incoming_document WHERE "
           + "etgo_incoming_document_id = :id", id));
-      assertNotNull(text("SELECT error_detail FROM etgo_incoming_document WHERE "
-          + "etgo_incoming_document_id = :id", id));
+      // an identifier, not text: the JSON the SPA translates by code
+      assertNotNull(InvoiceInboxFailureDetail.parse(text("SELECT error_detail FROM "
+          + "etgo_incoming_document WHERE etgo_incoming_document_id = :id", id)).orElse(null));
       // the retry the user asks for works on the same row, and consumes the SAME product keys
       completion.reset();
       NeoResponse retry = InvoiceInboxConfirm.confirm(id, null);
@@ -358,19 +365,28 @@ public class InvoiceInboxConfirmIntegrationTest extends WeldBaseTest {
     assertEquals(0, engine.compareTo(new BigDecimal("-121.00")));
   }
 
+  /**
+   * A document in a currency other than the tenant default, with a purchase list in that currency,
+   * is verified at the decimals of its own currency. USD is used because the selector allowlist
+   * (CurrencyIsoAllowlistSelectorPolicy) only offers EUR, USD and GBP, and the API refuses any
+   * other currency in the invoice header; all three have two decimals. The whole-unit case (JPY,
+   * scale 0) therefore cannot go through the full confirm: it stays covered by
+   * InvoiceInboxConfirmVerifyTest#theScaleFollowsTheInvoiceCurrency and the scale-0 cases of
+   * InvoiceInboxTotalsTest.
+   */
   @Test
-  public void aCurrencyWithoutDecimalsIsVerifiedAtItsOwnScale() throws Exception {
-    rate("102", "113", "160");
-    rate("113", "102", "0.00625");
+  public void aNonDefaultCurrencyIsVerifiedAtItsOwnTwoDecimalScale() throws Exception {
+    rate(EUR, USD, "1.1");
+    rate(USD, EUR, "0.909091");
     JSONArray lines = new JSONArray()
-        .put(newLine("JP-1 " + marker, "3", "1234.5", null, IVA_21, "21", "D"))
-        .put(newLine("JP-2 " + marker, "1", "99.5", "7.5", IVA_21, "21", "D"));
+        .put(newLine("US-1 " + marker, "3", "1234.5", null, IVA_21, "21", "D"))
+        .put(newLine("US-2 " + marker, "1", "99.5", "7.5", IVA_21, "21", "D"));
 
     BigDecimal engine = confirmedTotal(lines,
-        persistedVendor(purchaseList("JPY", "113", false)), "113");
+        persistedVendor(purchaseList("USD", USD, false)), USD);
 
-    assertEquals(0, engine.compareTo(engine.setScale(0, java.math.RoundingMode.HALF_UP)));
-    assertEquals(0, engine.compareTo(InvoiceInboxTotals.totals(lines, 0).total()));
+    assertEquals(0, engine.compareTo(engine.setScale(2, java.math.RoundingMode.HALF_UP)));
+    assertEquals(0, engine.compareTo(InvoiceInboxTotals.totals(lines, 2).total()));
   }
 
   // ------------------------------------------------- price lists of a linked vendor

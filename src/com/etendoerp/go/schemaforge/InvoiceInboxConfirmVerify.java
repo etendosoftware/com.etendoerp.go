@@ -61,7 +61,7 @@ final class InvoiceInboxConfirmVerify {
     if (!expected.isEmpty() && invoice.getCurrency() != null
         && !expected.equals(invoice.getCurrency().getId())) {
       throw new InvoiceInboxConfirmWork.Stop(
-          InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_CURRENCY_MISMATCH));
+          InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.CURRENCY_MISMATCH));
     }
     if (invoice.getGrandTotalAmount() == null) {
       return;
@@ -83,9 +83,10 @@ final class InvoiceInboxConfirmVerify {
     BigDecimal tolerance = BigDecimal.ONE.movePointLeft(scale)
         .multiply(BigDecimal.valueOf(Math.max(1, distinctTaxes(invoice))));
     if (document.subtract(created).abs().compareTo(tolerance) > 0) {
-      throw new InvoiceInboxConfirmWork.Stop(InvoiceInboxMessages.text(
-          InvoiceInboxMessages.CONFIRM_TOTAL_MISMATCH, "invoice", created.toPlainString(),
-          "document", document.toPlainString()));
+      throw new InvoiceInboxConfirmWork.Stop(InvoiceInboxFailureDetail.of(
+          InvoiceInboxFailureDetail.TOTAL_MISMATCH, InvoiceInboxFailureDetail.P_INVOICE,
+          created.toPlainString(), InvoiceInboxFailureDetail.P_DOCUMENT,
+          document.toPlainString()));
     }
   }
 }

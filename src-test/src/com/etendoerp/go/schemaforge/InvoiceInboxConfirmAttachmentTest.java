@@ -125,6 +125,7 @@ class InvoiceInboxConfirmAttachmentTest {
         () -> InvoiceInboxConfirmAttachment.attach("ROW-1", "INV-1"));
 
     assertTrue(stop.getMessage().contains("no longer available"), stop.getMessage());
+    assertEquals("no_file", stop.detail().code());
     store.verifyNoInteractions();
   }
 
@@ -138,6 +139,7 @@ class InvoiceInboxConfirmAttachmentTest {
           () -> InvoiceInboxConfirmAttachment.attach("ROW-1", "INV-1"));
 
       assertTrue(stop.getMessage().contains("could not be attached"), stop.getMessage());
+      assertEquals("attach_failed", stop.detail().code());
     }
     verify(dal, org.mockito.Mockito.times(2)).rollbackAndClose();
     helper.verify(() -> NeoAttachmentsHelper.cleanupTempFile(copy), org.mockito.Mockito.times(2));
