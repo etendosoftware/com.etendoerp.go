@@ -290,6 +290,32 @@ public class NeoWritePreflightTest {
         isNull()));
   }
 
+  /**
+   * ETP-5880: another tenant's id is refused with the guard's 404 on every record write verb,
+   * before any reference check, so it never reaches a customization or the {@code updated} check.
+   */
+  @Test
+  public void aForeignRecordIsRefusedOnEveryWriteVerb() throws Exception {
+    for (String method : new String[] {"PUT", "PATCH", "DELETE"}) {
+      assertForeignRecordRefused(method);
+    }
+  }
+
+  private void assertForeignRecordRefused(String method) throws Exception {
+    NeoContext request = NeoContext.builder().httpMethod(method).recordId("foreign-1")
+        .requestBody(new JSONObject().put("name", "x")).adTab(adTab).sfEntity(sfEntity).build();
+    NeoResponse notFound = NeoResponse.error(404, "Record not found");
+    targets.when(() -> NeoActionRecordGuard.updateRefusalFor(sfEntity, request))
+        .thenReturn(notFound);
+    targets.when(() -> NeoActionRecordGuard.writeRefusalFor(sfEntity, "foreign-1"))
+        .thenReturn(notFound);
+
+    NeoResponse refusal = NeoWritePreflight.refusalFor(request);
+
+    assertEquals(404, refusal.getHttpStatus());
+    ownership.verifyNoInteractions();
+  }
+
   /** ETP-6062: a delete is never waivable — it keeps the strict guard. */
   @Test
   public void deleteKeepsTheStrictTargetGuard() {
