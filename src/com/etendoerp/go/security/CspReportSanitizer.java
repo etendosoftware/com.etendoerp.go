@@ -17,10 +17,13 @@
 package com.etendoerp.go.security;
 
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -38,8 +41,14 @@ public final class CspReportSanitizer {
   static final String REDACTED = "[redacted]";
 
   private static final Set<String> TELEMETRY_HOSTS = Set.of("dataplane.rum.eu-west-3.amazonaws.com");
+  /** Hosts of the Google sign-in flow; the SPA verifies identity server-side, so none is allowed. */
+  private static final Set<String> SSO_HOSTS = Set.of("accounts.google.com", "apis.google.com",
+      "www.gstatic.com");
+  private static final Set<String> PREVIEW_DIRECTIVES = Set.of("frame-src", "img-src",
+      "object-src", "media-src", "child-src");
   private static final Set<String> EXTENSION_SCHEMES = Set.of("chrome-extension", "moz-extension",
       "safari-extension", "safari-web-extension", "ms-browser-extension");
+  private static final Set<String> WEB_SCHEMES = Set.of("http", "https", "ws", "wss");
   private static final Set<String> KEYWORDS = Set.of("inline", "eval", "self", "wasm-eval",
       "trusted-types-policy", "trusted-types-sink");
   private static final Pattern TOKEN_SEGMENT = Pattern.compile(
@@ -48,7 +57,12 @@ public final class CspReportSanitizer {
   private CspReportSanitizer() {
   }
 
-  /** @return the sanitized report, or empty when the body is not a usable CSP report */
+  /**
+   * Sanitizes one CSP report body.
+   *
+   * @param body raw request body, either a legacy {@code csp-report} object or a Reporting API array
+   * @return the sanitized report, or empty when the body is not a usable CSP report
+   */
   public static Optional<JSONObject> sanitize(String body) {
     if (body == null || body.length() > MAX_BODY_CHARS) {
       return Optional.empty();
@@ -70,7 +84,7 @@ public final class CspReportSanitizer {
       out.put("documentUri", document);
       out.put("effectiveDirective", directive);
       out.put("disposition", "enforce".equals(first(report, "disposition")) ? "enforce" : "report");
-      out.put("classification", classify(blocked, directive));
+      out.put("classification", classify(blocked, directive, document));
       return Optional.of(out);
     } catch (JSONException e) {
       return Optional.empty();
@@ -115,7 +129,6 @@ public final class CspReportSanitizer {
     if (raw.isEmpty() || KEYWORDS.contains(raw)) {
       return raw;
     }
-    String value = raw.startsWith("blob:") ? raw.substring(5) : raw;
     if (raw.startsWith("data:")) {
       return "data";
     }
@@ -123,52 +136,66 @@ public final class CspReportSanitizer {
       return "blob";
     }
     try {
-      URI u = new URI(value);
+      URI u = new URI(raw);
       String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(Locale.ROOT);
-      if (!scheme.equals("http") && !scheme.equals("https")) {
+      if (!WEB_SCHEMES.contains(scheme)) {
         return EXTENSION_SCHEMES.contains(scheme) ? scheme + "://" : REDACTED;
       }
-      StringBuilder sb = new StringBuilder(scheme).append("://").append(u.getHost());
-      if (u.getPort() > 0) {
-        sb.append(':').append(u.getPort());
-      }
-      for (String seg : (u.getRawPath() == null ? "" : u.getRawPath()).split("/", -1)) {
-        if (!sb.toString().endsWith("/") || !seg.isEmpty()) {
-          sb.append(seg.isEmpty() ? "" : "/" + redactSegment(seg));
-        }
-      }
-      return cap(sb.toString());
-    } catch (Exception e) {
+      return u.getHost() == null ? REDACTED : cap(origin(u, scheme) + path(u.getRawPath()));
+    } catch (URISyntaxException e) {
       return REDACTED;
     }
   }
 
+  private static String origin(URI u, String scheme) {
+    return scheme + "://" + u.getHost() + (u.getPort() > 0 ? ":" + u.getPort() : "");
+  }
+
+  private static String path(String rawPath) {
+    if (rawPath == null) {
+      return "";
+    }
+    return Arrays.stream(rawPath.split("/"))
+        .filter(seg -> !seg.isEmpty())
+        .map(CspReportSanitizer::redactSegment)
+        .map(seg -> "/" + seg)
+        .collect(Collectors.joining());
+  }
+
   private static String redactSegment(String seg) {
-    return seg.contains("@") || seg.contains("%40") || TOKEN_SEGMENT.matcher(seg).matches()
-        ? REDACTED : seg;
+    return seg.contains("@") || seg.toLowerCase(Locale.ROOT).contains("%40")
+        || TOKEN_SEGMENT.matcher(seg).matches() ? REDACTED : seg;
   }
 
   private static String cap(String s) {
     return s.length() <= MAX_FIELD_CHARS ? s : s.substring(0, MAX_FIELD_CHARS);
   }
 
-  static String classify(String blocked, String directive) {
+  static String classify(String blocked, String directive, String document) {
     if (blocked.equals("blob")) {
       return "INVENTORY_BLOB";
     }
-    for (String scheme : EXTENSION_SCHEMES) {
-      if (blocked.startsWith(scheme + "://")) {
-        return "EXPECTED_EXTENSION";
-      }
+    if (blocked.endsWith("://") && EXTENSION_SCHEMES.contains(blocked.replace("://", ""))) {
+      return "EXPECTED_EXTENSION";
     }
+    String host = host(blocked);
+    if (TELEMETRY_HOSTS.contains(host)) {
+      return "INVENTORY_TELEMETRY";
+    }
+    if (SSO_HOSTS.contains(host)) {
+      return "INVENTORY_SSO";
+    }
+    boolean preview = PREVIEW_DIRECTIVES.contains(directive)
+        && (blocked.equals("data") || (!host.isEmpty() && host.equals(host(document))));
+    return preview ? "INVENTORY_PREVIEW" : "UNEXPECTED";
+  }
+
+  private static String host(String value) {
     try {
-      String host = new URI(blocked).getHost();
-      if (host != null && TELEMETRY_HOSTS.contains(host)) {
-        return "INVENTORY_TELEMETRY";
-      }
-    } catch (Exception e) {
-      // not a URL: unexpected
+      String h = new URI(value).getHost();
+      return h == null ? "" : h;
+    } catch (URISyntaxException e) {
+      return "";
     }
-    return "UNEXPECTED";
   }
 }

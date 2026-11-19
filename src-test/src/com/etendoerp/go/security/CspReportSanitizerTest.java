@@ -115,9 +115,84 @@ class CspReportSanitizerTest {
   }
 
   @Test
-  void truncatesLongPathsAndDirectives() throws Exception {
+  void truncatesLongPaths() throws Exception {
     JSONObject o = CspReportSanitizer.sanitize(legacy("https://x.test/" + "p/".repeat(300),
         "https://go.test/", "script-src")).orElseThrow();
     assertTrue(o.getString("blockedUri").length() <= CspReportSanitizer.MAX_FIELD_CHARS);
+  }
+
+  @Test
+  void redactsPresignedAttachmentUrlQueryAndKeepsExactPath() throws Exception {
+    JSONObject o = CspReportSanitizer.sanitize(legacy(
+        "https://bucket.s3.eu-west-1.amazonaws.com/att/invoice.pdf?X-Amz-Signature=deadbeef"
+            + "&X-Amz-Credential=AKIAXYZ&Signature=abc&Key-Pair-Id=K123&Expires=1",
+        "https://go.test/", "frame-src")).orElseThrow();
+    assertEquals("https://bucket.s3.eu-west-1.amazonaws.com/att/invoice.pdf",
+        o.getString("blockedUri"));
+    assertFalse(o.toString().matches("(?s).*(Signature|AKIA|Key-Pair|deadbeef).*"));
+  }
+
+  @Test
+  void redactsUuidAndEtendoRecordIdsInDocumentPath() throws Exception {
+    JSONObject o = CspReportSanitizer.sanitize(legacy("inline",
+        "https://go.test/orders/3f2c1a9e-aaaa-bbbb-cccc-0123456789ab/lines/"
+            + "0123456789ABCDEF0123456789ABCDEF/edit", "script-src")).orElseThrow();
+    assertEquals("https://go.test/orders/[redacted]/lines/[redacted]/edit",
+        o.getString("documentUri"));
+  }
+
+  @Test
+  void redactsEncodedEmailSegment() throws Exception {
+    JSONObject o = CspReportSanitizer.sanitize(legacy("https://x.test/u/jane%40corp.com/p",
+        "https://go.test/", "img-src")).orElseThrow();
+    assertEquals("https://x.test/u/[redacted]/p", o.getString("blockedUri"));
+  }
+
+  @Test
+  void redactsJwtLikeSegment() throws Exception {
+    JSONObject o = CspReportSanitizer.sanitize(legacy(
+        "https://x.test/cb/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.abc_DEF-ghi/z",
+        "https://go.test/", "connect-src")).orElseThrow();
+    assertEquals("https://x.test/cb/[redacted]/z", o.getString("blockedUri"));
+  }
+
+  @Test
+  void keepsHostOfWebSocketUris() throws Exception {
+    assertEquals("wss://rt.test/socket", CspReportSanitizer.sanitize(
+        legacy("wss://rt.test/socket?token=T", "https://go.test/", "connect-src")).orElseThrow()
+        .getString("blockedUri"));
+  }
+
+  @Test
+  void redactsUrisWhoseHostCannotBeParsed() throws Exception {
+    assertEquals("[redacted]", CspReportSanitizer.sanitize(
+        legacy("https://bad_host.test/p?q=1", "https://go.test/", "img-src")).orElseThrow()
+        .getString("blockedUri"));
+  }
+
+  @Test
+  void classifiesPreviewAndSso() throws Exception {
+    assertEquals("INVENTORY_PREVIEW", CspReportSanitizer.sanitize(
+        legacy("https://go.test/attachments/x.pdf", "https://go.test/app", "frame-src"))
+        .orElseThrow().getString("classification"));
+    assertEquals("INVENTORY_PREVIEW", CspReportSanitizer.sanitize(
+        legacy("data:image/png;base64,AAAA", "https://go.test/app", "img-src"))
+        .orElseThrow().getString("classification"));
+    assertEquals("INVENTORY_SSO", CspReportSanitizer.sanitize(
+        legacy("https://accounts.google.com/gsi/client?x=1", "https://go.test/", "script-src"))
+        .orElseThrow().getString("classification"));
+    assertEquals("UNEXPECTED", CspReportSanitizer.sanitize(
+        legacy("https://go.test/x.js", "https://go.test/", "script-src")).orElseThrow()
+        .getString("classification"));
+  }
+
+  @Test
+  void normalizesAndBoundsTheDirective() throws Exception {
+    assertEquals("script-src-elem", CspReportSanitizer.sanitize(
+        legacy("inline", "https://go.test/", "SCRIPT-SRC-ELEM 'self' https://x.test/?t=1"))
+        .orElseThrow().getString("effectiveDirective"));
+    assertEquals("", CspReportSanitizer.sanitize(
+        legacy("inline", "https://go.test/", "a".repeat(200) + "1")).orElseThrow()
+        .getString("effectiveDirective"));
   }
 }
