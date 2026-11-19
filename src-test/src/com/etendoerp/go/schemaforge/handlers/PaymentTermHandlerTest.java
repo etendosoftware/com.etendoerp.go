@@ -362,6 +362,8 @@ public class PaymentTermHandlerTest {
       JSONObject error = error(response);
       assertEquals(PaymentTermHandler.CODE_DAYS_OUT_OF_RANGE, error.getString("code"));
       assertEquals(outOfRange, error.getJSONObject("messageParams").getLong("value"));
+      assertTrue("the refusal tells the agent to ask the user instead of working around it",
+          error.getString("hint").contains("do not store the number in any other field"));
     }
     assertNoDuplicateLookup();
   }
