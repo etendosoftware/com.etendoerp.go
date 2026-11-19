@@ -149,6 +149,7 @@ final class RemittanceFileAction {
       if (ACTION_READINESS.equals(action)) {
         return NeoResponse.ok(RemittanceFileReadiness.body(remittance));
       }
+      handler.lockRemittance(remittance);
       return ACTION_CONFIRM.equals(action) ? confirm(remittance, params)
           : generateFile(remittance);
     } catch (Exception e) {

@@ -146,7 +146,22 @@ final class RemittanceProcessAction {
         remittance.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS))) {
       return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_REACTIVATE_NOT_ALLOWED);
     }
+    refreshForReactivation(remittance);
     return runAndAnswer(remittance, REACTIVATE_CODE, MSG_REACTIVATE_FAILED);
+  }
+
+  /**
+   * REM's reactivation deletes the payments and then the bank instructions it finds in the
+   * remittance's {@code getREMInstructionList()}. When the remittance was processed in THIS session
+   * (a batch, or a confirm and a reactivate in one transaction) that inverse collection was loaded
+   * before the instructions were created and does not hold them, so they are never deleted and the
+   * payments' delete breaks {@code rem_intruction_payment}. Pending changes are flushed and the
+   * remittance detached, so REM loads it, and its instructions, again from the database.
+   */
+  static void refreshForReactivation(Remittance remittance) {
+    OBDal dal = OBDal.getInstance();
+    dal.flush();
+    dal.getSession().evict(remittance);
   }
 
   /**

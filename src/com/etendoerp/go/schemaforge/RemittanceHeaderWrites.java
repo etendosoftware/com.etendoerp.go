@@ -73,7 +73,16 @@ final class RemittanceHeaderWrites {
     if (create) {
       RemittanceNameCallout.fillSuggestedName(handler, body);
     }
-    NeoResponse fieldError = validateName(body, create);
+    NeoResponse fieldError = validateIban(body);
+    if (fieldError == null) {
+      fieldError = validateOptions(handler, body, stored);
+    }
+    if (fieldError == null) {
+      fieldError = validateCreditorId(handler, body, stored);
+    }
+    if (fieldError == null) {
+      fieldError = validateName(body, create);
+    }
     if (fieldError == null) {
       fieldError = validateDueDate(handler, body, stored);
     }
@@ -105,7 +114,8 @@ final class RemittanceHeaderWrites {
     if (account == null) {
       return null; // unknown reference: the generic write preflight answers it
     }
-    String accountRefusal = handler.accountRefusal(account);
+    String accountRefusal = handler.accountRefusal(account,
+        remittanceHasIban(body, stored, create, accountId, typeId));
     if (accountRefusal != null) {
       return NeoMessageText.error(SC_UNPROCESSABLE, accountRefusal);
     }
@@ -114,6 +124,149 @@ final class RemittanceHeaderWrites {
       return null;
     }
     return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_TYPE_NOT_AVAILABLE);
+  }
+
+  /**
+   * ETP-6247 — the IBAN written on the remittance ({@value RemittanceHeaderHandler#FIELD_IBAN}):
+   * normalized in place (upper case, no separators) and validated (15 to 34 characters, mod-97
+   * check digits), 422 {@value RemittanceHeaderHandler#MSG_IBAN_INVALID} otherwise. A blank value
+   * is dropped from the body, so the database copies the account's. It is never written to the
+   * account.
+   */
+  private static NeoResponse validateIban(JSONObject body) throws JSONException {
+    if (!body.has(RemittanceHeaderHandler.FIELD_IBAN)) {
+      return null;
+    }
+    Object raw = body.opt(RemittanceHeaderHandler.FIELD_IBAN);
+    String iban = raw == null || JSONObject.NULL.equals(raw)
+        ? "" : RemittanceIban.normalize(raw.toString());
+    if (iban.isEmpty()) {
+      body.remove(RemittanceHeaderHandler.FIELD_IBAN);
+      return null;
+    }
+    if (!RemittanceIban.isValid(iban)) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_IBAN_INVALID);
+    }
+    body.put(RemittanceHeaderHandler.FIELD_IBAN, iban);
+    return null;
+  }
+
+  /**
+   * ETP-6247 — the remittance's own SEPA creditor identifier
+   * ({@value RemittanceHeaderHandler#FIELD_CREDITOR_ID}): normalized in place and validated by
+   * {@link SepaCreditorId} (country, mod-97 check digits, business code, national id, at most 35
+   * characters): 422 with {@code ETGO_SepaCreditorIdInvalidFormat} /
+   * {@code ETGO_SepaCreditorIdInvalidCheckDigits} ({@code error.expectedCheckDigits}). A blank value
+   * is dropped from the body (the database copies the account's on insert). Only a collection takes
+   * one: on a payment, 422 {@value RemittanceHeaderHandler#MSG_OPTIONS_COLLECTION_ONLY}. Never
+   * written to the account.
+   */
+  private static NeoResponse validateCreditorId(RemittanceHeaderHandler handler, JSONObject body,
+      Remittance stored) throws JSONException {
+    if (!body.has(RemittanceHeaderHandler.FIELD_CREDITOR_ID)) {
+      return null;
+    }
+    Object raw = body.opt(RemittanceHeaderHandler.FIELD_CREDITOR_ID);
+    String text = raw == null || JSONObject.NULL.equals(raw) ? "" : raw.toString();
+    if (SepaCreditorId.normalize(text).isEmpty()) {
+      body.remove(RemittanceHeaderHandler.FIELD_CREDITOR_ID);
+      return null;
+    }
+    SepaCreditorId.Result result = SepaCreditorId.validate(text);
+    if (!result.isValid()) {
+      NeoResponse refusal = NeoMessageText.error(SC_UNPROCESSABLE,
+          result.getReason().getMessageKey());
+      JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error")
+          : null;
+      if (error != null && result.getExpectedCheckDigits() != null) {
+        error.put("expectedCheckDigits", result.getExpectedCheckDigits());
+      }
+      return refusal;
+    }
+    String typeId = body.has(RemittanceHeaderHandler.FIELD_TYPE)
+        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
+        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
+    RemittanceType type = typeId != null ? handler.loadType(typeId) : null;
+    if (type != null
+        && !RemittanceSepaProvisioning.SCHEME_CORE.equals(RemittanceSepaFileSetup.schemeOf(type))) {
+      return NeoMessageText.error(SC_UNPROCESSABLE,
+          RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY);
+    }
+    body.put(RemittanceHeaderHandler.FIELD_CREDITOR_ID, result.getNormalized());
+    return null;
+  }
+
+  /**
+   * ETP-6247 — the direct debit options of a collection ({@value RemittanceHeaderHandler#FIELD_SCHEME}
+   * {@code CORE | B2B}, {@value RemittanceHeaderHandler#FIELD_FINANCED} boolean). Normalized in
+   * place; a blank scheme is dropped (the database defaults a collection to CORE). 422
+   * {@value RemittanceHeaderHandler#MSG_SCHEME_INVALID} for any other scheme. On a PAYMENT remittance
+   * they do not apply: {@code B2B} or {@code financed: true} is refused (422
+   * {@value RemittanceHeaderHandler#MSG_OPTIONS_COLLECTION_ONLY}); {@code CORE} / {@code false} is
+   * dropped from the body. Processed remittances never get here.
+   */
+  private static NeoResponse validateOptions(RemittanceHeaderHandler handler, JSONObject body,
+      Remittance stored) throws JSONException {
+    boolean hasScheme = body.has(RemittanceHeaderHandler.FIELD_SCHEME);
+    boolean hasFinanced = body.has(RemittanceHeaderHandler.FIELD_FINANCED);
+    if (!hasScheme && !hasFinanced) {
+      return null;
+    }
+    String scheme = null;
+    if (hasScheme) {
+      Object raw = body.opt(RemittanceHeaderHandler.FIELD_SCHEME);
+      String text = raw == null || JSONObject.NULL.equals(raw) ? "" : raw.toString().trim();
+      if (text.isEmpty()) {
+        body.remove(RemittanceHeaderHandler.FIELD_SCHEME);
+      } else {
+        scheme = RemittanceSepaOptions.normalizeScheme(text);
+        if (scheme == null) {
+          return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_SCHEME_INVALID);
+        }
+        body.put(RemittanceHeaderHandler.FIELD_SCHEME, scheme);
+      }
+    }
+    boolean financed = false;
+    if (hasFinanced) {
+      Object raw = body.opt(RemittanceHeaderHandler.FIELD_FINANCED);
+      String text = raw == null ? "" : raw.toString().trim();
+      financed = "true".equalsIgnoreCase(text) || "Y".equalsIgnoreCase(text);
+      body.put(RemittanceHeaderHandler.FIELD_FINANCED, financed);
+    }
+    String typeId = body.has(RemittanceHeaderHandler.FIELD_TYPE)
+        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
+        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
+    RemittanceType type = typeId != null ? handler.loadType(typeId) : null;
+    if (type == null
+        || RemittanceSepaProvisioning.SCHEME_CORE.equals(RemittanceSepaFileSetup.schemeOf(type))) {
+      return null;
+    }
+    if (RemittanceSepaOptions.SCHEME_B2B.equals(scheme) || financed) {
+      return NeoMessageText.error(SC_UNPROCESSABLE,
+          RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY);
+    }
+    body.remove(RemittanceHeaderHandler.FIELD_SCHEME);
+    body.remove(RemittanceHeaderHandler.FIELD_FINANCED);
+    return null;
+  }
+
+  /**
+   * Whether the write leaves the remittance with a valid IBAN of its own, so the account need not
+   * have one: the body carries one, or (an update that changes neither account nor type, which the
+   * database would otherwise re-copy from the account) the stored copy is valid.
+   */
+  private static boolean remittanceHasIban(JSONObject body, Remittance stored, boolean create,
+      String accountId, String typeId) {
+    boolean typed = body.has(RemittanceHeaderHandler.FIELD_IBAN); // validated by validateIban
+    if (create || stored == null) {
+      return typed;
+    }
+    // An update that changes the account or the type makes the database re-copy the account's IBAN
+    // over whatever is typed or stored.
+    boolean recopied = !accountId.equals(
+        RemittanceHeaderHandler.idOf(stored.getFinancialAccount()))
+        || !typeId.equals(RemittanceHeaderHandler.idOf(stored.getRemittanceType()));
+    return !recopied && (typed || RemittanceIban.isValid(RemittanceIban.stored(stored)));
   }
 
   /**

@@ -55,9 +55,10 @@ import org.openbravo.sepa.iso20022.util.SEPAUtil;
  *   <li><b>organization</b> — the remittance organization's own information (no parent fallback,
  *       as the generator reads it): an address with locality, country, street name and building
  *       number (both schemes ask for the structured creditor/debtor address), and a tax ID — on a
- *       collection, one that forms the SEPA creditor identifier;</li>
- *   <li><b>account</b> — a valid IBAN for its country, a well-formed BIC when it has one, euros;
- *       and a remittance type GO provisioned (one with a SEPA generator);</li>
+ *       collection with no saved creditor identifier, one that forms it;</li>
+ *   <li><b>account</b> — a valid IBAN (the remittance's own, else its account's), a well-formed BIC when it has one, euros;
+ *       a remittance type GO provisioned (one with a SEPA generator); and, on a collection, a SEPA
+ *       creditor identifier saved for the remittance ({@link RemittanceCreditorId}, ETP-6247);</li>
  *   <li><b>lines</b> — {@link RemittanceFileLineCheck}.</li>
  * </ul>
  *
@@ -80,6 +81,13 @@ final class RemittanceFileReadiness {
   static final String MSG_ACCOUNT_INVALID_BIC = "ETGO_RemittanceFileAccountInvalidBic";
   static final String MSG_ACCOUNT_NOT_EUR = "ETGO_RemittanceFileAccountNotEur";
   static final String MSG_NO_GENERATOR = "ETGO_RemittanceFileNoGenerator";
+  /** ETP-6247: a collection has no creditor identifier saved. */
+  static final String MSG_ACCOUNT_NO_CREDITOR_ID = "ETGO_RemittanceFileAccountNoCreditorId";
+  /** ETP-6247: the creditor identifier saved for the remittance is not a valid one. */
+  static final String MSG_ACCOUNT_INVALID_CREDITOR_ID =
+      "ETGO_RemittanceFileAccountInvalidCreditorId";
+  /** Key of the computed identifier in the account problem the SPA offers to use. */
+  static final String KEY_SUGGESTED_CREDITOR_ID = "suggestedCreditorId";
 
   static final String KEY_READY = "ready";
   static final String KEY_SCHEME = "scheme";
@@ -132,7 +140,9 @@ final class RemittanceFileReadiness {
     String scheme = RemittanceSepaFileSetup.schemeOf(remittance.getRemittanceType());
     boolean collection = RemittanceSepaProvisioning.SCHEME_CORE.equals(scheme);
     RemittanceFileProblems problems = new RemittanceFileProblems();
-    checkOrganization(remittance.getOrganization(), collection, problems);
+    checkOrganization(remittance.getOrganization(),
+        collection && !SepaCreditorId.isValid(RemittanceCreditorId.effective(remittance)),
+        problems);
     checkAccount(remittance, scheme, problems);
     boolean checkAmount = !Boolean.TRUE.equals(remittance.isProcessed());
     Set<String> invoices = new HashSet<>();
@@ -197,7 +207,8 @@ final class RemittanceFileReadiness {
   // Organization and account
   // ---------------------------------------------------------------------------
 
-  private static void checkOrganization(Organization organization, boolean collection,
+  private static void checkOrganization(Organization organization,
+      boolean needsComputedCreditorId,
       RemittanceFileProblems problems) throws JSONException {
     List<OrganizationInformation> infos = organization.getOrganizationInformationList();
     OrganizationInformation info = infos == null || infos.isEmpty() ? null : infos.get(0);
@@ -214,7 +225,7 @@ final class RemittanceFileReadiness {
     String country = location != null && location.getCountry() != null
         ? location.getCountry().getISOCountryCode()
         : null;
-    boolean creditorIdMissing = collection && country != null && taxId != null
+    boolean creditorIdMissing = needsComputedCreditorId && country != null && taxId != null
         && SepaCreditorId.build(country, RemittanceSepaFileData.suffixOf(
             RemittanceSepaProvisioning.creditorBusinessCode(organization.getClient())), taxId)
             == null;
@@ -244,7 +255,9 @@ final class RemittanceFileReadiness {
           remittance.getRemittanceType() != null ? remittance.getRemittanceType().getName()
               : null);
     }
-    if (!RemittanceHeaderHandler.hasValidIban(account)) {
+    // ETP-6247: the file carries the REMITTANCE's IBAN (its copy of the account's, or the one typed
+    // on it); an old remittance with no copy is judged by its account's, which is then copied.
+    if (!RemittanceIban.isValid(RemittanceIban.effective(remittance))) {
       problems.account(account.getId(), MSG_ACCOUNT_NO_IBAN, account.getName());
     }
     String bic = StringUtils.trimToNull(account.getSwiftCode());
@@ -254,6 +267,35 @@ final class RemittanceFileReadiness {
     if (account.getCurrency() == null || !EUR_ID.equals(account.getCurrency().getId())) {
       problems.account(account.getId(), MSG_ACCOUNT_NOT_EUR, account.getName());
     }
+    if (RemittanceSepaProvisioning.SCHEME_CORE.equals(scheme)) {
+      checkCreditorId(remittance, account, problems);
+    }
+  }
+
+  /**
+   * ETP-6247 — a collection's file carries the creditor identifier saved for the remittance, never one
+   * computed on the fly: no saved value and none computable from the organization
+   * ({@value #MSG_ACCOUNT_NO_CREDITOR_ID}; when it CAN be computed there is no problem, it is kept
+   * as the remittance's copy on confirm), or an invalid one
+   * ({@value #MSG_ACCOUNT_INVALID_CREDITOR_ID}) is a problem, and carries the identifier computed
+   * from the organization as {@value #KEY_SUGGESTED_CREDITOR_ID} ({@code null} when the
+   * organization cannot form one), so the SPA can offer «Usar el calculado», which saves it, or let
+   * the user type their own. A payment (SCT) file has no creditor identifier: not checked.
+   */
+  private static void checkCreditorId(Remittance remittance, FIN_FinancialAccount account,
+      RemittanceFileProblems problems) throws JSONException {
+    String value = RemittanceCreditorId.effective(remittance);
+    if (SepaCreditorId.isValid(value)) {
+      return;
+    }
+    String suggested = RemittanceCreditorId.suggested(remittance.getOrganization());
+    boolean hasStored = value != null;
+    if (!hasStored && suggested != null) {
+      return; // none anywhere, but the organization's computed one is taken and kept as the copy
+    }
+    problems.accountWith(account.getId(),
+        hasStored ? MSG_ACCOUNT_INVALID_CREDITOR_ID : MSG_ACCOUNT_NO_CREDITOR_ID,
+        KEY_SUGGESTED_CREDITOR_ID, suggested, account.getName());
   }
 
   // ---------------------------------------------------------------------------

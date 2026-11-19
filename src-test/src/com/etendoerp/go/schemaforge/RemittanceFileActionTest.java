@@ -107,6 +107,7 @@ class RemittanceFileActionTest {
   @BeforeEach
   void setUp() throws Exception {
     dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(mock(org.hibernate.Session.class));
     dalStatic = mockStatic(OBDal.class);
     dalStatic.when(OBDal::getInstance).thenReturn(dal);
     contextStatic = mockStatic(OBContext.class);

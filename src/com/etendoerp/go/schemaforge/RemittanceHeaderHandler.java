@@ -126,6 +126,17 @@ public class RemittanceHeaderHandler implements NeoHandler {
   static final String FIELD_ACCOUNT = "financialAccount";
   static final String FIELD_TYPE = "remittanceType";
   static final String FIELD_NAME = "name";
+  /** ETP-6247: the remittance's own IBAN ({@code REM_REMITTANCE.IBAN}, DAL {@code iBAN}). */
+  static final String FIELD_IBAN = RemittanceIban.PROPERTY;
+  /** ETP-6247: the direct debit scheme and financed flag of a collection remittance. */
+  static final String FIELD_SCHEME = RemittanceSepaOptions.PROPERTY_SCHEME;
+  static final String FIELD_FINANCED = RemittanceSepaOptions.PROPERTY_FINANCED;
+  /** ETP-6247: the remittance's own SEPA creditor identifier (DAL {@code creditorIdentifier}). */
+  static final String FIELD_CREDITOR_ID = RemittanceCreditorId.REMITTANCE_PROPERTY;
+  static final String MSG_SCHEME_INVALID = "ETGO_RemittanceSchemeInvalid";
+  static final String MSG_OPTIONS_COLLECTION_ONLY = "ETGO_RemittanceOptionsCollectionOnly";
+  /** ETP-6247: the IBAN written on the remittance is not a valid IBAN. */
+  static final String MSG_IBAN_INVALID = "ETGO_RemittanceIbanInvalid";
   static final String FIELD_DUE_DATE = "dueDate";
   static final String COLUMN_DUE_DATE = "Duedate";
   static final String COLUMN_TYPE_FOR_CALLOUT = "REM_Remittance_Type_ID";
@@ -229,7 +240,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
     try {
       String accountId = idOf(defaults.opt(FIELD_ACCOUNT));
       FIN_FinancialAccount account = accountId != null ? loadAccount(accountId) : null;
-      if (accountId != null && account != null && accountRefusal(account) == null) {
+      if (accountId != null && account != null && eligibilityRefusal(account) == null) {
         return null;
       }
       for (String key : List.of(FIELD_ACCOUNT, FIELD_TYPE)) {
@@ -399,10 +410,22 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
    */
   String accountRefusal(FIN_FinancialAccount account) {
+    return accountRefusal(account, false);
+  }
+
+  /**
+   * {@link #accountRefusal(FIN_FinancialAccount)}, skipping the IBAN rule when the remittance
+   * itself carries a valid IBAN (ETP-6247: its file uses its own, the account need not have one).
+   *
+   * @param account       the financial account
+   * @param remittanceHasIban whether the write gives the remittance a valid IBAN of its own
+   * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
+   */
+  String accountRefusal(FIN_FinancialAccount account, boolean remittanceHasIban) {
     if (!TYPE_BANK.equals(account.getType())) {
       return MSG_ACCOUNT_NOT_BANK;
     }
-    if (!hasValidIban(account)) {
+    if (!remittanceHasIban && !hasValidIban(account)) {
       return MSG_ACCOUNT_IBAN_REQUIRED;
     }
     if (!hasRemittanceMethods(account)) {
@@ -482,6 +505,12 @@ public class RemittanceHeaderHandler implements NeoHandler {
     return StringUtils.isBlank(id) ? null : TenantOwnership.loadOwned(Remittance.class, id);
   }
 
+  /** Refresh after acquiring the row lock so validation sees the latest account and status. */
+  void lockRemittance(Remittance remittance) {
+    org.openbravo.dal.service.OBDal.getInstance().getSession().refresh(remittance,
+        new org.hibernate.LockOptions(org.hibernate.LockMode.PESSIMISTIC_WRITE));
+  }
+
   FIN_FinancialAccount loadAccount(String id) {
     return TenantOwnership.loadOwned(FIN_FinancialAccount.class, id);
   }
@@ -497,6 +526,23 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** The client's stored creditor business code ({@link RemittanceSepaProvisioning}), raw. */
   String creditorBusinessCode(FIN_FinancialAccount account) {
     return RemittanceSepaProvisioning.creditorBusinessCode(account.getClient());
+  }
+
+  /** The creditor identifier saved on the account, normalized, valid or not; {@code null} when none. */
+  String storedCreditorId(FIN_FinancialAccount account) {
+    return RemittanceCreditorId.stored(account);
+  }
+
+  /** Saves a validated creditor identifier on the remittance, its own copy (ETP-6247). */
+  void storeRemittanceCreditorId(Remittance remittance, String normalized) {
+    remittance.set(RemittanceCreditorId.REMITTANCE_PROPERTY, normalized);
+    org.openbravo.dal.service.OBDal.getInstance().save(remittance);
+    org.openbravo.dal.service.OBDal.getInstance().flush();
+  }
+
+  /** Saves a validated creditor identifier on the account (ETP-6247). */
+  void storeCreditorId(FIN_FinancialAccount account, String normalized) {
+    RemittanceCreditorId.store(account, normalized);
   }
 
   Organization loadOrganization(String id) {

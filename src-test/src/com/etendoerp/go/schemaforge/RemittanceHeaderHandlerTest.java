@@ -403,16 +403,30 @@ class RemittanceHeaderHandlerTest {
     RemittanceType core = mock(RemittanceType.class);
     when(core.getId()).thenReturn(TYPE_ID);
     when(core.getIdentifier()).thenReturn("Remesa de cobro (adeudo SEPA)");
-    selectorRows = List.of(core);
-    selectorTotal = 1;
+    org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod payin =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod.class);
+    when(payin.isPayinAllow()).thenReturn(true);
+    when(core.getPaymentMethod()).thenReturn(payin);
+    RemittanceType transfer = mock(RemittanceType.class);
+    when(transfer.getId()).thenReturn("TYPE-SCT");
+    when(transfer.getIdentifier()).thenReturn("Remesa de pago (transferencia SEPA)");
+    org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod payout =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod.class);
+    when(payout.isPayinAllow()).thenReturn(false);
+    when(transfer.getPaymentMethod()).thenReturn(payout);
+    selectorRows = List.of(core, transfer);
+    selectorTotal = 2;
     doReturn(request(Map.of("fin_financial_account_id", new String[] { ACC_ID })))
         .when(handler).currentRequest();
 
     NeoResponse response = handler.handle(selector("remittanceType"));
 
     JSONArray items = response.getBody().getJSONArray("items");
-    assertEquals(1, items.length());
+    assertEquals(2, items.length());
     assertEquals(TYPE_ID, items.getJSONObject(0).getString("id"));
+    // ETP-6247: the direction lets the SPA show the scheme / financed options before the first save.
+    assertEquals("collection", items.getJSONObject(0).getString("direction"));
+    assertEquals("payment", items.getJSONObject(1).getString("direction"));
     assertEquals(2, queries.size());
     for (Recorded query : queries) {
       assertTrue(query.hql.contains("p.name = :marker"), query.hql);
@@ -596,7 +610,8 @@ class RemittanceHeaderHandlerTest {
    * but it is never prefilled: the defaults drop it, and the type with it.
    */
   @Test
-  void theDefaultsDropALinkedAccountWithoutAValidIban() throws Exception {
+  void theDefaultsKeepALinkedAccountWithoutAValidIban() throws Exception {
+    // ETP-6247: the remittance can carry its own IBAN, so the account need not have one.
     FIN_FinancialAccount noIban = bankAccount(ACC_ID, "BBVA", null);
     FIN_FinancialAccount brokenIban = bankAccount(ACC_ID, "BBVA", ES_IBAN_BAD_CHECKSUM);
 
@@ -604,11 +619,7 @@ class RemittanceHeaderHandlerTest {
       doReturn(true).when(handler).hasRemittanceMethods(account);
       doReturn(account).when(handler).loadAccount(ACC_ID);
 
-      NeoResponse response = handler.afterHandle(defaultsContext());
-
-      JSONObject defaults = response.getBody().getJSONObject("defaults");
-      assertFalse(defaults.has("financialAccount"), defaults.toString());
-      assertFalse(defaults.has("remittanceType"), defaults.toString());
+      assertNull(handler.afterHandle(defaultsContext()));
     }
   }
 
@@ -944,6 +955,10 @@ class RemittanceHeaderHandlerTest {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(eligible ? null : RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED).when(handler)
         .accountRefusal(account);
+    // ETP-6247: the write path asks with «the remittance has its own IBAN» too.
+    doReturn(eligible ? null : RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED).when(handler)
+        .accountRefusal(org.mockito.ArgumentMatchers.eq(account),
+            org.mockito.ArgumentMatchers.anyBoolean());
     doReturn(account).when(handler).loadAccount(ACC_ID);
     return account;
   }
@@ -1152,8 +1167,8 @@ class RemittanceHeaderHandlerTest {
   void theHeaderDeclaresTheDueItemsAndProcessActions() {
     assertTrue(handler.servesActions());
     assertEquals(List.of("availableDueItems", "selectDueItems", "syncDueItems", "process",
-        "reactivate", "sepaFileData", "fileReadiness", "confirm", "generateFile", "markSent", "markCollected",
-        "returnState", "returnLines"),
+        "reactivate", "sepaFileData", "saveCreditorId", "fileReadiness", "confirm", "generateFile",
+        "markSent", "markCollected", "returnState", "returnLines"),
         new ArrayList<>(handler.actionContracts().keySet()));
   }
 
@@ -1263,6 +1278,443 @@ class RemittanceHeaderHandlerTest {
     assertEquals("[\"creditorBusinessCode\"]", body.getJSONArray("missing").toString());
   }
 
+  // ---------------------------------------------------------------- creditor id (ETP-6247)
+
+  private static final String CI = "ES82000B87654323";
+  private static final String CI_OTHER = "ES97000B12345678";
+
+  /** The account form: record id new, no remittance. */
+  private static NeoContext accountAction(String name, JSONObject body) {
+    NeoContext ctx = context("POST", NeoEndpointType.ACTION, body, "new");
+    when(ctx.getFieldName()).thenReturn(name);
+    return ctx;
+  }
+
+  /** A draft collection remittance on {@code account}, loadable by REM_ID. */
+  private Remittance draftRemittance(FIN_FinancialAccount account, String own) {
+    Remittance remittance = mock(Remittance.class);
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    when(remittance.getId()).thenReturn(REM_ID);
+    when(remittance.isProcessed()).thenReturn(false);
+    when(remittance.get(RemittanceCreditorId.REMITTANCE_PROPERTY)).thenReturn(own);
+    doReturn(remittance).when(handler).loadRemittance(REM_ID);
+    org.mockito.Mockito.doNothing().when(handler).lockRemittance(any());
+    org.mockito.Mockito.doNothing().when(handler).storeRemittanceCreditorId(any(), any());
+    org.mockito.Mockito.doNothing().when(handler).storeCreditorId(any(), any());
+    return remittance;
+  }
+
+  private static MockedStatic<RemittanceSepaFileSetup> scheme(String scheme) {
+    MockedStatic<RemittanceSepaFileSetup> setup =
+        org.mockito.Mockito.mockStatic(RemittanceSepaFileSetup.class);
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any())).thenReturn(scheme);
+    return setup;
+  }
+
+  private static JSONObject params() throws Exception {
+    return new JSONObject().put("accountId", ACC_ID);
+  }
+
+  /** Nothing saved anywhere: the computed one is offered. */
+  @Test
+  void sepaFileDataOffersTheComputedCreditorIdWhenNoneIsSaved() throws Exception {
+    sepaAccount();
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData", params())).getBody();
+
+    assertTrue(body.isNull("remittanceCreditorId"));
+    assertTrue(body.isNull("accountCreditorId"));
+    assertEquals(CI_OTHER, body.getString("suggestedCreditorId"));
+    assertEquals(CI_OTHER, body.getString("creditorId"));
+    assertEquals("suggested", body.getString("creditorIdSource"));
+  }
+
+  /** The account's default applies while the remittance has no copy of its own. */
+  @Test
+  void sepaFileDataFallsBackToTheAccountDefault() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    doReturn(CI).when(handler).storedCreditorId(account);
+
+    JSONObject body = handler.handle(accountAction("sepaFileData", params())).getBody();
+
+    assertEquals(CI, body.getString("accountCreditorId"));
+    assertTrue(body.getBoolean("accountCreditorIdValid"));
+    assertEquals(CI, body.getString("creditorId"));
+    assertEquals("account", body.getString("creditorIdSource"));
+    assertEquals(CI, body.getString("storedCreditorId"), "alias of the account's");
+  }
+
+  /** The remittance's own copy wins over the account's, found by record id or by remittanceId. */
+  @Test
+  void sepaFileDataPrefersTheRemittancesOwnCopy() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    doReturn(CI).when(handler).storedCreditorId(account);
+    draftRemittance(account, CI_OTHER);
+
+    JSONObject byRecord = handler.handle(action("POST", "sepaFileData", params())).getBody();
+    JSONObject byParam = handler.handle(accountAction("sepaFileData",
+        params().put("remittanceId", REM_ID))).getBody();
+
+    for (JSONObject body : List.of(byRecord, byParam)) {
+      assertEquals(CI_OTHER, body.getString("remittanceCreditorId"));
+      assertEquals(CI, body.getString("accountCreditorId"));
+      assertEquals(CI_OTHER, body.getString("creditorId"));
+      assertEquals("remittance", body.getString("creditorIdSource"));
+    }
+  }
+
+  /** A remittance on ANOTHER account (the form changed it) contributes nothing. */
+  @Test
+  void sepaFileDataIgnoresARemittanceOnAnotherAccount() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    doReturn(CI).when(handler).storedCreditorId(account);
+    draftRemittance(bankAccount("ACC-OTHER", "Other", ES_IBAN), CI_OTHER);
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData", params())).getBody();
+
+    assertTrue(body.isNull("remittanceCreditorId"));
+    assertEquals("account", body.getString("creditorIdSource"));
+  }
+
+  /** A saved value that is not a valid identifier (typed in Classic) is not used. */
+  @Test
+  void sepaFileDataDoesNotUseAnInvalidCopy() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    doReturn(CI).when(handler).storedCreditorId(account);
+    draftRemittance(account, "ES00000B87654323");
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData", params())).getBody();
+
+    assertTrue(body.isNull("remittanceCreditorId"));
+    assertFalse(body.getBoolean("remittanceCreditorIdValid"));
+    // Not replaced by the account's: the file would be refused until the user saves a valid one.
+    assertEquals("missing", body.getString("creditorIdSource"));
+    assertTrue(body.isNull("creditorId"));
+  }
+
+  /** The account form saves the account default only, and says so with saveToAccount. */
+  @Test
+  void theAccountFormSavesTheAccountDefaultAndAnswersTheBlock() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    org.mockito.Mockito.doNothing().when(handler).storeCreditorId(any(), any());
+    doReturn(CI).when(handler).storedCreditorId(account);
+
+    NeoResponse response = handler.handle(accountAction("saveCreditorId",
+        params().put("creditorId", " es82 000b-8765 4323 ").put("saveToAccount", true)));
+
+    assertEquals(200, response.getHttpStatus(), String.valueOf(response.getBody()));
+    verify(handler).storeCreditorId(account, CI);
+    verify(handler, never()).storeRemittanceCreditorId(any(), any());
+    assertEquals("account", response.getBody().getString("creditorIdSource"));
+  }
+
+  @Test
+  void withoutARemittanceTheWriteMustBeAskedForAsTheAccountDefault() throws Exception {
+    sepaAccount();
+
+    NeoResponse response = handler.handle(accountAction("saveCreditorId",
+        params().put("creditorId", CI)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("ETGO_RemittanceCreditorIdNeedsAccount", messageKey(response));
+    verify(handler, never()).storeCreditorId(any(), any());
+  }
+
+  /** On a remittance the copy is saved there; the account only when asked. */
+  @Test
+  void savingOnADraftUpdatesOnlyTheRemittanceUnlessSaveToAccount() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    Remittance remittance = draftRemittance(account, null);
+    try (MockedStatic<RemittanceSepaFileSetup> schemes =
+        scheme(RemittanceSepaProvisioning.SCHEME_CORE)) {
+      NeoResponse only = handler.handle(action("POST", "saveCreditorId",
+          params().put("creditorId", CI)));
+      assertEquals(200, only.getHttpStatus(), String.valueOf(only.getBody()));
+      verify(handler).storeRemittanceCreditorId(remittance, CI);
+      verify(handler, never()).storeCreditorId(any(), any());
+
+      handler.handle(action("POST", "saveCreditorId",
+          params().put("creditorId", CI).put("saveToAccount", true)));
+      verify(handler).storeCreditorId(account, CI);
+    }
+  }
+
+  @Test
+  void theRemittanceIdParameterTargetsTheRemittanceFromTheAccountForm() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    Remittance remittance = draftRemittance(account, null);
+    try (MockedStatic<RemittanceSepaFileSetup> schemes =
+        scheme(RemittanceSepaProvisioning.SCHEME_CORE)) {
+      handler.handle(accountAction("saveCreditorId",
+          params().put("creditorId", CI).put("remittanceId", REM_ID)));
+
+      verify(handler).storeRemittanceCreditorId(remittance, CI);
+      verify(handler, never()).storeCreditorId(any(), any());
+    }
+  }
+
+  @Test
+  void aProcessedRemittanceKeepsItsCopyAndAnUnknownOneIsA404() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    Remittance remittance = draftRemittance(account, null);
+    when(remittance.isProcessed()).thenReturn(true);
+
+    NeoResponse processed = handler.handle(action("POST", "saveCreditorId",
+        params().put("creditorId", CI)));
+    assertEquals(422, processed.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_PROCESSED, messageKey(processed));
+
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    assertEquals(404, handler.handle(action("POST", "saveCreditorId",
+        params().put("creditorId", CI))).getHttpStatus());
+    verify(handler, never()).storeRemittanceCreditorId(any(), any());
+  }
+
+  /** A payment remittance, or one on another account, takes no creditor identifier. */
+  @Test
+  void aPaymentRemittanceOrAnotherAccountIsNotApplicable() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    draftRemittance(account, null);
+    try (MockedStatic<RemittanceSepaFileSetup> schemes =
+        scheme(RemittanceSepaProvisioning.SCHEME_SCT)) {
+      NeoResponse payment = handler.handle(action("POST", "saveCreditorId",
+          params().put("creditorId", CI)));
+      assertEquals("ETGO_RemittanceCreditorIdNotApplicable", messageKey(payment));
+    }
+    draftRemittance(bankAccount("ACC-OTHER", "Other", ES_IBAN), null);
+    try (MockedStatic<RemittanceSepaFileSetup> schemes =
+        scheme(RemittanceSepaProvisioning.SCHEME_CORE)) {
+      NeoResponse other = handler.handle(action("POST", "saveCreditorId",
+          params().put("creditorId", CI)));
+      assertEquals("ETGO_RemittanceCreditorIdNotApplicable", messageKey(other));
+    }
+    verify(handler, never()).storeRemittanceCreditorId(any(), any());
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource(value = {
+      "--|ETGO_SepaCreditorIdRequired", "ES82|ETGO_SepaCreditorIdInvalidFormat",
+      "ES00000B87654323|ETGO_SepaCreditorIdInvalidCheckDigits" }, delimiter = '|')
+  void saveCreditorIdRefusesAnInvalidIdentifierAndSavesNothing(String raw, String key)
+      throws Exception {
+    sepaAccount();
+
+    NeoResponse response = handler.handle(accountAction("saveCreditorId",
+        params().put("creditorId", raw).put("saveToAccount", true)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(key, messageKey(response));
+    verify(handler, never()).storeCreditorId(any(), any());
+    verify(handler, never()).storeRemittanceCreditorId(any(), any());
+    if (key.endsWith("CheckDigits")) {
+      assertEquals("82",
+          response.getBody().getJSONObject("error").getString("expectedCheckDigits"));
+    }
+  }
+
+  @Test
+  void saveCreditorIdIsPostOnlyAndNeedsTheCreditorId() throws Exception {
+    sepaAccount();
+
+    assertEquals(405, handler.handle(action("GET", "saveCreditorId", null)).getHttpStatus());
+    assertEquals(422, handler.handle(accountAction("saveCreditorId", params())).getHttpStatus());
+    verify(handler, never()).storeCreditorId(any(), any());
+  }
+
+  @Test
+  void saveCreditorIdRefusesAnAccountThatIsNotARemittanceAccount() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(false).when(handler).hasRemittanceMethods(account);
+
+    NeoResponse response = handler.handle(accountAction("saveCreditorId",
+        params().put("creditorId", CI).put("saveToAccount", true)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED, messageKey(response));
+    verify(handler, never()).storeCreditorId(any(), any());
+  }
+
+  // ---------------------------------------------------------------- remittance IBAN (ETP-6247)
+
+  private static final String IBAN_SPACED = "es91 2100 0418 4502 0005 1332";
+
+  /** A typed IBAN is normalized and lets an account WITHOUT one hold a remittance. */
+  @Test
+  void aCreateWithItsOwnIbanIsNormalizedAndNeedsNoAccountIban() throws Exception {
+    FIN_FinancialAccount noIban = bankAccount(ACC_ID, "BBVA", null);
+    doReturn(noIban).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(noIban);
+    doReturn(null).when(handler).loadType(TYPE_ID);
+    JSONObject body = validBody().put("iBAN", IBAN_SPACED);
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+  }
+
+  @Test
+  void anInvalidTypedIbanIsRefusedBeforeAnythingElse() throws Exception {
+    NeoResponse response = handler.handle(create(validBody().put("iBAN", ES_IBAN_BAD_CHECKSUM)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_IBAN_INVALID, messageKey(response));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A blank IBAN is dropped from the body, so the database copies the account's. */
+  @Test
+  void aBlankIbanIsDroppedFromTheBody() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(null).when(handler).loadType(TYPE_ID);
+    JSONObject body = validBody().put("iBAN", "  ");
+
+    assertNull(handler.handle(create(body)));
+
+    assertFalse(body.has("iBAN"));
+  }
+
+  /** The IBAN of the account is still required when the remittance brings none. */
+  @Test
+  void withoutAnyIbanTheCreateIsRefusedWithTheExistingKey() throws Exception {
+    FIN_FinancialAccount noIban = bankAccount(ACC_ID, "BBVA", null);
+    doReturn(noIban).when(handler).loadAccount(ACC_ID);
+
+    NeoResponse response = handler.handle(create(validBody()));
+
+    assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_IBAN_REQUIRED, messageKey(response));
+  }
+
+  /** The IBAN block of a saved remittance: its own copy wins; the account's is reported apart. */
+  @Test
+  void sepaFileDataReportsTheRemittanceIbanAndItsSource() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    Remittance remittance = draftRemittance(account, null);
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn("DE89370400440532013000");
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData", params())).getBody();
+
+    assertEquals("DE89370400440532013000", body.getString("remittanceIban"));
+    assertEquals(ES_IBAN, body.getString("accountIban"));
+    assertEquals(ES_IBAN, body.getString("accountIban"));
+    assertEquals("DE89370400440532013000", body.getString("iban"));
+    assertEquals("remittance", body.getString("ibanSource"));
+    assertTrue(body.getBoolean("ibanValid"));
+  }
+
+  @Test
+  void sepaFileDataFallsBackToTheAccountIbanForANewRemittance() throws Exception {
+    sepaAccount();
+
+    JSONObject body = handler.handle(accountAction("sepaFileData", params())).getBody();
+
+    assertTrue(body.isNull("remittanceIban"));
+    assertEquals(ES_IBAN, body.getString("iban"));
+    assertEquals("account", body.getString("ibanSource"));
+  }
+
+  // ---------------------------------------------------------------- creditor id on the remittance (ETP-6247)
+
+  @Test
+  void aCollectionTakesItsOwnCreditorIdNormalized() throws Exception {
+    collectionType(RemittanceSepaProvisioning.SCHEME_CORE);
+    JSONObject body = validBody().put("creditorIdentifier", " es82 000b-8765 4323 ");
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals("ES82000B87654323", body.getString("creditorIdentifier"));
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource(value = {
+      "ES82|ETGO_SepaCreditorIdInvalidFormat",
+      "ES00000B87654323|ETGO_SepaCreditorIdInvalidCheckDigits" }, delimiter = '|')
+  void anInvalidCreditorIdIsRefusedWithTheExistingKeys(String raw, String key) throws Exception {
+    NeoResponse response = handler.handle(create(validBody().put("creditorIdentifier", raw)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(key, messageKey(response));
+  }
+
+  @Test
+  void aBlankCreditorIdIsDroppedAndAPaymentRefusesOne() throws Exception {
+    collectionType(RemittanceSepaProvisioning.SCHEME_CORE);
+    JSONObject blank = validBody().put("creditorIdentifier", "  ");
+    assertNull(handler.handle(create(blank)));
+    assertFalse(blank.has("creditorIdentifier"));
+    schemeSetup.close();
+    schemeSetup = null;
+
+    collectionType(RemittanceSepaProvisioning.SCHEME_SCT);
+    NeoResponse payment = handler.handle(create(validBody()
+        .put("creditorIdentifier", "ES82000B87654323")));
+    assertEquals(RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY, messageKey(payment));
+  }
+
+  // ---------------------------------------------------------------- scheme and financed (ETP-6247)
+
+  private void collectionType(String scheme) {
+    RemittanceType type = mock(RemittanceType.class);
+    doReturn(type).when(handler).loadType(TYPE_ID);
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(true).when(handler).isTypeAvailable(any(), any());
+    schemeSetup = org.mockito.Mockito.mockStatic(RemittanceSepaFileSetup.class);
+    schemeSetup.when(() -> RemittanceSepaFileSetup.schemeOf(any())).thenReturn(scheme);
+  }
+
+  private MockedStatic<RemittanceSepaFileSetup> schemeSetup;
+
+  @org.junit.jupiter.api.AfterEach
+  void closeSchemeSetup() {
+    if (schemeSetup != null) {
+      schemeSetup.close();
+      schemeSetup = null;
+    }
+  }
+
+  @Test
+  void aCollectionTakesB2bAndFinancedNormalized() throws Exception {
+    collectionType(RemittanceSepaProvisioning.SCHEME_CORE);
+    JSONObject body = validBody().put("directDebitScheme", " b2b ").put("financed", "Y");
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals("B2B", body.getString("directDebitScheme"));
+    assertTrue(body.getBoolean("financed"));
+  }
+
+  @Test
+  void anUnknownSchemeIsRefusedAndABlankOneDropped() throws Exception {
+    NeoResponse refused = handler.handle(create(validBody().put("directDebitScheme", "XYZ")));
+    assertEquals(422, refused.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_SCHEME_INVALID, messageKey(refused));
+
+    collectionType(RemittanceSepaProvisioning.SCHEME_CORE);
+    JSONObject body = validBody().put("directDebitScheme", " ");
+    assertNull(handler.handle(create(body)));
+    assertFalse(body.has("directDebitScheme"));
+  }
+
+  /** A payment takes neither: B2B or financed is refused, CORE / false are dropped. */
+  @Test
+  void aPaymentRefusesB2bAndFinancedAndDropsTheDefaults() throws Exception {
+    collectionType(RemittanceSepaProvisioning.SCHEME_SCT);
+
+    NeoResponse b2b = handler.handle(create(validBody().put("directDebitScheme", "B2B")));
+    assertEquals(RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY, messageKey(b2b));
+    NeoResponse financed = handler.handle(create(validBody().put("financed", true)));
+    assertEquals(RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY, messageKey(financed));
+
+    JSONObject defaults = validBody().put("directDebitScheme", "CORE").put("financed", false);
+    assertNull(handler.handle(create(defaults)));
+    assertFalse(defaults.has("directDebitScheme"));
+    assertFalse(defaults.has("financed"));
+  }
+
   /** An account that cannot be used for a remittance at all is refused with its own key. */
   @Test
   void sepaFileDataRefusesAnAccountWithoutTheRemittanceMethods() throws Exception {
@@ -1288,7 +1740,7 @@ class RemittanceHeaderHandlerTest {
 
     assertEquals(404, response.getHttpStatus());
     verify(handler, never()).loadOrganizationInfo(any());
-    verify(handler, never()).loadRemittance(any());
+    verify(handler).loadRemittance(REM_ID);
   }
 
   /** A saved remittance is read for its organization, which wins over the account's. */
@@ -1309,7 +1761,7 @@ class RemittanceHeaderHandlerTest {
     assertEquals(SepaCreditorId.build("FR", "000", "FR12345678901"), body.getString("creditorId"));
   }
 
-  /** An explicit organizationId is used as given, without reading the remittance. */
+  /** An explicit organizationId determines the suggestion for a saved remittance. */
   @Test
   void sepaFileDataUsesAnExplicitOrganization() throws Exception {
     sepaAccount();
@@ -1322,7 +1774,7 @@ class RemittanceHeaderHandlerTest {
         .getBody();
 
     assertEquals("ORG-CHOSEN", body.getString("organizationId"));
-    verify(handler, never()).loadRemittance(any());
+    verify(handler).loadRemittance(REM_ID);
   }
 
   /** A GET carries its parameters in the query string. */

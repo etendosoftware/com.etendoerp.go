@@ -27,22 +27,30 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.openbravo.advpaymentmngt.dao.TransactionsDao;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.businesspartner.BankAccount;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
+import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -57,10 +65,12 @@ import org.openbravo.module.remittance.RemittanceType;
 import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
 
 /**
- * Real-database acceptance of the returns of a collected remittance (ETP-6247): a collection
- * remittance of GOClient is built, confirmed by REM with the automated-remittance hook (which
- * settles its payments) and then returned through {@link RemittanceReturnAction}, all inside the
- * test transaction, rolled back after each test.
+ * Real-database acceptance of the step flow of a remittance and of the returns of a collected one
+ * (ETP-6247): a collection remittance of GOClient is built, confirmed ({@code PR}: payments
+ * remitted, invoices unpaid, file attached), marked sent ({@code SB}), marked collected (settled on
+ * its due date, {@code CT}) and then returned through {@link RemittanceReturnAction}, all inside
+ * the test transaction, rolled back after each test. The step tests also pin the reactivation
+ * (allowed on {@code PR}/{@code SB}, refused once collected, paid, partial or voided).
  *
  * <p>What it pins, with the real module code ({@code AutomatedReturnProcess}, REM's settle undo,
  * the payment removal utility) and the real triggers:
@@ -87,6 +97,8 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  * @covers com.etendoerp.go.schemaforge.RemittanceReturnState
  * @covers com.etendoerp.go.schemaforge.RemittanceReturnProcess
  * @covers com.etendoerp.go.schemaforge.RemittanceFileAction
+ * @covers com.etendoerp.go.schemaforge.RemittanceStatusAction
+ * @covers com.etendoerp.go.schemaforge.RemittanceProcessAction
  */
 public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
@@ -295,10 +307,297 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     }
   }
 
+  // ---------------------------------------------------------------- the step flow
+
+  @Test
+  public void confirmProcessesWithoutSettlingAttachesTheFileAndLeavesTheRemittanceInPr()
+      throws Exception {
+    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    String remittanceId = remittance.getId();
+
+    NeoResponse response = RemittanceFileAction.confirm(remittance, new JSONObject());
+
+    assertEquals(String.valueOf(response.getBody()), 200, response.getHttpStatus());
+    assertEquals("PR", response.getBody().getString("status"));
+    Attachment file = OBDal.getInstance().get(Attachment.class,
+        response.getBody().getString("attachmentId"));
+    assertNotNull("the SEPA file is attached", file);
+    assertTrue(file.getName(), file.getName().endsWith(".xml"));
+
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittanceId);
+    OBDal.getInstance().refresh(reloaded);
+    assertTrue(reloaded.isProcessed());
+    assertEquals("PR", String.valueOf(reloaded.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)));
+    assertFalse("the automatic settlement is off", Boolean.TRUE.equals(
+        reloaded.isETARAutomaticprocess()));
+    String lineId = lineIds(reloaded).get(0);
+    JSONObject line = lineOf(RemittanceReturnAction.state(reloaded), lineId);
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, line.getString("paymentId"));
+    assertEquals("the payment is only remitted", "REM_SENT", payment.getStatus());
+    assertTrue("nothing is deposited", payment.getFINFinaccTransactionList().isEmpty());
+    String scheduleId = scheduleIdOf(reloaded, lineId);
+    assertEquals("the due is still owed", 0, DUE_AMOUNT.compareTo(outstandingOf(scheduleId)));
+    Invoice invoice = invoiceOf(scheduleId);
+    OBDal.getInstance().refresh(invoice);
+    assertFalse("the invoice is unpaid", Boolean.TRUE.equals(invoice.isPaymentComplete()));
+    assertEquals("PROCESSED", line.getString("state"));
+    assertEquals("NOT_SETTLED", line.getString("reasonCode"));
+    assertFalse(line.getBoolean("returnable"));
+
+    NeoResponse early = RemittanceReturnAction.returnLines(handler, reloaded,
+        params(null, lineId));
+    assertEquals("nothing can be returned before it is collected", 422, early.getHttpStatus());
+    assertEquals("NOT_SETTLED", early.getBody().getJSONObject("error").getJSONArray("problems")
+        .getJSONObject(0).getString("reasonCode"));
+  }
+
+  @Test
+  public void markSentIsInformationalAndOnlyFromPr() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    String lineId = lineIds(remittance).get(0);
+    String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
+        .getString("paymentId");
+    String scheduleId = scheduleIdOf(remittance, lineId);
+
+    NeoResponse sent = RemittanceStatusAction.markSent(remittance);
+
+    assertEquals(String.valueOf(sent.getBody()), 200, sent.getHttpStatus());
+    assertEquals("SB", sent.getBody().getString("status"));
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    OBDal.getInstance().refresh(reloaded);
+    assertEquals("SB", String.valueOf(reloaded.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)));
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    OBDal.getInstance().refresh(payment);
+    assertEquals("nothing is settled", "REM_SENT", payment.getStatus());
+    assertEquals(0, DUE_AMOUNT.compareTo(outstandingOf(scheduleId)));
+    assertEquals("a line is still not returnable", "NOT_SETTLED",
+        lineOf(RemittanceReturnAction.state(reloaded), lineId).getString("reasonCode"));
+
+    NeoResponse again = RemittanceStatusAction.markSent(reloaded);
+
+    assertEquals(422, again.getHttpStatus());
+    assertEquals(RemittanceStatusAction.MSG_SENT_NOT_ALLOWED, again.getBody().getJSONObject(
+        "error").getJSONArray("messageKeys").getString(0));
+  }
+
+  @Test
+  public void markCollectedFromPrSettlesOnTheRemittanceDueDate() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    assertCollectedOnTheDueDate(remittance);
+  }
+
+  @Test
+  public void markCollectedFromSbSettlesTheSame() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    assertEquals(200, RemittanceStatusAction.markSent(remittance).getHttpStatus());
+    assertCollectedOnTheDueDate(remittance);
+  }
+
+  @Test
+  public void theWholeStepFlowEndsInAReturn() throws Exception {
+    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    assertEquals(200, RemittanceFileAction.confirm(remittance, new JSONObject()).getHttpStatus());
+    Remittance confirmed = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    assertEquals(200, RemittanceStatusAction.markSent(confirmed).getHttpStatus());
+    collect(confirmed);
+    Remittance collected = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    String lineId = lineIds(collected).get(0);
+    assertEquals("SETTLED", lineOf(RemittanceReturnAction.state(collected), lineId)
+        .getString("state"));
+
+    NeoResponse returned = RemittanceReturnAction.returnLines(handler, collected,
+        params(null, lineId));
+
+    assertEquals(String.valueOf(returned.getBody()), 200, returned.getHttpStatus());
+    assertEquals("CP", returned.getBody().getString("status"));
+  }
+
+  @Test
+  public void reactivateIsAllowedOnPrAndRemovesThePayments() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    assertReactivated(remittance);
+  }
+
+  @Test
+  public void reactivateIsAllowedOnSbToo() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    assertEquals(200, RemittanceStatusAction.markSent(remittance).getHttpStatus());
+    assertReactivated(remittance);
+  }
+
+  @Test
+  public void reactivateIsRefusedOnceCollectedPaidPartialOrVoided() throws Exception {
+    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    String id = remittance.getId();
+    assertReactivationRefused(remittance, "CT");
+    for (String status : new String[] {"PT", "CP", "PP", "AN"}) {
+      OBDal.getInstance().getSession().doWork(connection -> {
+        try (java.sql.PreparedStatement statement = connection.prepareStatement(
+            "update rem_remittance set remittance_status = ? where rem_remittance_id = ?")) {
+          statement.setString(1, status);
+          statement.setString(2, id);
+          statement.executeUpdate();
+        }
+      });
+      OBDal.getInstance().refresh(remittance);
+      assertReactivationRefused(remittance, status);
+    }
+  }
+
+  @Test
+  public void aFailedSettlementOutsideABatchRollsEverythingBack() throws Exception {
+    Remittance remittance = twoPaymentsOneWithABankTransaction();
+    String remittanceId = remittance.getId();
+
+    NeoResponse response = RemittanceStatusAction.markCollected(remittance);
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceStatusAction.MSG_COLLECTED_FAILED, response.getBody()
+        .getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    assertNull("the whole transaction was rolled back, the settled payment included",
+        OBDal.getInstance().get(Remittance.class, remittanceId));
+  }
+
+  @Test
+  public void inABatchAFailedSettlementIsLeftToTheBatchAndNeverDeclaredCollected()
+      throws Exception {
+    Remittance remittance = twoPaymentsOneWithABankTransaction();
+    String remittanceId = remittance.getId();
+
+    NeoResponse response;
+    BatchService.beginCallerOwnedTransaction();
+    try {
+      response = RemittanceStatusAction.markCollected(remittance);
+      assertEquals(422, response.getHttpStatus());
+      assertEquals(RemittanceStatusAction.MSG_COLLECTED_FAILED, response.getBody()
+          .getJSONObject("error").getJSONArray("messageKeys").getString(0));
+      Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittanceId);
+      assertNotNull("the action did not close the session under the batch", reloaded);
+      assertFalse("the remittance is not flagged as settled",
+          Boolean.TRUE.equals(reloaded.isETARAutomaticprocess()));
+      Object status = reloaded.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS);
+      assertFalse("and never reports collected: " + status,
+          RemittanceStatusUtil.COLLECTED.equals(status));
+    } finally {
+      BatchService.endCallerOwnedTransaction();
+    }
+  }
+
+  /** Two payments (one per line); the second already has a bank transaction, REM refuses it. */
+  private Remittance twoPaymentsOneWithABankTransaction() throws Exception {
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID,
+        DUE_B_DETAIL_ID);
+    List<String> ids = lineIds(remittance);
+    assertEquals(2, ids.size());
+    FIN_Payment second = OBDal.getInstance().get(FIN_Payment.class,
+        lineOf(RemittanceReturnAction.state(remittance), ids.get(1)).getString("paymentId"));
+    FIN_Payment first = OBDal.getInstance().get(FIN_Payment.class,
+        lineOf(RemittanceReturnAction.state(remittance), ids.get(0)).getString("paymentId"));
+    assertFalse("one payment per line", first.getId().equals(second.getId()));
+    FIN_FinaccTransaction existing = TransactionsDao.createFinAccTransaction(second);
+    existing.setAccount(remittance.getFinancialAccount());
+    OBDal.getInstance().save(existing);
+    OBDal.getInstance().flush();
+    return remittance;
+  }
+
+  private void assertCollectedOnTheDueDate(Remittance remittance) throws Exception {
+    String remittanceId = remittance.getId();
+    String lineId = lineIds(remittance).get(0);
+    String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
+        .getString("paymentId");
+    String scheduleId = scheduleIdOf(remittance, lineId);
+    Date dueDate = remittance.getDueDate();
+
+    NeoResponse collected = RemittanceStatusAction.markCollected(remittance);
+
+    assertEquals(String.valueOf(collected.getBody()), 200, collected.getHttpStatus());
+    assertEquals("CT", collected.getBody().getString("status"));
+    assertEquals(new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT)
+        .format(dueDate), collected.getBody().getString("settledOn"));
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittanceId);
+    OBDal.getInstance().refresh(reloaded);
+    assertEquals("CT", String.valueOf(reloaded.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)));
+    assertTrue("the automatic flag is set", Boolean.TRUE.equals(reloaded.isETARAutomaticprocess()));
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    OBDal.getInstance().refresh(payment);
+    assertFalse("a bank transaction settles the payment",
+        payment.getFINFinaccTransactionList().isEmpty());
+    assertEquals("on the remittance due date", new java.text.SimpleDateFormat("yyyy-MM-dd",
+        java.util.Locale.ROOT).format(dueDate), new java.text.SimpleDateFormat("yyyy-MM-dd",
+        java.util.Locale.ROOT).format(
+            payment.getFINFinaccTransactionList().get(0).getTransactionDate()));
+    assertEquals("the due is paid", 0, outstandingOf(scheduleId).compareTo(BigDecimal.ZERO));
+    Invoice invoice = invoiceOf(scheduleId);
+    OBDal.getInstance().refresh(invoice);
+    assertTrue("the invoice is paid", Boolean.TRUE.equals(invoice.isPaymentComplete()));
+    assertEquals("SETTLED", lineOf(RemittanceReturnAction.state(reloaded), lineId)
+        .getString("state"));
+  }
+
+  private void assertReactivated(Remittance remittance) throws Exception {
+    String remittanceId = remittance.getId();
+    String lineId = lineIds(remittance).get(0);
+    String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
+        .getString("paymentId");
+    String scheduleId = scheduleIdOf(remittance, lineId);
+
+    NeoResponse reactivated = RemittanceProcessAction.reactivate(remittance);
+
+    assertEquals(String.valueOf(reactivated.getBody()), 200, reactivated.getHttpStatus());
+    assertEquals("PE", reactivated.getBody().getString("status"));
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittanceId);
+    OBDal.getInstance().refresh(reloaded);
+    assertFalse(Boolean.TRUE.equals(reloaded.isProcessed()));
+    assertEquals(0L, count("select count(p.id) from FIN_Payment p where p.id = :id", paymentId));
+    assertEquals("the due is owed in full again", 0,
+        DUE_AMOUNT.compareTo(outstandingOf(scheduleId)));
+  }
+
+  private static void assertReactivationRefused(Remittance remittance, String status)
+      throws Exception {
+    NeoResponse refused = RemittanceProcessAction.reactivate(remittance);
+    assertEquals(status, 422, refused.getHttpStatus());
+    assertEquals(status, RemittanceProcessAction.MSG_REACTIVATE_NOT_ALLOWED,
+        refused.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    assertTrue("nothing was reactivated (" + status + ")", Boolean.TRUE.equals(
+        remittance.isProcessed()));
+  }
+
   // ---------------------------------------------------------------- fixtures
 
-  /** A GOClient collection remittance with one line per due, processed by REM and settled. */
+  /** A GOClient collection remittance with one line per due, processed by REM and collected. */
   private Remittance confirmed(String grouping, String... dueDetailIds) throws Exception {
+    Remittance remittance = processed(grouping, dueDetailIds);
+    collect(remittance);
+    return OBDal.getInstance().get(Remittance.class, remittance.getId());
+  }
+
+  /** «Cobrada» on {@code remittance}: the settlement on its due date, as the step does. */
+  private static void collect(Remittance remittance) throws Exception {
+    NeoResponse collected = RemittanceStatusAction.markCollected(remittance);
+    assertEquals(String.valueOf(collected.getBody()), 200, collected.getHttpStatus());
+    assertEquals("CT", collected.getBody().getString("status"));
+  }
+
+  /**
+   * A GOClient collection remittance with one line per due, processed by REM without the
+   * automatic settlement (status {@code PR}): payments remitted, invoices still unpaid.
+   */
+  private Remittance processed(String grouping, String... dueDetailIds) throws Exception {
+    Remittance remittance = built(grouping, dueDetailIds);
+    NeoResponse processed = RemittanceProcessAction.process(remittance,
+        new JSONObject().put(RemittanceProcessAction.P_GROUPING, grouping));
+    assertEquals(String.valueOf(processed.getBody()), 200, processed.getHttpStatus());
+    // REM may clear the session (grouped payments): read the remittance again by id.
+    remittance = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    assertTrue("REM left the remittance unprocessed: " + processed.getBody(),
+        Boolean.TRUE.equals(remittance.isProcessed()));
+    return remittance;
+  }
+
+  /** A GOClient collection remittance with one line per due, not processed yet. */
+  private Remittance built(String grouping, String... dueDetailIds) throws Exception {
     OBContext.setOBContext("100", GO_ADMIN_ROLE_ID, GO_CLIENT_ID, GO_ORG_ID);
     OBContext.setAdminMode(true);
     // No request context is set up here on purpose: the bank transaction removal reads the
@@ -310,6 +609,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
         GO_ACCOUNT_ID);
     assertNotNull("GOClient's remittance account", account);
     RemittanceSepaProvisioning.ensureAccountLinks(account);
+    completeOrganization(account.getOrganization());
     RemittanceType type = RemittanceSepaProvisioning.findType(client,
         RemittanceSepaProvisioning.SCHEME_CORE);
     assertNotNull("the CORE type", type);
@@ -327,10 +627,9 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     remittance.setTransactionDate(day(LocalDate.now()));
     remittance.setDueDate(day(LocalDate.now().plusDays(10)));
     remittance.setProcessed(false);
-    // The automated-remittance hook settles the payments only on an automatic remittance.
-    remittance.setETARAutomaticprocess(true);
     OBDal.getInstance().save(remittance);
     long lineNo = 10L;
+    Set<String> bankAccountGiven = new HashSet<>();
     for (String dueId : dueDetailIds) {
       FIN_PaymentScheduleDetail due = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class,
           dueId);
@@ -343,7 +642,9 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
         partner.setObsepadMandateDate(day(LocalDate.now().minusDays(30)));
       }
       OBDal.getInstance().save(partner);
-      giveBankAccount(partner);
+      if (bankAccountGiven.add(partner.getId())) {
+        giveBankAccount(partner);
+      }
       RemittanceLine line = OBProvider.getInstance().get(RemittanceLine.class);
       line.setClient(client);
       line.setOrganization(remittance.getOrganization());
@@ -356,16 +657,30 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
       lineNo += 10L;
     }
     OBDal.getInstance().flush();
-
-    NeoResponse processed = RemittanceProcessAction.process(remittance,
-        new JSONObject().put(RemittanceProcessAction.P_GROUPING, grouping));
-    assertEquals(String.valueOf(processed.getBody()), 200, processed.getHttpStatus());
-    // REM may clear the session (grouped payments): read the remittance again by id.
-    String remittanceId = remittance.getId();
-    remittance = OBDal.getInstance().get(Remittance.class, remittanceId);
-    assertTrue("REM left the remittance unprocessed: " + processed.getBody(),
-        Boolean.TRUE.equals(remittance.isProcessed()));
     return remittance;
+  }
+
+  /** The organization's own information with a structured address, as the SEPA file needs. */
+  private static void completeOrganization(Organization organization) {
+    OrganizationInformation info = organization.getOrganizationInformationList().get(0);
+    Location location = info.getLocationAddress();
+    if (location == null) {
+      location = OBProvider.getInstance().get(Location.class);
+      location.setClient(organization.getClient());
+      location.setOrganization(organization);
+      info.setLocationAddress(location);
+    }
+    if (location.getCityName() == null) {
+      location.setCityName("Madrid");
+    }
+    if (location.getCountry() == null) {
+      location.setCountry(OBDal.getInstance().get(Country.class, SPAIN_ID));
+    }
+    location.setOBSEPAStreetName("Calle Mayor");
+    location.setOBSEPABuildingNumber("1");
+    OBDal.getInstance().save(location);
+    OBDal.getInstance().save(info);
+    OBDal.getInstance().flush();
   }
 
   private static List<String> lineIds(Remittance remittance) {
@@ -456,8 +771,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     bankAccount.setBusinessPartner(partner);
     bankAccount.setBankFormat("IBAN");
     bankAccount.setIBAN(PARTNER_IBAN);
-    bankAccount.setCountry(OBDal.getInstance().get(
-        org.openbravo.model.common.geography.Country.class, SPAIN_ID));
+    bankAccount.setCountry(OBDal.getInstance().get(Country.class, SPAIN_ID));
     bankAccount.setETABAMIsdefault(true);
     OBDal.getInstance().save(bankAccount);
     OBDal.getInstance().flush();

@@ -87,6 +87,24 @@ final class RemittanceFileProblems {
   }
 
   /**
+   * Adds a financial account problem that carries one more value for the client to act on (ETP-6247:
+   * the creditor identifier computed from the organization, so the SPA can offer to use it).
+   *
+   * @param accountId the remittance's financial account
+   * @param code      the message key
+   * @param extraKey  the key of the extra value
+   * @param extra     the extra value, {@code null} is written as JSON null
+   * @param params    the placeholders of the message
+   */
+  void accountWith(String accountId, String code, String extraKey, String extra,
+      Object... params) throws JSONException {
+    JSONObject problem = problem(SCOPE_ACCOUNT, code, params);
+    problem.put(KEY_ACCOUNT_ID, accountId);
+    putOrNull(problem, extraKey, extra);
+    problems.put(SCOPE_ACCOUNT + '|' + code, problem);
+  }
+
+  /**
    * Adds a problem of the line's business partner, folded into an earlier one of the same partner
    * and code.
    *

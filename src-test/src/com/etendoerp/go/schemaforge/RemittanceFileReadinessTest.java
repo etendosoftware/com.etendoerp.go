@@ -90,6 +90,9 @@ class RemittanceFileReadinessTest {
   private MockedStatic<NeoAttachmentsHelper> attachments;
   private MockedStatic<NeoLanguage> language;
 
+  /** A valid creditor identifier saved on the account (ETP-6247). */
+  private static final String STORED_CI = "ES82000B87654323";
+
   private Remittance remittance;
   private Organization org;
   private OrganizationInformation info;
@@ -134,6 +137,7 @@ class RemittanceFileReadinessTest {
     when(account.getIBAN()).thenReturn(VALID_IBAN);
     when(account.getCountry()).thenReturn(spain);
     when(account.getCurrency()).thenReturn(euro);
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(STORED_CI);
     RemittanceType type = mock(RemittanceType.class);
     when(type.getName()).thenReturn("SEPA Core");
     remittance = mock(Remittance.class);
@@ -222,15 +226,133 @@ class RemittanceFileReadinessTest {
     assertEquals("ORG-1", problems.getJSONObject(0).getString("organizationId"));
   }
 
-  /** On a collection the tax ID must form the creditor identifier; on a payment it need not. */
+  /**
+   * On a collection WITHOUT a saved identifier the tax ID must form the computed one; with one
+   * saved, or on a payment, it need not (the saved identifier is what the file carries).
+   */
   @Test
   void onACollectionATaxIdThatCannotFormTheCreditorIdIsReported() throws Exception {
     when(info.getTaxID()).thenReturn("B123456789012345678901234567890");
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
 
-    assertEquals(List.of(RemittanceFileReadiness.MSG_ORG_NO_TAX_ID), codes());
+    assertEquals(List.of(RemittanceFileReadiness.MSG_ORG_NO_TAX_ID,
+        RemittanceFileReadiness.MSG_ACCOUNT_NO_CREDITOR_ID), codes());
 
     givenScheme(RemittanceSepaProvisioning.SCHEME_SCT);
     assertEquals(List.of(), codes(), "a payment file does not use the creditor identifier");
+
+    givenScheme(RemittanceSepaProvisioning.SCHEME_CORE);
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(STORED_CI);
+    assertEquals(List.of(), codes(), "a saved identifier does not need the tax ID to form one");
+  }
+
+  // ---------------------------------------------------------------- creditor id (ETP-6247)
+
+  /**
+   * None on the remittance nor the account, but the organization's computed one can be formed: NOT a
+   * problem (confirm keeps it as the remittance's copy).
+   */
+  @Test
+  void aComputableCreditorIdIsNotAProblem() throws Exception {
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+
+    assertEquals(List.of(), codes());
+  }
+
+  /** An own value that is present but invalid is still a problem, with the computed one offered. */
+  @Test
+  void anInvalidCopyStillCarriesTheSuggestedOne() throws Exception {
+    when(remittance.get(RemittanceCreditorId.REMITTANCE_PROPERTY)).thenReturn("ES00000B87654323");
+
+    JSONObject problem = problems().getJSONObject(0);
+
+    assertEquals(RemittanceFileReadiness.MSG_ACCOUNT_INVALID_CREDITOR_ID, problem.getString("code"));
+    assertEquals(SepaCreditorId.build("ES", "000", "B12345678"),
+        problem.getString("suggestedCreditorId"));
+  }
+
+  /** No tax ID: nothing to suggest, so the key is null (the organization problem is reported too). */
+  @Test
+  void theSuggestionIsNullWhenTheOrganizationCannotFormOne() throws Exception {
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+    when(info.getTaxID()).thenReturn(null);
+
+    JSONObject problem = problems().getJSONObject(1);
+
+    assertEquals(RemittanceFileReadiness.MSG_ACCOUNT_NO_CREDITOR_ID, problem.getString("code"));
+    assertTrue(problem.isNull("suggestedCreditorId"));
+  }
+
+  @Test
+  void aSavedButInvalidCreditorIdIsReportedAsInvalid() throws Exception {
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn("ES00000B87654323");
+
+    assertEquals(List.of(RemittanceFileReadiness.MSG_ACCOUNT_INVALID_CREDITOR_ID), codes());
+  }
+
+  /** A saved identifier is normalized before it is checked: lower case and separators are fine. */
+  @Test
+  void aSavedCreditorIdIsNormalizedBeforeItIsChecked() throws Exception {
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(" es82 000b-87654323 ");
+
+    assertEquals(List.of(), codes());
+  }
+
+  /** ETP-6247: the IBAN that counts is the remittance's own; the account's only when no copy. */
+  @Test
+  void theRemittanceIbanIsEnoughWhateverTheAccountHolds() throws Exception {
+    when(account.getIBAN()).thenReturn(null);
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn(" es91 2100 0418 4502 0005 1332 ");
+
+    assertEquals(List.of(), codes());
+  }
+
+  @Test
+  void anInvalidRemittanceIbanIsNotReplacedByTheAccountsValidOne() throws Exception {
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn("ES0021000418450200051332");
+
+    assertEquals(List.of(RemittanceFileReadiness.MSG_ACCOUNT_NO_IBAN), codes());
+  }
+
+  @Test
+  void withNoCopyTheAccountsIbanApplies() throws Exception {
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn(null);
+
+    assertEquals(List.of(), codes());
+  }
+
+  /** The remittance's own copy is what the file carries: it makes the remittance ready alone. */
+  @Test
+  void aRemittanceCopyIsEnoughWhateverTheAccountHolds() throws Exception {
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+    when(remittance.get(RemittanceCreditorId.REMITTANCE_PROPERTY)).thenReturn(STORED_CI);
+
+    assertEquals(List.of(), codes());
+  }
+
+  /** An invalid copy is reported; the account's valid default does not silently replace it. */
+  @Test
+  void anInvalidRemittanceCopyIsNotReplacedByTheAccountDefault() throws Exception {
+    when(remittance.get(RemittanceCreditorId.REMITTANCE_PROPERTY)).thenReturn("ES00000B87654323");
+
+    assertEquals(List.of(RemittanceFileReadiness.MSG_ACCOUNT_INVALID_CREDITOR_ID), codes());
+  }
+
+  /** With no copy, the account's default applies (an existing remittance, confirmed as today). */
+  @Test
+  void withNoCopyTheAccountDefaultApplies() throws Exception {
+    when(remittance.get(RemittanceCreditorId.REMITTANCE_PROPERTY)).thenReturn(null);
+
+    assertEquals(List.of(), codes());
+  }
+
+  /** A payment (pain.001) file has no creditor identifier: never asked for. */
+  @Test
+  void aPaymentRemittanceDoesNotNeedACreditorId() throws Exception {
+    givenScheme(RemittanceSepaProvisioning.SCHEME_SCT);
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+
+    assertEquals(List.of(), codes());
   }
 
   // ---------------------------------------------------------------- account

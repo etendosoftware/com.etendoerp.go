@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,6 +38,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 
 import org.hibernate.Session;
 import org.hibernate.query.Query;
@@ -50,8 +52,10 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.module.remittance.Remittance;
 import org.openbravo.module.remittance.RemittanceType;
+import org.openbravo.module.remittance.RemittanceTypeParameter;
 import org.openbravo.module.remittance.utility.REM_RemittanceCreateFile;
 import org.openbravo.sepa.iso20022.util.SEPA_RemittanceCreateFile;
 
@@ -83,37 +87,54 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  * <p>A class of its own: {@code RemittanceFileGenerator} is a new production class.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceFileGenerator
+ * @covers com.etendoerp.go.schemaforge.RemittanceSepaRules
  */
 class RemittanceFileGeneratorTest {
 
   /** What the generators below hand back, set per test. */
   static StringBuffer output;
   static OBError error;
+  /** ETP-6247: a minimal pain.001 whose company account the file's IBAN replaces. */
+  static final String PAYMENT_XML = "<Document><PmtInf><DbtrAcct><Id><IBAN>ES0000000000000000000000"
+      + "</IBAN></Id></DbtrAcct></PmtInf></Document>";
+  /** A valid IBAN: the remittance's own copy. */
+  static final String IBAN = "ES9121000418450200051332";
   static String lineDetail;
   static RuntimeException failure;
 
   private MockedStatic<NeoMessageTranslator> translator;
+  private MockedStatic<RemittanceSepaFileSetup> setup;
+  private MockedStatic<RemittanceCreditorId> creditorId;
   private Remittance remittance;
   private RemittanceType type;
 
   @BeforeEach
   void setUp() {
-    output = new StringBuffer("<x/>");
+    output = new StringBuffer(PAYMENT_XML);
     error = null;
     lineDetail = null;
     failure = null;
     translator = mockStatic(NeoMessageTranslator.class);
     translator.when(() -> NeoMessageTranslator.safeParseTranslation(any()))
         .thenAnswer(inv -> inv.getArgument(0));
+    // ETP-6247: a payment (SCT) file has no creditor identifier to apply; the tests of the
+    // collection case say CORE themselves.
+    setup = mockStatic(RemittanceSepaFileSetup.class, Mockito.CALLS_REAL_METHODS);
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any()))
+        .thenReturn(RemittanceSepaProvisioning.SCHEME_SCT);
+    creditorId = mockStatic(RemittanceCreditorId.class, Mockito.CALLS_REAL_METHODS);
     type = mock(RemittanceType.class);
     when(type.getName()).thenReturn("SEPA Core");
     remittance = mock(Remittance.class);
     when(remittance.getId()).thenReturn("REM-1");
     when(remittance.getRemittanceType()).thenReturn(type);
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn(IBAN);
   }
 
   @AfterEach
   void tearDown() {
+    creditorId.close();
+    setup.close();
     translator.close();
     Mockito.framework().clearInlineMocks();
   }
@@ -193,20 +214,132 @@ class RemittanceFileGeneratorTest {
   @Test
   void theOneBytePerCharBufferIsReadBackAsUtf8() throws Exception {
     useGenerator(PlainGenerator.class);
-    String utf8AsChars = new String("<Nm>Peña</Nm>".getBytes(StandardCharsets.UTF_8),
+    String utf8AsChars = new String(("<Document><Nm>Peña</Nm>" + PAYMENT_XML.substring(10))
+        .getBytes(StandardCharsets.UTF_8),
         StandardCharsets.ISO_8859_1);
     output = new StringBuffer(utf8AsChars);
 
     byte[] bytes = RemittanceFileGenerator.generate(remittance);
 
-    assertEquals("<Nm>Peña</Nm>", new String(bytes, StandardCharsets.UTF_8));
+    assertTrue(new String(bytes, StandardCharsets.UTF_8).contains("<Nm>Peña</Nm>"));
+  }
+
+  // ---------------------------------------------------------------- creditor identifier (ETP-6247)
+
+  private static final String CI = "ES82000B87654323";
+
+  private static final String COLLECTION_XML = "<Document><CstmrDrctDbtInitn>"
+      + "<GrpHdr><InitgPty><Id><OrgId><Othr><Id>ES00000B11111111</Id></Othr></OrgId></Id>"
+      + "</InitgPty></GrpHdr><PmtInf><CdtrAcct><Id><IBAN>ES0000000000000000000000</IBAN></Id>"
+      + "</CdtrAcct><CdtrSchmeId><Id><PrvtId><Othr><Id>ES00000B11111111</Id>"
+      + "<SchmeNm><Prtry>SEPA</Prtry></SchmeNm></Othr></PrvtId></Id></CdtrSchmeId>"
+      + "<DrctDbtTxInf><DbtrAcct><Id><IBAN>ES1111111111111111111111</IBAN></Id></DbtrAcct>"
+      + "<Dbtr><Id><PrvtId><Othr><Id>ES00000B99999999</Id></Othr></PrvtId></Id>"
+      + "</Dbtr></DrctDbtTxInf></PmtInf></CstmrDrctDbtInitn></Document>";
+
+  /** A collection's file carries the identifier saved on the account, not the computed one. */
+  @Test
+  void aCollectionFileCarriesTheCreditorIdSavedOnTheAccount() throws Exception {
+    useGenerator(PlainGenerator.class);
+    output = new StringBuffer(COLLECTION_XML);
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any()))
+        .thenReturn(RemittanceSepaProvisioning.SCHEME_CORE);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getIBAN()).thenReturn(IBAN);
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    creditorId.when(() -> RemittanceCreditorId.forFile(remittance)).thenReturn(CI);
+
+    String xml = new String(RemittanceFileGenerator.generate(remittance), StandardCharsets.UTF_8);
+
+    assertTrue(xml.contains("<Id>" + CI + "</Id>"), xml);
+    assertFalse(xml.contains("ES00000B11111111"), xml);
+    assertTrue(xml.contains("ES00000B99999999"), "the debtor identifier is untouched: " + xml);
+    assertTrue(xml.contains("<CdtrAcct><Id><IBAN>" + IBAN + "</IBAN>"), xml);
+    assertTrue(xml.contains("ES1111111111111111111111"), "the debtor IBAN is untouched: " + xml);
+  }
+
+  /** A collection whose account has no valid identifier is refused, even if readiness was skipped. */
+  @Test
+  void aCollectionWithoutASavedCreditorIdIsRefused() {
+    useGenerator(PlainGenerator.class);
+    output = new StringBuffer(COLLECTION_XML);
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any()))
+        .thenReturn(RemittanceSepaProvisioning.SCHEME_CORE);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getIBAN()).thenReturn(IBAN);
+    when(account.getName()).thenReturn("BBVA");
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    creditorId.when(() -> RemittanceCreditorId.forFile(remittance)).thenReturn(null);
+
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> RemittanceFileGenerator.generate(remittance));
+
+    assertEquals(RemittanceFileGenerator.MSG_NO_CREDITOR_ID, refusal.getKey());
+    assertArrayEquals(new Object[] { "BBVA" }, refusal.getArgs());
+  }
+
+  /** A payment (SCT) file takes no creditor identifier: only the company's IBAN is replaced. */
+  @Test
+  void aPaymentFileTakesOnlyTheRemittanceIban() throws Exception {
+    useGenerator(PlainGenerator.class);
+    output = new StringBuffer(COLLECTION_XML.replace("CdtrAcct", "DbtrAcct")
+        .replace("<DbtrAcct><Id><IBAN>ES1111", "<CdtrAcct><Id><IBAN>ES1111")
+        .replace("</DbtrAcct><Dbtr>", "</CdtrAcct><Dbtr>"));
+
+    String xml = new String(RemittanceFileGenerator.generate(remittance), StandardCharsets.UTF_8);
+
+    assertTrue(xml.contains("<IBAN>" + IBAN + "</IBAN>"), xml);
+    assertTrue(xml.contains("ES00000B11111111"), "no creditor id on a payment: " + xml);
+    assertTrue(xml.contains("ES1111111111111111111111"), "the line's IBAN is untouched: " + xml);
+  }
+
+  /** No valid IBAN on the remittance (nor its account): refused, whatever the scheme. */
+  @Test
+  void aRemittanceWithoutAValidIbanIsRefused() {
+    useGenerator(PlainGenerator.class);
+    when(remittance.get(RemittanceIban.PROPERTY)).thenReturn("ES0000");
+
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> RemittanceFileGenerator.generate(remittance));
+
+    assertEquals(RemittanceFileGenerator.MSG_NO_IBAN, refusal.getKey());
+  }
+
+  /** A file with no company account to replace is never silently left with the account's IBAN. */
+  @Test
+  void aFileWithoutTheCompanyAccountIsAGenerationFailure() {
+    useGenerator(PlainGenerator.class);
+    output = new StringBuffer("<Document><PmtInf/></Document>");
+
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> RemittanceFileGenerator.generate(remittance));
+
+    assertEquals(RemittanceFileGenerator.MSG_GENERATION_FAILED, refusal.getKey());
+  }
+
+  /** A collection file with no creditor scheme identification cannot silently keep another id. */
+  @Test
+  void aCollectionFileWithoutACreditorSchemeIdIsAGenerationFailure() {
+    useGenerator(PlainGenerator.class);
+    output = new StringBuffer("<Document><PmtInf/></Document>");
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any()))
+        .thenReturn(RemittanceSepaProvisioning.SCHEME_CORE);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getIBAN()).thenReturn(IBAN);
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    creditorId.when(() -> RemittanceCreditorId.forFile(remittance)).thenReturn(CI);
+
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> RemittanceFileGenerator.generate(remittance));
+
+    assertEquals(RemittanceFileGenerator.MSG_GENERATION_FAILED, refusal.getKey());
   }
 
   /** A SEPA generator whose schema has no XSD next to it nor bundled with GO: refused. */
   @Test
   void aSchemaWithNoXsdAnywhereIsRefusedNotStoredUnvalidated() throws Exception {
     useGenerator(SepaGeneratorWithoutXsd.class);
-    output = new StringBuffer("not even xml");
+    output = new StringBuffer(PAYMENT_XML);
 
     RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
         () -> RemittanceFileGenerator.generate(remittance));
@@ -234,7 +367,8 @@ class RemittanceFileGeneratorTest {
   void aVersionGoShipsIsValidatedAgainstTheBundledXsd() throws Exception {
     useGenerator(SepaGeneratorOfABundledVersion.class);
     output = new StringBuffer("<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:pain.008.001.08\">"
-        + "<CstmrDrctDbtInitn/></Document>");
+        + "<CstmrDrctDbtInitn/><PmtInf><DbtrAcct><Id><IBAN>ES00</IBAN></Id></DbtrAcct></PmtInf>"
+        + "</Document>");
 
     RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
         () -> RemittanceFileGenerator.generate(remittance));
@@ -243,6 +377,107 @@ class RemittanceFileGeneratorTest {
     assertEquals("pain.008.001.08", refusal.getArgs()[0]);
     assertTrue(String.valueOf(refusal.getArgs()[1]).contains("GrpHdr"),
         String.valueOf(refusal.getArgs()[1]));
+  }
+
+  private static final String BIC = "<BICFI>CAIXESBBXXX</BICFI>";
+  private static final String UNKNOWN_AGENT = "<Othr><Id>NOTPROVIDED</Id></Othr>";
+  private static final String COLLECTION_NS = "urn:iso:std:iso:20022:tech:xsd:pain.008.001.08";
+
+  /** Two one-debit blocks allow a correct message total to hide an incorrect block total. */
+  private static String collectionBlocks() {
+    String block = "<PmtInf><PmtInfId>block</PmtInfId><PmtMtd>DD</PmtMtd><NbOfTxs>01</NbOfTxs>"
+        + "<CtrlSum>1.00</CtrlSum><PmtTpInf><LclInstrm><Cd>CORE</Cd></LclInstrm></PmtTpInf>"
+        + "<ReqdColltnDt>2027-01-19</ReqdColltnDt>"
+        + "<Cdtr><Nm>Creditor</Nm></Cdtr><CdtrAcct><Id><IBAN>" + IBAN + "</IBAN></Id></CdtrAcct>"
+        + "<CdtrAgt><FinInstnId>" + BIC + "</FinInstnId></CdtrAgt>"
+        + "<CdtrSchmeId><Id><PrvtId><Othr><Id>" + CI + "</Id></Othr></PrvtId></Id></CdtrSchmeId>"
+        + "<DrctDbtTxInf><PmtId><EndToEndId>debit</EndToEndId></PmtId><InstdAmt Ccy=\"EUR\">1.0"
+        + "</InstdAmt><DbtrAgt><FinInstnId/></DbtrAgt><Dbtr><Nm>Debtor</Nm></Dbtr>"
+        + "<DbtrAcct><Id><IBAN>" + IBAN + "</IBAN></Id></DbtrAcct></DrctDbtTxInf></PmtInf>";
+    return "<Document xmlns=\"" + COLLECTION_NS + "\"><CstmrDrctDbtInitn><GrpHdr><MsgId>message"
+        + "</MsgId><CreDtTm>2027-01-15T12:00:00</CreDtTm><NbOfTxs>2</NbOfTxs>"
+        + "<CtrlSum>2.00</CtrlSum><InitgPty><Nm>Initiator</Nm></InitgPty></GrpHdr>"
+        + block + block.replace(">block<", ">block2<").replace(">debit<", ">debit2<")
+        + "</CstmrDrctDbtInitn></Document>";
+  }
+
+  private byte[] generateCollection(String xml) throws Exception {
+    useGenerator(SepaGeneratorOfABundledVersion.class);
+    output = new StringBuffer(new String(xml.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1));
+    setup.when(() -> RemittanceSepaFileSetup.schemeOf(any()))
+        .thenReturn(RemittanceSepaProvisioning.SCHEME_CORE);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getIBAN()).thenReturn(IBAN);
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    creditorId.when(() -> RemittanceCreditorId.forFile(remittance)).thenReturn(CI);
+    return RemittanceFileGenerator.generate(remittance);
+  }
+
+  @Test
+  void ibanOnlyCollectionsWithAvailableBicsStillUseNotProvidedInEveryBlock() throws Exception {
+    String xml = new String(generateCollection(collectionBlocks()), StandardCharsets.UTF_8);
+    assertEquals(4, xml.split(UNKNOWN_AGENT, -1).length - 1);
+    assertFalse(xml.contains(BIC), xml);
+  }
+
+  @Test
+  void aProfileRequiringBicsPreservesEachBicAndRefusesMissingBankData() throws Exception {
+    RemittanceTypeParameter parameter = mock(RemittanceTypeParameter.class);
+    when(parameter.isActive()).thenReturn(true);
+    when(parameter.getName()).thenReturn("BIC_SWIFT_MANDATORY");
+    when(parameter.getValue()).thenReturn("Y");
+    when(type.getREMRemittanceTypeParamList()).thenReturn(List.of(parameter));
+    String blocks = collectionBlocks();
+
+    assertRuleRefusal(blocks, RemittanceSepaRules.MSG_BIC_REQUIRED,
+        "/PmtInf[1]/DrctDbtTxInf/DbtrAgt/FinInstnId");
+    String debtorBic = "<BICFI>BBVAESMMXXX</BICFI>";
+    String populated = blocks.replace("<FinInstnId/>", "<FinInstnId>" + debtorBic + "</FinInstnId>");
+    String file = new String(generateCollection(populated), StandardCharsets.UTF_8);
+    assertEquals(2, file.split(BIC, -1).length - 1);
+    assertEquals(2, file.split(debtorBic, -1).length - 1);
+    assertFalse(file.contains(UNKNOWN_AGENT), file);
+  }
+
+  @Test
+  void aB2bFileKeepsItsOwnAgentPolicy() throws Exception {
+    String b2b = collectionBlocks().replace("<Cd>CORE</Cd>", "<Cd>B2B</Cd>");
+    String xml = new String(generateCollection(b2b), StandardCharsets.UTF_8);
+    assertTrue(xml.contains("<DbtrAgt><FinInstnId/></DbtrAgt>"), xml);
+    assertFalse(xml.contains(UNKNOWN_AGENT), xml);
+  }
+
+  @Test
+  void inconsistentControlFieldsAreRefusedAtTheAffectedLevel() {
+    String blocks = collectionBlocks();
+    assertRuleRefusal(blocks.replace("<NbOfTxs>2", "<NbOfTxs>3"), RemittanceSepaRules.MSG_COUNT,
+        "/GrpHdr/NbOfTxs");
+    assertRuleRefusal(blocks.replace("<CtrlSum>2.00", "<CtrlSum>2.01"), RemittanceSepaRules.MSG_TOTAL,
+        "/GrpHdr/CtrlSum");
+    assertRuleRefusal(blocks.replaceFirst("<CtrlSum>1.00", "<CtrlSum>2.00"), RemittanceSepaRules.MSG_TOTAL,
+        "/PmtInf[1]/CtrlSum");
+    assertRuleRefusal(blocks.replaceFirst("<NbOfTxs>01", "<NbOfTxs>02"), RemittanceSepaRules.MSG_COUNT,
+        "/PmtInf[1]/NbOfTxs");
+    assertRuleRefusal(blocks.replaceFirst("<CtrlSum>1.00</CtrlSum>", ""), RemittanceSepaRules.MSG_REQUIRED,
+        "/PmtInf[1]/CtrlSum");
+  }
+
+  @Test
+  void unsupportedAgentIdentificationAndLongPartyNamesIdentifyTheXmlElement() {
+    String blocks = collectionBlocks();
+    for (String identification : new String[] { BIC + UNKNOWN_AGENT, "<Othr><Id>unknown</Id></Othr>" }) {
+      assertRuleRefusal(blocks.replace(BIC, identification), RemittanceSepaRules.MSG_AGENT,
+          "/PmtInf[1]/CdtrAgt/FinInstnId");
+    }
+    assertRuleRefusal(blocks.replace("Debtor", "X".repeat(71)), RemittanceSepaRules.MSG_NAME,
+        "/PmtInf[1]/DrctDbtTxInf/Dbtr/Nm");
+  }
+
+  private void assertRuleRefusal(String xml, String key, String location) {
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> generateCollection(xml));
+    assertEquals(key, refusal.getKey());
+    assertEquals("/Document/CstmrDrctDbtInitn" + location, refusal.getArgs()[0]);
   }
 
   // ---------------------------------------------------------------- file name

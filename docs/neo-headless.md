@@ -2530,7 +2530,9 @@ everything is Classic's model.
   `hasRemittanceMethodLink` runs, and every item is `{id, label, iban (raw or null), ibanValid}`
   (`ibanValid` = the account form's pair check); `totalCount`/`hasMore` come from the same list as
   the items. `remittanceType` offers only the provisioned types linked to the request's
-  `FIN_Financial_Account_ID`. Writes stay strict: saving with an account without a valid IBAN is
+  `FIN_Financial_Account_ID`; each item is `{id, label, direction}` (ETP-6247), `direction` being
+  `collection` | `payment` from the type's payment method pay-in flag, so the SPA can show the scheme
+  and financed options before the first save. Writes stay strict: saving with an account without a valid IBAN is
   `422 ETGO_RemittanceAccountIbanRequired`. DEFAULTS keep the strict rule too and never prefill an
   account that is not a remittance account, an IBAN-less one included. Interactive
   callouts never reach Classic's `REM_RemittanceType_FinAccount` (it runs type → account, the
@@ -2539,11 +2541,16 @@ everything is Classic's model.
   (`RemittanceSepaFileData`). It reads the account, not the remittance, so it answers for a
   remittance not saved yet: the SPA calls `POST …/remittance/remittance/new/action/sepaFileData`
   (sentinel id `new`, never loaded; the generic `NeoActionRecordGuard` lets it through, it is not a
-  row) or the saved id, body `{accountId, organizationId?}` (GET with the same query parameters
-  also works). The organization is `organizationId` when sent, else the saved remittance's, else the
-  account's. Answer: `{accountId, accountName, iban (raw or null), ibanValid, organizationId,
-  country, creditorId, creditorIdAvailable, missing[]}`. `country` is the **organization's** ISO
-  code and `creditorId` the SEPA creditor identifier (AT-02) computed as Classic's
+  row) or the saved id, body `{accountId, organizationId?, remittanceId?}` (GET with the same query
+  parameters also works). The organization is `organizationId` when sent, else the saved
+  remittance's, else the account's. Answer: `{accountId, accountName, iban (raw or null), ibanValid,
+  organizationId, country, creditorId, creditorIdAvailable, creditorIdSource, remittanceCreditorId,
+  accountCreditorId, suggestedCreditorId, missing[]}` (plus `…Valid` flags and the `storedCreditorId`
+  aliases, see the creditor identifier bullet below). `country` is the **organization's** ISO
+  code. **ETP-6247: the creditor identifier is saved on the account as the default and copied to each
+  collection remittance**, which keeps its own (next bullet): `creditorId` is the effective one and
+  `creditorIdSource` says where it comes from (`remittance`, `account`, `suggested`, `missing`).
+  `suggestedCreditorId` (formerly `creditorId`) is the SEPA creditor identifier (AT-02) computed as Classic's
   `SEPAUtil.getAT02Identification` does (`SepaCreditorId.build`), from the organization's own
   `AD_OrgInfo` location country and tax ID — where Classic's `SEPA_RemittanceCreateFile` reads
   them, no parent-organization fallback — and the **creditor business code** (positions 4-6): the
@@ -2559,14 +2566,159 @@ everything is Classic's model.
   `ETGO_RemittanceAccountNotBank` / `ETGO_RemittanceAccountNotAllowed` for an account that cannot
   be used at all; 403 with the flag off. Not injected into the header GET (no `afterHandle`
   enrichment): it is an action on purpose.
-- **Saving the IBAN on the account.** The IBAN typed in that block is saved on the **account**, not
-  on the remittance, through the financial-account spec so its validation and window access apply:
-  `GET /sws/neo/financial-account/account/{id}` then `PATCH` it with `{iBAN, updated}`
-  (`FinancialAccountHandler.validateCountryAndIban`, then `FIN_FINANCIAL_ACCOUNT_TRG2`). The
-  remittance handler never writes the account. **The account needs a country first:** the country is
-  never derived from the IBAN (ETP-5473), so on an account stored without one (legacy and
-  sample-data Bank accounts) the PATCH answers `400 ETGO_FinAccIbanRequiresCountry` and nothing is
-  saved; the user sets the country in the account's edit form, then saves the IBAN.
+- **SEPA creditor identifier: account default + the remittance's own copy (ETP-6247).** Like
+  Holded, the identifier the bank assigns is saved on the **financial account** as the DEFAULT, and
+  each collection remittance keeps its own COPY, which is what its file carries. Two columns, both
+  in `org.openbravo.module.remittance`: `FIN_FINANCIAL_ACCOUNT.EM_REM_CREDITOR_IDENTIFIER`
+  (varchar 35, DAL `rEMCreditorIdentifier`, `modifiedTables`, an `AD_FIELD` on the Classic account
+  window shown for Bank accounts) and `REM_REMITTANCE.CREDITOR_IDENTIFIER` (varchar 35, a column of
+  the module itself, DAL `creditorIdentifier`, an `AD_FIELD` on the remittance header, read-only once
+  processed). The DAL property names come from `NamingUtil` and are read by name
+  (`RemittanceCreditorId`), so GO compiles whatever the order the entities are generated in.
+  - **Copy.** The trigger `REM_REMITTANCE_TRG` copies the account's identifier into the remittance
+    on insert (when the remittance has none) and, while it is not processed, whenever its account or
+    its type changes — only for a pay-in (collection) type; a change of account therefore replaces a
+    copy edited by hand. It also refuses changing a non-empty copy once processed (an old
+    remittance with none can still get one). `confirm` and `generateFile` snapshot the account's
+    valid identifier into a remittance that has none, in their own transaction before the file is
+    generated (`RemittanceCreditorId.forFile`), so remittances created before this change behave
+    as before and keep that file's identifier afterwards. They lock the remittance row first
+    (`lockRemittance`), as the write below does.
+  - **Read** — `sepaFileData` (`{accountId, organizationId?, remittanceId?}`; the record id of a
+    saved remittance counts as `remittanceId`, `new` as none). Besides the earlier fields:
+    `remittanceCreditorId` (the remittance's copy; `null` when none, invalid, or the remittance is on
+    another account than `accountId`), `remittanceCreditorIdValid`, `accountCreditorId` (the
+    account's default, `null` when none or invalid), `accountCreditorIdValid`, `suggestedCreditorId`
+    (the one computed from the organization), `creditorIdSource` (`remittance` | `account` |
+    `suggested` | `missing`) and `creditorId`, the effective one: the remittance's valid copy; else,
+    when the remittance has none, the account's valid default; else the suggested one. A remittance
+    copy that is present but invalid is NOT replaced by the account's (the file would be refused, as
+    `fileReadiness` says): the source is then `suggested`/`missing`. `storedCreditorId` /
+    `storedCreditorIdValid` stay as aliases of the account's. `missing[]` is unchanged and does not
+    include the identifier, so a payment remittance is not blocked by it.
+  - **Write** — `saveCreditorId`, POST only, body `{accountId, creditorId, remittanceId?,
+    saveToAccount?, organizationId?}`, record id the remittance or `new`. The value is upper-cased
+    and stripped of spaces and separators, then validated by `SepaCreditorId`: country code, two
+    mod-97 check digits, a three-character business code and the national identifier, at most 35
+    characters (422 `ETGO_SepaCreditorIdRequired` / `ETGO_SepaCreditorIdInvalidFormat` /
+    `ETGO_SepaCreditorIdInvalidCheckDigits`, the last with `error.expectedCheckDigits`). The account
+    must be a Bank account with the remittance payment methods (422
+    `ETGO_RemittanceAccountNotBank` / `ETGO_RemittanceAccountNotAllowed`). **With a saved
+    remittance** (`remittanceId` or the record id) it is saved on THAT remittance only; the account's
+    default changes only when `saveToAccount` is `true`. The remittance must exist (404), not be
+    processed (422 `ETGO_RemittanceProcessedNotEditable`: its file and regenerations use the copy),
+    be a collection on that same account (422 `ETGO_RemittanceCreditorIdNotApplicable`). **Without a
+    remittance** (record id `new`, the financial-account form) the only write is the account's
+    default and `saveToAccount: true` is required (422 `ETGO_RemittanceCreditorIdNeedsAccount`).
+    The answer is the `sepaFileData` block. The value cannot be cleared through it. Window access is
+    the remittance spec's: the columns are not exposed in the financial-account spec.
+  - **Write from the header's CRUD (preferred), field `creditorIdentifier`** (decisions, editable, not in
+    the generic form; needs the NEO push). Like `iBAN`: the SPA preloads it with the account's default
+    or the computed `suggestedCreditorId` and saves it with the general «Guardar».
+    `RemittanceHeaderWrites` normalizes it (upper case, no separators) and validates it with
+    `SepaCreditorId` (422 `ETGO_SepaCreditorIdInvalidFormat` / `ETGO_SepaCreditorIdInvalidCheckDigits`,
+    with `error.expectedCheckDigits`); a blank one is dropped (the trigger copies the account's on
+    insert and respects one that is sent); only a collection takes one (422
+    `ETGO_RemittanceOptionsCollectionOnly` on a payment); never written to the account.
+    `saveCreditorId` stays for the financial-account modal (`saveToAccount`).
+  - **fileReadiness / confirm / generateFile**: for a **collection** (`CORE`), a remittance with an own
+    copy or an account default that is valid needs nothing. With NONE at all but the identifier
+    computed from the organization can be formed, it is NOT a problem: confirm / generateFile keep
+    that computed one as the remittance's COPY (never the account's), in their own transaction,
+    before generating. It is an `account` problem only when none is valid and none can be computed
+    (organization without tax ID or country): `ETGO_RemittanceFileAccountNoCreditorId` with
+    `suggestedCreditorId: null`; and for an own value that is present but invalid,
+    `ETGO_RemittanceFileAccountInvalidCreditorId` with `suggestedCreditorId` (the computed one, or
+    `null`). Neither is replaced silently. The organization's tax ID need not form an
+    identifier when a valid one is saved. A **payment** (`SCT`, pain.001) never asks for it: GO
+    provisions it with `Use_AT-02_toGenerateId=N`, so the generator writes the plain tax ID.
+  - **How the file carries it.** `CoreDirectDebit` always computes the identifier it writes
+    (`SEPAUtil.getAT02Identification(organization country, business code, organization tax ID)`)
+    and has no parameter, hook or override for another one, and the SEPA modules are not ours to
+    change. Evaluated: (a) rewrite the generator's XML — chosen; (b) a GO subclass of the generator
+    set as the type's `Classname` — rejected: it changes the type configuration Classic users also
+    see, needs the business code to be per account while it is a type parameter, and depends on the
+    generator's protected fields; (c) a change in REM — rejected: REM does not generate the file.
+    `RemittanceFileGenerator.generate` runs the generator untouched, then
+    `RemittanceCreditorIdRewriter` replaces `GrpHdr/InitgPty/.../Othr/Id` and every
+    `PmtInf/CdtrSchmeId/.../Othr/Id` with the REMITTANCE's identifier, by structure (debtor
+    identifiers are never touched), reading the XML without DOCTYPE or external entities; the result
+    is then validated against the XSD like any file. Editing the account afterwards changes neither
+    a generated file nor a regeneration. A file with no `CdtrSchmeId` to replace is a
+    `ETGO_RemittanceFileGenerationFailed`, never a silent computed identifier; and a collection with
+    no valid identifier is refused (`ETGO_RemittanceFileAccountNoCreditorId`) even if readiness was
+    skipped.
+  - **Existing remittances.** There is no backfill. An old remittance takes its account's default
+    when it is confirmed or its file regenerated and keeps it; with none anywhere, the next
+    `confirm` or `generateFile` of a collection reports the problem until the user saves one.
+- **The remittance's own IBAN (ETP-6247).** The IBAN typed in the «Datos para el fichero SEPA»
+  block is NOT saved on the account any more: the remittance keeps its own COPY of the account's
+  IBAN in `REM_REMITTANCE.IBAN` (a column of `org.openbravo.module.remittance`, `NVARCHAR(34)`,
+  DAL `iBAN`, an `AD_FIELD` on the remittance header, read-only once processed), and its SEPA file
+  always carries it. The account keeps its own IBAN untouched; the remittance handler never writes
+  the account's.
+  - **Copy.** `REM_REMITTANCE_TRG` copies the account's IBAN on insert when the remittance brings
+    none (an IBAN sent on create is kept) and, while it is not processed, when its account changes or
+    its type changes between collection and payment (any other type change keeps a typed IBAN); it refuses changing a non-empty
+    IBAN once processed. `confirm` / `generateFile` snapshot the account's valid IBAN into a
+    remittance without a copy (`RemittanceIban.forFile`), as for the creditor identifier.
+  - **Write: the header's CRUD, field `iBAN`** (decisions `entities.remittance.fields.iBAN`,
+    editable, not in the generic form; needs `make regen ONLY=remittance PUSH_TO_NEO=1` and
+    `export.database`). Chosen over an action because it is the only way to give the IBAN BEFORE
+    the first save: the value travels in the create body. `RemittanceHeaderWrites` normalizes it in
+    place (upper case, no separators), validates it (15 to 34 characters, mod-97 check digits; 422
+    `ETGO_RemittanceIbanInvalid`) and drops a blank one so the database copies the account's. A
+    remittance with its own valid IBAN no longer needs the account to have one; otherwise the
+    account must (422 `ETGO_RemittanceAccountIbanRequired`, now «the remittance needs a valid IBAN»).
+    An update that changes the account or the type does not count a typed or stored IBAN, as the
+    trigger re-copies the account's. Processed remittances are not editable (422
+    `ETGO_RemittanceProcessedNotEditable`).
+  - **Read.** `sepaFileData` adds `remittanceIban` (the copy when valid and the remittance is on
+    that account, else `null`), `remittanceIbanValid`, `accountIban` (raw, as before),
+    `accountIbanValid` and `ibanSource` (`remittance` | `account` | `missing`). `iban` / `ibanValid`
+    are now the effective ones: the remittance's when it has a copy (an invalid copy is not
+    replaced by the account's: `missing`), else the account's. `missing[]` names `iban` when the
+    effective one is not valid.
+  - **File.** `RemittanceCreditorIdRewriter.applyIban` replaces the IBAN of the company's account by
+    structure: `CdtrAcct` (pain.008) or `DbtrAcct` (pain.001) as a direct child of `PmtInf`; the
+    lines' accounts (`DbtrAcct` under `DrctDbtTxInf`, `CdtrAcct` under `CdtTrfTxInf`) are never
+    touched. No such account, or no valid IBAN, is a refusal. Classic's generator refuses an account
+    without IBAN (`OBSEPA_FINANCIALACCOUNT_NOIBAN`), so while it runs the remittance's IBAN stands
+    in for a blank account IBAN in the session only (`RemittanceIban.whileAccountHas`: pending
+    changes flushed first, flushing off, original restored): nothing reaches the database.
+  - **fileReadiness** `ETGO_RemittanceFileAccountNoIban` now judges the remittance's IBAN (its copy,
+    else its account's).
+- **Direct debit scheme and financed flag (ETP-6247).** A COLLECTION remittance carries two options
+  of its own, columns of `org.openbravo.module.remittance`: `REM_REMITTANCE.DD_SCHEME` (`CORE` |
+  `B2B`, `VARCHAR(4)`, DAL `directDebitScheme`) and `REM_REMITTANCE.ISFINANCED` (`Y`/`N`, default
+  `N`, DAL `financed`); both `AD_FIELD`s on the remittance header, read-only once processed, and
+  frozen by `REM_REMITTANCE_TRG` after processing. The trigger defaults `DD_SCHEME` to `CORE` on insert
+  for a pay-in type (none for a payment). They are a per-remittance replacement of Classic's TYPE
+  parameters `CORE_B2B` and `SEPA_DD_Financed_58`, so the type does not change.
+  - **Write: the header's CRUD**, fields `directDebitScheme` and `financed` (decisions
+    `entities.remittance.fields`, editable, not in the generic form; the SPA block «Opciones
+    avanzadas» owns them; needs the NEO push). `RemittanceHeaderWrites` normalizes them (scheme
+    upper-cased, `financed` to a boolean from `true`/`Y`), 422 `ETGO_RemittanceSchemeInvalid` for a
+    scheme other than CORE/B2B. On a **payment** remittance they do not apply: `B2B` or
+    `financed: true` is refused, 422 `ETGO_RemittanceOptionsCollectionOnly`; `CORE` / `false` are
+    dropped from the body. Processed remittances are not editable.
+  - **Read.** The fields travel with the header record; `sepaFileData` (with a saved remittance)
+    also answers `directDebitScheme` (`null` for a payment) and `financed`.
+  - **File.** `CoreDirectDebit` reads both from the type and has no per-remittance hook, so, as for the
+    IBAN and the creditor identifier, the output is rewritten by structure
+    (`RemittanceCreditorIdRewriter.applyOptions`) and then validated against the XSD: `B2B` sets
+    `PmtInf/PmtTpInf/LclInstrm/Cd` of every block; financed gives `GrpHdr/MsgId` the prefix, cut to 35
+    characters (untouched when it already starts with it). A plain CORE, non-financed remittance is
+    not rewritten (the type already writes CORE); a file without `LclInstrm/Cd` or `MsgId` to change
+    is a `ETGO_RemittanceFileGenerationFailed`. The prefix is the type's own
+    `SEPA_DD_Financed_58` value when it has one, else `RemittanceSepaOptions.FINANCED_PREFIX`
+    (`FSDD`, PROVISIONAL: the real text is not decided; the one place to change).
+  - **Known cost / debt.** Classic's own «Create File» button ignores these columns and writes what
+    the type says, so a file made there can differ from GO's. B2B is not validated beyond what CORE
+    needs (a mandate and its date): the debtor must be a company and the mandate a B2B one, but GO has
+    no field for the mandate type; that validation is tracked debt, not implemented. «Financed»
+    changes only the message identifier: no accounting, settlement or return effect (nothing in REM or
+    automated.remittance reads it).
 - **Customer bank account IBAN** (ETP-6247; contacts `bankAccount`, `ContactBankAccountHandler`,
   `@NeoExtension(spec = "contacts", entity = "bankAccount")`, every write channel: REST single,
   `/batch`, MCP). On `POST`/`PUT`/`PATCH` the IBAN the body sends — under `iBAN` or any casing of
@@ -2757,6 +2909,15 @@ everything is Classic's model.
     `[A-Za-z0-9._-]`, `_2`, `_3`… when the record already has one (the attachment manager
     overwrites a same-named attachment). The bytes reach the attachment store before the commit: a
     later rollback leaves an orphan file, never a row.
+  - **CORE collections in `pain.008.001.08`.** Before XSD validation, GO trims the leading and
+    trailing whitespace from XML field values. The default profile (`BIC_SWIFT_MANDATORY = N`)
+    writes `Othr/Id = NOTPROVIDED` for the creditor and debtor agents, including when their
+    account records contain a BIC. A profile explicitly configured with `Y` requires a `BICFI`
+    for each agent. The profile is configured by remittance type. After XSD validation,
+    GO checks that each agent uses exactly one identification, that creditor and debtor names are
+    present, and that these names and any initiating-party name fit in 70 characters. GO also checks
+    `NbOfTxs` and `CtrlSum` against the debits in each `PmtInf` and in the entire file. A failure
+    returns HTTP 422 with the XML element path before the attachment is saved.
   - **Not automatic on create (ETP-6247, step-by-step flow).** A remittance created through GO keeps
     `EM_Etar_Automaticprocess = 'N'` (the column default): confirming it does NOT settle. It
     becomes `'Y'` only when it is collected (`markCollected`, below), which is what Classic and the

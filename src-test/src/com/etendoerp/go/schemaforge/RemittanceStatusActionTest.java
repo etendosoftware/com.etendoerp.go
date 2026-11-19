@@ -92,7 +92,9 @@ class RemittanceStatusActionTest {
     translator = mockStatic(NeoMessageTranslator.class);
     translator.when(() -> NeoMessageTranslator.safeParseTranslation(any()))
         .thenAnswer(inv -> inv.getArgument(0));
-    errors = mockStatic(NeoErrorResponses.class);
+    // Real, so the 403 of a disabled flag is built; only the rollback is a stub.
+    errors = mockStatic(NeoErrorResponses.class, Mockito.CALLS_REAL_METHODS);
+    errors.when(NeoErrorResponses::rollbackUnlessBatchOwned).then(inv -> null);
     processService = mockStatic(NeoProcessService.class);
     processService.when(NeoProcessService::pushRequestContextVars)
         .thenReturn(mock(NeoProcessService.RequestContextScope.class));

@@ -161,10 +161,21 @@ final class RemittanceHeaderSelectors {
     List<RemittanceType> types = rows.setFirstResult(page.offset).setMaxResults(page.limit).list();
     JSONArray items = new JSONArray();
     for (RemittanceType type : types) {
-      items.put(item(type.getId(), type.getIdentifier()));
+      JSONObject item = item(type.getId(), type.getIdentifier());
+      // ETP-6247: lets the SPA show the scheme / financed options of a collection before the
+      // first save. A collection is a type whose payment method allows pay-in, as REM decides.
+      boolean collection = type.getPaymentMethod() != null
+          && Boolean.TRUE.equals(type.getPaymentMethod().isPayinAllow());
+      item.put("direction", collection ? DIRECTION_COLLECTION : DIRECTION_PAYMENT);
+      items.put(item);
     }
     return page.response(items, count.uniqueResult());
   }
+
+  /** {@code direction} of a type whose payment method allows pay-in. */
+  static final String DIRECTION_COLLECTION = "collection";
+  /** {@code direction} of any other type. */
+  static final String DIRECTION_PAYMENT = "payment";
 
   private static JSONObject item(String id, String label) throws JSONException {
     JSONObject item = new JSONObject();
