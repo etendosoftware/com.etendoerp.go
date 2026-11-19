@@ -37,6 +37,7 @@ public final class NeoTelemetryEvent {
   private final Instant timestamp;
   private final String clientId;
   private final String insertId;
+  private final NeoTelemetryIdentity identity;
 
   /**
    * An event with no tenant for the server log.
@@ -59,6 +60,21 @@ public final class NeoTelemetryEvent {
    */
   NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
       String clientId) {
+    this(name, properties, timestamp, clientId, NeoTelemetryIdentity.NONE);
+  }
+
+  /**
+   * An event with its common identity (ETP-6228).
+   *
+   * @param name       backend event name
+   * @param properties sanitized properties
+   * @param timestamp  creation instant
+   * @param clientId   the {@code AD_Client_ID} for the server log, or {@code null}
+   * @param identity   the identity resolved when the event was built, {@code null} for none
+   */
+  NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
+      String clientId, NeoTelemetryIdentity identity) {
+    this.identity = identity == null ? NeoTelemetryIdentity.NONE : identity;
     this.name = name;
     this.properties = Collections.unmodifiableMap(new LinkedHashMap<>(properties));
     this.timestamp = timestamp;
@@ -94,13 +110,12 @@ public final class NeoTelemetryEvent {
   }
 
   /**
-   * The tenant ({@code AD_Client_ID}) the event happened under, for the server log only.
+   * The tenant ({@code AD_Client_ID}) the event happened under, for the server log.
    *
-   * <p>Deliberately not one of {@link #getProperties()}: properties are what every sink receives,
-   * Mixpanel included, and the tenant id stays on our side. Only {@code LogNeoTelemetrySink} prints
-   * it, so a failure seen in Datadog can be traced to its tenant (ETP-5639). An event that must be
-   * segmented by tenant in Mixpanel sends it explicitly as the allowlisted {@code account_id}
-   * property instead (the contact KPI events, ETP-5791).</p>
+   * <p>Not one of {@link #getProperties()}: those are what every sink receives. {@code
+   * LogNeoTelemetrySink} prints it, so a failure seen in Datadog can be traced to its tenant
+   * (ETP-5639). Mixpanel receives the tenant through {@link #getIdentity()} as {@code ad_client_id}
+   * (and {@code account_id} during the transition), added by the Mixpanel sink (ETP-6228).</p>
    *
    * @return the AD client id, or {@code null} when the event carries none
    */
@@ -117,5 +132,15 @@ public final class NeoTelemetryEvent {
    */
   public String getInsertId() {
     return insertId;
+  }
+
+  /**
+   * The common identity (user, environment, owner account, tenant type) resolved when the event
+   * was built (ETP-6228), never {@code null}. The Mixpanel sink adds it to the event.
+   *
+   * @return the identity, {@link NeoTelemetryIdentity#NONE} when the event had no session
+   */
+  public NeoTelemetryIdentity getIdentity() {
+    return identity;
   }
 }

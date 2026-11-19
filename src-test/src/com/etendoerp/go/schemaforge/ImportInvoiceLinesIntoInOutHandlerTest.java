@@ -182,6 +182,19 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       return held;
     }
 
+    /** The OTHER draft movement each invoice line's own link points at (ETP-5828). */
+    final Map<String, String> linkedDrafts = new java.util.HashMap<>();
+    List<String> linkedAsked;
+    String linkedTarget;
+
+    @Override
+    protected Map<String, String> draftMovementsLinkedTo(Collection<String> invoiceLineIds,
+        String targetId) {
+      linkedAsked = new ArrayList<>(invoiceLineIds);
+      linkedTarget = targetId;
+      return linkedDrafts;
+    }
+
     /** Every asked invoice carries the {@link #followUp} lines (only its own are ever read). */
     @Override
     protected Map<String, PendingResolver.Source> loadFollowUpSources(
@@ -307,14 +320,15 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     probe.followUp.put("il3", bd("4"));
     probe.holdings.add(new DraftHolding("o2", "t1", "DS-1", bd("3")));
     probe.holdings.add(new DraftHolding("o2", "other", "DS-2", bd("1")));
+    probe.linkedDrafts.put("il1", "DS-9");
 
     JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
 
     assertEquals("line order, no discount nor inactive line", List.of("il1", "il2", "il3"),
         ids(all));
     Object[][] expected = {
-        { "CP-22 / CP-14: shipped through the invoice-line link, not carried by the follow-up",
-            "0", List.of() },
+        { "CP-22 / CP-14: shipped through the invoice-line link, not carried by the follow-up; "
+            + "the other draft its link points at is named (ETP-5828)", "0", List.of("DS-9") },
         { "the follow-up's pending, whatever the order line delivered", "1", List.of("DS-2") },
         { "no order line", "4", List.of() },
     };
@@ -341,7 +355,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   /**
    * Goods receipt (the popup's rule): a linked line has 0, any other its quantity minus what the
    * OTHER draft receipts hold of its order line; neither delivered nor the target's own draft is
-   * deducted.
+   * deducted. ETP-5828 QA UI-9: the lines carry their unit price and the availableInvoices row its
+   * amount (unit price x that pending), as on a goods shipment.
    */
   @Test
   public void availableInvoiceLines_receipt_deductsOnlyOtherDrafts_neverDelivered()
@@ -350,11 +365,17 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     OrderLine bought = orderLine("olA", 10, product("p1", "Agua", true), "10", "6", "8");
     OrderLine linkedOl = orderLine("olB", 20, product("p2", "Pan", true), "4", "0", "4");
     OrderLine overHeld = orderLine("olC", 30, product("p3", "Sal", true), "5", "0", "5");
-    invoice(probe, "inv1", false,
-        line("il1", 10, bought.getProduct(), "8", bought, false),
-        line("il2", 20, linkedOl.getProduct(), "4", linkedOl, true),
-        line("il3", 30, product("p4", "Té", false), "3", null, false),
+    InvoiceLine water = line("il1", 10, bought.getProduct(), "8", bought, false);
+    probe.linkedDrafts.put("il2", "DR-9");
+    InvoiceLine tea = line("il3", 30, product("p4", "Té", false), "3", null, false);
+    when(water.getUnitPrice()).thenReturn(bd("1.5"));
+    when(tea.getUnitPrice()).thenReturn(bd("2"));
+    Invoice inv1 = invoice(probe, "inv1", false, water,
+        line("il2", 20, linkedOl.getProduct(), "4", linkedOl, true), tea,
         line("il4", 40, overHeld.getProduct(), "5", overHeld, false));
+    Currency euro = inv1.getCurrency();
+    when(euro.getStandardPrecision()).thenReturn(2L);
+    probe.candidates = List.of(inv1);
     probe.holdings.add(new DraftHolding("olA", "t1", "DR-1", bd("3")));
     probe.holdings.add(new DraftHolding("olA", "other", "DR-2", bd("2")));
     probe.holdings.add(new DraftHolding("olC", "other", "DR-2", bd("9")));
@@ -372,9 +393,15 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     }
     assertEquals("the target's own draft is not named", List.of("DR-2"),
         strings(all.getJSONObject(0).getJSONArray("inDraftDocuments")));
+    assertEquals("ETP-5828: only the linked line's link is looked up, the target left out",
+        Arrays.asList(List.of("il2"), "t1"), Arrays.asList(probe.linkedAsked, probe.linkedTarget));
+    assertEquals("the other draft receipt its link points at is named", List.of("DR-9"),
+        strings(all.getJSONObject(1).getJSONArray("inDraftDocuments")));
     assertFalse("receipt drafts are read on the purchase side", probe.holdingsSales);
     assertNull("the receipt keeps its rule: the follow-up is not read", probe.followUpSales);
-    assertFalse("nor a unit price", all.getJSONObject(0).has("unitPrice"));
+    assertEquals("1.5", all.getJSONObject(0).get("unitPrice").toString());
+    assertEquals("6 x 1.5 + 3 x 2, the lines at 0 left out, with or without detail", "15.00",
+        rows(run(probe, INVOICES, null, RECEIPT)).getJSONObject(0).get("amount").toString());
   }
 
   /**
@@ -571,7 +598,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals(2, plain.getJSONObject(0).getInt("pendingLines"));
     assertEquals("o1", plain.getJSONObject(0).getString("order"));
     assertFalse("no detail, no creationDate", plain.getJSONObject(0).has("creationDate"));
-    assertFalse("no detail, no amount", plain.getJSONObject(0).has("amount"));
+    assertEquals("the amount without detail too (ETP-5828 QA UI-9)", "10.01",
+        plain.getJSONObject(0).get("amount").toString());
     assertEquals("scanned with the target's partner, direction and currency",
         Arrays.asList(PARTNER, true, CURRENCY),
         Arrays.asList(probe.lastPartner, probe.lastSales, probe.lastCurrency));
@@ -775,9 +803,6 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     assertEquals("server: the other draft holds all of inv1", List.of(),
         ids(rows(run(probe, INVOICES, "{\"pendingBasis\":\"server\"}", RECEIPT))));
-    assertFalse("the receipt rows keep no amount, even with detail (ETP-6002 is sales only)",
-        rows(run(probe, INVOICES, "{\"includeCovered\":true,\"detail\":true}", RECEIPT))
-            .getJSONObject(0).has("amount"));
     assertFalse("the server rule reads the drafts", probe.holdingsSales);
   }
 
