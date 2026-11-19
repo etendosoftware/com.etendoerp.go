@@ -50,6 +50,10 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  */
 public final class WidgetAccessPolicy {
 
+  /** Flag on a denied widget's empty payload, so an MCP caller can tell "denied" from "no data"
+   *  (ETP-5850; see {@code WidgetQueryHelper.buildEmptyDataResponse}). */
+  public static final String KEY_RESTRICTED = "restricted";
+
   /** {@code AD_Window_ID}s. Core windows keep their legacy numeric IDs; financial-account is the
    *  Etendo GO window, distributed with the module, and is already referenced by that same
    *  literal on the frontend ({@code windows/custom/financial-account/index.jsx}). */
