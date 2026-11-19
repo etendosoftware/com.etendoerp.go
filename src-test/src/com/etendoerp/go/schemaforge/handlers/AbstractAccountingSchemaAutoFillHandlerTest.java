@@ -29,6 +29,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Stream;
 import org.hibernate.criterion.Order;
 import org.mockito.ArgumentCaptor;
 import java.util.Map;
@@ -42,6 +43,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.ProductCategoryAccountingHandler;
 import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -50,6 +52,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -65,22 +69,34 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 
 /**
- * Unit tests for {@link ProductAccountingHandler}.
+ * Unit tests for {@link AbstractAccountingSchemaAutoFillHandler}.
  *
- * <p>Covers all guard clauses in {@code handle()}, the injection path when
- * {@code accountingSchema} is absent or explicitly null, the no-op path when
- * the DB returns no accounting schemas, and the exception fallback.
- *
- * <p>100 % line and branch coverage of the handler class is the target.
- *
- * @covers com.etendoerp.go.schemaforge.handlers.ProductAccountingHandler
- * @covers com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHandler
+ * <p>The guard clauses and the auto-fill of {@code accountingSchema} run once per subclass: they
+ * all inherit {@code handle()} and only differ in {@link
+ * AbstractAccountingSchemaAutoFillHandler#describeContext()}. The ETP-5693 cases (parent ledger,
+ * context organization, ordered client fallback, posting guard) run on
+ * {@link ProductAccountingHandler}.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class ProductAccountingHandlerTest {
+class AbstractAccountingSchemaAutoFillHandlerTest {
 
   private static final ProductAccountingHandler HANDLER = new ProductAccountingHandler();
+
+  static Stream<AbstractAccountingSchemaAutoFillHandler> handlers() {
+    return Stream.of(
+        new AssetAccountingHandler(),
+        new AssetGroupAccountingHandler(),
+        new BusinessPartnerCategoryAccountingHandler(),
+        new CustomerAccountingHandler(),
+        new GeneralLedgerAccountsHandler(),
+        new GeneralLedgerDefaultsHandler(),
+        HANDLER,
+        new ProductCategoryAccountingHandler(),
+        new TaxAccountingHandler(),
+        new VendorAccountingHandler(),
+        new WarehouseAccountingHandler());
+  }
 
   private static final String CLIENT_ID = "test-client-001";
   private static final String SCHEMA_ID  = "acct-schema-001";
@@ -114,49 +130,53 @@ class ProductAccountingHandlerTest {
   /**
    * Endpoints other than CRUD must be ignored — the handler is a POST/create guard only.
    */
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("Non-CRUD endpoint returns null immediately")
-  void testHandleReturnsNullForNonCrudEndpoint() {
+  void testHandleReturnsNullForNonCrudEndpoint(AbstractAccountingSchemaAutoFillHandler handler) {
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.DEFAULTS)
         .httpMethod("GET")
         .build();
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
   }
 
   /**
    * CRUD GET (and any non-POST method) must pass through without side effects.
    */
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD GET returns null without touching the body")
-  void testHandleReturnsNullForGetMethod() {
+  void testHandleReturnsNullForGetMethod(AbstractAccountingSchemaAutoFillHandler handler) {
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .build();
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
   }
 
   /**
    * A null request body must not cause a NullPointerException — returns null immediately.
    */
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST with null body returns null safely")
-  void testHandleReturnsNullForNullBody() {
+  void testHandleReturnsNullForNullBody(AbstractAccountingSchemaAutoFillHandler handler) {
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("POST")
         .build();
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
   }
 
   /**
    * When the body already contains a non-null {@code accountingSchema}, the handler
    * must skip injection and leave the value unchanged.
    */
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST with accountingSchema already set skips injection")
-  void testHandleSkipsInjectionWhenFieldAlreadyPresent() throws Exception {
+  void testHandleSkipsInjectionWhenFieldAlreadyPresent(AbstractAccountingSchemaAutoFillHandler handler) throws Exception {
     JSONObject body = new JSONObject().put("accountingSchema", "existing-schema-id");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -164,7 +184,7 @@ class ProductAccountingHandlerTest {
         .requestBody(body)
         .build();
 
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
     assertEquals("existing-schema-id", body.getString("accountingSchema"));
   }
 
@@ -175,9 +195,10 @@ class ProductAccountingHandlerTest {
    * the default schema for the current client and inject its ID.
    */
   @SuppressWarnings("unchecked")
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST with missing field injects the default accounting schema ID")
-  void testHandleInjectsSchemaWhenFieldAbsent() throws Exception {
+  void testHandleInjectsSchemaWhenFieldAbsent(AbstractAccountingSchemaAutoFillHandler handler) throws Exception {
     JSONObject body = new JSONObject(); // key absent
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -193,7 +214,7 @@ class ProductAccountingHandlerTest {
     when(criteria.add(any())).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(schema));
 
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
     assertEquals(SCHEMA_ID, body.getString("accountingSchema"));
   }
 
@@ -203,9 +224,10 @@ class ProductAccountingHandlerTest {
    * the default schema ID.
    */
   @SuppressWarnings("unchecked")
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST with accountingSchema=null injects the default accounting schema ID")
-  void testHandleInjectsSchemaWhenFieldIsExplicitNull() throws Exception {
+  void testHandleInjectsSchemaWhenFieldIsExplicitNull(AbstractAccountingSchemaAutoFillHandler handler) throws Exception {
     JSONObject body = new JSONObject().put("accountingSchema", JSONObject.NULL);
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -221,7 +243,7 @@ class ProductAccountingHandlerTest {
     when(criteria.add(any())).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(schema));
 
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
     assertEquals(SCHEMA_ID, body.getString("accountingSchema"));
   }
 
@@ -230,9 +252,10 @@ class ProductAccountingHandlerTest {
    * must leave the body unchanged rather than injecting {@code null}.
    */
   @SuppressWarnings("unchecked")
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST when no AcctSchema found in DB does not inject")
-  void testHandleDoesNotInjectWhenNoSchemaFound() throws Exception {
+  void testHandleDoesNotInjectWhenNoSchemaFound(AbstractAccountingSchemaAutoFillHandler handler) throws Exception {
     JSONObject body = new JSONObject(); // key absent
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -245,7 +268,7 @@ class ProductAccountingHandlerTest {
     when(criteria.add(any())).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.emptyList());
 
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
     assertTrue(body.isNull("accountingSchema"));
   }
 
@@ -253,9 +276,10 @@ class ProductAccountingHandlerTest {
    * A DB exception during schema resolution must be caught and swallowed — the handler
    * must still return null so the default CRUD path can proceed (or fail cleanly on its own).
    */
-  @Test
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("handlers")
   @DisplayName("CRUD POST when DB throws returns null without propagating the exception")
-  void testHandleReturnsNullOnDbException() {
+  void testHandleReturnsNullOnDbException(AbstractAccountingSchemaAutoFillHandler handler) {
     JSONObject body = new JSONObject(); // key absent, triggers resolveDefaultSchemaId()
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -266,7 +290,7 @@ class ProductAccountingHandlerTest {
     when(obDal.createCriteria(AcctSchema.class))
         .thenThrow(new RuntimeException("DB connection lost"));
 
-    assertNull(HANDLER.handle(ctx));
+    assertNull(handler.handle(ctx));
   }
 
   // ── ETP-5693: deterministic auto-fill + posting guard ──────────────────────

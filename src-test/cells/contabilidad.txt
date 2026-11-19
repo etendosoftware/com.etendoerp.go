@@ -31,6 +31,7 @@ com.etendoerp.go.schemaforge.ProfitLossReportHandlerTest
 com.etendoerp.go.schemaforge.TrialBalanceFoldingTest
 com.etendoerp.go.schemaforge.TrialBalanceReportHandlerTest
 com.etendoerp.go.schemaforge.YearCloseHandlerTest
+com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHandlerTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsCriteriaTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsHandlerTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsTreeMathTest
@@ -39,7 +40,6 @@ com.etendoerp.go.schemaforge.handlers.GLJournalLineHandlerTest
 com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupportTest
 com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandlerTest
 com.etendoerp.go.schemaforge.handlers.ReactivationUnpostTest
-com.etendoerp.go.schemaforge.handlers.TaxAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.YearAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.PostingAccountCombinationSelectorPolicyTest
 com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetryTest
