@@ -4,7 +4,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (644)
+# --- con mocks (643)
 com.etendoerp.go.modulescript.EnsureDocumentStatusTranslationsScriptTest
 com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.payment.CheckoutPromotionTermsTest
@@ -469,8 +469,7 @@ com.etendoerp.go.schemaforge.TenantIsolationPolicyTest
 com.etendoerp.go.schemaforge.TenantOwnershipTest
 com.etendoerp.go.schemaforge.WidgetAccessPolicyTest
 com.etendoerp.go.schemaforge.WidgetActivityHandlerTest
-com.etendoerp.go.schemaforge.WidgetBestProductsHandlerTest
-com.etendoerp.go.schemaforge.WidgetBestSellersHandlerTest
+com.etendoerp.go.schemaforge.WidgetBestProductsAndSellersHandlerTest
 com.etendoerp.go.schemaforge.WidgetKpisHandlerTest
 com.etendoerp.go.schemaforge.WidgetPendingAmountsHandlerTest
 com.etendoerp.go.schemaforge.WidgetPendingTasksHandlerTest
