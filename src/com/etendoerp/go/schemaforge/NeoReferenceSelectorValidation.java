@@ -63,8 +63,10 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * ({@link NeoReferenceOwnership}) and activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
  *
  * <p><b>Context.</b> The UI resolves a selector against the whole form. Here the form is the
- * <i>merged record</i>: the parent record (child tabs), overlaid by the stored record (updates),
- * overlaid by the incoming values (on update, the callout outputs are already in them). Every property is published under its DAL name and under its
+ * <i>merged record</i>: the parent record (child tabs; found through {@code parentId} or the
+ * link-to-parent value the request sets), overlaid by the stored record (updates), overlaid by the
+ * incoming values (on update, the callout outputs are already in them), completed with the tab's
+ * literal auxiliary inputs (ETP-6381). Every property is published under its DAL name and under its
  * column name, which is how validation rules ({@code @C_BPartner_ID@}) and selector policies
  * ({@code businessPartner}) read it. So an address must belong to the partner, a price list must
  * match the document direction, a tax must be valid for the line, and a payment method must suit
@@ -309,17 +311,22 @@ public final class NeoReferenceSelectorValidation {
     }
   }
 
-  /** Parent record, overlaid by the stored record, overlaid by the incoming values. */
+  /**
+   * Parent record, overlaid by the stored record, overlaid by the incoming values, then the tab's
+   * literal auxiliary inputs and the window direction for what the record does not say.
+   *
+   * <p>The parent is the explicit {@code parentId}, else the one the request sets in the link-to-
+   * parent column (a line created with {@code shipmentReceipt} and no {@code parentId}), else the
+   * stored record's. Without it a line selector that reads a header field — a storage bin reading
+   * the receipt's warehouse — offers nothing.
+   */
   private static Map<String, String> mergedContext(Tab adTab, Entity written,
       BaseOBObject stored, String parentId, JSONObject requestFields) {
     Map<String, String> context = new HashMap<>();
     Entity parentEntity = parentEntity(adTab);
-    String effectiveParent = parentId;
     Property parentLink = parentLink(adTab, written);
-    if (StringUtils.isBlank(effectiveParent) && stored != null && parentLink != null
-        && stored.get(parentLink.getName()) instanceof BaseOBObject) {
-      effectiveParent = ((BaseOBObject) stored.get(parentLink.getName())).getId().toString();
-    }
+    String effectiveParent = effectiveParent(written, parentLink, parentId, stored,
+        requestFields);
     if (parentEntity != null && StringUtils.isNotBlank(effectiveParent)) {
       BaseOBObject parent = load(parentEntity, effectiveParent);
       if (parent != null) {
@@ -333,8 +340,45 @@ public final class NeoReferenceSelectorValidation {
       publish(context, written, flat(stored));
     }
     publish(context, written, requestFields);
+    addAuxiliaryLiterals(adTab, context);
     addWindowDirection(adTab, context);
     return context;
+  }
+
+  private static String effectiveParent(Entity written, Property parentLink, String parentId,
+      BaseOBObject stored, JSONObject requestFields) {
+    if (StringUtils.isNotBlank(parentId) || parentLink == null) {
+      return parentId;
+    }
+    String linkName = parentLink.getName();
+    if (requestFields.has(linkName)) {
+      String sent = referenceId(written, linkName, requestFields.opt(linkName));
+      if (sent != null) {
+        return sent;
+      }
+    }
+    return storedId(stored, linkName);
+  }
+
+  /**
+   * The tab's literal auxiliary inputs (Sales Quotation's {@code isQuotation=Y}, a return window's
+   * {@code isReturnMaterial=Y}), as Classic puts them in the form context. A value the record
+   * already carries under any casing of the name wins: the record, not the window, says.
+   */
+  private static void addAuxiliaryLiterals(Tab adTab, Map<String, String> context) {
+    Set<String> present = new HashSet<>();
+    for (String key : context.keySet()) {
+      present.add(key.toLowerCase(Locale.ROOT));
+    }
+    for (Map.Entry<String, String> literal : NeoAuxiliaryInputResolver.literalValues(adTab)
+        .entrySet()) {
+      String name = literal.getKey();
+      if (present.add(name.toLowerCase(Locale.ROOT))) {
+        context.put(name, literal.getValue());
+        context.put(name.toUpperCase(Locale.ROOT), literal.getValue());
+        context.put(name.toLowerCase(Locale.ROOT), literal.getValue());
+      }
+    }
   }
 
   private static Entity parentEntity(Tab adTab) {
