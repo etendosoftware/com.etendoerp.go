@@ -250,17 +250,27 @@ final class McpResponseSanitizer {
   /** The literal segment separator {@code IdentifierProvider} joins address segments with. */
   private static final String DASH_SEPARATOR = " - ";
 
-  private static final Pattern DASH_SEPARATOR_PATTERN = Pattern.compile(Pattern.quote(DASH_SEPARATOR));
+  /**
+   * Matches a run of one or more {@code " -"} tokens followed by a trailing space — i.e. the
+   * whole separator cluster left behind by N consecutive blank segments (N+1 repetitions of the
+   * {@code " -"} token), collapsing to a single delimiter regardless of how many blank segments
+   * produced it. A single isolated separator ({@code " - "}) is exactly one repetition, so this
+   * also covers the ordinary single-separator case. Splitting on the literal {@code " - "}
+   * string instead (the previous approach) under-counts matches on a run of repeated separators,
+   * because consecutive {@code " - "} tokens share boundary characters and the literal split
+   * finds fewer matches than there are blank segments — see ETP-5806 CP-8b follow-up.
+   */
+  private static final Pattern DASH_RUN_PATTERN = Pattern.compile("(?: -)+ ");
 
   /**
    * Drops empty segments from a {@code " - "}-joined identifier string, so a blank address
    * segment never leaves a double or dangling separator on the wire (ETP-5806 CP-8b).
    *
    * <p>Mirrors the SPA's own {@code sanitizeDashJoinedIdentifier}
-   * ({@code tools/app-shell/src/lib/locationAddress.js}) exactly: split on {@code " - "}, trim
-   * each segment, filter the blank ones, rejoin with the same separator. A string with no
-   * occurrence of the separator — the common case for most identifiers — is returned unchanged
-   * without being split at all.
+   * ({@code tools/app-shell/src/lib/locationAddress.js}) exactly: split on the separator-run
+   * pattern, trim each segment, filter the blank ones, rejoin with the canonical separator. A
+   * string with no occurrence of the separator — the common case for most identifiers — is
+   * returned unchanged without being split at all.
    *
    * @param raw the identifier value as the default service built it; never {@code null} here,
    *            since the only call site already checked {@code instanceof String}
@@ -270,7 +280,7 @@ final class McpResponseSanitizer {
     if (!raw.contains(DASH_SEPARATOR)) {
       return raw;
     }
-    String[] segments = DASH_SEPARATOR_PATTERN.split(raw, -1);
+    String[] segments = DASH_RUN_PATTERN.split(raw, -1);
     StringBuilder cleaned = new StringBuilder();
     for (String segment : segments) {
       String trimmed = segment.trim();

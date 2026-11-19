@@ -602,6 +602,19 @@ class BpLocationHandlerTest {
       when(existingCountry.getId()).thenReturn("ES");
       when(existing.getCountry()).thenReturn(existingCountry);
       when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+      // syncLinkedContactNames (ETP-5806 CP-12c) runs unconditionally after the setters above and
+      // calls OBDal#createCriteria on C_BPartner_Location — these getters give buildDisplayName
+      // enough to compute a non-null name, unlike the bare-mock create tests above where every
+      // getter is null and that call short-circuits before reaching createCriteria at all. Left
+      // unstubbed, createCriteria() returns Mockito's default null and criteria.list() NPEs,
+      // silently swallowed by afterHandle's catch-all — which skipped flush() with no visible
+      // failure except this test's own verify(obDal).flush(). No linked contacts for this case.
+      @SuppressWarnings("unchecked")
+      OBCriteria<org.openbravo.model.common.businesspartner.Location> linkedCriteria =
+          mock(OBCriteria.class);
+      when(obDal.createCriteria(org.openbravo.model.common.businesspartner.Location.class))
+          .thenReturn(linkedCriteria);
+      when(linkedCriteria.list()).thenReturn(java.util.List.of());
 
       JSONObject body = new JSONObject();
       body.put("buildingName", "Torre A"); // partial body: only the optional field changes

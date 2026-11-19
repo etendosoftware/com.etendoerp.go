@@ -343,6 +343,37 @@ public class McpToolRouterTest {
         new JSONObject(rendered).getJSONObject("row").getString("name$_identifier"));
   }
 
+  /**
+   * Direct coverage of {@link McpResponseSanitizer#sanitizeDashJoinedIdentifier} for a
+   * separator-run sitting at the very START of the string (leading blank segment(s)) — reviewed
+   * by hand during ETP-5806 CP-8b follow-up but never pinned as a test until now.
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierDropsALeadingSeparatorRun() {
+    assertEquals("Madrid",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier(" -  - Madrid"));
+  }
+
+  /**
+   * Mirror case: a separator-run at the very END of the string (trailing blank segment(s)).
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierDropsATrailingSeparatorRun() {
+    assertEquals("Madrid",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier("Madrid -  - "));
+  }
+
+  /**
+   * A literal 3+-consecutive-blank run in the middle collapses to a single separator, same as a
+   * single blank segment would — {@link McpResponseSanitizer}'s dash-run pattern matches the
+   * whole repeated-token run regardless of how many blank segments produced it.
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierCollapsesALongBlankRun() {
+    assertEquals("A - B",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier("A - - - - B"));
+  }
+
   /** A static OBContext whose language is {@code code}; the caller closes it. */
   private static MockedStatic<OBContext> contextInLanguage(String code) {
     org.openbravo.model.ad.system.Language language =
