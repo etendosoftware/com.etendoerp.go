@@ -72,9 +72,23 @@ public class ConversionRateHandler extends AbstractNeoHandler {
   /** One write of the handler, run under admin mode with the refusals translated. */
   @FunctionalInterface
   interface Write {
+    /**
+     * Runs the write.
+     *
+     * @param writes the per-request writer
+     * @return the response to answer
+     * @throws JSONException if the response cannot be built
+     */
     NeoResponse run(ConversionRateWrites writes) throws JSONException;
   }
 
+  /**
+   * Serves the three actions, and every create, update and delete of the entity; reads fall
+   * through to the generic CRUD.
+   *
+   * @param context the request context
+   * @return the response, or {@code null} for a read or a request this customization does not own
+   */
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoEndpointType type = context.getEndpointType();
@@ -103,7 +117,7 @@ public class ConversionRateHandler extends AbstractNeoHandler {
 
   private NeoResponse create(ConversionRateWrites writes, JSONObject body) throws JSONException {
     ConversionRate forward = writes.applyCreate(writes.planCreate(writes.parseCreate(body)));
-    return ConversionRateResponses.record(forward, store());
+    return ConversionRateResponses.recordResponse(forward, store());
   }
 
   private NeoResponse update(ConversionRateWrites writes, String recordId, JSONObject body)
@@ -113,7 +127,7 @@ public class ConversionRateHandler extends AbstractNeoHandler {
     if (missing != null) {
       return missing;
     }
-    return ConversionRateResponses.record(writes.applyUpdate(row, body), store());
+    return ConversionRateResponses.recordResponse(writes.applyUpdate(row, body), store());
   }
 
   private NeoResponse delete(ConversionRateWrites writes, String recordId) {

@@ -75,7 +75,7 @@ class ConversionRateRefusal extends RuntimeException {
     return new ConversionRateRefusal(HttpServletResponse.SC_CONFLICT, key, args);
   }
 
-  static ConversionRateRefusal overlap(String fromIso, String toIso) {
+  static ConversionRateRefusal overlapOf(String fromIso, String toIso) {
     return conflict(OVERLAP, fromIso, toIso);
   }
 

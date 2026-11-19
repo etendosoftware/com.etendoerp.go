@@ -132,7 +132,7 @@ class ConversionRateWrites {
         request.toCurrency().getId());
     Plan plan = ConversionRateRules.planCreate(ranges, request.validFrom());
     if (plan.overlap()) {
-      throw ConversionRateRefusal.overlap(fromIso, toIso);
+      throw ConversionRateRefusal.overlapOf(fromIso, toIso);
     }
     return new CreatePlan(request, plan);
   }
@@ -192,7 +192,7 @@ class ConversionRateWrites {
     others.remove(target);
     Plan plan = ConversionRateRules.planMove(others, target, newFrom);
     if (plan.overlap()) {
-      throw ConversionRateRefusal.overlap(fromIso, toIso);
+      throw ConversionRateRefusal.overlapOf(fromIso, toIso);
     }
     Close adjacent = plan.closes().isEmpty() ? null : plan.closes().get(0);
     boolean shrinksAdjacent = adjacent != null

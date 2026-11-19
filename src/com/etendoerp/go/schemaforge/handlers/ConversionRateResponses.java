@@ -66,7 +66,8 @@ final class ConversionRateResponses {
    * @return the 200 response
    * @throws JSONException if the body cannot be built
    */
-  static NeoResponse record(ConversionRate row, ConversionRateStore store) throws JSONException {
+  static NeoResponse recordResponse(ConversionRate row, ConversionRateStore store)
+      throws JSONException {
     DataToJsonConverter converter = OBProvider.getInstance().get(DataToJsonConverter.class);
     JSONObject json = converter.toJsonObject(row, DataResolvingMode.FULL);
     json.put(ConversionRateWrites.F_VALID_FROM,
@@ -99,7 +100,7 @@ final class ConversionRateResponses {
       return ConversionRateRefusal.conflict(ConversionRateRefusal.SYNCED_LOCKED).toResponse();
     }
     if (text.contains(CORE_OVERLAP) || containsCoreOverlapText(text)) {
-      return ConversionRateRefusal.overlap(pairIso[0], pairIso[1]).toResponse();
+      return ConversionRateRefusal.overlapOf(pairIso[0], pairIso[1]).toResponse();
     }
     log.error("[ETP-6365] Conversion rate write failed", failure);
     return NeoErrorResponses.fromException(failure, httpMethod, "conversion-rates write", null);
