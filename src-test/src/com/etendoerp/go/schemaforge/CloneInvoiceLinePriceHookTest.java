@@ -66,15 +66,20 @@ public class CloneInvoiceLinePriceHookTest {
     assertTrue(!hook.shouldCopyChildren(false));
   }
 
+  /**
+   * preCopy() (shared by the invoice and order line hooks through CloneLinePriceHook) must hand
+   * back what the core hook prepared, not the untouched original.
+   */
   @Test
-  public void testPreCopyDelegatesToCoreHook() throws Exception {
+  public void testPreCopyReturnsWhatTheCoreHookPrepared() throws Exception {
     CloneRecordHook delegate = mock(CloneRecordHook.class);
     BaseOBObject original = mock(BaseOBObject.class);
-    when(delegate.preCopy(original)).thenReturn(original);
+    BaseOBObject prepared = mock(BaseOBObject.class);
+    when(delegate.preCopy(original)).thenReturn(prepared);
 
     CloneInvoiceLinePriceHook hook = new CloneInvoiceLinePriceHook(delegate);
 
-    assertSame(original, hook.preCopy(original));
+    assertSame(prepared, hook.preCopy(original));
   }
 
   // ── postCopy() — single line ────────────────────────────────────────────────

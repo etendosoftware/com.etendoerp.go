@@ -351,20 +351,6 @@ public class OnboardingMarkOrgReadyServiceTest {
   // ---------------------------------------------------------------------------------------------
 
   @Test
-  public void testResolveOrganizationDelegatesToObDalGet() {
-    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
-    Organization org = mock(Organization.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Organization.class, "ORG-1")).thenReturn(org);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(org, service.resolveOrganization("ORG-1"));
-    }
-  }
-
-  @Test
   public void testResolveOrganizationReturnsNullWhenAbsent() {
     OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
 

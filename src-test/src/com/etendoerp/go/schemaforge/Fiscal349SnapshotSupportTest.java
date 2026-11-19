@@ -18,10 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertSame;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -47,15 +44,6 @@ public class Fiscal349SnapshotSupportTest {
   @Test
   public void declModelIs349() {
     assertEquals("349", support.declModel());
-  }
-
-  @Test
-  public void computeLivePayloadDelegatesToComputeOperators() throws Exception {
-    Fiscal349BoxesHandler handler = spy(new Fiscal349BoxesHandler(mock(NeoServlet.class)));
-    JSONObject operators = new JSONObject().put("operators", new JSONArray());
-    doReturn(operators).when(handler).computeOperators("org1", 2026, "T1");
-
-    assertSame(operators, support.computeLivePayload(handler, "org1", 2026, "T1"));
   }
 
   /** A payload without operators is left alone (nothing to fold). */

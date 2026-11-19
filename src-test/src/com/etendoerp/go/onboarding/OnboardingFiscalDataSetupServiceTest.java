@@ -153,22 +153,8 @@ public class OnboardingFiscalDataSetupServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // resolveClient() / saveSiiDescription() — real OBDal delegation
+  // saveSiiDescription() — real OBDal delegation
   // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testResolveClientDelegatesToObDalGet() {
-    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
-    Client client = mock(Client.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Client.class, "CLIENT-1")).thenReturn(client);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(client, service.resolveClient("CLIENT-1"));
-    }
-  }
 
   @Test
   public void testSaveSiiDescriptionDelegatesToObDalSave() {

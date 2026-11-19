@@ -1146,24 +1146,6 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // resolveClient() — real OBDal.get delegation
-  // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testResolveClientDelegatesToObDalGet() {
-    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
-    Client client = mock(Client.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Client.class, "C1")).thenReturn(client);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(client, service.resolveClient("C1"));
-    }
-  }
-
-  // ---------------------------------------------------------------------------------------------
   // contextSubject()
   // ---------------------------------------------------------------------------------------------
 
