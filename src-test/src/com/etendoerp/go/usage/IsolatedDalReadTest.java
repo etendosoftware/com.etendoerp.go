@@ -502,12 +502,12 @@ class IsolatedDalReadTest {
   @Test
   void aTimedOutQueuedReadLeavesTheQueue() throws Exception {
     CountDownLatch release = new CountDownLatch(1);
-    ExecutorService callers = Executors.newFixedThreadPool(IsolatedDalRead.WORKER_THREADS);
+    ExecutorService blockingCallers = Executors.newFixedThreadPool(IsolatedDalRead.WORKER_THREADS);
     try {
       // Occupy every worker, then let one more read wait in the queue and time out.
       CountDownLatch started = new CountDownLatch(IsolatedDalRead.WORKER_THREADS);
       for (int i = 0; i < IsolatedDalRead.WORKER_THREADS; i++) {
-        callers.submit(() -> IsolatedDalRead.call(() -> {
+        blockingCallers.submit(() -> IsolatedDalRead.call(() -> {
           started.countDown();
           awaitQuietly(release);
           return "held";
@@ -525,7 +525,7 @@ class IsolatedDalReadTest {
       assertEquals(0, pool.getQueue().size());
     } finally {
       release.countDown();
-      callers.shutdownNow();
+      blockingCallers.shutdownNow();
     }
   }
 

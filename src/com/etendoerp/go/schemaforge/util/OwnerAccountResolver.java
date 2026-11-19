@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
 import org.apache.commons.lang3.StringUtils;
@@ -52,7 +53,8 @@ public final class OwnerAccountResolver {
   // ETP-6386: one cache for every caller (the session payload is read on page load and by every
   // report query). Access order, so eviction drops the least recently used client.
   private static final Map<String, Cached> CACHE = new LinkedHashMap<>(16, 0.75f, true);
-  private static volatile LongSupplier clock = System::currentTimeMillis;
+  private static final AtomicReference<LongSupplier> CLOCK =
+      new AtomicReference<>(System::currentTimeMillis);
 
   private OwnerAccountResolver() {
     // static helper
@@ -60,7 +62,7 @@ public final class OwnerAccountResolver {
 
   /** Test seam: replaces the clock and empties the cache; {@code null} restores the real clock. */
   static void resetForTest(LongSupplier testClock) {
-    clock = testClock == null ? System::currentTimeMillis : testClock;
+    CLOCK.set(testClock == null ? System::currentTimeMillis : testClock);
     synchronized (CACHE) {
       CACHE.clear();
     }
@@ -76,7 +78,7 @@ public final class OwnerAccountResolver {
    *     is not cached.
    */
   public static String findOwnerAccountId(String clientId) {
-    long now = clock.getAsLong();
+    long now = CLOCK.get().getAsLong();
     synchronized (CACHE) {
       Cached cached = CACHE.get(clientId);
       if (cached != null && cached.until > now) {
