@@ -1392,7 +1392,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   /**
    * ETP-5828 QA UI-4: a line other draft invoices hold names them ({@code inDraftInvoices}, this
    * invoice left out), so the popup says «en factura borrador X» and the agent can tell the user
-   * the same; a line no other draft holds carries no such key. Both directions.
+   * the same; a line no other draft holds carries no such key. Both directions. QA MCP-3: a line
+   * the other drafts hold entirely is listed at 0 with its holders even without includeCovered.
    */
   @Test
   public void availableOrderLines_namesTheOtherDraftsHoldingALine() throws Exception {
@@ -1404,10 +1405,12 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
           new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003", bd("3.000"))));
       String side = isSales ? "sales" : "purchase";
 
-      JSONArray rows = run(probe, "availableOrderLines",
-          "{\"orderId\":\"o1\",\"includeCovered\":true}")
+      JSONArray rows = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}")
           .getBody().getJSONObject("response").getJSONArray("data");
 
+      assertEquals(side, List.of("ol1", "ol2"), ids(rows));
+      assertEquals(side + ": held entirely by other drafts", 0,
+          rows.getJSONObject(1).getInt("pendingQuantity"));
       assertEquals(side, "i1", probe.holdersExcept);
       assertEquals(side + ": only the listed lines are looked up", List.of("ol1", "ol2"),
           probe.holdersAsked);
@@ -1949,67 +1952,29 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   /**
-   * With detail, a pending line THIS invoice already holds is not selectable: it counts in neither
-   * pendingLines nor amount, on both directions (sales reads the drafts batched, purchase lazily).
+   * ETP-5828 QA UI-7: a line THIS invoice already holds in part still counts for what is left of it
+   * (pending is drafts-deducted, this invoice included), with or without detail, on both
+   * directions: an order whose remaining lines are all partly on this invoice is still listed, its
+   * pendingLines and amount match the expanded order, and the invoice's own lines are not read.
    */
   @Test
-  public void availableOrders_detail_leavesOutTheLinesAlreadyOnThisInvoice() throws Exception {
+  public void availableOrders_countsTheLinesThisInvoiceHoldsInPart() throws Exception {
     for (boolean isSales : new boolean[] { true, false }) {
-      Probe probe = isSales ? salesScenario() : scenario();
-      pricedLines(probe);
-      probe.linesOnInvoice = Set.of("ol2");
-      probe.candidates = List.of(probe.order);
-      String side = isSales ? "sales" : "purchase";
+      for (String body : new String[] { null, "{\"detail\":true}" }) {
+        Probe probe = isSales ? salesScenario() : scenario();
+        pricedLines(probe);
+        probe.linesOnInvoice = Set.of("ol1", "ol2");
+        probe.candidates = List.of(probe.order);
+        String side = (isSales ? "sales " : "purchase ") + body;
 
-      JSONArray rows = serverOrders(probe, "{\"detail\":true}");
+        JSONArray rows = serverOrders(probe, body);
 
-      assertEquals(side, List.of("o1"), ids(rows));
-      JSONObject o1 = rows.getJSONObject(0);
-      assertEquals(side + ": Pan is on this invoice, only Agua is selectable", 1,
-          o1.getInt("pendingLines"));
-      assertEquals(side + ": 47.50 x 8, Pan's 20 x 5 left out", "380.00",
-          o1.get("amount").toString());
-      assertEquals(side, 1, probe.calls.stream().filter("linesOnInvoice"::equals).count());
-    }
-  }
-
-  /**
-   * With detail, an order whose every pending line is already on THIS invoice is out of the plain
-   * answer, and with includeCovered it is listed at pendingLines 0 and amount 0.
-   */
-  @Test
-  public void availableOrders_detail_anOrderEntirelyOnThisInvoice_onlyWithIncludeCovered()
-      throws Exception {
-    Probe probe = salesScenario();
-    pricedLines(probe);
-    probe.linesOnInvoice = Set.of("ol1", "ol2");
-    probe.candidates = List.of(probe.order);
-
-    assertEquals(List.of(), ids(serverOrders(probe, "{\"detail\":true}")));
-
-    JSONArray rows = serverOrders(probe, "{\"detail\":true,\"includeCovered\":true}");
-    assertEquals(List.of("o1"), ids(rows));
-    assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
-    assertEquals(0, BigDecimal.ZERO.compareTo(
-        new BigDecimal(rows.getJSONObject(0).getString("amount"))));
-  }
-
-  /** Without detail the answer is the pre-ETP-6099 one: the invoice's own lines are not read. */
-  @Test
-  public void availableOrders_withoutDetail_countsEveryPendingLine_andReadsNoInvoiceLines()
-      throws Exception {
-    for (boolean isSales : new boolean[] { true, false }) {
-      Probe probe = isSales ? salesScenario() : scenario();
-      pricedLines(probe);
-      probe.linesOnInvoice = Set.of("ol2");
-      probe.candidates = List.of(probe.order);
-      String side = isSales ? "sales" : "purchase";
-
-      JSONObject o1 = serverOrders(probe, null).getJSONObject(0);
-
-      assertEquals(side, 2, o1.getInt("pendingLines"));
-      assertEquals(side + ": 47.50 x 8 + 20 x 5", "480.00", o1.get("amount").toString());
-      assertFalse(side, probe.calls.contains("linesOnInvoice"));
+        assertEquals(side, List.of("o1"), ids(rows));
+        JSONObject o1 = rows.getJSONObject(0);
+        assertEquals(side, 2, o1.getInt("pendingLines"));
+        assertEquals(side + ": 47.50 x 8 + 20 x 5", "480.00", o1.get("amount").toString());
+        assertFalse(side, probe.calls.contains("linesOnInvoice"));
+      }
     }
   }
 
@@ -2041,41 +2006,6 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertFalse(side, plain.getJSONObject(1).has("importedHere"));
       assertFalse(side, probe.calls.contains("linesOnInvoice"));
     }
-  }
-
-  /**
-   * selectableOnly: an empty set (no detail) or an empty pending hands the same map back; otherwise
-   * a copy without exactly the keys in the set, leaving the input untouched.
-   */
-  @Test
-  public void selectableOnly_removesOnlyTheLinesOnThisInvoice() {
-    Map<String, BigDecimal> pending = new LinkedHashMap<>();
-    pending.put("ol1", bd("8"));
-    pending.put("ol2", bd("5"));
-    Object[][] cases = {
-        { Set.of(), List.of("ol1", "ol2") },
-        { Set.of("ol2"), List.of("ol1") },
-        { Set.of("ol9"), List.of("ol1", "ol2") },
-        { Set.of("ol1", "ol2"), List.of() },
-    };
-    for (Object[] c : cases) {
-      @SuppressWarnings("unchecked")
-      Set<String> here = (Set<String>) c[0];
-
-      Map<String, BigDecimal> selectable =
-          ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, here);
-
-      assertEquals(here.toString(), c[1], new ArrayList<>(selectable.keySet()));
-      assertEquals(here + ": the input is untouched", List.of("ol1", "ol2"),
-          new ArrayList<>(pending.keySet()));
-    }
-    assertSame("no lines on the invoice: the same map", pending,
-        ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, Set.of()));
-    Map<String, BigDecimal> none = Map.of();
-    assertSame("nothing pending: the same map", none,
-        ImportOrderLinesIntoInvoiceHandler.selectableOnly(none, Set.of("ol1")));
-    assertEquals(0, bd("8").compareTo(
-        ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, Set.of("ol2")).get("ol1")));
   }
 
   // ── pendingBasis (ETP-6099 follow-up, classic removed by ETP-5828 QA MCP-2) ─────────

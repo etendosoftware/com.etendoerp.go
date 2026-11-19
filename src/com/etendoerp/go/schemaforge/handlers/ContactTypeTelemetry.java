@@ -46,6 +46,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -342,9 +343,13 @@ public final class ContactTypeTelemetry {
     }
   }
 
-  private static void send(String event, Map<String, Object> properties, String clientId) {
+  static void send(String event, Map<String, Object> properties, String clientId) {
     try {
-      SENDER.execute(() -> telemetry().emit(event, properties, clientId));
+      // ETP-6228: the sender thread has no session, so the identity is captured here.
+      NeoTelemetryService service = telemetry();
+      NeoTelemetryIdentity identity = service.captureIdentity(clientId, null);
+      SENDER.execute(() -> NeoTelemetryIdentity.runWith(identity,
+          () -> service.emit(event, properties, clientId)));
     } catch (RejectedExecutionException e) {
       log.debug("Contact telemetry queue full; dropping {}", event);
     }

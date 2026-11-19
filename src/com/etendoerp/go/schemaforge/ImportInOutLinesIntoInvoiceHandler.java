@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -189,8 +190,11 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         "Lists the lines of a " + inout + " that can still be invoiced here: {data:[{id, lineNo, "
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
             + "what no completed or draft invoice (this one included) covers, and the id is the "
-            + "sourceLineId " + imp + " takes. includeCovered also lists the lines with nothing "
-            + "left at pendingQuantity 0; detail adds " + STANDARD_LINE_DETAIL + ". Step 2." + flow,
+            + "sourceLineId " + imp + " takes. When OTHER draft invoices hold the line (linked to "
+            + "it or to its order line), inDraftDocuments lists their document numbers; absent "
+            + "when none: tell the user which draft holds what is missing. includeCovered also "
+            + "lists the lines with nothing left at pendingQuantity 0; detail adds "
+            + STANDARD_LINE_DETAIL + ". Step 2." + flow,
         ImportListing.linesParams(STANDARD_LINE_DETAIL,
             NeoActionContract.Param.required(param, NeoActionContract.TYPE_STRING,
                 "Id of a document returned by " + list + ".")))
@@ -603,6 +607,42 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     String joined = sources.stream().map(d -> d.optString("documentNo", ""))
         .filter(no -> !no.isEmpty()).collect(Collectors.joining(", "));
     return joined.isEmpty() ? null : joined;
+  }
+
+  /**
+   * The HQL behind {@link #draftInvoicesHoldingLines}: per movement line of one document, the
+   * document number of every OTHER draft invoice with an active line on it, linked to the movement
+   * line itself or to its order line (the two arms the drafts-included pending deducts), in the
+   * session's client and the role's readable organizations. Exposed so a test parses it against the
+   * real model.
+   */
+  static final String DRAFT_INVOICES_HOLDING_LINES_HQL = "select ml.id, i.documentNo "
+      + "from MaterialMgmtShipmentInOutLine ml, InvoiceLine il join il.invoice i "
+      + "where ml.shipmentReceipt.id = :io and ml.active = true and il.active = true "
+      + "and i.active = true and i.documentStatus = 'DR' and i.id <> :inv "
+      + "and i.client.id = :client "
+      + "and i.organization.id in (:orgs) and (il.goodsShipmentLine.id = ml.id "
+      + "or (ml.salesOrderLine is not null and il.salesOrderLine.id = ml.salesOrderLine.id)) "
+      + "group by ml.id, i.documentNo order by i.documentNo";
+
+  /**
+   * Seam: per movement line of the document, the document numbers of the OTHER draft invoices
+   * holding it (ETP-5828 QA UI-8), so a line the drafts took can name them; a line no other draft
+   * holds is absent. A draft outside the role's organizations still counts in the pending, it is
+   * only not named.
+   */
+  protected Map<String, Set<String>> draftInvoicesHoldingLines(String inOutId, String invoiceId) {
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery(DRAFT_INVOICES_HOLDING_LINES_HQL, Object[].class)
+        .setParameter("io", inOutId).setParameter("inv", invoiceId)
+        .setParameter(PARAM_CLIENT, sessionClientId())
+        .setParameterList("orgs", Arrays.asList(OBContext.getOBContext().getReadableOrganizations()))
+        .list();
+    Map<String, Set<String>> holders = new LinkedHashMap<>();
+    for (Object[] row : rows) {
+      holders.computeIfAbsent((String) row[0], k -> new LinkedHashSet<>()).add((String) row[1]);
+    }
+    return holders;
   }
 
   /**

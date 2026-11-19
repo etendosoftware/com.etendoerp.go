@@ -117,6 +117,7 @@ import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.CheckoutPromotionTerms;
@@ -264,6 +265,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_CSRF_TOKEN = "csrfToken";
   private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ETGO_ACCOUNT_ID = "etgoAccountId";
   private static final String FIELD_ROLE_LIST = "roleList";
   private static final String HEADER_USER_AGENT = "User-Agent";
   private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
@@ -8076,7 +8078,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Build the environment block of a restore response: the selected {@code user/role/client/org/
    * warehouse}, or {@code null} when no environment has been entered yet on this session.
    */
-  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+  static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
     if (sessionRecord.getUserId() == null) {
       return JSONObject.NULL;
     }
@@ -8086,7 +8088,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     env.put(FIELD_CLIENT_ID, sessionRecord.getCtxClientId());
     env.put("orgId", sessionRecord.getCtxOrgId());
     env.put("warehouseId", sessionRecord.getWarehouseId());
+    // ETP-6228: the account that OWNS the environment, for analytics; not `account.id`, which is
+    // whoever is signed in. Left out when it cannot be resolved, never guessed.
+    String ownerAccountId = ownerAccountIdOf(sessionRecord.getCtxClientId());
+    if (ownerAccountId != null) {
+      env.put(FIELD_ETGO_ACCOUNT_ID, ownerAccountId);
+    }
     return env;
+  }
+
+  private static String ownerAccountIdOf(String clientId) {
+    if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) {
+      return null;
+    }
+    try {
+      return OwnerAccountResolver.findOwnerAccountId(clientId);
+    } catch (RuntimeException e) {
+      log.debug("Owner account of client {} not resolved: {}", clientId, e.getMessage());
+      return null;
+    }
   }
 
   private static JSONArray loadSessionRoleList(GoSessionRecord sessionRecord) throws JSONException {

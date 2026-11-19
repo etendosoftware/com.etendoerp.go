@@ -19,12 +19,15 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -40,9 +43,11 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -61,6 +66,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -286,6 +292,36 @@ class ContactTypeTelemetryTest {
         .obContext(obContext)
         .previousResult(new NeoResponse(status, new JSONObject()))
         .build();
+  }
+
+  /**
+   * ETP-6228: the sender thread has no session, so the identity is captured through the service on
+   * the calling thread and handed to the thread that emits.
+   */
+  @Test
+  void theIdentityCapturedOnTheCallingThreadReachesTheSenderThread() throws Exception {
+    NeoTelemetryIdentity identity = new NeoTelemetryIdentity("U1", CLIENT_ID, "OWNER", "demo");
+    AtomicReference<Thread> capturedOn = new AtomicReference<>();
+    AtomicReference<Thread> emittedOn = new AtomicReference<>();
+    AtomicReference<NeoTelemetryIdentity> seen = new AtomicReference<>();
+    when(telemetry.captureIdentity(CLIENT_ID, null)).thenAnswer(invocation -> {
+      capturedOn.set(Thread.currentThread());
+      return identity;
+    });
+    doAnswer(invocation -> {
+      emittedOn.set(Thread.currentThread());
+      seen.set(NeoTelemetryIdentity.handedOff());
+      return null;
+    }).when(telemetry).emit(eq(NeoTelemetryEvents.BACKEND_CONTACT_CREATED), anyMap(), eq(CLIENT_ID));
+
+    ContactTypeTelemetry.send(NeoTelemetryEvents.BACKEND_CONTACT_CREATED,
+        new HashMap<String, Object>(), CLIENT_ID);
+
+    verify(telemetry, timeout(WAIT_MS)).emit(eq(NeoTelemetryEvents.BACKEND_CONTACT_CREATED),
+        anyMap(), eq(CLIENT_ID));
+    assertSame(Thread.currentThread(), capturedOn.get());
+    assertNotSame(Thread.currentThread(), emittedOn.get());
+    assertSame(identity, seen.get());
   }
 
   @SuppressWarnings("unchecked")
