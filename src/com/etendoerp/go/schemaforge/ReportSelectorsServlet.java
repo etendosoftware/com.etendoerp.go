@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -48,7 +49,7 @@ import com.etendoerp.go.common.CorsUtils;
  *
  * Mapped to /sws/report-selectors/* via AD_MODEL_OBJECT registration.
  * Provides searchable selector data for report parameter inputs (currency,
- * bpartner, product, warehouse, org, account, acctschema, year, tax, project).
+ * bpartner, product, product-all, warehouse, org, account, acctschema, year, tax, project).
  *
  * URL:
  *   GET /sws/report-selectors/{type}?q=&limit=20&offset=0
@@ -56,8 +57,13 @@ import com.etendoerp.go.common.CorsUtils;
  * Optional query params (type-specific):
  *   selectedOrgId         — filter warehouse/product/year by org
  *   selectedAcctSchemaId  — filter account by accounting schema
- *   warehouseIds          — comma-separated warehouse IDs to filter product stock
+ *   warehouseIds          — comma-separated warehouse IDs to filter product stock (not product-all)
  *   roleOrgIds            — comma-separated org IDs accessible to the role
+ *   ids                   — comma-separated record IDs (bpartner, product, product-all): resolves exactly those
+ *                           rows (same client/role scoping as the list), ignoring q and paging; used
+ *                           to label a selection restored from a link. A blank or invalid list
+ *                           returns no rows, never the whole selector; ids beyond 100 are silently dropped; other
+ *                           selector types answer 400 (ETP-6239)
  *
  * Response:
  *   { "items": [ { "id": "...", "name": "...", "label": "..." } ],
@@ -78,6 +84,11 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   private static final String PARAM_SELECTED_ACCT_SCHEMA_ID = "selectedAcctSchemaId";
   private static final String PARAM_WAREHOUSE_IDS = "warehouseIds";
   private static final String PARAM_ROLE_ORG_IDS = "roleOrgIds";
+  private static final String PARAM_IDS = "ids";
+  /** The `ids` lookup is capped: a label lookup, not a bulk read. */
+  private static final int MAX_IDS = 100;
+  /** Selectors that answer `ids`; any other one refuses it rather than ignore it and list everything. */
+  private static final Set<String> IDS_LOOKUP_TYPES = Set.of("bpartner", "product", "product-all");
   private static final String ACTIVE_CLIENT_NAME_SEARCH = " AND ad_client_id = :"
       + PARAM_CLIENT_ID + " AND name ILIKE :" + PARAM_SEARCH;
 
@@ -95,11 +106,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     final String selectedAcctSchemaId;
     final List<String> warehouseIds;
     final List<String> roleOrgIds;
+    /** True when the request carries `ids` at all: then only those rows may come back, even if none is valid. */
+    final boolean idsRequested;
+    final List<String> ids;
 
     SelectorRequest(HttpServletRequest request, String clientId) {
-      this.q = StringUtils.trimToEmpty(request.getParameter("q"));
-      this.limit = parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
-      this.offset = parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
+      this.idsRequested = request.getParameter(PARAM_IDS) != null;
+      this.ids = parseSafeIdList(request.getParameter(PARAM_IDS)).stream().limit(MAX_IDS)
+          .collect(Collectors.toList());
+      this.q = idsRequested ? "" : StringUtils.trimToEmpty(request.getParameter("q"));
+      // An id lookup is not paged: at most one row per id.
+      this.limit = idsRequested ? Math.max(1, ids.size())
+          : parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
+      this.offset = idsRequested ? 0
+          : parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
       this.clientId = clientId;
       this.selectedOrgId = safeId(request.getParameter(PARAM_SELECTED_ORG_ID));
       this.selectedAcctSchemaId = safeId(request.getParameter(PARAM_SELECTED_ACCT_SCHEMA_ID));
@@ -234,6 +254,10 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   @SuppressWarnings({"unchecked", "rawtypes"})
   private JSONObject executeSelector(String type, SelectorRequest req) throws JSONException {
     SelectorQuery sq = buildQuery(type, req);
+    if (req.idsRequested && req.ids.isEmpty()) {
+      // A blank or invalid `ids` list resolves nothing: it must never fall back to the whole selector.
+      return new JSONObject().put("items", new JSONArray()).put("totalCount", 0).put("hasMore", false);
+    }
 
     String fromWhereStr = sq.fromWhere.toString();
     String countSql = "SELECT COUNT(*) " + fromWhereStr;
@@ -257,6 +281,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         req.warehouseIds);
     bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_ROLE_ORG_IDS,
         req.roleOrgIds);
+    bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_IDS, req.ids);
 
     Number countResult = (Number) countQuery.uniqueResult();
     int totalCount = countResult != null ? countResult.intValue() : 0;
@@ -279,9 +304,13 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // ---------------------------------------------------------------------------
 
   private SelectorQuery buildQuery(String type, SelectorRequest req) {
+    if (req.idsRequested && !IDS_LOOKUP_TYPES.contains(type)) {
+      throw new IllegalArgumentException("ids is not supported for selector: " + type);
+    }
     switch (type) {
-      case "bpartner":   return buildBpartnerQuery();
-      case "product":    return buildProductQuery(req);
+      case "bpartner":   return buildBpartnerQuery(req);
+      case "product":    return buildProductQuery(req, true);
+      case "product-all": return buildProductQuery(req, false);
       case "warehouse":  return buildWarehouseQuery(req);
       case "product-category": return buildProductCategoryQuery();
       case "project":    return buildProjectQuery();
@@ -297,43 +326,64 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private SelectorQuery buildBpartnerQuery() {
+  private SelectorQuery buildBpartnerQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder("FROM c_bpartner WHERE " + activePredicate(req)
+        + ACTIVE_CLIENT_NAME_SEARCH);
+    appendIdsFilter(fromWhere, "c_bpartner_id", req);
     return new SelectorQuery(
-        "SELECT c_bpartner_id AS id, name, name AS label",
-        new StringBuilder("FROM c_bpartner WHERE isactive='Y'"
-            + ACTIVE_CLIENT_NAME_SEARCH),
-        ORDER_BY_NAME, true);
+        "SELECT c_bpartner_id AS id, name, name AS label", fromWhere, ORDER_BY_NAME, true);
   }
 
-  private SelectorQuery buildProductQuery(SelectorRequest req) {
+  /** An `ids` lookup labels a restored selection, so a since-deactivated record must still resolve. */
+  private static String activePredicate(SelectorRequest req) {
+    return req.idsRequested ? "1=1" : "isactive='Y'";
+  }
+
+  /** `ids` narrows the rows the normal scoping already allows (a foreign id never resolves). */
+  private void appendIdsFilter(StringBuilder fromWhere, String pkColumn, SelectorRequest req) {
+    if (req.idsRequested && !req.ids.isEmpty()) {
+      fromWhere.append(" AND ").append(pkColumn).append(" IN (:").append(PARAM_IDS).append(")");
+    }
+  }
+
+  /**
+   * @param stockScoped true for "product" (only products with stock, for stock reports); false for
+   *     "product-all" (every product incl. services, scoped by the product's own org).
+   */
+  private SelectorQuery buildProductQuery(SelectorRequest req, boolean stockScoped) {
     // ETP-4967: excludes products classified under a category flagged
     // EM_Etgo_IsSystemCategory='Y' (e.g. ETGO_DTO, category "Discounts") — same exclusion as
     // every other product selector in the app, applied directly in SQL since this servlet builds
     // its own queries independently of NeoSelectorService.
     StringBuilder fromWhere = new StringBuilder(
-        "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
+        "FROM m_product WHERE " + activePredicate(req) + " AND ad_client_id = :clientId"
         + " AND (name ILIKE :search OR value ILIKE :search)"
         + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
         + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"
         + " AND mpc.em_etgo_issystemcategory = 'Y')");
-    if (!req.warehouseIds.isEmpty()) {
+    if (stockScoped && !req.warehouseIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
           + " AND l.m_warehouse_id IN (:warehouseIds))");
     }
-    if (req.selectedOrgId != null) {
+    if (stockScoped && req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
           + " AND ad_isorgincluded(l.ad_org_id, :selectedOrgId, m_product.ad_client_id) <> -1)");
     }
     if (!req.roleOrgIds.isEmpty()) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
-          + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
-          + " WHERE sd.m_product_id = m_product.m_product_id"
-          + " AND l.ad_org_id IN (:roleOrgIds))");
+      if (stockScoped) {
+        fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
+            + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
+            + " WHERE sd.m_product_id = m_product.m_product_id"
+            + " AND l.ad_org_id IN (:roleOrgIds))");
+      } else {
+        fromWhere.append(" AND m_product.ad_org_id IN (:roleOrgIds)");
+      }
     }
+    appendIdsFilter(fromWhere, "m_product_id", req);
     return new SelectorQuery(
         "SELECT m_product_id AS id, name, value || ' - ' || name AS label",
         fromWhere, "ORDER BY value, name", true);

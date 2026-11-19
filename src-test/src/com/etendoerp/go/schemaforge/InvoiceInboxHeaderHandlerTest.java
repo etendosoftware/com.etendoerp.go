@@ -39,7 +39,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
- * The feature-flag gate and the {@code discard}, {@code review}, {@code apply} and {@code mark-reviewed} dispatch of the invoice inbox header customization.
+ * The feature-flag gate and the {@code discard}, {@code review}, {@code apply}, {@code mark-reviewed} and {@code confirm} dispatch of the invoice inbox header customization.
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandler
  */
@@ -50,6 +50,7 @@ class InvoiceInboxHeaderHandlerTest {
   private MockedStatic<InvoiceInboxReview> review;
   private MockedStatic<InvoiceInboxApply> apply;
   private MockedStatic<InvoiceInboxMarkReviewed> markReviewed;
+  private MockedStatic<InvoiceInboxConfirm> confirm;
   private MockedStatic<OBMessageUtils> messages;
   private final InvoiceInboxHeaderHandler handler = new InvoiceInboxHeaderHandler();
 
@@ -60,6 +61,7 @@ class InvoiceInboxHeaderHandlerTest {
     review = mockStatic(InvoiceInboxReview.class);
     apply = mockStatic(InvoiceInboxApply.class);
     markReviewed = mockStatic(InvoiceInboxMarkReviewed.class);
+    confirm = mockStatic(InvoiceInboxConfirm.class);
     // Unstubbed messageBD answers null: the English default is used.
     messages = mockStatic(OBMessageUtils.class);
   }
@@ -67,6 +69,7 @@ class InvoiceInboxHeaderHandlerTest {
   @AfterEach
   void closeStaticMocks() {
     messages.close();
+    confirm.close();
     markReviewed.close();
     apply.close();
     review.close();
@@ -141,7 +144,7 @@ class InvoiceInboxHeaderHandlerTest {
   void flagOnLetsAnotherActionContinue() {
     flag(true);
 
-    assertNull(handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "confirm")));
+    assertNull(handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", "something-else")));
     assertNull(handler.handle(ctx("POST", NeoEndpointType.ACTION, "ID-1", null)));
     discard.verifyNoInteractions();
   }
@@ -296,14 +299,62 @@ class InvoiceInboxHeaderHandlerTest {
     markReviewed.verifyNoInteractions();
   }
 
+  // ---------------------------------------------------------------- confirm
+
+  @Test
+  void flagOffRefusesConfirmAndNeverRunsIt() throws Exception {
+    flag(false);
+
+    assertDisabled(handler.handle(post("confirm", new org.codehaus.jettison.json.JSONObject())));
+
+    confirm.verifyNoInteractions();
+  }
+
+  @Test
+  void aPostOnConfirmDelegatesWithTheRecordIdAndTheBodyAndReturnsItsAnswer() throws Exception {
+    flag(true);
+    org.codehaus.jettison.json.JSONObject body = new org.codehaus.jettison.json.JSONObject()
+        .put("updated", "T");
+    NeoResponse answer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    confirm.when(() -> InvoiceInboxConfirm.confirm("ID-1", body)).thenReturn(answer);
+
+    assertSame(answer, handler.handle(post("confirm", body)));
+
+    confirm.verify(() -> InvoiceInboxConfirm.confirm("ID-1", body));
+    apply.verifyNoInteractions();
+    markReviewed.verifyNoInteractions();
+    discard.verifyNoInteractions();
+    review.verifyNoInteractions();
+  }
+
+  @Test
+  void confirmIsRefusedWithA405ForEveryVerbButPost() {
+    flag(true);
+    for (String method : new String[] { "GET", "PUT", "PATCH", "DELETE" }) {
+      NeoResponse response = handler.handle(ctx(method, NeoEndpointType.ACTION, "ID-1", "confirm"));
+
+      assertEquals(405, response.getHttpStatus(), method);
+    }
+
+    confirm.verifyNoInteractions();
+  }
+
+  @Test
+  void confirmOnACrudEndpointContinuesToTheDefaultHandling() {
+    flag(true);
+
+    assertNull(handler.handle(ctx("POST", NeoEndpointType.CRUD, "ID-1", "confirm")));
+    confirm.verifyNoInteractions();
+  }
+
   // ---------------------------------------------------------------- contract
 
   @Test
   void itServesActionsAndHidesTheInboxActionsFromAgents() {
     assertTrue(handler.servesActions());
-    assertEquals(Set.of("discard", "review", "apply", "mark-reviewed"),
+    assertEquals(Set.of("discard", "review", "apply", "mark-reviewed", "confirm"),
         handler.agentExcludedActions());
-    assertEquals(4, handler.agentExcludedActions().size());
+    assertEquals(5, handler.agentExcludedActions().size());
   }
 
   @Test

@@ -139,6 +139,37 @@ final class InvoicePendingResolver implements PendingResolver {
     return result;
   }
 
+  /**
+   * What is left of each candidate line of one invoice by the same rule as the pending, WITHOUT the
+   * floor at 0: {@code min(QtyInvoiced - moved, upstream_remaining)}, negative when more is moved
+   * than the line or its order line allows. The pending cannot show that excess (ETP-6002 CP-30).
+   * Call it holding {@link #lockSource}.
+   *
+   * @param invoiceId the invoice
+   * @return invoice line id to what is left; a line that is no candidate is absent
+   */
+  Map<String, BigDecimal> remainingByLine(String invoiceId) {
+    Map<String, BigDecimal> remaining = new LinkedHashMap<>();
+    try (PreparedStatement ps = OBDal.getInstance().getConnection()
+        .prepareStatement(pendingSql(matchTable, 1))) {
+      ps.setString(1, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+      ps.setString(2, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String lineId = rs.getString("c_invoiceline_id");
+          if (lineId != null) {
+            BigDecimal own = rs.getBigDecimal("own_remaining");
+            BigDecimal upstream = rs.getBigDecimal("upstream_remaining");
+            remaining.put(lineId, upstream == null ? own : own.min(upstream));
+          }
+        }
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not compute remaining quantities: " + e.getMessage(), e);
+    }
+    return remaining;
+  }
+
   private static void readRow(ResultSet rs, Map<String, SourceFacts> facts) throws SQLException {
     String invoiceId = rs.getString("c_invoice_id");
     String isSoTrx = rs.getString("issotrx");
@@ -204,6 +235,7 @@ final class InvoicePendingResolver implements PendingResolver {
     String base = "SELECT i.c_invoice_id, i.issotrx, i.docstatus, i.c_doctypetarget_id, "
         + "il.c_invoiceline_id, il.line, il.c_orderline_id, "
         + "GREATEST(0, COALESCE(il.qtyinvoiced, 0) - COALESCE(mv.moved, 0)) AS own_pending, "
+        + "COALESCE(il.qtyinvoiced, 0) - COALESCE(mv.moved, 0) AS own_remaining, "
         + "CASE WHEN ol.c_orderline_id IS NULL THEN NULL "
         + "     ELSE ol.qtyordered - COALESCE(ol.qtydelivered, 0) - COALESCE(dr.draftqty, 0) "
         + "END AS order_pending "

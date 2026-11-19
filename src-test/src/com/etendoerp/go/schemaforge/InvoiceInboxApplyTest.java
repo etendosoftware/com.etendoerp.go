@@ -556,7 +556,7 @@ class InvoiceInboxApplyTest {
     assertEquals(12, lineAt(0).getDouble("quantity"), 0);
     // 12 x 10 + 2 x 20 = 160, tax 21 % = 33.60
     assertEquals(193.6, header().getDouble("totalAmount"), 0.0001);
-    verify(row).setGrandTotalAmount(BigDecimal.valueOf(193.6));
+    verify(row).setGrandTotalAmount(new BigDecimal("193.60"));
     assertTrue(state.adjusted);
   }
 
@@ -1731,7 +1731,8 @@ class InvoiceInboxApplyTest {
   // ------------------------------------------------------------------ newProduct
 
   @Test
-  void newProductDefaultsTheNameToTheDescriptionAndAlwaysMarks() throws Exception {
+  void newProductDefaultsTheNameToTheDescriptionAndDoesNotMarkWhenNothingDiffers()
+      throws Exception {
     useProduct(0, "{state:'none',candidates:[]}");
 
     assertSaved(apply("{op:'newProduct',index:0}"));
@@ -1740,8 +1741,222 @@ class InvoiceInboxApplyTest {
     assertEquals("new", product.getString("state"));
     assertTrue(product.isNull("id"));
     assertEquals("Tornillo", product.getJSONObject("new").getString("name"));
-    // N1: the alta of a product always marks, even without any change of the extracted data
+    // the alta follows the extraction: no default found, nothing the user changed
+    assertFalse(state.adjusted);
+  }
+
+  /** The tenant has a default category C1 and a default unit U1 (what the worker pre-fills). */
+  private void tenantDefaults() {
+    when(lookups.defaultProductCategory(any())).thenReturn(Optional.of(new Party("C1", "Cat")));
+    when(lookups.defaultUom()).thenReturn(Optional.of(new Party("U1", "Unit")));
+  }
+
+  @Test
+  void newProductFromNonePreFillsTheDefaultsWithTheirSourceAndDoesNotMark() throws Exception {
+    tenantDefaults();
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    assertSaved(apply("{op:'newProduct',index:0}"));
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("C1", draft.getString("categoryId"));
+    assertEquals("default", draft.getString("categorySource"));
+    assertEquals("U1", draft.getString("uomId"));
+    assertEquals("default", draft.getString("uomSource"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void newProductPreFillsTheUnitTheLinePrintedWithTheOcrSource() throws Exception {
+    tenantDefaults();
+    when(lookups.uomByPrintedUnit("kg")).thenReturn(Optional.of(new Party("U2", "Kilogramo")));
+    use(doc()).getJSONArray("lines").getJSONObject(0).put("unitPrinted", "kg")
+        .put("product", op("{state:'ambiguous',id:null,candidates:[{id:'P2',name:'Prod2'}]}"));
+
+    assertSaved(apply("{op:'newProduct',index:0}"));
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("U2", draft.getString("uomId"));
+    assertEquals("ocr", draft.getString("uomSource"));
+    assertEquals("default", draft.getString("categorySource"));
+    assertFalse(state.adjusted, "ambiguous -> new unchanged does not mark");
+  }
+
+  @Test
+  void newProductWithNoDefaultsLeavesTheCategoryAndTheUnitAbsent() throws Exception {
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertFalse(draft.has("categoryId"));
+    assertFalse(draft.has("categorySource"));
+    assertFalse(draft.has("uomId"));
+    assertFalse(draft.has("uomSource"));
+  }
+
+  @Test
+  void newProductPreFillsWithTheRowsOrganizationNotTheSessions() throws Exception {
+    org.openbravo.model.common.enterprise.Organization rowOrganization =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(rowOrganization.getId()).thenReturn("ROW-ORG");
+    when(row.getOrganization()).thenReturn(rowOrganization);
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0}");
+
+    verify(lookups).defaultProductCategory("ROW-ORG");
+  }
+
+  @Test
+  void aLiveGapOfTheVerdictIsStoredWithTheDocument() throws Exception {
+    use(doc()).getJSONObject("header").put("vendor", op("{state:'new',extracted:{name:'Acme',"
+        + "taxId:'B1'},candidates:[]}"));
+
+    apply("{op:'setHeader',documentNo:'F-9'}");
+
+    JSONObject validation = saved().getJSONObject("validation");
+    assertFalse(validation.getBoolean("valid"));
+    assertTrue(validation.getJSONArray("missing").toString().contains("vendorAddress"),
+        validation.toString());
+  }
+
+  @Test
+  void newProductPicksAnotherIdMarksAndTagsItManual() throws Exception {
+    tenantDefaults();
+    when(lookups.productCategoryById("C2")).thenReturn(Optional.of(new Party("C2", "Other")));
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0,categoryId:'C2'}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("C2", draft.getString("categoryId"));
+    assertEquals("manual", draft.getString("categorySource"));
+    assertEquals("default", draft.getString("uomSource"), "the untouched pick keeps its source");
     assertTrue(state.adjusted);
+  }
+
+  @Test
+  void newProductResendingTheStoredIdsIsANoOpThatKeepsTheSources() throws Exception {
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo',categoryId:'C1',"
+        + "categorySource:'default',uomId:'U1',uomSource:'ocr'}}");
+    String before = commit();
+
+    apply("{op:'newProduct',index:0,name:'Tornillo',categoryId:'C1',uomId:'U1'}");
+
+    assertNothingWritten(before);
+  }
+
+  @Test
+  void newProductResendingThePreFilledIdsKeepsTheirSourceAndDoesNotMark() throws Exception {
+    tenantDefaults();
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0,categoryId:'C1',uomId:'U1'}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("default", draft.getString("categorySource"));
+    assertEquals("default", draft.getString("uomSource"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void newProductNullClearsTheIdAndItsSourceAndMarks() throws Exception {
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo',categoryId:'C1',"
+        + "categorySource:'default',uomId:'U1',uomSource:'default'}}");
+
+    apply("{op:'newProduct',index:0,uomId:null}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertFalse(draft.has("uomId"));
+    assertFalse(draft.has("uomSource"));
+    assertEquals("default", draft.getString("categorySource"));
+    assertTrue(state.adjusted);
+  }
+
+  // Owner decision 2026-11-17: filling a value the OCR could not define does not mark.
+  @Test
+  void aLegacyNewBlockWithoutSourcesDoesNotMarkWhenTheUserFillsTheEmptyValue() throws Exception {
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo'}}");
+
+    apply("{op:'newProduct',index:0,categoryId:'C1'}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("manual", draft.getString("categorySource"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void aTenantWithoutDefaultCategoryDoesNotMarkWhenTheUserPicksOne() throws Exception {
+    when(lookups.defaultProductCategory(any())).thenReturn(Optional.empty());
+    when(lookups.productCategoryById("C1")).thenReturn(Optional.of(new Party("C1", "Cat")));
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0,categoryId:'C1'}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("C1", draft.getString("categoryId"));
+    assertEquals("manual", draft.getString("categorySource"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void anUnmatchedUnitWithNoDefaultDoesNotMarkWhenTheUserPicksOne() throws Exception {
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo',categoryId:'C1',"
+        + "categorySource:'default'}}");
+
+    apply("{op:'newProduct',index:0,uomId:'U1'}");
+
+    JSONObject draft = lineAt(0).getJSONObject("product").getJSONObject("new");
+    assertEquals("U1", draft.getString("uomId"));
+    assertEquals("manual", draft.getString("uomSource"));
+    assertEquals("default", draft.getString("categorySource"));
+    assertFalse(state.adjusted);
+  }
+
+  @Test
+  void fillingTheEmptyOneAndChangingTheOneThatHadAValueMarks() throws Exception {
+    when(lookups.productCategoryById("C2")).thenReturn(Optional.of(new Party("C2", "Other")));
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo',categoryId:'C1',"
+        + "categorySource:'default'}}");
+
+    apply("{op:'newProduct',index:0,categoryId:'C2',uomId:'U1'}");
+
+    assertTrue(state.adjusted);
+  }
+
+  @Test
+  void fillingAnEmptyValueDoesNotRemoveAnEarlierMark() throws Exception {
+    useProduct(0, "{state:'new',id:null,candidates:[],new:{name:'Tornillo'}}");
+
+    apply("{op:'newProduct',index:0,name:'Tornillo B'}");
+    assertTrue(state.adjusted);
+    apply("{op:'newProduct',index:0,categoryId:'C1'}");
+
+    assertTrue(state.adjusted, "sticky");
+  }
+
+  @Test
+  void newProductRenamingMarksAndRevertingStillKeepsTheFlag() throws Exception {
+    useProduct(0, "{state:'none',candidates:[]}");
+
+    apply("{op:'newProduct',index:0,name:'Tornillo B'}");
+    assertTrue(state.adjusted);
+    apply("{op:'newProduct',index:0,name:'Tornillo'}");
+
+    assertTrue(state.adjusted, "sticky");
+  }
+
+  @Test
+  void theRequestCannotForgeASourceOrAStoredDisplayName() throws Exception {
+    useProduct(0, "{state:'none',candidates:[]}");
+    String before = commit();
+
+    assertRefusal(apply("{op:'newProduct',index:0,uomSource:'ocr'}"), 400, "invalid_request");
+    assertRefusal(apply("{op:'newProduct',index:0,categorySource:'default'}"), 400,
+        "invalid_request");
+    assertRefusal(apply("{op:'newProduct',index:0,category:'Cat'}"), 400, "invalid_request");
+    assertNothingWritten(before);
   }
 
   @Test

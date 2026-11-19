@@ -2111,7 +2111,8 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
             .fieldName("createReturnInvoice").recordId("ret-1").requestBody(body).build());
 
         assertEquals(200, result.getHttpStatus());
-        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+            InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
         Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
             .process(eq("ret-inv-sif"), eq("CO"), anyString(), anyString(), anyString(), any(),
                 any());

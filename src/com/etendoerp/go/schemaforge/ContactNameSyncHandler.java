@@ -41,8 +41,9 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
  * <p>Covers both Classic (direct OBDal save) and Etendo GO (NEO NeoCrudHandler, which also
  * persists via OBDal).
  *
- * <p>Does not interfere with {@link BusinessPartnerHandler}, which only derives {@code Name}
- * on POST (new records with a blank name).
+ * <p>Agrees with {@link BusinessPartnerHandler}: since ETP-6175 its pre-hook already writes the
+ * same derivation into the request for a person on NEO writes ({@code ContactIdentityRules}), so on
+ * that path this observer recomputes an identical value; it remains the rule for Classic saves.
  */
 public class ContactNameSyncHandler extends EntityPersistenceEventObserver {
 

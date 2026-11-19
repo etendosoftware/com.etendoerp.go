@@ -4,7 +4,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (635)
+# --- con mocks (644)
 com.etendoerp.go.modulescript.EnsureDocumentStatusTranslationsScriptTest
 com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.payment.CheckoutPromotionTermsTest
@@ -244,6 +244,11 @@ com.etendoerp.go.payment.reconcile.ReconciliationRunLockTest
 com.etendoerp.go.payment.reconcile.ReconciliationSettingsTest
 com.etendoerp.go.payment.reconcile.ReconciliationSupportTest
 com.etendoerp.go.payment.reconcile.SubscriptionReconcilerTest
+com.etendoerp.go.payment.invoicing.PaymentLedgerTest
+com.etendoerp.go.payment.invoicing.PaymentMethodReaderTest
+com.etendoerp.go.payment.invoicing.PaymentStatusTest
+com.etendoerp.go.payment.invoicing.PaymentsApiServletTest
+com.etendoerp.go.payment.invoicing.StripeInvoicePaymentTest
 com.etendoerp.go.rest.AccountIdentityDalHelperTest
 com.etendoerp.go.rest.AccountRegistrationServiceTest
 com.etendoerp.go.rest.CompanyInvitationDalHelperTest
@@ -319,6 +324,10 @@ com.etendoerp.go.schemaforge.ComboReferenceSelectorExecutorTest
 com.etendoerp.go.schemaforge.DocActionIdempotencyTest
 com.etendoerp.go.schemaforge.DocTemplateConfigSupportTest
 com.etendoerp.go.schemaforge.DocTypeResolverTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReaderTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReportProcessTest
+com.etendoerp.go.schemaforge.DocumentPdfMonthlyReportTest
+com.etendoerp.go.schemaforge.DocumentPdfUsageTest
 com.etendoerp.go.schemaforge.ForeignOriginalTest
 com.etendoerp.go.schemaforge.HiddenMandatoryDefaultsTest
 com.etendoerp.go.schemaforge.InvoiceCompletionQuotaHookTest
@@ -407,6 +416,7 @@ com.etendoerp.go.schemaforge.NeoQuotaWriteGateTest
 com.etendoerp.go.schemaforge.NeoReadPredicatesTest
 com.etendoerp.go.schemaforge.NeoReferenceActivenessTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipTest
+com.etendoerp.go.schemaforge.NeoReferenceSelectorValidationTest
 com.etendoerp.go.schemaforge.NeoRequestBodyParserTest
 com.etendoerp.go.schemaforge.NeoRequestRouterTest
 com.etendoerp.go.schemaforge.NeoResponseTest
@@ -641,7 +651,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (50)
+# --- integración (BD) (51)
 com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
 com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
@@ -649,6 +659,7 @@ com.etendoerp.go.mcp.McpPropertyPathFilterIntegrationTest
 com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest
 com.etendoerp.go.oauth2.PublicApiKeyStoreIntegrationTest
 com.etendoerp.go.onboarding.BusinessPartnerTransactionalSequenceIntegrationTest
+com.etendoerp.go.onboarding.OnboardingInitialPeriodStateTenantContextIntegrationTest
 com.etendoerp.go.payment.BillingEventStoreIntegrationTest
 com.etendoerp.go.payment.CheckoutRequestStoreIntegrationTest
 com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest

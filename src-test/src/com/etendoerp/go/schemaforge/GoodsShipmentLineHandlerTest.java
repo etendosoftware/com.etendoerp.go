@@ -23,18 +23,35 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -53,7 +70,8 @@ import org.openbravo.model.common.order.OrderLine;
  *
  * <p>Covers two responsibilities:
  * <ul>
- *   <li>{@code handle()} — must always return null to fall through to default CRUD.</li>
+ *   <li>{@code handle()} — returns the 422 for a capped create or update, and null otherwise so
+ *       the default CRUD proceeds.</li>
  *   <li>{@code afterHandle()} — guard conditions that short-circuit before DB access:
  *       non-GET method, missing previous result, null body, and empty data array.</li>
  *   <li>ETP-6002 CP-22 — {@code invoiceLineId} declared as a create directive (the MCP no longer
@@ -62,6 +80,10 @@ import org.openbravo.model.common.order.OrderLine;
  *   <li>ETP-6002 CP-14 — a quotation line is never a shipment line's order line.</li>
  *   <li>ETP-6002 QA BUG-1 — a create with {@code invoiceLineId} and no {@code salesOrderLine}
  *       takes the invoice line's order line (MCP parity with the window).</li>
+ *   <li>ETP-6002 CP-30 — the quantity of a line is capped by the invoice line it ships
+ *       ({@link ShipmentLineInvoiceCap}): the create pre-hook (refusal, default to the pending,
+ *       REST and MCP), the update of a linked line, and the re-check under the invoice lock after
+ *       the create, inside and outside {@code /batch}, failures included.</li>
  * </ul>
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
@@ -69,6 +91,7 @@ import org.openbravo.model.common.order.OrderLine;
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentLineHandler
  * @covers com.etendoerp.go.schemaforge.SalesQuotations
+ * @covers com.etendoerp.go.schemaforge.ShipmentLineInvoiceCap
  */
 public class GoodsShipmentLineHandlerTest {
 
@@ -734,5 +757,479 @@ public class GoodsShipmentLineHandlerTest {
         .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build());
 
     assertFalse(body.has("salesOrderLine"));
+  }
+
+  // ── ETP-6002 CP-30 — the quantity is capped by the invoice line's pending: helpers ──
+
+  private static final String INVOICE_ID = "inv-1";
+  private static final String INVOICE_LINE_ID = "il-1";
+  private static final String SHIPMENT_LINE_ID = "ship-1";
+  private static final String FIELD_QTY = "movementQuantity";
+
+  /** Makes {@code il-1} the caller's own line of the invoice {@code inv-1}. */
+  private void ownInvoiceLineOfInvoice() {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn(INVOICE_ID);
+    InvoiceLine invoiceLine = mock(InvoiceLine.class);
+    when(invoiceLine.getInvoice()).thenReturn(invoice);
+    when(invoiceLine.getId()).thenReturn(INVOICE_LINE_ID);
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, INVOICE_LINE_ID))
+        .thenReturn(invoiceLine);
+  }
+
+  /** A completed invoice with {@code qty} pending on {@code lineId}. */
+  private static PendingResolver.Source pendingOf(String invoiceId, String lineId, String qty) {
+    return PendingResolver.Source.available(invoiceId,
+        List.of(new PendingResolver.SourceLine(lineId, new BigDecimal(qty))));
+  }
+
+  private static PendingResolver.Source nothingPending(String invoiceId) {
+    return PendingResolver.Source.unavailable(invoiceId, FollowUpException.Reason.NOTHING_PENDING);
+  }
+
+  private static PendingResolver.Source notCompleted(String invoiceId) {
+    return PendingResolver.Source.unavailable(invoiceId, FollowUpException.Reason.NOT_COMPLETED);
+  }
+
+  /** The POST post-hook context of a line just created with id {@code newLineId}. */
+  private static NeoContext postCreated(String newLineId) throws Exception {
+    JSONObject created = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", newLineId))));
+    return NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(201, created)).build();
+  }
+
+  /**
+   * Runs a POST post-hook with no result: it clears the invoice line a previous request may have
+   * left armed on this thread, so what a case arms is only what its own pre-hook armed.
+   */
+  private static void clearArmedLink(GoodsShipmentLineHandler handler) {
+    handler.afterHandle(NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).build());
+  }
+
+  /** The invoice lines linked to a movement line, as {@code invoice line id, invoice id} pairs. */
+  private static ResultSet linkRows(String... lineAndInvoice) throws Exception {
+    int[] cursor = { -1 };
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenAnswer(inv -> (++cursor[0]) * 2 < lineAndInvoice.length);
+    when(rs.getString(anyInt())).thenAnswer(inv -> {
+      int column = inv.getArgument(0);
+      return lineAndInvoice[cursor[0] * 2 + column - 1];
+    });
+    return rs;
+  }
+
+  private static void assertQuantity(String label, String expected, Object actual) {
+    assertEquals(label, 0, new BigDecimal(expected).compareTo(new BigDecimal(actual.toString())));
+  }
+
+  // ── CP-30 — the create pre-hook ───────────────────────────────────────────
+
+  /**
+   * The create of a line carrying one of the caller's {@code invoiceLineId}: a quantity up to the
+   * pending passes and the link is armed; above it, 0, negative, nothing pending or an invoice
+   * that is not completed (no line pending) answer 422 {@code importQuantityExceedsPending} and
+   * nothing is armed. Without a quantity the line takes the pending — on REST when the body has
+   * none, on MCP when the key set the caller sent ({@code ATTR_CLIENT_PROVIDED_FIELDS}) lacks it,
+   * whatever the defaults pass put there. A value the caller sent is never overwritten. A
+   * non-numeric quantity and another tenant's invoice line are left as they were, without
+   * locking the invoice. QA CP-30 is the "one above the pending" row: an invoice line with 2
+   * pending accepted a line of 3, because only the popup limited the quantity. Every refusal
+   * names the pending it was checked against.
+   */
+  @Test
+  public void createWithAnInvoiceLineIsCappedByItsPendingAndDefaultsToIt() throws Exception {
+    ownInvoiceLineOfInvoice();
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "il-foreign"))
+        .thenReturn(null);
+    PendingResolver.Source twoPending = pendingOf(INVOICE_ID, INVOICE_LINE_ID, "2");
+    Set<String> mcpWithoutQty = Set.of("invoiceLineId", "description");
+    Set<String> mcpWithQty = Set.of("invoiceLineId", FIELD_QTY);
+    Object[][] cases = {
+        // label, invoiceLineId, quantity in the body (null: absent), MCP keys sent (null: REST),
+        // the invoice's verdict, refused, quantity after the pre-hook (null: absent), locked, linked
+        { "equal to the pending", INVOICE_LINE_ID, 2, null, twoPending, false, "2", true, true },
+        { "one above the pending", INVOICE_LINE_ID, 3, null, twoPending, true, "3", true, false },
+        { "nothing pending", INVOICE_LINE_ID, 1, null, nothingPending(INVOICE_ID), true, "1",
+            true, false },
+        { "zero", INVOICE_LINE_ID, 0, null, twoPending, true, "0", true, false },
+        { "negative", INVOICE_LINE_ID, -1, null, twoPending, true, "-1", true, false },
+        { "invoice not completed", INVOICE_LINE_ID, 1, null, notCompleted(INVOICE_ID), true, "1",
+            true, false },
+        { "REST, no quantity: takes the pending", INVOICE_LINE_ID, null, null, twoPending, false,
+            "2", true, true },
+        { "REST, no quantity and nothing pending", INVOICE_LINE_ID, null, null,
+            nothingPending(INVOICE_ID), true, null, true, false },
+        { "MCP, a defaulted quantity is not the caller's: takes the pending", INVOICE_LINE_ID, 7,
+            mcpWithoutQty, twoPending, false, "2", true, true },
+        { "MCP, the caller's quantity is kept", INVOICE_LINE_ID, 1, mcpWithQty, twoPending, false,
+            "1", true, true },
+        { "MCP, the caller's quantity above the pending", INVOICE_LINE_ID, 3, mcpWithQty,
+            twoPending, true, "3", true, false },
+        { "REST, the caller's quantity is kept", INVOICE_LINE_ID, 1, null, twoPending, false, "1",
+            true, true },
+        { "non-numeric quantity: left to the write", INVOICE_LINE_ID, "abc", null, twoPending,
+            false, "abc", false, true },
+        { "another tenant's invoice line: ignored", "il-foreign", 99, null, twoPending, false,
+            "99", false, false },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      JSONObject body = new JSONObject().put("invoiceLineId", c[1]);
+      if (c[2] != null) {
+        body.put(FIELD_QTY, c[2]);
+      }
+      NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+      if (c[3] != null) {
+        ctx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, c[3]);
+      }
+      PendingResolver.Source verdict = (PendingResolver.Source) c[4];
+      boolean refused = (Boolean) c[5];
+      GoodsShipmentLineHandler handler = new GoodsShipmentLineHandler();
+      clearArmedLink(handler);
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class, (resolver, construction) ->
+                  when(resolver.loadSources(any())).thenReturn(Map.of(INVOICE_ID, verdict)))) {
+        obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+        NeoResponse refusal = handler.handle(ctx);
+        boolean locked = !resolvers.constructed().isEmpty();
+        NeoResponse after = handler.afterHandle(postCreated("ship-new"));
+
+        assertEquals(label, refused, refusal != null);
+        if (refused) {
+          assertEquals(label, 422, refusal.getHttpStatus());
+          assertEquals(label, DocumentLineImport.ERROR_EXCEEDS_PENDING,
+              refusal.getBody().getJSONObject("error").getString("code"));
+          // A quantity of 0 or below is refused for its sign, not for the pending.
+          boolean notPositive = c[2] instanceof Integer && (Integer) c[2] <= 0;
+          assertEquals(label + ": quantityNotPositive", notPositive,
+              refusal.getBody().getJSONObject("error").optBoolean("quantityNotPositive", false));
+          assertQuantity(label + ": the pending it names", verdict == twoPending ? "2" : "0",
+              refusal.getBody().getJSONObject("error").get("pending"));
+        }
+        String expected = (String) c[6];
+        assertEquals(label, expected, body.has(FIELD_QTY) ? body.get(FIELD_QTY).toString() : null);
+        assertEquals(label + ": locks the invoice", c[7], locked);
+        if (locked) {
+          verify(resolvers.constructed().get(0)).lockSource(INVOICE_ID);
+        }
+        assertNull(label + ": the post-hook keeps the created line", after);
+        linker.verify(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine(anyString(), anyString(),
+            any()), times((Boolean) c[8] ? 1 : 0));
+      }
+    }
+  }
+
+  // ── CP-30 — the update of a linked line ───────────────────────────────────
+
+  /**
+   * The update of {@code movementQuantity} on a line linked to invoice lines (the column or
+   * {@code M_MatchSI}, both read by one statement bound twice to the line): raising it is allowed
+   * up to the pending plus what the line holds, for EVERY linked invoice line, and the first that
+   * does not fit refuses with {@code maximumAllowed}; lowering or keeping it is allowed. A negative
+   * quantity is refused even against an invoice no longer completed, while such an invoice does
+   * not cap a raise. Nothing of the update path was covered before.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void updateOfALinkedLineIsCappedByEveryInvoiceLineItShips() throws Exception {
+    Object[][] cases = {
+        // label, held, requested, links (invoice line, invoice)..., verdicts, refused line, maximum
+        { "raise within pending + held", "2", 5, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "3")), null, null },
+        { "raise above pending + held", "2", 6, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "3")), "il-1", "5" },
+        { "raise with nothing pending", "2", 3, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", nothingPending("inv-1")), "il-1", "2" },
+        { "lower", "5", 3, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", nothingPending("inv-1")), null, null },
+        { "keep", "5", 5, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", nothingPending("inv-1")), null, null },
+        { "negative", "2", -1, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "3")), "il-1", "5" },
+        { "negative on an invoice no longer completed", "2", -1, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", notCompleted("inv-1")), "il-1", "2" },
+        { "raise on an invoice no longer completed", "2", 10, new String[] { "il-1", "inv-1" },
+            Map.of("inv-1", notCompleted("inv-1")), null, null },
+        { "two links, both fit", "2", 3, new String[] { "il-1", "inv-1", "il-2", "inv-2" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "10"),
+                "inv-2", pendingOf("inv-2", "il-2", "1")), null, null },
+        { "two links, the second does not fit", "2", 4,
+            new String[] { "il-1", "inv-1", "il-2", "inv-2" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "10"),
+                "inv-2", pendingOf("inv-2", "il-2", "1")), "il-2", "3" },
+        { "two links, neither fits: the first refuses", "2", 4,
+            new String[] { "il-1", "inv-1", "il-2", "inv-2" },
+            Map.of("inv-1", pendingOf("inv-1", "il-1", "1"), "inv-2", nothingPending("inv-2")),
+            "il-1", "3" },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getMovementQuantity()).thenReturn(new BigDecimal((String) c[1]));
+      ownership.when(() -> TenantOwnership.loadOwned(ShipmentInOutLine.class, SHIPMENT_LINE_ID))
+          .thenReturn(line);
+      ResultSet links = linkRows((String[]) c[3]);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(links);
+      Connection conn = mock(Connection.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      OBDal dal = mock(OBDal.class);
+      when(dal.getConnection()).thenReturn(conn);
+      Map<String, PendingResolver.Source> verdicts = (Map<String, PendingResolver.Source>) c[4];
+      NeoContext ctx = NeoContext.builder().httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .recordId(SHIPMENT_LINE_ID).requestBody(new JSONObject().put(FIELD_QTY, c[2])).build();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class, (resolver, construction) ->
+                  when(resolver.loadSources(any())).thenReturn(verdicts))) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        NeoResponse refusal = new GoodsShipmentLineHandler().handle(ctx);
+
+        String refusedLine = (String) c[5];
+        if (refusedLine == null) {
+          assertNull(label, refusal);
+        } else {
+          assertNotNull(label, refusal);
+          assertEquals(label, 422, refusal.getHttpStatus());
+          JSONObject error = refusal.getBody().getJSONObject("error");
+          assertEquals(label, DocumentLineImport.ERROR_EXCEEDS_PENDING, error.getString("code"));
+          assertEquals(label, refusedLine, error.getString("sourceLineId"));
+          assertQuantity(label, (String) c[6], error.get("maximumAllowed"));
+          assertQuantity(label, String.valueOf(c[2]), error.get("requested"));
+        }
+        for (String invoiceId : verdicts.keySet()) {
+          verify(resolvers.constructed().get(0)).lockSource(invoiceId);
+        }
+        verify(dal).refresh(line);
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(conn).prepareStatement(sql.capture());
+        assertTrue(label, sql.getValue().contains("il.m_inoutline_id = ?")
+            && sql.getValue().contains(InOutInvoiceLinks.MatchTable.SALES.tableName()));
+        verify(ps).setString(1, SHIPMENT_LINE_ID);
+        verify(ps).setString(2, SHIPMENT_LINE_ID);
+      }
+    }
+  }
+
+  /**
+   * An update that does not raise anything to check is never capped and, but for the line with no
+   * invoice link, reads nothing: a body without {@code movementQuantity}, a quantity lowered to 0
+   * and a non-numeric one perform no query; a line with no invoice link (the way to ship extra
+   * units) is read and left as it is, without locking any invoice.
+   */
+  @Test
+  public void updateWithoutAQuantityToCheckOrWithoutAnInvoiceLinkIsNotCapped() throws Exception {
+    ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+    when(line.getMovementQuantity()).thenReturn(new BigDecimal("2"));
+    ownership.when(() -> TenantOwnership.loadOwned(ShipmentInOutLine.class, SHIPMENT_LINE_ID))
+        .thenReturn(line);
+    Object[][] cases = {
+        // label, body, reads the links
+        { "no movementQuantity", new JSONObject().put("description", "x"), false },
+        { "lowered to 0", new JSONObject().put(FIELD_QTY, 0), false },
+        { "non-numeric", new JSONObject().put(FIELD_QTY, "abc"), false },
+        { "a line with no invoice link", new JSONObject().put(FIELD_QTY, 99), true },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      ResultSet noLinks = linkRows();
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(noLinks);
+      Connection conn = mock(Connection.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      OBDal dal = mock(OBDal.class);
+      when(dal.getConnection()).thenReturn(conn);
+      NeoContext ctx = NeoContext.builder().httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .recordId(SHIPMENT_LINE_ID).requestBody((JSONObject) c[1]).build();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        assertNull(label, new GoodsShipmentLineHandler().handle(ctx));
+
+        verify(conn, times((Boolean) c[2] ? 1 : 0)).prepareStatement(anyString());
+        assertTrue(label + ": no invoice is locked", resolvers.constructed().isEmpty());
+      }
+    }
+  }
+
+  // ── CP-30 — the re-check after the create ─────────────────────────────────
+
+  /**
+   * Within the cap — exactly at it, below it, or a line the follow-up does not list — the line
+   * keeps the link written under the invoice lock and the post-hook keeps the default result.
+   * The existing tests only reach the link without an invoice (no lock) or the excess.
+   */
+  @Test
+  public void aCreateWithinTheCapOnTheRecheckKeepsItsLink() throws Exception {
+    ownInvoiceLineOfInvoice();
+    Object[][] cases = {
+        // label, what is left of the invoice line once linked
+        { "exactly at the cap", Map.of(INVOICE_LINE_ID, BigDecimal.ZERO) },
+        { "below the cap", Map.of(INVOICE_LINE_ID, new BigDecimal("3")) },
+        { "not listed by the follow-up", Map.of() },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      @SuppressWarnings("unchecked")
+      Map<String, BigDecimal> remaining = (Map<String, BigDecimal>) c[1];
+      OBDal dal = mock(OBDal.class);
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class, (resolver, construction) ->
+                  when(resolver.remainingByLine(INVOICE_ID)).thenReturn(remaining))) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        assertNull(label, ShipmentLineInvoiceCap.linkUnderCap(INVOICE_LINE_ID, "ship-2"));
+
+        verify(resolvers.constructed().get(0)).lockSource(INVOICE_ID);
+        linker.verify(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine(INVOICE_LINE_ID,
+            "ship-2", InOutInvoiceLinks.MatchTable.SALES));
+        linker.verify(() -> InvoiceLineLinker.unlinkInvoiceLineFromInOutLine(anyString(),
+            anyString(), any()), never());
+        verify(dal, never()).remove(any());
+        verify(dal, never()).commitAndClose();
+        context.verify(OBContext::restorePreviousMode);
+      }
+    }
+  }
+
+  /**
+   * Review B1: outside a batch the insert commits before the link exists, so two racing creates
+   * both pass the pre-hook. Of two racing creates that together exceed what is pending, exactly
+   * one keeps its line; which one depends on the binding cap, not on who locks first (under the
+   * order line's cap the first to lock already sees both drafts and can be the one removed).
+   *
+   * <p>The create the re-check finds in excess, once it holds the invoice lock and has written its
+   * link, is answered the 422 by the handler's post-hook in place of the created line, naming
+   * nothing pending. Outside a batch the line was committed, so it is unlinked, removed and that
+   * removal committed; inside {@code /batch} nothing is compensated — the 422 rolls the whole
+   * batch back.
+   */
+  @Test
+  public void aCreateFoundInExcessIsAnsweredTheRefusalAndCompensatedOnlyOutsideABatch()
+      throws Exception {
+    ownInvoiceLineOfInvoice();
+    PendingResolver.Source fivePending = pendingOf(INVOICE_ID, INVOICE_LINE_ID, "5");
+    Map<String, BigDecimal> overShipped = Map.of(INVOICE_LINE_ID, new BigDecimal("-5"));
+    for (boolean inBatch : new boolean[] { false, true }) {
+      String label = inBatch ? "inside /batch" : "outside a batch";
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getMovementQuantity()).thenReturn(new BigDecimal("5"));
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(ShipmentInOutLine.class, "ship-2")).thenReturn(line);
+      JSONObject body = new JSONObject().put("invoiceLineId", INVOICE_LINE_ID).put(FIELD_QTY, 5);
+      NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+      GoodsShipmentLineHandler handler = new GoodsShipmentLineHandler();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class, (resolver, construction) -> {
+                when(resolver.loadSources(any())).thenReturn(Map.of(INVOICE_ID, fivePending));
+                when(resolver.remainingByLine(INVOICE_ID)).thenReturn(overShipped);
+              })) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        NeoResponse answer;
+        if (inBatch) {
+          BatchService.beginCallerOwnedTransaction();
+        }
+        try {
+          assertNull(label + ": the pre-hook lets it through", handler.handle(ctx));
+          answer = handler.afterHandle(postCreated("ship-2"));
+        } finally {
+          BatchService.endCallerOwnedTransaction();
+        }
+
+        assertNotNull(label, answer);
+        assertEquals(label, 422, answer.getHttpStatus());
+        assertEquals(label, DocumentLineImport.ERROR_EXCEEDS_PENDING,
+            answer.getBody().getJSONObject("error").getString("code"));
+        assertQuantity(label, "0", answer.getBody().getJSONObject("error").get("pending"));
+        // The pre-hook's resolver is the first; the re-check's, under the lock, the second.
+        verify(resolvers.constructed().get(1)).lockSource(INVOICE_ID);
+        linker.verify(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine(INVOICE_LINE_ID,
+            "ship-2", InOutInvoiceLinks.MatchTable.SALES));
+        int compensated = inBatch ? 0 : 1;
+        linker.verify(() -> InvoiceLineLinker.unlinkInvoiceLineFromInOutLine(INVOICE_LINE_ID,
+            "ship-2", InOutInvoiceLinks.MatchTable.SALES), times(compensated));
+        verify(dal, times(compensated)).remove(line);
+        verify(dal, times(compensated)).commitAndClose();
+      }
+    }
+  }
+
+  /**
+   * A failure while linking, re-checking or removing the line in excess is answered as a 500,
+   * never as the success of the create: the line may exceed what was invoiced, so the caller must
+   * not read it as saved and correct. Nothing is committed by the cap and admin mode is restored.
+   */
+  @Test
+  public void aFailureOfTheRecheckIsAServerErrorNeverASuccess() throws Exception {
+    ownInvoiceLineOfInvoice();
+    String[] steps = { "link", "recheck", "unlink", "remove" };
+    for (String step : steps) {
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getMovementQuantity()).thenReturn(new BigDecimal("5"));
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(ShipmentInOutLine.class, "ship-2")).thenReturn(line);
+      if ("remove".equals(step)) {
+        doThrow(new IllegalStateException("remove failed")).when(dal).remove(line);
+      }
+      Map<String, BigDecimal> overShipped = Map.of(INVOICE_LINE_ID, new BigDecimal("-5"));
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class);
+          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+          MockedConstruction<InvoicePendingResolver> resolvers =
+              Mockito.mockConstruction(InvoicePendingResolver.class, (resolver, construction) -> {
+                if ("recheck".equals(step)) {
+                  when(resolver.remainingByLine(INVOICE_ID))
+                      .thenThrow(new OBException("query failed"));
+                } else {
+                  when(resolver.remainingByLine(INVOICE_ID)).thenReturn(overShipped);
+                }
+              })) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        if ("link".equals(step)) {
+          linker.when(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine(INVOICE_LINE_ID,
+              "ship-2", InOutInvoiceLinks.MatchTable.SALES))
+              .thenThrow(new IllegalStateException("link failed"));
+        }
+        if ("unlink".equals(step)) {
+          linker.when(() -> InvoiceLineLinker.unlinkInvoiceLineFromInOutLine(INVOICE_LINE_ID,
+              "ship-2", InOutInvoiceLinks.MatchTable.SALES))
+              .thenThrow(new IllegalStateException("unlink failed"));
+        }
+
+        NeoResponse answer = ShipmentLineInvoiceCap.linkUnderCap(INVOICE_LINE_ID, "ship-2");
+
+        assertNotNull(step, answer);
+        assertEquals(step, 500, answer.getHttpStatus());
+        assertEquals(step, NeoErrorClassifier.CODE_SERVER_ERROR,
+            answer.getBody().getJSONObject("error").getString("code"));
+        verify(dal, never()).commitAndClose();
+        context.verify(OBContext::restorePreviousMode);
+      }
+    }
   }
 }

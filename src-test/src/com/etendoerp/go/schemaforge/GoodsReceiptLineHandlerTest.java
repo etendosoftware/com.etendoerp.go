@@ -25,14 +25,22 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
@@ -46,6 +54,11 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * Receipt, where the quantity being received has nothing to do with what is already on hand.
  * {@code afterCallout()} must strip that stock-derived value so the frontend keeps the row's own
  * default instead of silently overwriting it.
+ *
+ * <p>ETP-6002 CP-30: the shipment's quantity cap against the invoice line does not reach the
+ * receipt.
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptLineHandler
  */
 public class GoodsReceiptLineHandlerTest {
 
@@ -351,6 +364,61 @@ public class GoodsReceiptLineHandlerTest {
           + "value — it must be overridden with the warehouse's default locator, not treated "
           + "as already supplied",
           "loc-default-wh1", body.getString("storageBin"));
+    }
+  }
+
+  // ── ETP-6002 CP-30 — the sales cap stays on the sales side ────────────────
+
+  /**
+   * The quantity cap against the invoice line is the goods shipment's own
+   * ({@link ShipmentLineInvoiceCap}); a goods receipt line created from a purchase invoice line is
+   * neither capped nor defaulted, locks no invoice, and keeps the base column-only link without
+   * the shipment's linker or re-check.
+   */
+  @Test
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  public void aReceiptLineFromAnInvoiceLineIsNotCappedNorLinkedThroughTheSalesCap()
+      throws Exception {
+    JSONObject body = new JSONObject().put("invoiceLineId", "pil-1");
+    NeoContext create = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+    JSONObject created = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "rcpt-line-1"))));
+    NeoContext afterCreate = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).previousResult(new NeoResponse(201, created)).build();
+    InvoiceLine ownLine = mock(InvoiceLine.class);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    List<String> statements = new ArrayList<>();
+    when(session.createNativeQuery(Mockito.anyString())).thenAnswer(call -> {
+      statements.add(call.getArgument(0));
+      return query;
+    });
+    when(query.setParameter(Mockito.anyString(), any())).thenReturn(query);
+
+    try (MockedStatic<TenantOwnership> ownership = Mockito.mockStatic(TenantOwnership.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class);
+        MockedConstruction<InvoicePendingResolver> resolvers =
+            Mockito.mockConstruction(InvoicePendingResolver.class)) {
+      ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, "pil-1"))
+          .thenReturn(ownLine);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      assertNull(HANDLER.handle(create));
+      assertFalse("a receipt line takes no quantity from the invoice line",
+          body.has("movementQuantity"));
+      assertNull(HANDLER.afterHandle(afterCreate));
+
+      assertTrue("no invoice is locked or re-checked", resolvers.constructed().isEmpty());
+      linker.verifyNoInteractions();
+      assertEquals(1, statements.size());
+      assertTrue(statements.get(0), statements.get(0).startsWith("UPDATE c_invoiceline SET "
+          + "m_inoutline_id = :lineId"));
+      Mockito.verify(query).setParameter("lineId", "rcpt-line-1");
+      Mockito.verify(query).setParameter("invLineId", "pil-1");
     }
   }
 }
