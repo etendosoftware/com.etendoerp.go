@@ -104,8 +104,7 @@ and so carry no `ad_user_id`; app-side ones carry the signed-in user's.
 The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`
 (`OwnerAccountResolver`), so both sides send one `etgo_account_id`.
 
-**Open items.** PM confirmation of `ad_user_id` under the ETP-5791 legal rule (no business record id
-of any kind) is pending. The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
+**Open items.** The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
 of `ad_user_id` with a per-deployment secret salt) is pending sign-off and is not shipped. Platform
 must still name the `ETGO_Account` lookup table's test-account flag in Mixpanel.
 
@@ -121,8 +120,8 @@ Allowed low-cardinality keys:
 
 - `account_id` — the tenant (`AD_Client_ID`); the web client sends the same key. No business
   record id of any kind (contacts, documents, ...) — legal rule ETP-5791; the internal identity ids
-  of the ETP-6228 section above are allowed. PM confirmation of `ad_user_id` under that rule is
-  pending.
+  of the ETP-6228 section above are allowed. The PM confirmed on 2026-11-19 that `ad_user_id` is
+  allowed: the rule forbids business record ids only.
 - `category`
 - `change_origin`
 - `change_trigger`
