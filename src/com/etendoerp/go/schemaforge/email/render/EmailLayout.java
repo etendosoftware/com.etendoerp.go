@@ -173,7 +173,9 @@ public final class EmailLayout {
   }
 
   private static void appendCta(StringBuilder html, EmailContent content) {
-    if (!content.hasCta()) {
+    // ADR-0005: entity escaping cannot neutralise a javascript:/data: scheme, so the button is
+    // dropped rather than rendered with a live href.
+    if (!content.hasCta() || !EmailEscape.isSafeUrl(content.getCtaUrl())) {
       return;
     }
     String url = escape(content.getCtaUrl());

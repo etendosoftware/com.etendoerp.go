@@ -57,6 +57,45 @@ public final class EmailEscape {
   }
 
   /**
+   * Tells whether a value may be emitted as an {@code href}/{@code src} (ADR-0005, URL context).
+   *
+   * <p>Entity escaping does not stop {@code javascript:}, so a URL also needs a scheme allowlist:
+   * {@code http}, {@code https}, {@code mailto}, or no scheme at all (relative). Browsers ignore tabs,
+   * newlines and other control characters inside a scheme and compare it case-insensitively, so
+   * the value is normalised the same way before the scheme is read.</p>
+   *
+   * @param url the candidate URL, may be {@code null}
+   * @return {@code true} when the URL is safe to place in an attribute (after escaping)
+   */
+  public static boolean isSafeUrl(String url) {
+    if (StringUtils.isBlank(url)) {
+      return false;
+    }
+    StringBuilder normalized = new StringBuilder(url.length());
+    for (int i = 0; i < url.length(); i++) {
+      char c = url.charAt(i);
+      if (c > ' ' && c != '\u007f' && !Character.isWhitespace(c) && !Character.isSpaceChar(c)) {
+        normalized.append(Character.toLowerCase(c));
+      }
+    }
+    String value = normalized.toString();
+    int colon = value.indexOf(':');
+    int delimiter = -1;
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (c == '/' || c == '?' || c == '#') {
+        delimiter = i;
+        break;
+      }
+    }
+    if (colon < 0 || (delimiter >= 0 && delimiter < colon)) {
+      return true;
+    }
+    String scheme = value.substring(0, colon);
+    return "http".equals(scheme) || "https".equals(scheme) || "mailto".equals(scheme);
+  }
+
+  /**
    * Turns {@code **bold**} markers into {@code <strong>} tags.
    *
    * <p>ETP-5003: emphasis used to be applied in Java, by wrapping an interpolated value in

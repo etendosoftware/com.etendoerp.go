@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.email.render;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -39,6 +40,25 @@ public class EmailEncodeOnOutputTest {
       { "Normal Value", "Normal Value" },
       { "", "" },
       { null, "" },
+      // Unquoted-attribute breakout: the space and "=" survive, but "<", ">" and quotes cannot.
+      { "x onmouseover=alert(1)>", "x onmouseover=alert(1)&gt;" },
+  };
+
+  /** URL fixtures: {input, "allowed" | "rejected"}; mirrors the URL table of the fixtures doc. */
+  private static final String[][] URL_FIXTURES = {
+      { "https://example.com/a?b=1&c=2", "allowed" },
+      { "http://example.com", "allowed" },
+      { "mailto:a@example.com", "allowed" },
+      { "/portal/doc/1", "allowed" },
+      { "relative/path?x=a:b", "allowed" },
+      { "javascript:alert(1)", "rejected" },
+      { "JaVa\tScript:alert(1)", "rejected" },
+      { "  javascript:alert(1)", "rejected" },
+      { "java\nscript:alert(1)", "rejected" },
+      { "data:text/html,<script>alert(1)</script>", "rejected" },
+      { "vbscript:msgbox(1)", "rejected" },
+      { "", "rejected" },
+      { null, "rejected" },
   };
 
   @Test
@@ -46,6 +66,33 @@ public class EmailEncodeOnOutputTest {
     for (String[] fixture : FIXTURES) {
       assertEquals(fixture[0], fixture[1], EmailEscape.escapeHtml(fixture[0]));
     }
+  }
+
+  @Test
+  public void urlFixturesMatchTheSchemeAllowlist() {
+    for (String[] fixture : URL_FIXTURES) {
+      assertEquals(String.valueOf(fixture[0]), "allowed".equals(fixture[1]),
+          EmailEscape.isSafeUrl(fixture[0]));
+    }
+  }
+
+  @Test
+  public void layoutNeverEmitsAUnsafeCtaHref() {
+    for (String[] fixture : URL_FIXTURES) {
+      if (!"rejected".equals(fixture[1]) || fixture[0] == null || fixture[0].isEmpty()) {
+        continue;
+      }
+      String html = EmailLayout.render(EmailContent.builder().paragraph("Hi")
+          .cta("Open", fixture[0]).linkFallbackText("Or copy:").build());
+      assertFalse(fixture[0], html.contains("href="));
+    }
+  }
+
+  @Test
+  public void layoutKeepsASafeCtaHref() {
+    String html = EmailLayout.render(EmailContent.builder().paragraph("Hi")
+        .cta("Open", "https://example.com/a?b=1&c=2").build());
+    assertTrue(html.contains("href=\"https://example.com/a?b=1&amp;c=2\""));
   }
 
   @Test
