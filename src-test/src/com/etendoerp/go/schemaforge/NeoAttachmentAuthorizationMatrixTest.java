@@ -38,7 +38,6 @@ import javax.servlet.ServletOutputStream;
 import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletResponse;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.weld.WeldUtils;
@@ -260,53 +259,9 @@ public class NeoAttachmentAuthorizationMatrixTest {
     }
   }
 
-  // ───────────────── Group B — target contract (red until ETP-4570) ──────────
-
-  /**
-   * S3 — same client, non-readable organization. Must be {@code 404} and must not
-   * stream any bytes.
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustReturnNotFoundForNonReadableOrganization() {
-    throw new UnsupportedOperationException(
-        "Implement with ADR-0003's authorizer: derive the parent record from the "
-            + "attachment, authorize it outside admin mode, and return a uniform 404.");
-  }
-
-  /**
-   * S6 versus S2–S5 — the {@code 404} for nonexistent and for unauthorized must be
-   * byte-identical, removing the enumeration oracle (ADR-0003 D5).
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustReturnIdenticalNotFoundForMissingAndUnauthorized() {
-    throw new UnsupportedOperationException(
-        "Assert identical status, body and headers for a nonexistent ID and an "
-            + "existing-but-unauthorized ID.");
-  }
-
-  /**
-   * S8 — a legitimate multi-organization administrator must keep working, through
-   * the normal permission model and with no hardcoded GOAdmin exception (ADR-0003 D4).
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustStillAllowLegitimateMultiOrgRole() {
-    throw new UnsupportedOperationException(
-        "Requires OBBaseTest fixtures: a role with several readable organizations.");
-  }
-
-  /**
-   * S7 — a client-supplied parent that disagrees with the attachment's real parent
-   * must be rejected, never used as the authorization basis.
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void suppliedParentMismatchingRealParentMustBeRejected() {
-    throw new UnsupportedOperationException(
-        "Applies to list, upload and download-all once parent derivation exists.");
-  }
+  // Group B (the target contract, formerly @Ignore) is implemented by ETP-4570 in
+  // NeoAttachmentParentAuthorizationTest (S1–S8 on the authorizer) and
+  // NeoBuiltInEndpointHandlerTest (every route answers the uniform 404 when denied).
 
   // ───────────────────────────────── helpers ─────────────────────────────────
 

@@ -94,6 +94,19 @@ and by OCR after a contextual list. Therefore:
 A single service — `NeoAttachmentAuthorizer` — is the only place attachment access is decided.
 Six call sites, one policy.
 
+> **Implementation status (ETP-4570):** `NeoAttachmentAuthorizer.authorizeById` /
+> `authorizeByRecord` decide every route (list, count, main, upload, download one/all, delete,
+> description, mark-main) on the parent record: role access to the entity
+> (`EntityAccessChecker`, which ignores admin mode), readable/writable client+org of the row
+> (`TenantOwnership`), row exists and is active. Denials answer one `404 Attachment not found`
+> (`notFound()`); the 403 write tier is revealed only after the parent is authorized. A supplied
+> table/record that differs from the attachment's real parent is rejected (S7). No administrator
+> branch (D4). Because those primitives read session data admin mode does not widen, the check is
+> not weakened by `NeoServlet`'s wrapper, so no nested admin-mode juggling was needed. D6: the
+> `setFilterOnReadableOrganization(false)` suppressions remain, since the parent record is now
+> authorized before every listing; removing them is left to a follow-up. MCP callers of the
+> helpers are not covered by this change.
+>
 > **Implementation status (ETP-5205, 2026-09-29):** a first slice of `NeoAttachmentAuthorizer`
 > exists and covers only the **window-access tier for WRITE** operations (upload, delete,
 > description, mark-main): the role needs editable access to at least one active window showing
