@@ -137,7 +137,6 @@ final class NeoCustomizedSelectorCheck {
         .queryParams(params)
         .build();
     NeoExtensionRequest request = NeoExtensionRequest.builder()
-        .qualifier(sfEntity.getJavaQualifier())
         .specName(sfEntity.getETGOSFSpec().getName())
         .entityName(sfEntity.getName())
         .surface(NeoExtensionSurface.SELECTOR)
