@@ -560,8 +560,7 @@ com.etendoerp.go.schemaforge.webhooks.SFAssignUserRolesTest
 com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypassTest
 com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistoryTest
 com.etendoerp.go.schemaforge.webhooks.SFListMenuTest
-com.etendoerp.go.schemaforge.webhooks.SFListProcessesTest
-com.etendoerp.go.schemaforge.webhooks.SFListWindowsTest
+com.etendoerp.go.schemaforge.webhooks.SFListWindowsAndProcessesTest
 com.etendoerp.go.schemaforge.webhooks.SFMyReportAccessTest
 com.etendoerp.go.schemaforge.webhooks.SFPopulateSpecTest
 com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRoleTest
