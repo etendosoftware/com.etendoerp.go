@@ -1415,34 +1415,34 @@ row error instead of "plan limit reached". Every other SPA write path translates
 the functional repo, then a core version bump. Workaround meanwhile: none in the import; the
 quota banner and `/account` show the limit.
 
-### ✅ 5.19 A request right after `POST /sws/go/session` or `/session/environment` can get a 401 — fixed (ETP-5912, ETP-6152)
+### ✅ 5.19 A request right after `POST /sws/go/session` or `/session/environment` can get a 401 — fixed (ETP-6152)
 
-**Ticket:** owner [ETP-5912](https://etendoproject.atlassian.net/browse/ETP-5912). Related
-ETP-5051 (where it was observed, outside its scope; pre-existing) and ETP-5455 (the backend-managed
-session). Was §4.21 (ticket created 2026-10-24, Martin Taal).
+**Ticket:** fixed by ETP-6152 (commit `bf118908a`); reported as
+[ETP-5912](https://etendoproject.atlassian.net/browse/ETP-5912). Related ETP-5051 (where it was
+observed, outside its scope; pre-existing) and ETP-5455 (the backend-managed session). Was §4.21
+(ticket created 2026-10-24, Martin Taal).
 
 Right after `POST /sws/go/session` (login) or `POST /sws/go/session/environment` (environment
 entry), an immediate follow-up request with the freshly rotated session cookie and CSRF token was
 answered 401 in about one of three attempts (seen with `curl` against a local Tomcat on
 `GET /sws/go/environments` and `GET /sws/go/billing/subscription`); the same request moments later
-succeeded. The pattern looks like **commit-after-response**: the response, with the new session
-cookie, reaches the client before the transaction that stores the session is committed, so a fast
-next request does not find it yet. Not confirmed in the code.
+succeeded.
 
-**Status: confirmed and fixed.** The hypothesis was right: the session row was written through the
-request's DAL transaction, which the Etendo request filter commits only after the servlet returns.
-ETP-6152 made `commitAndSetSessionCookies` / `commitAndClearSessionCookies` commit the session write
-before any session cookie is set, in every issued or rotated path (`/session`, `/session/register`,
-`/session/environment` and its re-entry, `/session/link`, `/session/refresh`, SSO, support handoff,
-change-password, logout). `GoSessionEndpointsTest` pins the commit-before-response order with
-`InOrder` and checks that a failed commit answers an error with no cookie.
+**Cause (confirmed in the code):** commit-after-response. The session row was written through the
+request's DAL transaction, which the Etendo request filter commits only after the servlet returns,
+so the response with the new session cookie reached the client first and a fast next request did
+not find the session yet.
 
-**Workaround (before the fix):** none in the product. In the observation a repeat of the same request moments
-later went through; whether the SPA hits the window in practice was not measured.
+**Fix:** ETP-6152 made `commitAndSetSessionCookies` / `commitAndClearSessionCookies` commit the
+session write before any session cookie is set, in every issued or rotated path (`/session`,
+`/session/register`, `/session/environment` and its re-entry, `/session/link`, `/session/refresh`,
+SSO, support handoff, change-password, logout). Environment entry has the same order.
+`GoSessionEndpointsTest` pins the commit-before-response order with `InOrder`
+(`createCommitsTheSessionBeforeAnswering`, `environmentEntryCommitsTheRotatedSessionBeforeAnswering`)
+and checks that a failed commit answers an error with no cookie.
 
-**To investigate:** when the session row is committed relative to writing the response in the
-session endpoints (ADR `adr/0001-backend-managed-session.md`), and whether the rotation on
-environment entry has the same order.
+**Not measured:** whether the SPA hit the window in practice. The commit-before-cookie order closes
+it regardless.
 
 ---
 
