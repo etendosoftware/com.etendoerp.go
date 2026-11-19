@@ -50,7 +50,6 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
-import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 
 /**
  * Unit tests for {@link TrialBalanceReportHandler} (ETP-5483 slice 2) — the MCP report tool
@@ -88,25 +87,6 @@ class TrialBalanceReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
-  @DisplayName("declares dateFrom/dateTo as required, everything else optional")
-  void reportParametersDeclaresRequiredDates() {
-    List<NeoReportParam> params = handler.reportParameters().orElseThrow();
-
-    NeoReportParam dateFrom = params.stream().filter(p -> "dateFrom".equals(p.getName()))
-        .findFirst().orElseThrow();
-    NeoReportParam dateTo = params.stream().filter(p -> "dateTo".equals(p.getName()))
-        .findFirst().orElseThrow();
-    assertTrue(dateFrom.isRequired());
-    assertTrue(dateTo.isRequired());
-
-    long optionalCount = params.stream()
-        .filter(p -> !"dateFrom".equals(p.getName()) && !"dateTo".equals(p.getName()))
-        .filter(NeoReportParam::isRequired)
-        .count();
-    assertEquals(0, optionalCount, "only dateFrom/dateTo may be required");
-  }
-
-  @Test
   @DisplayName("declares accountLevel as a closed C/D/E/S set")
   void reportParametersDeclaresAccountLevelEnum() {
     NeoReportParam accountLevel = handler.reportParameters().orElseThrow().stream()
@@ -140,86 +120,6 @@ class TrialBalanceReportHandlerTest {
       assertEquals(200, response.getHttpStatus());
       assertEquals("Trial Balance", response.getBody().getString("name"));
       assertTrue(response.getBody().getJSONArray("parameters").length() > 0);
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Validation — 400s, all reachable without touching the DB
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST with neither date is refused with 400")
-  void postWithoutDatesIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("dates_required", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with a malformed dateFrom is refused with 400")
-  void postWithMalformedDateFromIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "01/01/2026");
-      body.put("dateTo", "2026-09-24");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_from_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with dateFrom after dateTo is refused with 400")
-  void postWithDateFromAfterDateToIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "2026-09-24");
-      body.put("dateTo", "2026-01-01");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_range_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Access gate
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without the grant is refused with 403 before any validation runs")
-  void postWithoutGrantIsRefused() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      // An empty body would fail date validation too, but the gate must be checked first.
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  @Test
-  @DisplayName("GET without the grant does not leak the descriptor")
-  void getWithoutGrantDoesNotLeakDescriptor() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET", null));
-
-      assertEquals(403, response.getHttpStatus());
     }
   }
 

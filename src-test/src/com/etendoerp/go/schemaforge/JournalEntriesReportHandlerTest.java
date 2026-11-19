@@ -29,10 +29,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
-import java.sql.Date;
-import java.sql.Timestamp;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 
@@ -92,25 +88,6 @@ class JournalEntriesReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
-  @DisplayName("declares dateFrom/dateTo as required, everything else optional")
-  void reportParametersDeclaresRequiredDates() {
-    List<NeoReportParam> params = handler.reportParameters().orElseThrow();
-
-    NeoReportParam dateFrom = params.stream().filter(p -> "dateFrom".equals(p.getName()))
-        .findFirst().orElseThrow();
-    NeoReportParam dateTo = params.stream().filter(p -> "dateTo".equals(p.getName()))
-        .findFirst().orElseThrow();
-    assertTrue(dateFrom.isRequired());
-    assertTrue(dateTo.isRequired());
-
-    long optionalCount = params.stream()
-        .filter(p -> !"dateFrom".equals(p.getName()) && !"dateTo".equals(p.getName()))
-        .filter(NeoReportParam::isRequired)
-        .count();
-    assertEquals(0, optionalCount, "only dateFrom/dateTo may be required");
-  }
-
-  @Test
   @DisplayName("declares limit as a described integer parameter")
   void reportParametersDeclaresLimit() {
     NeoReportParam limit = handler.reportParameters().orElseThrow().stream()
@@ -156,53 +133,6 @@ class JournalEntriesReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
-  @DisplayName("POST with neither date is refused with 400")
-  void postWithoutDatesIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("dates_required", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with a malformed dateFrom is refused with 400")
-  void postWithMalformedDateFromIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "01/01/2026");
-      body.put("dateTo", "2026-09-24");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_from_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with dateFrom after dateTo is refused with 400")
-  void postWithDateFromAfterDateToIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "2026-09-24");
-      body.put("dateTo", "2026-01-01");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_range_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
   @DisplayName("POST with a zero/negative limit is refused with 400")
   void postWithInvalidLimitIsRefused() throws Exception {
     try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
@@ -217,35 +147,6 @@ class JournalEntriesReportHandlerTest {
 
       assertEquals(400, response.getHttpStatus());
       assertEquals("limit_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Access gate
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without the grant is refused with 403 before any validation runs")
-  void postWithoutGrantIsRefused() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      // An empty body would fail date validation too, but the gate must be checked first.
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  @Test
-  @DisplayName("GET without the grant does not leak the descriptor")
-  void getWithoutGrantDoesNotLeakDescriptor() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET", null));
-
-      assertEquals(403, response.getHttpStatus());
     }
   }
 
@@ -423,68 +324,6 @@ class JournalEntriesReportHandlerTest {
         assertEquals(Boolean.FALSE, valueCaptor.getAllValues().get(idx));
       }
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // toIsoDate — fact_acct.dateacct rendered as yyyy-MM-dd, not Timestamp#toString()
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("toIsoDate renders a midnight Timestamp as yyyy-MM-dd, not '... 00:00:00.0'")
-  void toIsoDateRendersMidnightTimestampAsPlainDate() {
-    Timestamp value = Timestamp.valueOf("2026-01-01 00:00:00");
-
-    assertEquals("2026-01-01", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate renders a late-in-the-day Timestamp with no day shift")
-  void toIsoDateRendersLateTimestampWithNoDayShift() {
-    Timestamp value = Timestamp.valueOf("2026-03-31 23:59:59");
-
-    assertEquals("2026-03-31", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate renders a java.sql.Date as yyyy-MM-dd")
-  void toIsoDateRendersSqlDate() {
-    Date value = Date.valueOf("2026-02-15");
-
-    assertEquals("2026-02-15", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate renders a LocalDateTime as yyyy-MM-dd")
-  void toIsoDateRendersLocalDateTime() {
-    LocalDateTime value = LocalDateTime.of(2026, 4, 7, 13, 45, 0);
-
-    assertEquals("2026-04-07", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate renders a LocalDate as yyyy-MM-dd")
-  void toIsoDateRendersLocalDate() {
-    LocalDate value = LocalDate.of(2026, 6, 30);
-
-    assertEquals("2026-06-30", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate truncates a raw timestamp-shaped String to its date prefix")
-  void toIsoDateTruncatesRawTimestampString() {
-    assertEquals("2026-05-06", AbstractSqlReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
-  }
-
-  @Test
-  @DisplayName("toIsoDate returns a short, non-date String unchanged")
-  void toIsoDateReturnsShortStringUnchanged() {
-    assertEquals("abc", AbstractSqlReportHandler.toIsoDate("abc"));
-  }
-
-  @Test
-  @DisplayName("toIsoDate returns an empty string for null")
-  void toIsoDateReturnsEmptyForNull() {
-    assertEquals("", AbstractSqlReportHandler.toIsoDate(null));
   }
 
   // -------------------------------------------------------------------------

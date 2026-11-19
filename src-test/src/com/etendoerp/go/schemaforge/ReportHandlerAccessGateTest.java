@@ -27,20 +27,24 @@ import static org.mockito.Mockito.spy;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 
 /**
- * Access gate of the three NEO report handlers (ETP-5335).
+ * Access gate of the NEO report handlers (ETP-5335).
  *
  * <p>Report specs are of type {@code R} with no linked {@code AD_Process} and no {@code AD_TAB_ID}
  * on any entity, so they reach {@code NeoAccessHelper.hasReportSpecAccess} with nothing to compare
@@ -53,6 +57,7 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * question and refuses before doing anything else.</p>
  *
  * @covers com.etendoerp.go.schemaforge.util.NeoAccessHelper
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class ReportHandlerAccessGateTest {
 
@@ -338,72 +343,32 @@ class ReportHandlerAccessGateTest {
     }
   }
 
-  // ── report-trial-balance (ETP-5483 slice 2) ─────────────────────────────
+  // ── financial reports (ETP-5483 slices 2-6) ─────────────────────────────
 
-  @Nested
-  @DisplayName("TrialBalanceReportHandler")
-  class TrialBalanceReport {
-
-    private final TrialBalanceReportHandler handler = new TrialBalanceReportHandler();
-
-    @Test
-    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
-    void declaresWindowGrant() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(true);
-      assertTrue(handler.isAccessibleForCurrentRole());
-
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(false);
-      assertFalse(handler.isAccessibleForCurrentRole());
-    }
-
-    @Test
-    @DisplayName("POST without the grant is refused with 403")
-    void postWithoutGrantIsRefused() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
-    }
-
-    @Test
-    @DisplayName("GET without the grant does not leak the description")
-    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET"));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-
-    /**
-     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
-     * ask the overridable declaration, not repeat the grant check inline.
-     */
-    @Test
-    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
-    void handleDelegatesToTheDeclaration() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      TrialBalanceReportHandler spied = spy(new TrialBalanceReportHandler());
-      doReturn(false).when(spied).isAccessibleForCurrentRole();
-
-      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
-    }
+  /**
+   * Trial balance, journal entries, balance sheet, profit and loss and general ledger: one window
+   * grant, enforced by the {@code handle()} they inherit from {@link AbstractSqlReportHandler}.
+   */
+  static Stream<Named<AbstractSqlReportHandler>> financialReports() {
+    return Stream.of(
+        Named.of("TrialBalanceReportHandler", new TrialBalanceReportHandler()),
+        Named.of("JournalEntriesReportHandler", new JournalEntriesReportHandler()),
+        Named.of("BalanceSheetReportHandler", new BalanceSheetReportHandler()),
+        Named.of("ProfitLossReportHandler", new ProfitLossReportHandler()),
+        Named.of("GeneralLedgerReportHandler", new GeneralLedgerReportHandler()));
   }
 
-  // ── report-journal-entries (ETP-5483 slice 3) ───────────────────────────
-
   @Nested
-  @DisplayName("JournalEntriesReportHandler")
-  class JournalEntriesReport {
+  @DisplayName("Financial report handlers")
+  class FinancialReports {
 
-    private final JournalEntriesReportHandler handler = new JournalEntriesReportHandler();
+    private static final String REPORTS =
+        "com.etendoerp.go.schemaforge.ReportHandlerAccessGateTest#financialReports";
 
-    @Test
+    @ParameterizedTest(name = "{0}")
+    @MethodSource(REPORTS)
     @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
-    void declaresWindowGrant() {
+    void declaresWindowGrant(AbstractSqlReportHandler handler) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
               ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
           .thenReturn(true);
@@ -415,17 +380,24 @@ class ReportHandlerAccessGateTest {
       assertFalse(handler.isAccessibleForCurrentRole());
     }
 
-    @Test
-    @DisplayName("POST without the grant is refused with 403")
-    void postWithoutGrantIsRefused() {
+    @ParameterizedTest(name = "{0}")
+    @MethodSource(REPORTS)
+    @DisplayName("POST without the grant is refused with 403 before any validation runs")
+    void postWithoutGrantIsRefused(AbstractSqlReportHandler handler) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
 
-      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
+      // An empty body would fail the report's own validation too, but the gate must be checked
+      // first.
+      NeoContext post = NeoContext.builder().specName("report").entityName("report")
+          .httpMethod("POST").requestBody(new JSONObject()).build();
+
+      assertEquals(403, handler.handle(post).getHttpStatus());
     }
 
-    @Test
+    @ParameterizedTest(name = "{0}")
+    @MethodSource(REPORTS)
     @DisplayName("GET without the grant does not leak the description")
-    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
+    void getWithoutGrantDoesNotLeakTheDescription(AbstractSqlReportHandler handler) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
 
       NeoResponse response = handler.handle(context("GET"));
@@ -437,176 +409,12 @@ class ReportHandlerAccessGateTest {
      * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
      * ask the overridable declaration, not repeat the grant check inline.
      */
-    @Test
+    @ParameterizedTest(name = "{0}")
+    @MethodSource(REPORTS)
     @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
-    void handleDelegatesToTheDeclaration() {
+    void handleDelegatesToTheDeclaration(AbstractSqlReportHandler handler) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      JournalEntriesReportHandler spied = spy(new JournalEntriesReportHandler());
-      doReturn(false).when(spied).isAccessibleForCurrentRole();
-
-      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
-    }
-  }
-
-  // ── balance-sheet (ETP-5483 slice 4) ────────────────────────────────────
-
-  @Nested
-  @DisplayName("BalanceSheetReportHandler")
-  class BalanceSheetReport {
-
-    private final BalanceSheetReportHandler handler = new BalanceSheetReportHandler();
-
-    @Test
-    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
-    void declaresWindowGrant() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(true);
-      assertTrue(handler.isAccessibleForCurrentRole());
-
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(false);
-      assertFalse(handler.isAccessibleForCurrentRole());
-    }
-
-    @Test
-    @DisplayName("POST without the grant is refused with 403")
-    void postWithoutGrantIsRefused() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
-    }
-
-    @Test
-    @DisplayName("GET without the grant does not leak the description")
-    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET"));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-
-    /**
-     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
-     * ask the overridable declaration, not repeat the grant check inline.
-     */
-    @Test
-    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
-    void handleDelegatesToTheDeclaration() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      BalanceSheetReportHandler spied = spy(new BalanceSheetReportHandler());
-      doReturn(false).when(spied).isAccessibleForCurrentRole();
-
-      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
-    }
-  }
-
-  // ── profit-loss (ETP-5483 slice 5) ──────────────────────────────────────
-
-  @Nested
-  @DisplayName("ProfitLossReportHandler")
-  class ProfitLossReport {
-
-    private final ProfitLossReportHandler handler = new ProfitLossReportHandler();
-
-    @Test
-    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
-    void declaresWindowGrant() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(true);
-      assertTrue(handler.isAccessibleForCurrentRole());
-
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(false);
-      assertFalse(handler.isAccessibleForCurrentRole());
-    }
-
-    @Test
-    @DisplayName("POST without the grant is refused with 403")
-    void postWithoutGrantIsRefused() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
-    }
-
-    @Test
-    @DisplayName("GET without the grant does not leak the description")
-    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET"));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-
-    /**
-     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
-     * ask the overridable declaration, not repeat the grant check inline.
-     */
-    @Test
-    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
-    void handleDelegatesToTheDeclaration() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      ProfitLossReportHandler spied = spy(new ProfitLossReportHandler());
-      doReturn(false).when(spied).isAccessibleForCurrentRole();
-
-      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
-    }
-  }
-
-  // ── report-general-ledger (ETP-5483 slice 6, the last one) ──────────────
-
-  @Nested
-  @DisplayName("GeneralLedgerReportHandler")
-  class GeneralLedgerReport {
-
-    private final GeneralLedgerReportHandler handler = new GeneralLedgerReportHandler();
-
-    @Test
-    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
-    void declaresWindowGrant() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(true);
-      assertTrue(handler.isAccessibleForCurrentRole());
-
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
-          .thenReturn(false);
-      assertFalse(handler.isAccessibleForCurrentRole());
-    }
-
-    @Test
-    @DisplayName("POST without the grant is refused with 403")
-    void postWithoutGrantIsRefused() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
-    }
-
-    @Test
-    @DisplayName("GET without the grant does not leak the description")
-    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET"));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-
-    /**
-     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
-     * ask the overridable declaration, not repeat the grant check inline.
-     */
-    @Test
-    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
-    void handleDelegatesToTheDeclaration() {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      GeneralLedgerReportHandler spied = spy(new GeneralLedgerReportHandler());
+      AbstractSqlReportHandler spied = spy(handler);
       doReturn(false).when(spied).isAccessibleForCurrentRole();
 
       assertEquals(403, spied.handle(context("POST")).getHttpStatus());

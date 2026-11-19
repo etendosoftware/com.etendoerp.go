@@ -119,35 +119,6 @@ class ProfitLossReportHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // Access gate
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without the grant is refused with 403 before any validation runs")
-  void postWithoutGrantIsRefused() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      // An empty body would fail yearId validation too, but the gate must be checked first.
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  @Test
-  @DisplayName("GET without the grant does not leak the descriptor")
-  void getWithoutGrantDoesNotLeakDescriptor() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET", null));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Validation — 400s, all reachable without touching the DB (pure input checks first)
   // -------------------------------------------------------------------------
 

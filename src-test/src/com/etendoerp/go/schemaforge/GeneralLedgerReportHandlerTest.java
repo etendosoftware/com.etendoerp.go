@@ -87,25 +87,6 @@ class GeneralLedgerReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
-  @DisplayName("declares dateFrom/dateTo as required, everything else optional")
-  void reportParametersDeclaresRequiredDates() {
-    List<NeoReportParam> params = handler.reportParameters().orElseThrow();
-
-    NeoReportParam dateFrom = params.stream().filter(p -> "dateFrom".equals(p.getName()))
-        .findFirst().orElseThrow();
-    NeoReportParam dateTo = params.stream().filter(p -> "dateTo".equals(p.getName()))
-        .findFirst().orElseThrow();
-    assertTrue(dateFrom.isRequired());
-    assertTrue(dateTo.isRequired());
-
-    long optionalCount = params.stream()
-        .filter(p -> !"dateFrom".equals(p.getName()) && !"dateTo".equals(p.getName()))
-        .filter(NeoReportParam::isRequired)
-        .count();
-    assertEquals(0, optionalCount, "only dateFrom/dateTo may be required");
-  }
-
-  @Test
   @DisplayName("declares accountLimit/linesPerAccountLimit as described integer parameters")
   void reportParametersDeclaresCaps() {
     List<NeoReportParam> params = handler.reportParameters().orElseThrow();
@@ -149,68 +130,9 @@ class GeneralLedgerReportHandlerTest {
     }
   }
 
-  @Test
-  @DisplayName("GET without the grant does not leak the descriptor")
-  void getWithoutGrantDoesNotLeakDescriptor() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET", null));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Validation — 400s, all reachable without touching OBContext/the DB
   // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST with neither date is refused with 400")
-  void postWithoutDatesIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("dates_required", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with a malformed dateFrom is refused with 400")
-  void postWithMalformedDateFromIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "01/01/2026");
-      body.put("dateTo", "2026-09-24");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_from_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with dateFrom after dateTo is refused with 400")
-  void postWithDateFromAfterDateToIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "2026-09-24");
-      body.put("dateTo", "2026-01-01");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("date_range_invalid", response.getBody().getString("error"));
-    }
-  }
 
   @Test
   @DisplayName("POST with a zero/negative accountLimit is refused with 400")
@@ -263,48 +185,6 @@ class GeneralLedgerReportHandlerTest {
 
       assertEquals(400, response.getHttpStatus());
       assertEquals("group_by_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  /**
-   * Every 400 above must be reachable with NO {@link OBContext}/{@link OBDal} mocking at all —
-   * i.e. pure input validation runs strictly before anything touches the session or the database.
-   * This test documents that guarantee explicitly (mirrors the same guarantee the sibling report
-   * handlers' tests assert implicitly by never mocking OBContext for their 400 tests).
-   */
-  @Test
-  @DisplayName("pure validation runs before OBContext is touched (no OBContext/OBDal mock needed for a 400)")
-  void pureValidationRunsBeforeObContext() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("dateFrom", "2026-09-24");
-      body.put("dateTo", "2026-01-01");
-
-      // No OBContext/OBDal static mock is installed here on purpose: if the handler touched
-      // OBContext.getOBContext() before this validation, it would throw (no context bound to
-      // this thread) instead of returning a clean 400.
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Access gate
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without the grant is refused with 403 before any validation runs")
-  void postWithoutGrantIsRefused() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      // An empty body would fail date validation too, but the gate must be checked first.
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(403, response.getHttpStatus());
     }
   }
 
@@ -565,37 +445,5 @@ class GeneralLedgerReportHandlerTest {
     assertEquals("Widget", line.getString("productname"));
     assertEquals("Proj A", line.getString("projectname"));
     assertEquals("CC1", line.getString("costcentername"));
-  }
-
-  // -------------------------------------------------------------------------
-  // toIsoDate — fact_acct.dateacct rendered as yyyy-MM-dd, not Timestamp#toString()
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("toIsoDate renders a midnight Timestamp as yyyy-MM-dd, not '... 00:00:00.0'")
-  void toIsoDateRendersMidnightTimestampAsPlainDate() {
-    java.sql.Timestamp value = java.sql.Timestamp.valueOf("2026-01-01 00:00:00");
-
-    assertEquals("2026-01-01", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate renders a java.sql.Date as yyyy-MM-dd")
-  void toIsoDateRendersSqlDate() {
-    java.sql.Date value = java.sql.Date.valueOf("2026-02-15");
-
-    assertEquals("2026-02-15", AbstractSqlReportHandler.toIsoDate(value));
-  }
-
-  @Test
-  @DisplayName("toIsoDate truncates a raw timestamp-shaped String to its date prefix")
-  void toIsoDateTruncatesRawTimestampString() {
-    assertEquals("2026-05-06", AbstractSqlReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
-  }
-
-  @Test
-  @DisplayName("toIsoDate returns an empty string for null")
-  void toIsoDateReturnsEmptyForNull() {
-    assertEquals("", AbstractSqlReportHandler.toIsoDate(null));
   }
 }
