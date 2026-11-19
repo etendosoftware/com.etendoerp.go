@@ -224,15 +224,19 @@ final class InvoiceInboxConfirmSeeds {
       return new String[] {"", ""};
     }
     String[] trailing = trailingNumberSplit(trimmed);
-    if (trailing != null) {
+    if (trailing.length > 0) {
       return trailing;
     }
     String[] leading = leadingNumberSplit(trimmed);
-    if (leading != null) {
+    if (leading.length > 0) {
       return leading;
     }
     return new String[] {trimmed, ""};
   }
+
+  /** Sentinel returned by {@link #trailingNumberSplit(String)} and {@link #leadingNumberSplit(String)}
+   * when the input does not match their shape (java:S1168: empty array, never {@code null}). */
+  private static final String[] NO_NUMBER_SPLIT = new String[0];
 
   /**
    * The "Street[,] Number" order: a trailing run of digits with an optional single trailing
@@ -241,7 +245,7 @@ final class InvoiceInboxConfirmSeeds {
    * {@code (.+?)[\s,]+(\d+[A-Za-z]?)\s*$} regex, without its backtracking shape.
    *
    * @param trimmed the already-trimmed, non-blank address line
-   * @return {@code [street, number]}, or {@code null} when the line does not end in that shape
+   * @return {@code [street, number]}, or an empty array when the line does not end in that shape
    */
   private static String[] trailingNumberSplit(String trimmed) {
     int length = trimmed.length();
@@ -254,14 +258,14 @@ final class InvoiceInboxConfirmSeeds {
       digitsStart--;
     }
     if (digitsStart == numberEnd) {
-      return null;
+      return NO_NUMBER_SPLIT;
     }
     int sepStart = digitsStart;
     while (sepStart > 0 && isSeparator(trimmed.charAt(sepStart - 1))) {
       sepStart--;
     }
     if (sepStart == digitsStart || sepStart == 0) {
-      return null;
+      return NO_NUMBER_SPLIT;
     }
     String street = StringUtils.stripEnd(trimmed.substring(0, sepStart).trim(), ", ");
     String number = trimmed.substring(digitsStart, length);
@@ -275,7 +279,7 @@ final class InvoiceInboxConfirmSeeds {
    * {@code ^\s*(\d+[A-Za-z]?)[\s,]+(.+)$} regex, without its backtracking shape.
    *
    * @param trimmed the already-trimmed, non-blank address line
-   * @return {@code [street, number]}, or {@code null} when the line does not start in that shape
+   * @return {@code [street, number]}, or an empty array when the line does not start in that shape
    */
   private static String[] leadingNumberSplit(String trimmed) {
     int length = trimmed.length();
@@ -288,7 +292,7 @@ final class InvoiceInboxConfirmSeeds {
       numberEnd++;
     }
     if (numberEnd == digitsStart) {
-      return null;
+      return NO_NUMBER_SPLIT;
     }
     if (numberEnd < length && isAsciiLetter(trimmed.charAt(numberEnd))) {
       numberEnd++;
@@ -298,7 +302,7 @@ final class InvoiceInboxConfirmSeeds {
       sepEnd++;
     }
     if (sepEnd == numberEnd || sepEnd == length) {
-      return null;
+      return NO_NUMBER_SPLIT;
     }
     String number = trimmed.substring(digitsStart, numberEnd);
     String street = trimmed.substring(sepEnd).trim();
