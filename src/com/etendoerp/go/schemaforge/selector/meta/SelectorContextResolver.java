@@ -110,7 +110,16 @@ public final class SelectorContextResolver {
       organizationId = StringUtils.trimToNull(contextParams.get(PARAM_INPUT_ORG_ID));
     }
     if (organizationId == null) {
-      organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
+      String parentId = contextParams.get("parentId");
+      if (parentId != null && !parentId.matches("^[A-Za-z0-9_\\-]+$")) {
+        log.warn("Invalid parent identifier in selector context: {}", parentId);
+        parentId = null;
+      }
+      organizationId = resolveOrgFromParentRecord(sourceEntity, parentId);
+    }
+    if (organizationId != null && !organizationId.matches("^[A-Za-z0-9_\\-]+$")) {
+      log.warn("Invalid organization identifier in selector context: {}", organizationId);
+      return null;
     }
     if ("0".equals(organizationId)) {
       return null;

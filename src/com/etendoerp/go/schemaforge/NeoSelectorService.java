@@ -245,8 +245,10 @@ public class NeoSelectorService {
             "Could not resolve target for: " + columnName);
       }
 
-      String validationFilter = SelectorValidationResolver.resolveValidationFilter(
+      SelectorQueryBuilder.HqlWithParams validationHql = SelectorValidationResolver.resolveValidationFilter(
           column, meta.entityName, contextParams);
+      String validationFilter = validationHql != null ? validationHql.getHql() : null;
+      Map<String, Object> validationParams = validationHql != null ? validationHql.getParams() : Collections.emptyMap();
       if (SystemClientSelectorRegistry.isRegisteredColumn(column)) {
         validationFilter = SystemClientSelectorRegistry.expandClientFilter(validationFilter);
       }
@@ -257,7 +259,8 @@ public class NeoSelectorService {
       Map<String, String> selectorContextParams = withSourceEntityName(contextParams, sourceEntity);
       selectorContextParams = withContextOrganizationId(selectorContextParams, contextOrganizationId);
       NeoResponse selectorResult = executeSelectorQuery(
-          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, selectorContextParams);
+          meta, search, safeLimit, safeOffset, contextOrganizationId,
+          new SelectorFilter(combinedFilter, validationParams), selectorContextParams);
       return enrichProductSelectorIfNeeded(selectorResult, meta, selectorContextParams);
 
     } catch (Exception e) {
@@ -385,6 +388,17 @@ public class NeoSelectorService {
 
   private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
       String contextOrganizationId, String combinedFilter, Map<String, String> contextParams) throws Exception {
+    return executeSelectorQuery(meta, search, limit, offset, contextOrganizationId,
+        new SelectorFilter(combinedFilter, Collections.emptyMap()), contextParams);
+  }
+
+  /** The combined selector filter HQL and the named parameters its validation part binds. */
+  private record SelectorFilter(String hql, Map<String, Object> params) {
+  }
+
+  private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
+      String contextOrganizationId, SelectorFilter filter, Map<String, String> contextParams) throws Exception {
+    Map<String, Object> validationParams = filter.params();
     Map<String, String> safeContextParams = contextParams != null ? contextParams : Collections.emptyMap();
     String ctxAlias = (meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.entityAlias))
         ? meta.entityAlias
@@ -392,6 +406,9 @@ public class NeoSelectorService {
     String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(
         meta.entityName, safeContextParams, ctxAlias);
     Map<String, Object> ctxFilterParams = new HashMap<>();
+    if (validationParams != null) {
+      ctxFilterParams.putAll(validationParams);
+    }
     String priceListId = safeContextParams.get("priceList");
     if (StringUtils.isNotBlank(priceListId) && ctxParamFilter != null
         && ctxParamFilter.contains(":priceListId")) {
@@ -422,7 +439,7 @@ public class NeoSelectorService {
       ctxFilterParams.put(NeoSelectorExecutionHelper.PARAM_SEARCH_MATCH_IDS, searchMatchIds);
     }
     return SelectorQueryExecutor.execute(
-        meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
+        meta, search, limit, offset, combineFilters(filter.hql(), ctxParamFilter),
         contextOrganizationId, ctxFilterParams);
   }
 

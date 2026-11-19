@@ -344,8 +344,8 @@ public final class SqlToHqlTranslator {
       String afterTableRef = result.toString();
 
       // Step 2: Replace bare column names that are NOT already prefixed with "e."
-      // Match word tokens that could be column names (not inside quotes, not SQL keywords)
-      Pattern bareColPattern = Pattern.compile("(?<![.'\"])\\b(\\w+)\\b(?!\\s*\\()");
+      // Match word tokens that could be column names (not inside quotes, not SQL keywords, not named params)
+      Pattern bareColPattern = Pattern.compile("(?<![.'\":])\\b(\\w+)\\b(?!\\s*\\()");
       m = bareColPattern.matcher(afterTableRef);
       result = new StringBuffer();
       java.util.Set<String> sqlKeywords = new java.util.HashSet<>(java.util.Arrays.asList(
