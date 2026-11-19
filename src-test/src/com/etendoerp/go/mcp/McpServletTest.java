@@ -2175,7 +2175,7 @@ public class McpServletTest {
 
       org.mockito.ArgumentCaptor<McpUsageRow> row =
           org.mockito.ArgumentCaptor.forClass(McpUsageRow.class);
-      loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture()));
+      loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture(), org.mockito.ArgumentMatchers.any()));
       return row.getValue();
     }
   }

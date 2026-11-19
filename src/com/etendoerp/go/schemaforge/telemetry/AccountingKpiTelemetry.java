@@ -300,8 +300,11 @@ public final class AccountingKpiTelemetry {
           : OPERATION_COMPLETE;
       // shortcut: the delay only makes the probe normally run after DalRequestFilter commits the
       // request; a commit slower than PROBE_DELAY_SECONDS is seen on the tenant's next probe.
+      // ETP-6228: the delayer and sender threads have no session, so the identity is captured here.
+      NeoTelemetryIdentity identity = telemetry().captureIdentity(clientId, null);
       DELAYER.schedule(() -> {
-        if (!submit(() -> runProbe(clientId, source, specName, entity, operation))) {
+        if (!submit(() -> NeoTelemetryIdentity.runWith(identity,
+            () -> runProbe(clientId, source, specName, entity, operation)))) {
           PROBE_LAST.remove(clientId);
         }
       }, probeDelayMillis, TimeUnit.MILLISECONDS);
@@ -338,7 +341,9 @@ public final class AccountingKpiTelemetry {
         putIfPresent(props, "operation", operation);
         props.put(PROP_SOURCE, source);
         props.put("errorCode", key);
-        submit(() -> emit(NeoTelemetryEvents.BACKEND_PERIOD_REFUSED, clientId, props));
+        NeoTelemetryIdentity identity = telemetry().captureIdentity(clientId, null);
+        submit(() -> NeoTelemetryIdentity.runWith(identity,
+            () -> emit(NeoTelemetryEvents.BACKEND_PERIOD_REFUSED, clientId, props)));
       }
     } catch (RuntimeException e) {
       log.debug("Accounting KPI telemetry: could not observe a refusal: {}", e.getMessage());
@@ -369,8 +374,10 @@ public final class AccountingKpiTelemetry {
   public static void productiveEnvironmentCreated(String clientId) {
     try {
       if (StringUtils.isNotBlank(clientId)) {
-        submit(() -> emit(NeoTelemetryEvents.BACKEND_PRODUCTIVE_ENVIRONMENT_CREATED, clientId,
-            new LinkedHashMap<>()));
+        NeoTelemetryIdentity identity = telemetry().captureIdentity(clientId, null);
+        submit(() -> NeoTelemetryIdentity.runWith(identity,
+            () -> emit(NeoTelemetryEvents.BACKEND_PRODUCTIVE_ENVIRONMENT_CREATED, clientId,
+                new LinkedHashMap<>())));
       }
     } catch (RuntimeException e) {
       log.debug("Accounting KPI telemetry: could not queue the signup: {}", e.getMessage());
@@ -395,7 +402,9 @@ public final class AccountingKpiTelemetry {
       }
       String marker = REVIEW_FIRST_STEPS.equals(kind) ? MARKER_REVIEW_FIRST_STEPS
           : MARKER_REVIEW_MANUAL_OPEN;
-      submit(() -> runReview(clientId, marker, type, source));
+      NeoTelemetryIdentity identity = telemetry().captureIdentity(clientId, null);
+      submit(() -> NeoTelemetryIdentity.runWith(identity,
+          () -> runReview(clientId, marker, type, source)));
     } catch (RuntimeException e) {
       log.debug("Accounting KPI telemetry: could not queue a review: {}", e.getMessage());
     }
