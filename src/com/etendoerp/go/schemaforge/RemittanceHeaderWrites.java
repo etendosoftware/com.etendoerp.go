@@ -86,7 +86,104 @@ final class RemittanceHeaderWrites {
     if (fieldError == null) {
       fieldError = validateDueDate(handler, body, stored);
     }
-    return fieldError != null ? fieldError : validateAccountAndType(handler, body, stored, create);
+    if (fieldError == null) {
+      fieldError = validateAccountAndType(handler, body, stored, create);
+    }
+    if (fieldError == null) {
+      proposeAccountValues(handler, body, stored, create);
+    }
+    return fieldError;
+  }
+
+  /**
+   * ETP-6247 — the SEPA values a remittance takes from its account and type, written into the body
+   * so the generic write persists them (the database no longer defaults or re-copies them; the
+   * Classic form gets them from the {@code REM_Remittance_SepaDefaults} callout). A valid value the
+   * body already carries is always respected (the user typed it on purpose).
+   * <ul>
+   *   <li><b>Create</b>: the account's IBAN when the body has none; for a collection the account's
+   *       valid creditor identifier when the body has none, and the scheme {@code CORE} when the
+   *       body has none. A payment gets neither creditor identifier nor scheme.</li>
+   *   <li><b>Update</b> that changes the account, or switches between collection and payment: the
+   *       account's IBAN when the body has none; the creditor identifier of the new account (cleared
+   *       when it has no valid one) for a collection, cleared for a payment. An update that changes
+   *       neither (including a collection to collection type change) touches nothing.</li>
+   * </ul>
+   * Runs after every validation, so an account without a valid IBAN has already been refused
+   * unless the remittance carries its own.
+   */
+  private static void proposeAccountValues(RemittanceHeaderHandler handler, JSONObject body,
+      Remittance stored, boolean create) throws JSONException {
+    boolean bodyHasAccount = body.has(RemittanceHeaderHandler.FIELD_ACCOUNT);
+    boolean bodyHasType = body.has(RemittanceHeaderHandler.FIELD_TYPE);
+    if (!create && !bodyHasAccount && !bodyHasType) {
+      return;
+    }
+    String accountId = bodyHasAccount
+        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_ACCOUNT))
+        : stored != null ? RemittanceHeaderHandler.idOf(stored.getFinancialAccount()) : null;
+    String typeId = bodyHasType
+        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
+        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
+    if (accountId == null || typeId == null) {
+      return;
+    }
+    boolean collection = isCollection(handler.loadType(typeId));
+    if (!create && !accountOrKindChanged(stored, accountId, collection)) {
+      return;
+    }
+    FIN_FinancialAccount account = handler.loadAccount(accountId);
+    if (account == null) {
+      return;
+    }
+    if (!body.has(RemittanceHeaderHandler.FIELD_IBAN)) {
+      String iban = RemittanceIban.normalize(account.getIBAN());
+      if (!iban.isEmpty()) {
+        body.put(RemittanceHeaderHandler.FIELD_IBAN, iban);
+      }
+    }
+    if (collection) {
+      proposeCreditorId(body, account, create);
+      if (create && !body.has(RemittanceHeaderHandler.FIELD_SCHEME)) {
+        body.put(RemittanceHeaderHandler.FIELD_SCHEME, RemittanceSepaProvisioning.SCHEME_CORE);
+      }
+    } else if (!create) {
+      body.put(RemittanceHeaderHandler.FIELD_CREDITOR_ID, JSONObject.NULL);
+    }
+  }
+
+  /**
+   * The creditor identifier of a collection: the body's when it carries one, else the account's
+   * valid one; on update, with none to give, the stored one (from the previous account) is cleared.
+   */
+  private static void proposeCreditorId(JSONObject body, FIN_FinancialAccount account,
+      boolean create) throws JSONException {
+    if (body.has(RemittanceHeaderHandler.FIELD_CREDITOR_ID)) {
+      return;
+    }
+    String creditorId = RemittanceCreditorId.stored(account);
+    if (creditorId != null && SepaCreditorId.isValid(creditorId)) {
+      body.put(RemittanceHeaderHandler.FIELD_CREDITOR_ID, creditorId);
+    } else if (!create) {
+      body.put(RemittanceHeaderHandler.FIELD_CREDITOR_ID, JSONObject.NULL);
+    }
+  }
+
+  /** Whether an update moves the remittance to another account or to the other kind of type. */
+  private static boolean accountOrKindChanged(Remittance stored, String accountId,
+      boolean collection) {
+    return stored != null
+        && (!accountId.equals(RemittanceHeaderHandler.idOf(stored.getFinancialAccount()))
+            || collection != isCollection(stored.getRemittanceType()));
+  }
+
+  /**
+   * A collection type: its payment method is a pay-in one, the same rule the Classic callout
+   * {@code REM_Remittance_SepaDefaults} uses.
+   */
+  private static boolean isCollection(RemittanceType type) {
+    return type != null && type.getPaymentMethod() != null
+        && Boolean.TRUE.equals(type.getPaymentMethod().isPayinAllow());
   }
 
   /**
@@ -115,7 +212,7 @@ final class RemittanceHeaderWrites {
       return null; // unknown reference: the generic write preflight answers it
     }
     String accountRefusal = handler.accountRefusal(account,
-        remittanceHasIban(body, stored, create, accountId, typeId));
+        remittanceHasIban(body, stored, create, accountId, typeId, handler));
     if (accountRefusal != null) {
       return NeoMessageText.error(SC_UNPROCESSABLE, accountRefusal);
     }
@@ -130,7 +227,8 @@ final class RemittanceHeaderWrites {
    * ETP-6247 — the IBAN written on the remittance ({@value RemittanceHeaderHandler#FIELD_IBAN}):
    * normalized in place (upper case, no separators) and validated (15 to 34 characters, mod-97
    * check digits), 422 {@value RemittanceHeaderHandler#MSG_IBAN_INVALID} otherwise. A blank value
-   * is dropped from the body, so the database copies the account's. It is never written to the
+   * is dropped from the body; {@link #proposeAccountValues} then writes the account's IBAN on a
+   * create and when an update changes the account or the kind of type. It is never written to the
    * account.
    */
   private static NeoResponse validateIban(JSONObject body) throws JSONException {
@@ -157,7 +255,7 @@ final class RemittanceHeaderWrites {
    * {@link SepaCreditorId} (country, mod-97 check digits, business code, national id, at most 35
    * characters): 422 with {@code ETGO_SepaCreditorIdInvalidFormat} /
    * {@code ETGO_SepaCreditorIdInvalidCheckDigits} ({@code error.expectedCheckDigits}). A blank value
-   * is dropped from the body (the database copies the account's on insert). Only a collection takes
+   * is dropped from the body ({@link #proposeAccountValues} then writes the account's). Only a collection takes
    * one: on a payment, 422 {@value RemittanceHeaderHandler#MSG_OPTIONS_COLLECTION_ONLY}. Never
    * written to the account.
    */
@@ -199,7 +297,7 @@ final class RemittanceHeaderWrites {
   /**
    * ETP-6247 — the direct debit options of a collection ({@value RemittanceHeaderHandler#FIELD_SCHEME}
    * {@code CORE | B2B}, {@value RemittanceHeaderHandler#FIELD_FINANCED} boolean). Normalized in
-   * place; a blank scheme is dropped (the database defaults a collection to CORE). 422
+   * place; a blank scheme is dropped ({@link #proposeAccountValues} then sets CORE on the create of a collection). 422
    * {@value RemittanceHeaderHandler#MSG_SCHEME_INVALID} for any other scheme. On a PAYMENT remittance
    * they do not apply: {@code B2B} or {@code financed: true} is refused (422
    * {@value RemittanceHeaderHandler#MSG_OPTIONS_COLLECTION_ONLY}); {@code CORE} / {@code false} is
@@ -252,21 +350,19 @@ final class RemittanceHeaderWrites {
 
   /**
    * Whether the write leaves the remittance with a valid IBAN of its own, so the account need not
-   * have one: the body carries one, or (an update that changes neither account nor type, which the
-   * database would otherwise re-copy from the account) the stored copy is valid.
+   * have one: the body carries one, or the stored copy is valid and stays (an update that changes
+   * neither the account nor the kind of type; a change of either replaces it with the new
+   * account's IBAN, see {@link #proposeAccountValues}, which then must be valid).
    */
   private static boolean remittanceHasIban(JSONObject body, Remittance stored, boolean create,
-      String accountId, String typeId) {
+      String accountId, String typeId, RemittanceHeaderHandler handler) {
     boolean typed = body.has(RemittanceHeaderHandler.FIELD_IBAN); // validated by validateIban
     if (create || stored == null) {
       return typed;
     }
-    // An update that changes the account or the type makes the database re-copy the account's IBAN
-    // over whatever is typed or stored.
-    boolean recopied = !accountId.equals(
-        RemittanceHeaderHandler.idOf(stored.getFinancialAccount()))
-        || !typeId.equals(RemittanceHeaderHandler.idOf(stored.getRemittanceType()));
-    return !recopied && (typed || RemittanceIban.isValid(RemittanceIban.stored(stored)));
+    boolean replaced = accountOrKindChanged(stored, accountId,
+        isCollection(handler.loadType(typeId)));
+    return typed || (!replaced && RemittanceIban.isValid(RemittanceIban.stored(stored)));
   }
 
   /**

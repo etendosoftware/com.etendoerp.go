@@ -45,23 +45,23 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.module.remittance.Remittance;
 import org.openbravo.module.remittance.RemittanceType;
+import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
 
 /**
- * Real-database acceptance of the REM trigger {@code REM_REMITTANCE_TRG} as ETP-6247 extended it
- * (the SEPA IBAN, creditor identifier, direct debit scheme and financed flag of a remittance),
- * inside the test transaction, rolled back after each test. GO reads those copies
- * ({@link RemittanceIban}, {@link RemittanceCreditorId}, {@link RemittanceSepaOptions}), so this
- * pins what they find there:
+ * Real-database acceptance of the REM trigger {@code REM_REMITTANCE_TRG} as ETP-6247 left it: it
+ * only FREEZES the SEPA values (IBAN, creditor identifier, direct debit scheme, financed flag) once
+ * the remittance is processed, inside the test transaction, rolled back after each test. It no
+ * longer copies nor defaults anything: the Classic callout {@code REM_Remittance_SepaDefaults} and
+ * the GO write path ({@link RemittanceHeaderWrites}) do. Pins:
  * <ul>
- *   <li>defaults: a collection (a pay-in type) is {@code CORE}, a payment has no scheme, nobody is
- *       financed;</li>
- *   <li>insert: the account's IBAN and, for a collection only, its creditor identifier are copied
- *       when not provided; a provided value is respected;</li>
- *   <li>update while not processed: the copies are made again when the account changes or the type
- *       switches between collection and payment, and not on any other type change (an IBAN typed
- *       by hand survives a collection-to-collection change);</li>
- *   <li>once processed: the IBAN, the identifier, the scheme and the financed flag are frozen;</li>
- *   <li>the scheme is only {@code CORE} or {@code B2B}.</li>
+ *   <li>insert: nothing is copied or defaulted (a remittance without IBAN, creditor identifier or
+ *       scheme keeps them empty; a provided value is kept; the scheme is only {@code CORE} or
+ *       {@code B2B});</li>
+ *   <li>update while not processed: a change of the account or the type re-copies nothing, so a
+ *       value typed by hand survives;</li>
+ *   <li>once processed: the IBAN, the identifier, the scheme and the financed flag are frozen,
+ *       and nothing else REM writes on it (status, posting, reactivation) is refused, with or
+ *       without SEPA values (a remittance from before they existed has them all NULL).</li>
  * </ul>
  *
  * <p>Data: GOClient's remittance types (several collection types, one SEPA payment type) and two of
@@ -128,27 +128,21 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
   // ---------------------------------------------------------------- insert
 
   @Test
-  public void aCollectionGetsCoreNotFinancedAndTheAccountsIbanAndCreditorId() {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+  public void theTriggerNoLongerCopiesNorDefaultsAnythingOnInsert() {
+    Remittance collection = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+    Remittance payment = insert(PAYMENT_TYPE_ID, ACCOUNT_A_ID, r -> { });
 
-    assertEquals("CORE", remittance.getDirectDebitScheme());
-    assertFalse(remittance.isFinanced());
-    assertEquals(ACCOUNT_A_IBAN, remittance.getIBAN());
-    assertEquals(ACCOUNT_A_CREDITOR_ID, remittance.getCreditorIdentifier());
+    for (Remittance remittance : new Remittance[] { collection, payment }) {
+      assertNull(remittance.getIBAN());
+      assertNull(remittance.getCreditorIdentifier());
+      assertNull(remittance.getDirectDebitScheme());
+      assertFalse(remittance.isFinanced());
+    }
+    assertEquals("CORE", RemittanceSepaOptions.scheme(collection));
   }
 
   @Test
-  public void aPaymentHasNoSchemeNorCreditorIdButTheAccountsIban() {
-    Remittance remittance = insert(PAYMENT_TYPE_ID, ACCOUNT_A_ID, r -> { });
-
-    assertNull(remittance.getDirectDebitScheme());
-    assertNull("a payment has no creditor identifier", remittance.getCreditorIdentifier());
-    assertFalse(remittance.isFinanced());
-    assertEquals(ACCOUNT_A_IBAN, remittance.getIBAN());
-  }
-
-  @Test
-  public void aProvidedIbanCreditorIdAndSchemeAreRespectedOnInsert() {
+  public void aProvidedIbanCreditorIdAndSchemeAreKeptOnInsert() {
     Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
@@ -162,20 +156,10 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     assertTrue(remittance.isFinanced());
   }
 
-  @Test
-  public void anAccountWithoutCreditorIdLeavesTheCopyEmpty() {
-    FIN_FinancialAccount account = account(ACCOUNT_A_ID, null);
-
-    Remittance remittance = insert(COLLECTION_TYPE_ID, account.getId(), r -> { });
-
-    assertNull(remittance.getCreditorIdentifier());
-    assertEquals(ACCOUNT_A_IBAN, remittance.getIBAN());
-  }
-
   // ---------------------------------------------------------------- update while not processed
 
   @Test
-  public void changingTheAccountRecopiesTheIbanAndTheCreditorIdEvenOverTypedOnes() {
+  public void changingTheAccountDoesNotOverwriteTheTypedIbanNorCreditorId() {
     Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
@@ -185,27 +169,13 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
         ACCOUNT_B_ID));
     update(remittance);
 
-    assertEquals(ACCOUNT_B_IBAN, remittance.getIBAN());
-    assertEquals(ACCOUNT_B_CREDITOR_ID, remittance.getCreditorIdentifier());
-  }
-
-  @Test
-  public void aCollectionToCollectionTypeChangeKeepsTheTypedValues() {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
-      r.setIBAN(TYPED_IBAN);
-      r.setCreditorIdentifier(TYPED_CREDITOR_ID);
-    });
-
-    remittance.setRemittanceType(OBDal.getInstance().get(RemittanceType.class,
-        OTHER_COLLECTION_TYPE_ID));
-    update(remittance);
-
-    assertEquals("an IBAN typed by hand survives", TYPED_IBAN, remittance.getIBAN());
+    assertEquals("the callout and the GO write path propose the new account's IBAN, not the trigger",
+        TYPED_IBAN, remittance.getIBAN());
     assertEquals(TYPED_CREDITOR_ID, remittance.getCreditorIdentifier());
   }
 
   @Test
-  public void switchingFromCollectionToPaymentRecopiesTheIbanAndDropsTheCreditorId() {
+  public void changingTheTypeDoesNotOverwriteTheTypedValues() {
     Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
@@ -214,29 +184,16 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     remittance.setRemittanceType(OBDal.getInstance().get(RemittanceType.class, PAYMENT_TYPE_ID));
     update(remittance);
 
-    assertEquals("the account's IBAN replaces the typed one", ACCOUNT_A_IBAN,
-        remittance.getIBAN());
-    assertNull("a payment has no creditor identifier", remittance.getCreditorIdentifier());
-  }
-
-  @Test
-  public void switchingFromPaymentToCollectionCopiesTheAccountsCreditorId() {
-    Remittance remittance = insert(PAYMENT_TYPE_ID, ACCOUNT_A_ID, r -> r.setIBAN(TYPED_IBAN));
-    assertNull(remittance.getCreditorIdentifier());
-
-    remittance.setRemittanceType(OBDal.getInstance().get(RemittanceType.class,
-        COLLECTION_TYPE_ID));
-    update(remittance);
-
-    assertEquals(ACCOUNT_A_CREDITOR_ID, remittance.getCreditorIdentifier());
-    assertEquals(ACCOUNT_A_IBAN, remittance.getIBAN());
+    assertEquals(TYPED_IBAN, remittance.getIBAN());
+    assertEquals("the trigger leaves the identifier as it is", TYPED_CREDITOR_ID,
+        remittance.getCreditorIdentifier());
   }
 
   // ---------------------------------------------------------------- processed
 
   @Test
   public void aProcessedRemittanceFreezesItsSepaValues() throws Exception {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+    Remittance remittance = insertWithSepaValues();
     String id = remittance.getId();
     execute("update rem_remittance set processed = 'Y' where rem_remittance_id = ?", id);
 
@@ -261,8 +218,8 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
   }
 
   @Test
-  public void aProcessedRemittanceIsNotRecopiedWhenTheTypeSwitches() throws Exception {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+  public void aProcessedRemittanceRefusesATypeSwitch() throws Exception {
+    Remittance remittance = insertWithSepaValues();
     String id = remittance.getId();
     execute("update rem_remittance set processed = 'Y' where rem_remittance_id = ?", id);
 
@@ -271,6 +228,43 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().refresh(remittance);
     assertEquals(COLLECTION_TYPE_ID, remittance.getRemittanceType().getId());
     assertEquals(ACCOUNT_A_CREDITOR_ID, remittance.getCreditorIdentifier());
+  }
+
+  /**
+   * The freeze stops only the SEPA values: the updates REM itself makes on a processed remittance
+   * (its status, posting, and the reactivation that sets {@code processed = 'N'}) are accepted, for
+   * a remittance carrying the values and for one from before they existed (all of them NULL).
+   */
+  @Test
+  public void aProcessedRemittanceAcceptsTheUpdatesRemMakesWithOrWithoutSepaValues()
+      throws Exception {
+    Remittance withValues = insertWithSepaValues();
+    Remittance legacy = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+
+    for (Remittance remittance : new Remittance[] { withValues, legacy }) {
+      String id = remittance.getId();
+      execute("update rem_remittance set processed = 'Y', remittance_status = 'PR'"
+          + " where rem_remittance_id = ?", id);
+      for (String status : new String[] { "SB", "CT", "CP", "PR" }) {
+        execute("update rem_remittance set remittance_status = ? where rem_remittance_id = ?",
+            status, id);
+      }
+      execute("update rem_remittance set posted = 'Y' where rem_remittance_id = ?", id);
+      execute("update rem_remittance set posted = 'N' where rem_remittance_id = ?", id);
+      execute("update rem_remittance set processed = 'N', remittance_status = 'PE'"
+          + " where rem_remittance_id = ?", id);
+
+      OBDal.getInstance().refresh(remittance);
+      assertFalse(remittance.isProcessed());
+      assertEquals("PE", remittance.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS));
+    }
+    assertEquals(ACCOUNT_A_IBAN, withValues.getIBAN());
+    assertEquals(ACCOUNT_A_CREDITOR_ID, withValues.getCreditorIdentifier());
+    assertEquals("CORE", withValues.getDirectDebitScheme());
+    assertNull("nothing is filled in on the way", legacy.getIBAN());
+    assertNull(legacy.getCreditorIdentifier());
+    assertNull(legacy.getDirectDebitScheme());
+    assertFalse(legacy.isFinanced());
   }
 
   // ---------------------------------------------------------------- scheme check
@@ -288,6 +282,15 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
   }
 
   // ---------------------------------------------------------------- fixtures
+
+  /** An unprocessed collection that already carries the account's SEPA values, as GO writes them. */
+  private Remittance insertWithSepaValues() {
+    return insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
+      r.setIBAN(ACCOUNT_A_IBAN);
+      r.setCreditorIdentifier(ACCOUNT_A_CREDITOR_ID);
+      r.setDirectDebitScheme("CORE");
+    });
+  }
 
   private static FIN_FinancialAccount account(String id, String creditorId) {
     FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, id);

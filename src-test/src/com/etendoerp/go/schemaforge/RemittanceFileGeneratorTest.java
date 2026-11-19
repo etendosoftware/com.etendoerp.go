@@ -473,6 +473,201 @@ class RemittanceFileGeneratorTest {
         "/PmtInf[1]/DrctDbtTxInf/Dbtr/Nm");
   }
 
+  private static final String DEBTOR_ID =
+      "<Id><OrgId><Othr><Id>ES31ZZZK01927367</Id></Othr></OrgId></Id>";
+
+  /** The debtor identification is optional and Classic invents it: a CORE file drops it, everywhere. */
+  @Test
+  void aCoreFileDropsEveryDebtorIdentificationAndKeepsTheRest() throws Exception {
+    String withIds = collectionBlocks().replace("<Nm>Debtor</Nm>", "<Nm>Debtor</Nm>" + DEBTOR_ID);
+    assertEquals(2, withIds.split("ES31ZZZK01927367", -1).length - 1);
+
+    String xml = new String(generateCollection(withIds), StandardCharsets.UTF_8);
+
+    assertFalse(xml.contains("ES31ZZZK01927367"), xml);
+    assertEquals(2, xml.split("<Dbtr><Nm>Debtor</Nm></Dbtr>", -1).length - 1, xml);
+    assertTrue(xml.contains("<Id>" + CI + "</Id>"), "the creditor id stays: " + xml);
+  }
+
+  @Test
+  void aB2bFileKeepsItsDebtorIdentification() throws Exception {
+    String b2b = collectionBlocks().replace("<Cd>CORE</Cd>", "<Cd>B2B</Cd>")
+        .replace("<Nm>Debtor</Nm>", "<Nm>Debtor</Nm>" + DEBTOR_ID);
+
+    assertTrue(new String(generateCollection(b2b), StandardCharsets.UTF_8)
+        .contains("ES31ZZZK01927367"));
+  }
+
+  /** EPC130-08 2025 v1.0, 1.4: no reference starts or ends with a slash nor holds two. */
+  @Test
+  void aReferenceBreakingTheSlashRuleIsRefusedAtItsElement() {
+    String blocks = collectionBlocks();
+    assertRuleRefusal(blocks.replace(">message<", ">/message<"), RemittanceSepaRules.MSG_SLASH,
+        "/GrpHdr/MsgId");
+    assertRuleRefusal(blocks.replaceFirst(">block<", ">bl//ock<"), RemittanceSepaRules.MSG_SLASH,
+        "/PmtInf[1]/PmtInfId");
+    assertRuleRefusal(blocks.replaceFirst(">debit<", ">debit/<"), RemittanceSepaRules.MSG_SLASH,
+        "/PmtInf[1]/DrctDbtTxInf/PmtId/EndToEndId");
+    assertRuleRefusal(blocks.replaceFirst("<DbtrAgt>",
+        "<DrctDbtTx><MndtRltdInf><MndtId>A//B</MndtId></MndtRltdInf></DrctDbtTx><DbtrAgt>"),
+        RemittanceSepaRules.MSG_SLASH, "/PmtInf[1]/DrctDbtTxInf/DrctDbtTx/MndtRltdInf/MndtId");
+  }
+
+  @Test
+  void aSingleSlashInsideAReferenceIsAllowed() throws Exception {
+    String xml = new String(generateCollection(collectionBlocks().replaceFirst(">debit<",
+        ">de/bit<")), StandardCharsets.UTF_8);
+
+    assertTrue(xml.contains("<EndToEndId>de/bit</EndToEndId>"), xml);
+  }
+
+  // ---------------------------------------------------------------- payments (pain.001.001.09)
+
+  private static final String PAYMENT_NS = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09";
+  private static final String EMPTY_AGENT = "<FinInstnId/>";
+  private static final String EMPTY_CREDITOR_AGENT = "<CdtrAgt><FinInstnId/></CdtrAgt>";
+  private static final String DEBTOR_BIC = "<BICFI>BBVAESMMXXX</BICFI>";
+
+  /** One payment block with {@code transactions} transfers of 1.00, agents as the generator writes. */
+  private static String paymentBlock(String id, int transactions, String debtorAgent,
+      String creditorAgent) {
+    StringBuilder block = new StringBuilder("<PmtInf><PmtInfId>" + id + "</PmtInfId><PmtMtd>TRF"
+        + "</PmtMtd><NbOfTxs>" + transactions + "</NbOfTxs><CtrlSum>" + transactions + ".00"
+        + "</CtrlSum><PmtTpInf><InstrPrty>NORM</InstrPrty><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>"
+        + "<ReqdExctnDt><Dt>2026-12-21</Dt></ReqdExctnDt><Dbtr><Nm>Company</Nm><PstlAdr>"
+        + "<StrtNm> Calle Organizacion</StrtNm><Ctry>ES</Ctry></PstlAdr><Id><OrgId><Othr><Id>"
+        + "A39200019</Id></Othr></OrgId></Id></Dbtr><DbtrAcct><Id><IBAN>ES0000000000000000000000"
+        + "</IBAN></Id></DbtrAcct><DbtrAgt>" + debtorAgent + "</DbtrAgt><ChrgBr>SLEV</ChrgBr>");
+    for (int i = 1; i <= transactions; i++) {
+      block.append("<CdtTrfTxInf><PmtId><InstrId>").append(id).append("</InstrId><EndToEndId>")
+          .append(id).append("-").append(i).append("</EndToEndId></PmtId><Amt><InstdAmt Ccy=\"EUR\">"
+              + "1.00</InstdAmt></Amt>").append(creditorAgent).append("<Cdtr><Nm>Payee</Nm></Cdtr>"
+              + "<CdtrAcct><Id><IBAN>").append(IBAN).append("</IBAN></Id></CdtrAcct><RmtInf><Ustrd>"
+              + "Invoice</Ustrd></RmtInf></CdtTrfTxInf>");
+    }
+    return block.append("</PmtInf>").toString();
+  }
+
+  private static String payment(String... blocks) {
+    int transactions = 0;
+    for (String block : blocks) {
+      transactions += block.split("<CdtTrfTxInf>", -1).length - 1;
+    }
+    return "<Document xmlns=\"" + PAYMENT_NS + "\"><CstmrCdtTrfInitn><GrpHdr><MsgId>message</MsgId>"
+        + "<CreDtTm>2026-11-19T14:20:52</CreDtTm><NbOfTxs>" + transactions + "</NbOfTxs><CtrlSum>"
+        + transactions + ".00</CtrlSum><InitgPty><Nm>Company</Nm></InitgPty></GrpHdr>"
+        + String.join("", blocks) + "</CstmrCdtTrfInitn></Document>";
+  }
+
+  private byte[] generatePayment(String xml) throws Exception {
+    useGenerator(SepaGeneratorOfPayments.class);
+    output = new StringBuffer(new String(xml.getBytes(StandardCharsets.UTF_8),
+        StandardCharsets.ISO_8859_1));
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getIBAN()).thenReturn(IBAN);
+    when(remittance.getFinancialAccount()).thenReturn(account);
+    return RemittanceFileGenerator.generate(remittance);
+  }
+
+  private void requireBics() {
+    RemittanceTypeParameter parameter = mock(RemittanceTypeParameter.class);
+    when(parameter.isActive()).thenReturn(true);
+    when(parameter.getName()).thenReturn("BIC_SWIFT_MANDATORY");
+    when(parameter.getValue()).thenReturn("Y");
+    when(type.getREMRemittanceTypeParamList()).thenReturn(List.of(parameter));
+  }
+
+  /** EPC132-08 2025 v1.0, 2.53-2.61 and 2.114: NOTPROVIDED for the debtor agent, no creditor agent. */
+  @Test
+  void aPaymentWithoutBicsIdentifiesTheDebtorAgentAndOmitsTheCreditorAgent() throws Exception {
+    String xml = new String(generatePayment(payment(
+        paymentBlock("b1", 1, EMPTY_AGENT, EMPTY_CREDITOR_AGENT))), StandardCharsets.UTF_8);
+
+    assertTrue(xml.contains("<DbtrAgt><FinInstnId><Othr><Id>NOTPROVIDED</Id></Othr></FinInstnId>"
+        + "</DbtrAgt>"), xml);
+    assertFalse(xml.contains("CdtrAgt"), xml);
+    assertFalse(xml.contains("<FinInstnId/>"), xml);
+    assertTrue(xml.contains("<StrtNm>Calle Organizacion</StrtNm>"), "trimmed: " + xml);
+  }
+
+  /** Without a BIC requirement the debtor BIC is not sent; a valid creditor BIC is kept. */
+  @Test
+  void anIbanOnlyPaymentReplacesTheDebtorBicButKeepsTheCreditorBic() throws Exception {
+    String xml = new String(generatePayment(payment(paymentBlock("b1", 1,
+        "<FinInstnId>" + DEBTOR_BIC + "</FinInstnId>", "<CdtrAgt><FinInstnId>" + BIC
+            + "</FinInstnId></CdtrAgt>"))), StandardCharsets.UTF_8);
+
+    assertTrue(xml.contains("<DbtrAgt><FinInstnId><Othr><Id>NOTPROVIDED</Id>"), xml);
+    assertFalse(xml.contains(DEBTOR_BIC), xml);
+    assertTrue(xml.contains("<CdtrAgt><FinInstnId>" + BIC + "</FinInstnId></CdtrAgt>"), xml);
+  }
+
+  @Test
+  void aProfileRequiringBicsKeepsThemAndRefusesAMissingOne() throws Exception {
+    requireBics();
+    String creditorAgent = "<CdtrAgt><FinInstnId>" + BIC + "</FinInstnId></CdtrAgt>";
+    String debtorAgent = "<FinInstnId>" + DEBTOR_BIC + "</FinInstnId>";
+
+    String xml = new String(generatePayment(payment(
+        paymentBlock("b1", 1, debtorAgent, creditorAgent))), StandardCharsets.UTF_8);
+    assertTrue(xml.contains(DEBTOR_BIC) && xml.contains(BIC), xml);
+    assertFalse(xml.contains("NOTPROVIDED"), xml);
+
+    assertPaymentRefusal(payment(paymentBlock("b1", 1, EMPTY_AGENT, creditorAgent)),
+        RemittanceSepaRules.MSG_BIC_REQUIRED, "/PmtInf/DbtrAgt/FinInstnId");
+    assertPaymentRefusal(payment(paymentBlock("b1", 1, debtorAgent, EMPTY_CREDITOR_AGENT)),
+        RemittanceSepaRules.MSG_BIC_REQUIRED, "/PmtInf/CdtTrfTxInf/CdtrAgt");
+  }
+
+  /** Several blocks and transfers: each block is tidied, counted and totalled on its own. */
+  @Test
+  void aPaymentWithSeveralBlocksAndTransfersIsTidiedEverywhereAndKeepsItsTotals() throws Exception {
+    String xml = new String(generatePayment(payment(
+        paymentBlock("b1", 2, EMPTY_AGENT, EMPTY_CREDITOR_AGENT),
+        paymentBlock("b2", 1, EMPTY_AGENT, "<CdtrAgt><FinInstnId>" + BIC
+            + "</FinInstnId></CdtrAgt>"))), StandardCharsets.UTF_8);
+
+    assertEquals(2, xml.split("<DbtrAgt><FinInstnId><Othr><Id>NOTPROVIDED</Id>", -1).length - 1, xml);
+    assertEquals(1, xml.split("<CdtrAgt>", -1).length - 1, xml);
+    assertEquals(3, xml.split("<CdtTrfTxInf>", -1).length - 1, xml);
+    assertFalse(xml.contains("<FinInstnId/>"), xml);
+    assertFalse(xml.contains("> Calle"), xml);
+  }
+
+  @Test
+  void aPaymentRefusesWhatTheCreditorAgentOrTheControlsGetWrong() {
+    String block = paymentBlock("b1", 1, EMPTY_AGENT, EMPTY_CREDITOR_AGENT);
+    assertPaymentRefusal(payment(block).replace("<CdtTrfTxInf><PmtId>",
+        "<CdtTrfTxInf><PmtId>").replace("</Amt>", "</Amt><CdtrAgt><FinInstnId>" + UNKNOWN_AGENT
+            + "</FinInstnId></CdtrAgt>"),
+        RemittanceSepaRules.MSG_CREDITOR_AGENT, "/PmtInf/CdtTrfTxInf/CdtrAgt");
+    assertPaymentRefusal(payment(block).replaceFirst("<NbOfTxs>1</NbOfTxs><CtrlSum>1.00",
+        "<NbOfTxs>1</NbOfTxs><CtrlSum>2.00"), RemittanceSepaRules.MSG_TOTAL, "/GrpHdr/CtrlSum");
+    assertPaymentRefusal(payment(block).replace("<PmtMtd>TRF</PmtMtd><NbOfTxs>1",
+        "<PmtMtd>TRF</PmtMtd><NbOfTxs>2"), RemittanceSepaRules.MSG_COUNT, "/PmtInf/NbOfTxs");
+    assertPaymentRefusal(payment(block).replace("<Nm>Payee</Nm>", "<Nm>" + "X".repeat(71) + "</Nm>"),
+        RemittanceSepaRules.MSG_NAME, "/PmtInf/CdtTrfTxInf/Cdtr/Nm");
+  }
+
+  /** EPC132-08 2025 v1.0, 1.4 applies to a payment's references and identifiers too. */
+  @Test
+  void theSlashRuleAlsoAppliesToAPayment() {
+    String block = paymentBlock("b1", 1, EMPTY_AGENT, EMPTY_CREDITOR_AGENT);
+    assertPaymentRefusal(payment(block).replace(">message<", ">/message<"),
+        RemittanceSepaRules.MSG_SLASH, "/GrpHdr/MsgId");
+    assertPaymentRefusal(payment(block).replace("b1-1", "b1//1"), RemittanceSepaRules.MSG_SLASH,
+        "/PmtInf/CdtTrfTxInf/PmtId/EndToEndId");
+    assertPaymentRefusal(payment(block).replace(">A39200019<", ">A392/<"),
+        RemittanceSepaRules.MSG_SLASH, "/PmtInf/Dbtr/Id/OrgId/Othr/Id");
+  }
+
+  private void assertPaymentRefusal(String xml, String key, String location) {
+    RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
+        () -> generatePayment(xml));
+    assertEquals(key, refusal.getKey());
+    assertEquals("/Document/CstmrCdtTrfInitn" + location, refusal.getArgs()[0]);
+  }
+
   private void assertRuleRefusal(String xml, String key, String location) {
     RemittanceFileGenerator.Refusal refusal = assertThrows(RemittanceFileGenerator.Refusal.class,
         () -> generateCollection(xml));
@@ -612,6 +807,18 @@ class RemittanceFileGeneratorTest {
   public static class SepaGeneratorOfABundledVersion extends SEPA_RemittanceCreateFile {
     public SepaGeneratorOfABundledVersion() {
       schema_version = "pain.008.001.08";
+    }
+
+    @Override
+    public StringBuffer generate(Remittance remittance) {
+      return output;
+    }
+  }
+
+  /** A SEPA generator of pain.001.001.09 (SCT), GO's bundled XSD applies. */
+  public static class SepaGeneratorOfPayments extends SEPA_RemittanceCreateFile {
+    public SepaGeneratorOfPayments() {
+      schema_version = "pain.001.001.09";
     }
 
     @Override

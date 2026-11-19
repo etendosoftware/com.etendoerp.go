@@ -334,6 +334,7 @@ final class RemittanceFileGenerator {
     }
     try {
       Document core = null;
+      Document transfer = null;
       boolean requireBic = false;
       byte[] content = xml;
       if ("pain.008.001.08".equals(version)) {
@@ -344,12 +345,24 @@ final class RemittanceFileGenerator {
           content = RemittanceCreditorIdRewriter.tidy(core, !requireBic);
         }
       }
+      if ("pain.001.001.09".equals(version)) {
+        transfer = RemittanceCreditorIdRewriter.parse(xml);
+        requireBic = SEPAUtil.isMandatoryBIC(remittance);
+        content = RemittanceCreditorIdRewriter.tidyPayment(transfer, !requireBic);
+      }
       String failure = RemittanceSepaSchema.failure(xsd, content);
       if (failure != null) {
         throw new Refusal(MSG_INVALID, version, failure);
       }
       if (core != null) {
         RemittanceSepaRules.Violation violation = RemittanceSepaRules.firstViolation(core, requireBic);
+        if (violation != null) {
+          throw new Refusal(violation.key, violation.args);
+        }
+      }
+      if (transfer != null) {
+        RemittanceSepaRules.Violation violation =
+            RemittanceSepaRules.firstPaymentViolation(transfer, requireBic);
         if (violation != null) {
           throw new Refusal(violation.key, violation.args);
         }

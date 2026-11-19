@@ -44,6 +44,11 @@ final class RemittanceSepaRules {
   static final String MSG_COUNT = "ETGO_RemittanceFileRuleCount";
   static final String MSG_TOTAL = "ETGO_RemittanceFileRuleTotal";
   static final String MSG_NAME = "ETGO_RemittanceFileRuleName";
+  static final String MSG_SLASH = "ETGO_RemittanceFileRuleSlash";
+  static final String MSG_CREDITOR_AGENT = "ETGO_RemittanceFileRuleCreditorAgent";
+
+  /** References and identifications the EPC IG 1.4 forbids to start or end with "/" or hold "//". */
+  private static final String[] REFERENCES = {"MsgId", "PmtInfId", "InstrId", "EndToEndId", "MndtId"};
 
   static final int NAME_MAX_LENGTH = 70;
 
@@ -97,7 +102,57 @@ final class RemittanceSepaRules {
     return true;
   }
 
+  /**
+   * EPC130-08 2025 v1.0, 1.4: «References, identifications and identifiers ... must not start or
+   * end with a '/' ... must not contain '//'».
+   */
+  static boolean breaksSlashRule(String value) {
+    return value != null && (value.startsWith("/") || value.endsWith("/") || value.contains("//"));
+  }
+
+  private static final String[] COLLECTION_ID_HOLDERS = {"CdtrSchmeId", "InitgPty"};
+  /** pain.001: the identifications of the initiating party, the debtor and the creditor. */
+  private static final String[] PAYMENT_ID_HOLDERS = {"InitgPty", "Dbtr", "Cdtr"};
+
+  private static Violation slashRule(Document document, String[] holders) {
+    for (String reference : REFERENCES) {
+      NodeList found = document.getElementsByTagNameNS("*", reference);
+      for (int i = 0; i < found.getLength(); i++) {
+        Violation violation = slash(found.item(i));
+        if (violation != null) {
+          return violation;
+        }
+      }
+    }
+    // The creditor identifier (AT-E005): Othr/Id under CdtrSchmeId and the initiating party.
+    for (String holder : holders) {
+      NodeList found = document.getElementsByTagNameNS("*", holder);
+      for (int i = 0; i < found.getLength(); i++) {
+        NodeList ids = ((Element) found.item(i)).getElementsByTagNameNS("*", "Id");
+        for (int j = 0; j < ids.getLength(); j++) {
+          if (ids.item(j).getParentNode() != null
+              && "Othr".equals(ids.item(j).getParentNode().getLocalName())) {
+            Violation violation = slash(ids.item(j));
+            if (violation != null) {
+              return violation;
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private static Violation slash(Node node) {
+    String value = node.getTextContent();
+    return breaksSlashRule(value) ? new Violation(MSG_SLASH, path(node), value) : null;
+  }
+
   static Violation firstViolation(Document document, boolean requireBic) {
+    Violation slash = slashRule(document, COLLECTION_ID_HOLDERS);
+    if (slash != null) {
+      return slash;
+    }
     Element message = child(document.getDocumentElement(), "CstmrDrctDbtInitn");
     Element header = child(message, "GrpHdr");
     Violation violation = partyName(child(header, "InitgPty"), false);
@@ -129,6 +184,95 @@ final class RemittanceSepaRules {
       total = total.add(blockTotal);
     }
     return controls(header, transactionCount, total);
+  }
+
+  /**
+   * Checks a pain.001.001.09 payment file (EPC132-08 2025 v1.0): the slash rule (1.4), the debtor
+   * agent (1..1, {@code BICFI} or {@code NOTPROVIDED}: 2.53, 2.54, 2.61), the creditor agent
+   * (0..1, {@code BICFI} only: 2.114), the 70-character names (1.7, 2.22, 2.79) and the counts
+   * and totals of every {@code PmtInf} and of the message (1.4, 1.5, 2.4, 2.5).
+   *
+   * @param document   the document, already XSD-valid
+   * @param requireBic whether the remittance type requires a BIC for each agent
+   * @return the first violation, or {@code null}
+   */
+  static Violation firstPaymentViolation(Document document, boolean requireBic) {
+    Violation violation = slashRule(document, PAYMENT_ID_HOLDERS);
+    if (violation != null) {
+      return violation;
+    }
+    Element message = child(document.getDocumentElement(), "CstmrCdtTrfInitn");
+    Element header = child(message, "GrpHdr");
+    violation = partyName(child(header, "InitgPty"), false);
+    if (violation != null) {
+      return violation;
+    }
+    int transactionCount = 0;
+    BigDecimal total = BigDecimal.ZERO;
+    for (Element block : children(message, PAYMENT_INFORMATION)) {
+      violation = debtorAgent(block, requireBic);
+      if (violation == null) {
+        violation = partyName(child(block, "Dbtr"), true);
+      }
+      if (violation != null) {
+        return violation;
+      }
+      List<Element> transactions = children(block, "CdtTrfTxInf");
+      BigDecimal blockTotal = BigDecimal.ZERO;
+      for (Element transaction : transactions) {
+        violation = creditorAgent(transaction, requireBic);
+        if (violation == null) {
+          violation = partyName(child(transaction, "Cdtr"), true);
+        }
+        if (violation != null) {
+          return violation;
+        }
+        Element amount = child(child(transaction, "Amt"), "InstdAmt");
+        if (amount == null) {
+          return missing(transaction, "Amt/InstdAmt");
+        }
+        blockTotal = blockTotal.add(new BigDecimal(amount.getTextContent().trim()));
+      }
+      violation = controls(block, transactions.size(), blockTotal);
+      if (violation != null) {
+        return violation;
+      }
+      transactionCount += transactions.size();
+      total = total.add(blockTotal);
+    }
+    return controls(header, transactionCount, total);
+  }
+
+  /** 2.53-2.61: exactly one of BICFI or Othr/Id = NOTPROVIDED; BICFI when the type requires it. */
+  private static Violation debtorAgent(Element block, boolean requireBic) {
+    Element institution = child(child(block, "DbtrAgt"), "FinInstnId");
+    if (institution == null) {
+      return missing(block, "DbtrAgt/FinInstnId");
+    }
+    Element other = child(institution, "Othr");
+    boolean hasBic = child(institution, "BICFI") != null;
+    if (requireBic && !hasBic) {
+      return new Violation(MSG_BIC_REQUIRED, path(institution));
+    }
+    if (hasBic == (other != null) || (other != null && !RemittanceCreditorIdRewriter.NOT_PROVIDED
+        .equals(child(other, "Id").getTextContent()))) {
+      return new Violation(MSG_AGENT, path(institution), RemittanceCreditorIdRewriter.NOT_PROVIDED);
+    }
+    return null;
+  }
+
+  /** 2.114: BICFI only, and no creditor agent at all without a BIC. */
+  private static Violation creditorAgent(Element transaction, boolean requireBic) {
+    Element agent = child(transaction, "CdtrAgt");
+    if (agent == null) {
+      return requireBic ? new Violation(MSG_BIC_REQUIRED, path(transaction) + "/CdtrAgt") : null;
+    }
+    Element institution = child(agent, "FinInstnId");
+    if (institution == null || child(institution, "BICFI") == null
+        || child(institution, "Othr") != null) {
+      return new Violation(MSG_CREDITOR_AGENT, path(agent));
+    }
+    return null;
   }
 
   private static Violation partyAndAgent(Element parent, String party, String agentName,

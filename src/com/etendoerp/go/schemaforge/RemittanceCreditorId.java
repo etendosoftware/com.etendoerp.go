@@ -31,14 +31,14 @@ final class RemittanceCreditorId {
 
   /**
    * DAL property of {@code FIN_FINANCIAL_ACCOUNT.EM_REM_CREDITOR_IDENTIFIER}: the AD column name
-   * {@code EM_REM_Creditor_Identifier} without its {@code EM_} prefix, camel-cased, first letter
+   * {@code EM_REM_CreditorIdentifier} without its {@code EM_} prefix, camel-cased, first letter
    * lower-cased ({@code NamingUtil}).
    */
   static final String PROPERTY = "rEMCreditorIdentifier";
 
   /**
    * DAL property of {@code REM_REMITTANCE.CREDITOR_IDENTIFIER}: the remittance's own copy, the
-   * one its file carries. The AD column is named {@code Creditor_Identifier}.
+   * one its file carries. The AD column is named {@code CreditorIdentifier}.
    */
   static final String REMITTANCE_PROPERTY = "creditorIdentifier";
 

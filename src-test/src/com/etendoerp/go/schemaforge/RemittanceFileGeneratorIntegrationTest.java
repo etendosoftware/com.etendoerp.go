@@ -72,8 +72,8 @@ import org.openbravo.module.remittance.utility.REM_RemittanceCreateFile;
 /**
  * Real-database acceptance of the SEPA files (ETP-6247), including a collection or payment whose
  * own values differ from its account's (creditor identifier, IBAN, B2B scheme, financed prefix):
- * the generated XML is parsed and validated against the XSD, and the copies the REM trigger makes
- * on the remittance are what a regeneration writes. See the tests named after those behaviors.
+ * the generated XML is parsed and validated against the XSD, and the copies the generation snapshots
+ * on the remittance (the database makes none) are what a regeneration writes. See the tests named after those behaviors.
  *
  * <p>Original scope: a minimal remittance of each scheme is
  * built and processed by REM inside the test transaction, then its file is generated with the
@@ -112,6 +112,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
 
   /** The IBAN of the partners' bank accounts (the lines' debtors); a test may change it. */
   private String partnerIban = PARTNER_IBAN;
+  /** The BIC of the partners' bank accounts; none unless a test sets it. */
+  private String partnerBic;
 
   private static final String EURO_ID = "102";
   private static final String SPAIN_ID = "106";
@@ -180,6 +182,47 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     byte[] file = goFile(remittance);
 
     assertTrue(new String(file, StandardCharsets.UTF_8).contains("pain.001.001.09"));
+  }
+
+  /**
+   * EPC132-08 2025 v1.0: DbtrAgt is 1..1 (2.53) and CdtrAgt 0..1, BICFI only (2.114). With no BIC
+   * anywhere the debtor agent is NOTPROVIDED and the creditor agent is left out; the file validates.
+   */
+  @Test
+  public void aPaymentWithoutBicsHasNotProvidedDebtorAgentNoCreditorAgentAndValidates()
+      throws Exception {
+    Remittance remittance = processedPayment(r -> r.getFinancialAccount().setSwiftCode(null));
+
+    String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
+    writeSample("payment-without-bic.xml", xml);
+
+    Document doc = dom(xml);
+    assertEquals(xml, List.of("NOTPROVIDED"), values(doc, "DbtrAgt", "FinInstnId", "Othr", "Id"));
+    assertTrue(xml, values(doc, "CdtTrfTxInf", "CdtrAgt").isEmpty());
+    assertFalse(xml, xml.contains("<FinInstnId/>"));
+    assertFalse(xml, xml.contains(" Calle"));
+    assertNull(xml, jdkSchemaFailure(xsdOf(RemittanceSepaFileSetup.CLASS_SCT, "pain.001.001.09"),
+        xml));
+  }
+
+  /**
+   * With BICs on the accounts and a profile that does not require them: the debtor's is not sent
+   * (NOTPROVIDED), the beneficiary bank's optional one is (CdtrAgt/FinInstnId/BICFI).
+   */
+  @Test
+  public void aPaymentWithBicsKeepsTheCreditorBicAndValidates() throws Exception {
+    partnerBic = "BBVAESMMXXX";
+    Remittance remittance = processedPayment(
+        r -> r.getFinancialAccount().setSwiftCode("CAIXESBBXXX"));
+
+    String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
+    writeSample("payment-with-bic.xml", xml);
+
+    Document doc = dom(xml);
+    assertEquals(xml, List.of("NOTPROVIDED"), values(doc, "DbtrAgt", "FinInstnId", "Othr", "Id"));
+    assertEquals(xml, List.of("BBVAESMMXXX"), values(doc, "CdtrAgt", "FinInstnId", "BICFI"));
+    assertNull(xml, jdkSchemaFailure(xsdOf(RemittanceSepaFileSetup.CLASS_SCT, "pain.001.001.09"),
+        xml));
   }
 
   // ---------------------------------------------------------------- collection (CORE)
@@ -316,6 +359,45 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
         xml));
   }
 
+  /**
+   * ETP-6247: the debtor identification Classic invents from the tax ID is dropped from a CORE
+   * file (several blocks and debits), the rest of the party stays and the file still validates.
+   */
+  @Test
+  public void aCoreCollectionDropsTheDebtorIdentificationOfEveryDebitAndValidates()
+      throws Exception {
+    Remittance remittance = processedCollection(r -> {
+      differentAccountValues(r);
+      r.setCreditorIdentifier(OWN_CREDITOR_ID);
+      r.setIBAN(OWN_IBAN);
+    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID,
+        GO_SALES_DUE_DETAIL_B_ID);
+    List<Instruction> instructions = new ArrayList<>(remittance.getREMInstructionList());
+    assertTrue("two instructions", instructions.size() >= 2);
+    instructions.get(instructions.size() - 1).setDueDate(day(LocalDate.now().plusDays(11)));
+    OBDal.getInstance().save(instructions.get(instructions.size() - 1));
+    OBDal.getInstance().flush();
+    assertTrue("Classic writes the debtor id",
+        classicFile(remittance).contains("<Dbtr>") && values(dom(classicFile(remittance)),
+            "DrctDbtTxInf", "Dbtr", "Id", "OrgId", "Othr", "Id").size() >= 2);
+
+    String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
+
+    Document doc = dom(xml);
+    assertEquals(xml, List.of("CORE", "CORE"), values(doc, "PmtInf", "PmtTpInf", "LclInstrm", "Cd"));
+    assertTrue(xml, values(doc, "DrctDbtTxInf", "Dbtr", "Id", "OrgId", "Othr", "Id").isEmpty());
+    assertTrue(xml, values(doc, "DrctDbtTxInf", "Dbtr", "Id").isEmpty());
+    assertEquals(xml, 2, values(doc, "DrctDbtTxInf", "Dbtr", "Nm").size());
+    assertEquals(xml, 2, values(doc, "DrctDbtTxInf", "Dbtr", "PstlAdr", "Ctry").size());
+    assertEquals(List.of(OWN_CREDITOR_ID),
+        values(doc, "InitgPty", "Id", "OrgId", "Othr", "Id"));
+    for (String id : values(doc, "CdtrSchmeId", "Id", "PrvtId", "Othr", "Id")) {
+      assertEquals(OWN_CREDITOR_ID, id);
+    }
+    assertNull(xml, jdkSchemaFailure(xsdOf(RemittanceSepaFileSetup.CLASS_CORE, "pain.008.001.08"),
+        xml));
+  }
+
   @Test
   public void aCoreNonFinancedCollectionOnlyTakesTheRemittanceIdAndIban() throws Exception {
     Remittance remittance = processedCollection(r -> {
@@ -323,8 +405,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.setCreditorIdentifier(OWN_CREDITOR_ID);
       r.setIBAN(OWN_IBAN);
     }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
-    assertEquals("the trigger defaults a collection to CORE", "CORE",
-        remittance.getDirectDebitScheme());
+    assertEquals("a collection without a stored scheme is CORE", "CORE",
+        RemittanceSepaOptions.scheme(remittance));
     assertFalse(remittance.isFinanced());
 
     String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
@@ -375,10 +457,12 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
     Remittance remittance = processedCollection();
-    assertEquals("the trigger copied the account's creditor identifier", ACCOUNT_CREDITOR_ID,
-        remittance.getCreditorIdentifier());
-    assertEquals("the trigger copied the account's IBAN", COMPANY_IBAN, remittance.getIBAN());
+    // The database copies nothing: the generation snapshots the account's values on the remittance.
     String before = new String(goFile(remittance), StandardCharsets.UTF_8);
+    assertEquals("the generation snapshotted the account's creditor identifier",
+        ACCOUNT_CREDITOR_ID, remittance.getCreditorIdentifier());
+    assertEquals("the generation snapshotted the account's IBAN", COMPANY_IBAN,
+        remittance.getIBAN());
 
     account.set(RemittanceCreditorId.PROPERTY, OWN_CREDITOR_ID);
     account.setIBAN(OTHER_IBAN);
@@ -449,7 +533,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.getFinancialAccount().set(RemittanceCreditorId.PROPERTY, ACCOUNT_CREDITOR_ID);
       r.setCreditorIdentifier("ES00000B12345678"); // wrong check digits
     }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
-    assertEquals("the trigger respects a provided value", "ES00000B12345678",
+    assertEquals("a provided value is kept", "ES00000B12345678",
         remittance.getCreditorIdentifier());
 
     JSONObject problem = problemOf(remittance,
@@ -488,6 +572,15 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   }
 
   // ---------------------------------------------------------------- fixtures
+
+  /** Leaves the generated file where the {@code SEPA_SAMPLE_DIR} environment variable points, to inspect it by hand. */
+  private static void writeSample(String name, String xml) throws java.io.IOException {
+    String dir = System.getenv("SEPA_SAMPLE_DIR");
+    if (dir != null) {
+      java.nio.file.Files.write(java.nio.file.Paths.get(dir, name),
+          xml.getBytes(StandardCharsets.UTF_8));
+    }
+  }
 
   private Remittance processedPayment() throws Exception {
     return processedPayment(r -> { });
@@ -607,7 +700,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     assertEquals(String.valueOf(processed.getBody()), 200, processed.getHttpStatus());
     // REM may clear the session (grouped payments): read the remittance again by id.
     remittance = OBDal.getInstance().get(Remittance.class, remittance.getId());
-    // The trigger fills the IBAN, the creditor identifier and the scheme the DAL did not set.
+    // The database fills nothing: an empty IBAN, creditor identifier or scheme is resolved when the file is made.
     OBDal.getInstance().refresh(remittance);
     assertTrue(Boolean.TRUE.equals(remittance.isProcessed()));
     return remittance;
@@ -653,6 +746,9 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     bankAccount.setBusinessPartner(partner);
     bankAccount.setBankFormat("IBAN");
     bankAccount.setIBAN(partnerIban);
+    if (partnerBic != null) {
+      bankAccount.setSwiftCode(partnerBic);
+    }
     bankAccount.setCountry(OBDal.getInstance().get(Country.class, SPAIN_ID));
     bankAccount.setETABAMIsdefault(true);
     OBDal.getInstance().save(bankAccount);

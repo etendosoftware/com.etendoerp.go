@@ -61,6 +61,7 @@ final class RemittanceFileLineCheck {
   static final String MSG_INVALID_BIC = "ETGO_RemittanceFileLineInvalidBic";
   static final String MSG_NO_MANDATE = "ETGO_RemittanceFileLineNoMandate";
   static final String MSG_NO_MANDATE_DATE = "ETGO_RemittanceFileLineNoMandateDate";
+  static final String MSG_MANDATE_SLASH = "ETGO_RemittanceFileLineMandateSlash";
   static final String MSG_NO_TAX_ID = "ETGO_RemittanceFileLineNoTaxId";
   static final String MSG_NO_ADDRESS = "ETGO_RemittanceFileLineNoAddress";
   static final String MSG_NO_LOCALITY_COUNTRY = "ETGO_RemittanceFileLineNoLocalityCountry";
@@ -151,10 +152,22 @@ final class RemittanceFileLineCheck {
       RemittanceFileProblems problems) throws JSONException {
     if (StringUtils.isBlank(partner.getObsepadMandateIdentifier())) {
       problems.line(ref, MSG_NO_MANDATE, partner.getName(), ref.documentNo);
+    } else if (RemittanceSepaRules.breaksSlashRule(
+        mandateAsWritten(partner.getObsepadMandateIdentifier()))) {
+      problems.line(ref, MSG_MANDATE_SLASH, partner.getName(), ref.documentNo,
+          partner.getObsepadMandateIdentifier());
     }
     if (partner.getObsepadMandateDate() == null) {
       problems.line(ref, MSG_NO_MANDATE_DATE, partner.getName(), ref.documentNo);
     }
+  }
+
+  /**
+   * The mandate reference as Classic's generator writes it ({@code MndtId}): the generator's own
+   * character clean-up (a backslash becomes a slash) cut to 35 characters.
+   */
+  static String mandateAsWritten(String raw) {
+    return StringUtils.left(SEPAUtil.replaceStrangeCharacters(StringUtils.defaultString(raw)), 35);
   }
 
   private static void checkAddress(BusinessPartner partner, LineRef ref,

@@ -132,6 +132,59 @@ class RemittanceCreditorIdRewriterTest {
     assertEquals("Calle  Mayor", document.getElementsByTagNameNS(NS, "StrtNm").item(0).getTextContent());
   }
 
+  private static final String PAYMENT_NS = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09";
+
+  @Test
+  void paymentTidyingIdentifiesTheDebtorAgentOmitsTheEmptyCreditorAgentsAndTrims() throws Exception {
+    String xml = "<Document xmlns=\"" + PAYMENT_NS + "\"><PmtInf><StrtNm> Calle  </StrtNm><DbtrAgt>"
+        + "<FinInstnId/></DbtrAgt><CdtTrfTxInf><CdtrAgt><FinInstnId/></CdtrAgt></CdtTrfTxInf>"
+        + "<CdtTrfTxInf><CdtrAgt><FinInstnId><BICFI>CAIXESBBXXX</BICFI></FinInstnId></CdtrAgt>"
+        + "</CdtTrfTxInf></PmtInf></Document>";
+
+    Document document = RemittanceCreditorIdRewriter.parse(xml.getBytes(StandardCharsets.UTF_8));
+    Document tidy = RemittanceCreditorIdRewriter.parse(
+        RemittanceCreditorIdRewriter.tidyPayment(document, true));
+
+    assertEquals("NOTPROVIDED", tidy.getElementsByTagNameNS(PAYMENT_NS, "Id").item(0).getTextContent());
+    assertEquals(1, tidy.getElementsByTagNameNS(PAYMENT_NS, "CdtrAgt").getLength());
+    assertEquals(1, tidy.getElementsByTagNameNS(PAYMENT_NS, "BICFI").getLength());
+    assertEquals("Calle", tidy.getElementsByTagNameNS(PAYMENT_NS, "StrtNm").item(0).getTextContent());
+  }
+
+  @Test
+  void paymentTidyingKeepsTheDebtorBicWhenTheTypeRequiresItAndStillOmitsEmptyCreditorAgents()
+      throws Exception {
+    String xml = "<Document xmlns=\"" + PAYMENT_NS + "\"><PmtInf><DbtrAgt><FinInstnId>"
+        + "<BICFI>BBVAESMMXXX</BICFI></FinInstnId></DbtrAgt><CdtTrfTxInf><CdtrAgt><FinInstnId/>"
+        + "</CdtrAgt></CdtTrfTxInf></PmtInf></Document>";
+
+    Document tidy = RemittanceCreditorIdRewriter.parse(RemittanceCreditorIdRewriter.tidyPayment(
+        RemittanceCreditorIdRewriter.parse(xml.getBytes(StandardCharsets.UTF_8)), false));
+
+    assertEquals(1, tidy.getElementsByTagNameNS(PAYMENT_NS, "BICFI").getLength());
+    assertEquals(0, tidy.getElementsByTagNameNS(PAYMENT_NS, "Othr").getLength());
+    assertEquals(0, tidy.getElementsByTagNameNS(PAYMENT_NS, "CdtrAgt").getLength());
+  }
+
+  @Test
+  void cleaningDropsTheDebtorIdOfEveryTransactionAndNothingElse() throws Exception {
+    String id = "<Id><OrgId><Othr><Id>" + DEBTOR + "</Id></Othr></OrgId></Id>";
+    String xml = "<Document xmlns=\"" + NS + "\"><CstmrDrctDbtInitn><GrpHdr><InitgPty><Nm>A</Nm>" + id
+        + "</InitgPty></GrpHdr><PmtInf><CdtrSchmeId>" + id + "</CdtrSchmeId>"
+        + "<DrctDbtTxInf><Dbtr><Nm>Juan</Nm><PstlAdr><TwnNm>Madrid</TwnNm></PstlAdr>" + id
+        + "</Dbtr></DrctDbtTxInf><DrctDbtTxInf><Dbtr><Nm>Ana</Nm>" + id + "</Dbtr></DrctDbtTxInf>"
+        + "<DrctDbtTxInf><Dbtr><Nm>Sin id</Nm></Dbtr></DrctDbtTxInf></PmtInf>"
+        + "</CstmrDrctDbtInitn></Document>";
+
+    String out = new String(RemittanceCreditorIdRewriter.tidy(xml.getBytes(StandardCharsets.UTF_8),
+        false), StandardCharsets.UTF_8);
+
+    assertEquals(2, out.split(DEBTOR, -1).length - 1, "initiating party and scheme id stay: " + out);
+    assertTrue(out.contains("<Nm>Juan</Nm><PstlAdr><TwnNm>Madrid</TwnNm></PstlAdr></Dbtr>"), out);
+    assertTrue(out.contains("<Dbtr><Nm>Ana</Nm></Dbtr>"), out);
+    assertTrue(out.contains("<Dbtr><Nm>Sin id</Nm></Dbtr>"), out);
+  }
+
   // ---------------------------------------------------------------- options (ETP-6247)
 
   private static String withInstrument(String msgId) {

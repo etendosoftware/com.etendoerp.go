@@ -53,7 +53,7 @@ class RemittanceCreditorIdTest {
 
   @Test
   void thePropertyIsTheOneNamingUtilGivesTheRemColumn() {
-    // EM_REM_Creditor_Identifier: "EM_" stripped, camel-cased, first letter lower-cased.
+    // EM_REM_CreditorIdentifier: "EM_" stripped, camel-cased, first letter lower-cased.
     assertEquals("rEMCreditorIdentifier", RemittanceCreditorId.PROPERTY);
   }
 

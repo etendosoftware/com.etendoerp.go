@@ -29,9 +29,10 @@ import org.openbravo.module.remittance.Remittance;
 /**
  * ETP-6247 — the IBAN of a remittance: its own COPY of the account's IBAN
  * ({@code REM_REMITTANCE.IBAN}, DAL {@value #PROPERTY}), which its SEPA file always carries. The
- * trigger {@code REM_REMITTANCE_TRG} copies the account's IBAN on insert when the remittance has
- * none and, while it is not processed, when its account or type changes; a remittance created with
- * an IBAN keeps it. The IBAN typed on a remittance is never written to the account.
+ * write path ({@link RemittanceHeaderWrites}) copies the account's IBAN on create when the body
+ * brings none and, while it is not processed, when an update changes the account or the kind of type
+ * (collection or payment); an IBAN the body carries is kept. The database does not copy it, and the
+ * IBAN typed on a remittance is never written to the account.
  *
  * <p>Valid means: normalized (upper case, no separators), 15 to 34 characters, the ISO 13616
  * mod-97 check ({@link FinancialAccountCountrySupport#isChecksumValid}). The account's own IBAN is

@@ -2575,11 +2575,14 @@ everything is Classic's model.
   the module itself, DAL `creditorIdentifier`, an `AD_FIELD` on the remittance header, read-only once
   processed). The DAL property names come from `NamingUtil` and are read by name
   (`RemittanceCreditorId`), so GO compiles whatever the order the entities are generated in.
-  - **Copy.** The trigger `REM_REMITTANCE_TRG` copies the account's identifier into the remittance
-    on insert (when the remittance has none) and, while it is not processed, whenever its account or
-    its type changes — only for a pay-in (collection) type; a change of account therefore replaces a
-    copy edited by hand. It also refuses changing a non-empty copy once processed (an old
-    remittance with none can still get one). `confirm` and `generateFile` snapshot the account's
+  - **Copy.** The database copies nothing: `REM_REMITTANCE_TRG` only refuses changing a non-empty
+    copy once processed (an old remittance with none can still get one). The account's identifier is
+    put on the remittance by the writers: `RemittanceHeaderWrites` (NEO REST, batch and MCP) writes
+    the account's valid identifier into the body of a COLLECTION create, and again on an update that
+    changes the account or switches between collection and payment (a payment, or an account without
+    a valid one, clears it); an identifier the body carries is respected. The Classic form gets the
+    same from the callout `REM_Remittance_SepaDefaults` (module `org.openbravo.module.remittance`).
+    `confirm` and `generateFile` snapshot the account's
     valid identifier into a remittance that has none, in their own transaction before the file is
     generated (`RemittanceCreditorId.forFile`), so remittances created before this change behave
     as before and keep that file's identifier afterwards. They lock the remittance row first
@@ -2617,8 +2620,8 @@ everything is Classic's model.
     or the computed `suggestedCreditorId` and saves it with the general «Guardar».
     `RemittanceHeaderWrites` normalizes it (upper case, no separators) and validates it with
     `SepaCreditorId` (422 `ETGO_SepaCreditorIdInvalidFormat` / `ETGO_SepaCreditorIdInvalidCheckDigits`,
-    with `error.expectedCheckDigits`); a blank one is dropped (the trigger copies the account's on
-    insert and respects one that is sent); only a collection takes one (422
+    with `error.expectedCheckDigits`); a blank one is dropped (`proposeAccountValues` then writes the account's on
+    a collection create, and on an update that changes the account or the kind of type); only a collection takes one (422
     `ETGO_RemittanceOptionsCollectionOnly` on a payment); never written to the account.
     `saveCreditorId` stays for the financial-account modal (`saveToAccount`).
   - **fileReadiness / confirm / generateFile**: for a **collection** (`CORE`), a remittance with an own
@@ -2657,21 +2660,26 @@ everything is Classic's model.
   DAL `iBAN`, an `AD_FIELD` on the remittance header, read-only once processed), and its SEPA file
   always carries it. The account keeps its own IBAN untouched; the remittance handler never writes
   the account's.
-  - **Copy.** `REM_REMITTANCE_TRG` copies the account's IBAN on insert when the remittance brings
-    none (an IBAN sent on create is kept) and, while it is not processed, when its account changes or
-    its type changes between collection and payment (any other type change keeps a typed IBAN); it refuses changing a non-empty
-    IBAN once processed. `confirm` / `generateFile` snapshot the account's valid IBAN into a
+  - **Copy.** The database copies nothing (`REM_REMITTANCE_TRG` only freezes the IBAN once processed).
+    `RemittanceHeaderWrites.proposeAccountValues` writes the account's IBAN into the body on create
+    when the body brings none, and, while the remittance is not processed, on an update that changes
+    the account or switches between collection and payment (any other type change keeps a typed IBAN);
+    an IBAN the body carries is kept. The SPA sends a blank IBAN on an account change, and the server
+    resolves it. The Classic form gets the same from the callout `REM_Remittance_SepaDefaults`.
+    `confirm` / `generateFile` snapshot the account's valid IBAN into a
     remittance without a copy (`RemittanceIban.forFile`), as for the creditor identifier.
   - **Write: the header's CRUD, field `iBAN`** (decisions `entities.remittance.fields.iBAN`,
     editable, not in the generic form; needs `make regen ONLY=remittance PUSH_TO_NEO=1` and
     `export.database`). Chosen over an action because it is the only way to give the IBAN BEFORE
     the first save: the value travels in the create body. `RemittanceHeaderWrites` normalizes it in
     place (upper case, no separators), validates it (15 to 34 characters, mod-97 check digits; 422
-    `ETGO_RemittanceIbanInvalid`) and drops a blank one so the database copies the account's. A
+    `ETGO_RemittanceIbanInvalid`) and drops a blank one (the account's is then written, see Copy). A
     remittance with its own valid IBAN no longer needs the account to have one; otherwise the
     account must (422 `ETGO_RemittanceAccountIbanRequired`, now «the remittance needs a valid IBAN»).
-    An update that changes the account or the type does not count a typed or stored IBAN, as the
-    trigger re-copies the account's. Processed remittances are not editable (422
+    An update that changes the account or switches between collection and payment does not count the
+    stored IBAN, because it is replaced by the new account's (which must then be valid); a typed one
+    does count, and so does the stored one on any other update. Processed
+    remittances are not editable (422
     `ETGO_RemittanceProcessedNotEditable`).
   - **Read.** `sepaFileData` adds `remittanceIban` (the copy when valid and the remittance is on
     that account, else `null`), `remittanceIbanValid`, `accountIban` (raw, as before),
@@ -2692,8 +2700,8 @@ everything is Classic's model.
   of its own, columns of `org.openbravo.module.remittance`: `REM_REMITTANCE.DD_SCHEME` (`CORE` |
   `B2B`, `VARCHAR(4)`, DAL `directDebitScheme`) and `REM_REMITTANCE.ISFINANCED` (`Y`/`N`, default
   `N`, DAL `financed`); both `AD_FIELD`s on the remittance header, read-only once processed, and
-  frozen by `REM_REMITTANCE_TRG` after processing. The trigger defaults `DD_SCHEME` to `CORE` on insert
-  for a pay-in type (none for a payment). They are a per-remittance replacement of Classic's TYPE
+  frozen by `REM_REMITTANCE_TRG` after processing. `RemittanceHeaderWrites` sets `DD_SCHEME` to `CORE` on the create of a collection when the body
+  has none (none for a payment; the Classic callout does the same on a type change, and an empty value is read as `CORE`). The database does not default it. They are a per-remittance replacement of Classic's TYPE
   parameters `CORE_B2B` and `SEPA_DD_Financed_58`, so the type does not change.
   - **Write: the header's CRUD**, fields `directDebitScheme` and `financed` (decisions
     `entities.remittance.fields`, editable, not in the generic form; the SPA block «Opciones
@@ -2913,10 +2921,33 @@ everything is Classic's model.
     trailing whitespace from XML field values. The default profile (`BIC_SWIFT_MANDATORY = N`)
     writes `Othr/Id = NOTPROVIDED` for the creditor and debtor agents, including when their
     account records contain a BIC. A profile explicitly configured with `Y` requires a `BICFI`
-    for each agent. The profile is configured by remittance type. After XSD validation,
+    for each agent. The profile is configured by remittance type. GO also removes `Dbtr/Id` from
+    every `DrctDbtTxInf`: Classic's generator always writes it as an AT-02-style code built from the
+    debtor's tax ID (`ES31ZZZ<taxId>`, always as `OrgId`), which is the creditor-identifier format
+    applied to a debtor. The debtor identification is optional in the EPC guidelines (EPC130-08
+    2025 v1.0, 2.185); `Dbtr/Nm` and `Dbtr/PstlAdr` stay, and `InitgPty/Id` and `CdtrSchmeId` are
+    not touched (`Use_Id_ForIdentifiers` governs all three, so the parameter is not changed). B2B
+    files keep what the generator writes.
+  - **SEPA credit transfer files, `pain.001.001.09` (ETP-6247, EPC132-08 2025 v1.0).** GO post-processes
+    the generator output, as for collections, before the XSD validation: every leaf text is trimmed
+    (`<StrtNm> Calle X</StrtNm>`). `DbtrAgt` is 1..1 (2.53, 2.54, 2.61): the generator wrote an
+    empty `FinInstnId` without a BIC, now `Othr/Id = NOTPROVIDED` (a BIC is sent only when the type
+    has `BIC_SWIFT_MANDATORY = Y`, as in collections). `CdtrAgt` is 0..1 and BICFI only (2.114):
+    a valid BIC stays; without one the whole node is omitted, never `NOTPROVIDED` and never an empty
+    `FinInstnId` (a `Y` profile refuses the line instead: `ETGO_RemittanceFileRuleBicRequired`; a
+    creditor agent that is not just a BICFI: `ETGO_RemittanceFileRuleCreditorAgent`). Afterwards GO
+    checks the slash rule (1.4) on `MsgId`, `PmtInfId`, `InstrId`, `EndToEndId` and the `Othr/Id` of
+    `InitgPty`, `Dbtr` and `Cdtr`, the 70-character names, and `NbOfTxs`/`CtrlSum` per `PmtInf` and
+    in the header. `InitgPty/Id` and `Dbtr/Id` are written by the generator from the same object
+    (organization tax ID; `Use_Id_ForIdentifiers`) and are NOT changed. After XSD validation,
     GO checks that each agent uses exactly one identification, that creditor and debtor names are
     present, and that these names and any initiating-party name fit in 70 characters. GO also checks
-    `NbOfTxs` and `CtrlSum` against the debits in each `PmtInf` and in the entire file. A failure
+    `NbOfTxs` and `CtrlSum` against the debits in each `PmtInf` and in the entire file. The
+    references and identifications (`MsgId`, `PmtInfId`, `InstrId`, `EndToEndId`, `MndtId` and the
+    creditor identifier under `CdtrSchmeId` / `InitgPty`) must not start or end with `/` nor
+    contain `//` (EPC130-08 2025 v1.0, 1.4; `ETGO_RemittanceFileRuleSlash`). Readiness reports the
+    same rule early for the mandate reference of each line, as the generator writes it (backslash
+    turned into `/`, cut to 35 characters; `ETGO_RemittanceFileLineMandateSlash`). A failure
     returns HTTP 422 with the XML element path before the attachment is saved.
   - **Not automatic on create (ETP-6247, step-by-step flow).** A remittance created through GO keeps
     `EM_Etar_Automaticprocess = 'N'` (the column default): confirming it does NOT settle. It

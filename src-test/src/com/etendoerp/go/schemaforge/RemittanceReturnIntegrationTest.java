@@ -83,7 +83,11 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  *   <li>the SEPA file can no longer be generated ({@code ETGO_RemittanceFileHasReturns});</li>
  *   <li>a reconciled settlement transaction refuses the return and changes nothing;</li>
  *   <li>grouping {@code GGPD}: two lines share one payment, one of them alone is refused
- *       ({@code SHARED_PAYMENT}) and both together are returned.</li>
+ *       ({@code SHARED_PAYMENT}) and both together are returned;</li>
+ *   <li>REM's own processes run the same on a remittance whose SEPA columns are NULL (one from
+ *       before they existed) and on one that carries them: the trigger's freeze of the processed
+ *       remittance does not stop them; values set before processing come out unchanged, and a
+ *       NULL one gets the copy the file used.</li>
  * </ul>
  *
  * <p>The sample data: GOClient's sales dues FV1000045 and FV1000046 (EUR 40.91 each, the same
@@ -99,6 +103,8 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  * @covers com.etendoerp.go.schemaforge.RemittanceFileAction
  * @covers com.etendoerp.go.schemaforge.RemittanceStatusAction
  * @covers com.etendoerp.go.schemaforge.RemittanceProcessAction
+ * @covers com.etendoerp.go.schemaforge.RemittanceIban
+ * @covers com.etendoerp.go.schemaforge.RemittanceCreditorId
  */
 public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
@@ -113,6 +119,9 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   private static final String DUE_A_DETAIL_ID = "A2324465AF674B82AD63A43AA0703A25";
   private static final String DUE_B_DETAIL_ID = "48B9DA0B195244EDA1D75BA5706052E6";
   private static final BigDecimal DUE_AMOUNT = new BigDecimal("40.91");
+  /** A valid IBAN and creditor identifier written on the remittance (not the account's). */
+  private static final String REMITTANCE_IBAN = "ES9121000418450200051332";
+  private static final String CREDITOR_ID = "ES97000B12345678";
 
   private final RemittanceHeaderHandler handler = new RemittanceHeaderHandler();
 
@@ -393,10 +402,67 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     assertCollectedOnTheDueDate(remittance);
   }
 
+  /**
+   * The whole flow on a remittance whose SEPA columns are all NULL, as one created before they
+   * existed (the trigger fills nothing): REM processes, settles and returns it. The file, made
+   * after REM processed it, keeps the IBAN and creditor identifier it used as the remittance's
+   * copy ({@link RemittanceIban#forFile}, {@link RemittanceCreditorId#forFile}): a NULL to value
+   * write on a processed remittance, which the freeze lets through. The scheme stays NULL (CORE is
+   * resolved when the file is made).
+   */
   @Test
   public void theWholeStepFlowEndsInAReturn() throws Exception {
     Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
-    assertEquals(200, RemittanceFileAction.confirm(remittance, new JSONObject()).getHttpStatus());
+    assertSepaValues(remittance, null, null, null);
+    String accountIban = RemittanceIban.normalize(remittance.getFinancialAccount().getIBAN());
+
+    Remittance returned = wholeStepFlow(remittance);
+
+    assertEquals("the IBAN the file used is kept", accountIban, returned.getIBAN());
+    assertTrue("the creditor identifier the file used is kept: " + returned.getCreditorIdentifier(),
+        SepaCreditorId.isValid(returned.getCreditorIdentifier()));
+    assertNull("the scheme is not written", returned.getDirectDebitScheme());
+    assertFalse(Boolean.TRUE.equals(returned.isFinanced()));
+  }
+
+  /**
+   * The same flow with the SEPA values set: the trigger's freeze does not get in the way of REM's
+   * own updates of the processed remittance (status, payments, settlement, return), and the values
+   * reach the end unchanged.
+   */
+  @Test
+  public void theWholeStepFlowWithSepaValuesKeepsThemToTheReturn() throws Exception {
+    Remittance remittance = withSepaValues(
+        built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID));
+
+    Remittance returned = wholeStepFlow(remittance);
+
+    assertSepaValues(returned, REMITTANCE_IBAN, CREDITOR_ID,
+        RemittanceSepaProvisioning.SCHEME_CORE);
+  }
+
+  @Test
+  public void reactivateWithSepaValuesKeepsThem() throws Exception {
+    Remittance remittance = withSepaValues(
+        built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID));
+    NeoResponse processed = RemittanceProcessAction.process(remittance,
+        new JSONObject().put(RemittanceProcessAction.P_GROUPING,
+            RemittanceProcessAction.GROUPING_NONE));
+    assertEquals(String.valueOf(processed.getBody()), 200, processed.getHttpStatus());
+    remittance = OBDal.getInstance().get(Remittance.class, remittance.getId());
+
+    assertReactivated(remittance);
+
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    OBDal.getInstance().refresh(reloaded);
+    assertSepaValues(reloaded, REMITTANCE_IBAN, CREDITOR_ID,
+        RemittanceSepaProvisioning.SCHEME_CORE);
+  }
+
+  /** Confirm, mark sent, collect and return the only line; the returned remittance, reread. */
+  private Remittance wholeStepFlow(Remittance remittance) throws Exception {
+    NeoResponse confirm = RemittanceFileAction.confirm(remittance, new JSONObject());
+    assertEquals(String.valueOf(confirm.getBody()), 200, confirm.getHttpStatus());
     Remittance confirmed = OBDal.getInstance().get(Remittance.class, remittance.getId());
     assertEquals(200, RemittanceStatusAction.markSent(confirmed).getHttpStatus());
     collect(confirmed);
@@ -410,6 +476,10 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
     assertEquals(String.valueOf(returned.getBody()), 200, returned.getHttpStatus());
     assertEquals("CP", returned.getBody().getString("status"));
+    OBDal.getInstance().flush();
+    Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittance.getId());
+    OBDal.getInstance().refresh(reloaded);
+    return reloaded;
   }
 
   @Test
@@ -657,7 +727,33 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
       lineNo += 10L;
     }
     OBDal.getInstance().flush();
+    // A remittance created in this session keeps its inverse instruction list as an empty,
+    // initialized collection (a refresh initializes it too). REM adds each bank instruction by
+    // setRemittance() only, and Classic's generator writes GrpHdr/NbOfTxs from
+    // getREMInstructionList().size(), so the file would declare 0 transactions. The step actions
+    // run in a request of their own that loads the remittance from the database: start from a
+    // clean session, as that request does.
+    String remittanceId = remittance.getId();
+    OBDal.getInstance().getSession().clear();
+    return OBDal.getInstance().get(Remittance.class, remittanceId);
+  }
+
+  /** Sets the remittance's own SEPA values, as the GO write path stores them, before it is processed. */
+  private static Remittance withSepaValues(Remittance remittance) {
+    remittance.setIBAN(REMITTANCE_IBAN);
+    remittance.setCreditorIdentifier(CREDITOR_ID);
+    remittance.setDirectDebitScheme(RemittanceSepaProvisioning.SCHEME_CORE);
+    OBDal.getInstance().save(remittance);
+    OBDal.getInstance().flush();
     return remittance;
+  }
+
+  private static void assertSepaValues(Remittance remittance, String iban, String creditorId,
+      String scheme) {
+    assertEquals("IBAN", iban, remittance.getIBAN());
+    assertEquals("creditor identifier", creditorId, remittance.getCreditorIdentifier());
+    assertEquals("direct debit scheme", scheme, remittance.getDirectDebitScheme());
+    assertFalse("financed", Boolean.TRUE.equals(remittance.isFinanced()));
   }
 
   /** The organization's own information with a structured address, as the SEPA file needs. */

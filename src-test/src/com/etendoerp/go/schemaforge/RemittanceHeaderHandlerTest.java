@@ -211,8 +211,8 @@ class RemittanceHeaderHandlerTest {
         .put("remittanceType", " " + TYPE_ID + " ");
 
     assertNull(handler.handle(create(body)));
-    verify(handler).loadAccount(ACC_ID);
-    verify(handler).loadType(TYPE_ID);
+    verify(handler, org.mockito.Mockito.atLeastOnce()).loadAccount(ACC_ID);
+    verify(handler, org.mockito.Mockito.atLeastOnce()).loadType(TYPE_ID);
   }
 
   @Test
@@ -1562,9 +1562,9 @@ class RemittanceHeaderHandlerTest {
     verify(handler, never()).loadAccount(any());
   }
 
-  /** A blank IBAN is dropped from the body, so the database copies the account's. */
+  /** A blank IBAN is dropped from the body, and the write path puts the account's in its place. */
   @Test
-  void aBlankIbanIsDroppedFromTheBody() throws Exception {
+  void aBlankIbanIsReplacedByTheAccountsOnCreate() throws Exception {
     FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(true).when(handler).hasRemittanceMethods(account);
@@ -1573,7 +1573,7 @@ class RemittanceHeaderHandlerTest {
 
     assertNull(handler.handle(create(body)));
 
-    assertFalse(body.has("iBAN"));
+    assertEquals(ES_IBAN, body.getString("iBAN"));
   }
 
   /** The IBAN of the account is still required when the remittance brings none. */
@@ -1653,10 +1653,198 @@ class RemittanceHeaderHandlerTest {
     assertEquals(RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY, messageKey(payment));
   }
 
+  // ---------------------------------------------------------------- account values (ETP-6247)
+
+  private static final String PAY_TYPE_ID = "TYPE-PAY";
+  private static final String OTHER_TYPE_ID = "TYPE-2";
+  private static final String OLD_ACC_ID = "ACC-OLD";
+  private static final String ACCOUNT_CREDITOR = "ES82000B87654323";
+  private final Map<String, RemittanceType> typesById = new HashMap<>();
+
+  /**
+   * An account with an IBAN and a creditor identifier, two collection types ({@code TYPE-1},
+   * {@code TYPE-2}) and a payment type ({@code TYPE-PAY}), all available for it.
+   */
+  private FIN_FinancialAccount givenAccountValues() {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(ACCOUNT_CREDITOR);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(true).when(handler).isTypeAvailable(any(), any());
+    for (String id : List.of(TYPE_ID, OTHER_TYPE_ID, PAY_TYPE_ID)) {
+      RemittanceType type = mock(RemittanceType.class);
+      when(type.getId()).thenReturn(id);
+      withPayinMethod(type, !PAY_TYPE_ID.equals(id));
+      doReturn(type).when(handler).loadType(id);
+      typesById.put(id, type);
+    }
+    schemeSetup = org.mockito.Mockito.mockStatic(RemittanceSepaFileSetup.class);
+    schemeSetup.when(() -> RemittanceSepaFileSetup.schemeOf(any())).thenAnswer(inv -> {
+      RemittanceType type = inv.getArgument(0);
+      return PAY_TYPE_ID.equals(type.getId()) ? RemittanceSepaProvisioning.SCHEME_SCT
+          : RemittanceSepaProvisioning.SCHEME_CORE;
+    });
+    return account;
+  }
+
+  /** A saved remittance on {@code accountId} and {@code typeId}, with a valid IBAN of its own. */
+  private Remittance givenStored(String accountId, String typeId) {
+    Remittance stored = stubStored(false);
+    FIN_FinancialAccount storedAccount = mock(FIN_FinancialAccount.class);
+    when(storedAccount.getId()).thenReturn(accountId);
+    when(stored.getFinancialAccount()).thenReturn(storedAccount);
+    when(stored.getRemittanceType()).thenReturn(typesById.get(typeId));
+    when(stored.get("iBAN")).thenReturn(ES_IBAN);
+    return stored;
+  }
+
+  @Test
+  void aCreateOfACollectionWritesTheAccountsIbanCreditorIdAndCoreScheme() throws Exception {
+    givenAccountValues();
+    JSONObject body = validBody();
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertEquals(ACCOUNT_CREDITOR, body.getString("creditorIdentifier"));
+    assertEquals("CORE", body.getString("directDebitScheme"));
+  }
+
+  @Test
+  void aCreateOfAPaymentOnlyWritesTheAccountsIban() throws Exception {
+    givenAccountValues();
+    JSONObject body = validBody().put("remittanceType", PAY_TYPE_ID);
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertFalse(body.has("creditorIdentifier"));
+    assertFalse(body.has("directDebitScheme"));
+  }
+
+  @Test
+  void aCreateKeepsTheValidValuesTheBodyCarries() throws Exception {
+    givenAccountValues();
+    JSONObject body = validBody().put("iBAN", FR_IBAN).put("creditorIdentifier", "ES97000B12345678")
+        .put("directDebitScheme", "B2B");
+
+    assertNull(handler.handle(create(body)));
+
+    assertEquals(FR_IBAN, body.getString("iBAN"));
+    assertEquals("ES97000B12345678", body.getString("creditorIdentifier"));
+    assertEquals("B2B", body.getString("directDebitScheme"));
+  }
+
+  @Test
+  void aCreateWithAnAccountWithoutCreditorIdWritesNone() throws Exception {
+    FIN_FinancialAccount account = givenAccountValues();
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+    JSONObject body = validBody();
+
+    assertNull(handler.handle(create(body)));
+
+    assertFalse(body.has("creditorIdentifier"));
+    assertEquals("CORE", body.getString("directDebitScheme"));
+  }
+
+  /** The SPA sends blank values on an account change; the server gives it the new account's. */
+  @Test
+  void anAccountChangeWithBlankValuesWritesTheNewAccountsIbanAndCreditorId() throws Exception {
+    givenAccountValues();
+    givenStored(OLD_ACC_ID, TYPE_ID);
+    JSONObject body = new JSONObject().put("financialAccount", ACC_ID).put("iBAN", "")
+        .put("creditorIdentifier", "");
+
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, body, REM_ID)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertEquals(ACCOUNT_CREDITOR, body.getString("creditorIdentifier"));
+    assertFalse(body.has("directDebitScheme"));
+  }
+
+  @Test
+  void anAccountChangeKeepsAValidIbanTheBodyCarries() throws Exception {
+    givenAccountValues();
+    givenStored(OLD_ACC_ID, TYPE_ID);
+    JSONObject body = new JSONObject().put("financialAccount", ACC_ID).put("iBAN", FR_IBAN);
+
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, body, REM_ID)));
+
+    assertEquals(FR_IBAN, body.getString("iBAN"));
+    assertEquals(ACCOUNT_CREDITOR, body.getString("creditorIdentifier"));
+  }
+
+  @Test
+  void anAccountChangeToOneWithoutCreditorIdClearsTheStoredOne() throws Exception {
+    FIN_FinancialAccount account = givenAccountValues();
+    when(account.get(RemittanceCreditorId.PROPERTY)).thenReturn(null);
+    givenStored(OLD_ACC_ID, TYPE_ID);
+    JSONObject body = new JSONObject().put("financialAccount", ACC_ID);
+
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, body, REM_ID)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertTrue(body.isNull("creditorIdentifier"));
+    assertTrue(body.has("creditorIdentifier"));
+  }
+
+  @Test
+  void switchingFromCollectionToPaymentWritesTheIbanAndClearsTheCreditorId() throws Exception {
+    givenAccountValues();
+    givenStored(ACC_ID, TYPE_ID);
+    JSONObject body = new JSONObject().put("remittanceType", PAY_TYPE_ID);
+
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, body, REM_ID)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertTrue(body.has("creditorIdentifier"));
+    assertTrue(body.isNull("creditorIdentifier"));
+  }
+
+  @Test
+  void switchingFromPaymentToCollectionWritesTheAccountsCreditorId() throws Exception {
+    givenAccountValues();
+    givenStored(ACC_ID, PAY_TYPE_ID);
+    JSONObject body = new JSONObject().put("remittanceType", TYPE_ID);
+
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, body, REM_ID)));
+
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+    assertEquals(ACCOUNT_CREDITOR, body.getString("creditorIdentifier"));
+  }
+
+  /** A collection to collection change, and a write that moves neither, touch nothing. */
+  @Test
+  void anUpdateThatChangesNeitherAccountNorKindTouchesNothing() throws Exception {
+    givenAccountValues();
+    givenStored(ACC_ID, TYPE_ID);
+
+    JSONObject sameKind = new JSONObject().put("remittanceType", OTHER_TYPE_ID)
+        .put("iBAN", FR_IBAN);
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, sameKind, REM_ID)));
+    assertEquals(FR_IBAN, sameKind.getString("iBAN"));
+    assertFalse(sameKind.has("creditorIdentifier"));
+
+    JSONObject sameKindNoIban = new JSONObject().put("remittanceType", OTHER_TYPE_ID);
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, sameKindNoIban, REM_ID)));
+    assertFalse(sameKindNoIban.has("iBAN"));
+    assertFalse(sameKindNoIban.has("creditorIdentifier"));
+
+    JSONObject sameAccount = new JSONObject().put("financialAccount", ACC_ID).put("name", "X");
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, sameAccount, REM_ID)));
+    assertFalse(sameAccount.has("iBAN"));
+    assertFalse(sameAccount.has("creditorIdentifier"));
+
+    JSONObject other = new JSONObject().put("description", "x");
+    assertNull(handler.handle(context("PATCH", NeoEndpointType.CRUD, other, REM_ID)));
+    assertEquals(1, other.length());
+  }
+
   // ---------------------------------------------------------------- scheme and financed (ETP-6247)
 
   private void collectionType(String scheme) {
     RemittanceType type = mock(RemittanceType.class);
+    withPayinMethod(type, RemittanceSepaProvisioning.SCHEME_CORE.equals(scheme));
     doReturn(type).when(handler).loadType(TYPE_ID);
     FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -1667,6 +1855,14 @@ class RemittanceHeaderHandlerTest {
   }
 
   private MockedStatic<RemittanceSepaFileSetup> schemeSetup;
+
+  /** A type whose payment method is (or is not) a pay-in one: a collection (or a payment). */
+  private static void withPayinMethod(RemittanceType type, boolean payin) {
+    org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod method =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod.class);
+    when(method.isPayinAllow()).thenReturn(payin);
+    when(type.getPaymentMethod()).thenReturn(method);
+  }
 
   @org.junit.jupiter.api.AfterEach
   void closeSchemeSetup() {
@@ -1696,7 +1892,8 @@ class RemittanceHeaderHandlerTest {
     collectionType(RemittanceSepaProvisioning.SCHEME_CORE);
     JSONObject body = validBody().put("directDebitScheme", " ");
     assertNull(handler.handle(create(body)));
-    assertFalse(body.has("directDebitScheme"));
+    assertEquals("CORE", body.getString("directDebitScheme"),
+        "a blank scheme of a new collection becomes CORE");
   }
 
   /** A payment takes neither: B2B or financed is refused, CORE / false are dropped. */

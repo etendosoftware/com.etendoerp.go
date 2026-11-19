@@ -21,6 +21,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -206,6 +208,8 @@ final class RemittanceCreditorIdRewriter {
    * ETP-6247 — cleans up what Classic's generator writes in a file about to be validated, by
    * structure and for every element:
    * <ul>
+   *   <li>the debtor identification ({@code Dbtr/Id}) is dropped (see
+   *       {@link #removeDebtorIdentifications});</li>
    *   <li>the text of every leaf element is trimmed (the generator copies the address data as it
    *       is stored, e.g. {@code <StrtNm> Calle X</StrtNm>}); nothing else is collapsed;</li>
    *   <li>the IBAN-only profile identifies each bank with {@code Othr/Id = NOTPROVIDED} even
@@ -230,6 +234,7 @@ final class RemittanceCreditorIdRewriter {
 
   static byte[] tidy(Document document, boolean ibanOnly) throws TransformerException {
     trimLeaves(document.getDocumentElement());
+    removeDebtorIdentifications(document);
     if (ibanOnly) {
       for (String agent : AGENTS) {
         NodeList agents = document.getElementsByTagNameNS(
@@ -240,6 +245,68 @@ final class RemittanceCreditorIdRewriter {
       }
     }
     return write(document);
+  }
+
+  /**
+   * ETP-6247 — cleans up a pain.001 (SEPA credit transfer) file the generator wrote, by structure
+   * and for every element, before it is validated. EPC132-08 2025 v1.0 (SCT Customer-to-PSP IG):
+   * <ul>
+   *   <li>the text of every leaf element is trimmed ({@code <StrtNm> Calle X</StrtNm>}); nothing
+   *       else is collapsed;</li>
+   *   <li>{@code DbtrAgt} is 1..1 and takes either {@code BICFI} or {@code Othr/Id = NOTPROVIDED}
+   *       (2.53, 2.54, 2.61): the generator writes an empty {@code FinInstnId} when the account has
+   *       no BIC. As in a collection, a BIC is sent only when the remittance type requires it
+   *       ({@code ibanOnly} false); otherwise the agent is identified with {@code NOTPROVIDED}
+   *       even when the account has a BIC;</li>
+   *   <li>{@code CdtrAgt} is 0..1 and takes only {@code BICFI} (2.114: «If the BIC is not
+   *       indicated 'Creditor Agent' structure is not to be used»): a creditor agent with no
+   *       identification is removed, never {@code NOTPROVIDED}; a valid BIC stays.</li>
+   * </ul>
+   *
+   * @param document the parsed pain.001.001.09 document (modified in place)
+   * @param ibanOnly whether the remittance type has no BIC requirement
+   * @return the document, UTF-8
+   * @throws TransformerException when it cannot be written
+   */
+  static byte[] tidyPayment(Document document, boolean ibanOnly) throws TransformerException {
+    trimLeaves(document.getDocumentElement());
+    String namespace = document.getDocumentElement().getNamespaceURI();
+    if (ibanOnly) {
+      NodeList debtorAgents = document.getElementsByTagNameNS(namespace, "DbtrAgt");
+      for (int i = 0; i < debtorAgents.getLength(); i++) {
+        useIbanOnlyIdentification(document, child(debtorAgents.item(i), "FinInstnId"));
+      }
+    }
+    NodeList creditorAgents = document.getElementsByTagNameNS(namespace, "CdtrAgt");
+    List<Node> empty = new ArrayList<>();
+    for (int i = 0; i < creditorAgents.getLength(); i++) {
+      Element institution = child(creditorAgents.item(i), "FinInstnId");
+      if (institution == null || !hasElementChild(institution)) {
+        empty.add(creditorAgents.item(i));
+      }
+    }
+    for (Node agent : empty) {
+      agent.getParentNode().removeChild(agent);
+    }
+    return write(document);
+  }
+
+  /**
+   * Drops {@code Dbtr/Id} of every {@code DrctDbtTxInf}. Classic's generator always writes it, as
+   * an AT-02-style code built from the debtor's tax ID (country, check digits, {@code ZZZ}, tax
+   * ID): the code of a creditor invented for a debtor, and always as an organisation. The debtor
+   * identification (AT-P004, EPC130-08 2.185) is optional; {@code Nm} and {@code PstlAdr} stay.
+   * {@code InitgPty/Id} and {@code CdtrSchmeId} are not under a transaction and are not touched.
+   */
+  private static void removeDebtorIdentifications(Document document) {
+    NodeList transactions = document.getElementsByTagNameNS("*", "DrctDbtTxInf");
+    for (int i = 0; i < transactions.getLength(); i++) {
+      Element debtor = child(transactions.item(i), "Dbtr");
+      Element id = debtor == null ? null : child(debtor, ID);
+      if (id != null) {
+        debtor.removeChild(id);
+      }
+    }
   }
 
   private static void trimLeaves(Node node) {
@@ -346,6 +413,9 @@ final class RemittanceCreditorIdRewriter {
   }
 
   static Element child(Node parent, String localName) {
+    if (parent == null) {
+      return null;
+    }
     for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
       if (node.getNodeType() == Node.ELEMENT_NODE && localName.equals(localNameOf(node))
           && Objects.equals(parent.getNamespaceURI(), node.getNamespaceURI())) {

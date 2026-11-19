@@ -223,6 +223,22 @@ class RemittanceFileLineCheckTest {
     assertEquals(0, check(false, true).length(), "a payment needs no mandate");
   }
 
+  /** EPC130-08 1.4: the mandate reference, as the generator writes it, obeys the slash rule. */
+  @Test
+  void aMandateReferenceBreakingTheSlashRuleIsReportedAsWritten() throws Exception {
+    for (String bad : new String[] {"/M1", "M1/", "M//1", "M\\\\1", "M1\\"}) {
+      when(partner.getObsepadMandateIdentifier()).thenReturn(bad);
+      assertEquals(List.of(RemittanceFileLineCheck.MSG_MANDATE_SLASH), codes(check(true, true)), bad);
+    }
+    // cut to 35 characters the reference ends with a slash
+    when(partner.getObsepadMandateIdentifier()).thenReturn("A".repeat(34) + "/B");
+    assertEquals(List.of(RemittanceFileLineCheck.MSG_MANDATE_SLASH), codes(check(true, true)));
+
+    when(partner.getObsepadMandateIdentifier()).thenReturn("M/1");
+    assertEquals(0, check(true, true).length(), "one inner slash is allowed");
+    assertEquals(0, check(false, true).length(), "a payment needs no mandate");
+  }
+
   @Test
   void aPartnerWithoutTaxIdIsReported() throws Exception {
     when(partner.getTaxID()).thenReturn(null);
