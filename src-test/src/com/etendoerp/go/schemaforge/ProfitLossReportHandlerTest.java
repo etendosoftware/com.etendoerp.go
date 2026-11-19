@@ -87,20 +87,22 @@ class ProfitLossReportHandlerTest {
   // -------------------------------------------------------------------------
 
   @Test
-  @DisplayName("declares only yearId as required")
-  void reportParametersDeclaresOnlyYearIdRequired() {
+  @DisplayName("declares no required parameter: yearId may be replaced by dateFrom + dateTo")
+  void reportParametersDeclareNothingRequired() {
     List<NeoReportParam> params = handler.reportParameters().orElseThrow();
 
-    NeoReportParam yearId = params.stream().filter(p -> "yearId".equals(p.getName()))
-        .findFirst().orElseThrow();
-    assertTrue(yearId.isRequired());
+    assertEquals(0, params.stream().filter(NeoReportParam::isRequired).count(),
+        "yearId is conditionally required (no dateFrom + dateTo) and referenceYearId too "
+            + "(compareTo), which the schema cannot express");
+  }
 
-    long otherRequiredCount = params.stream()
-        .filter(p -> !"yearId".equals(p.getName()))
-        .filter(NeoReportParam::isRequired)
-        .count();
-    assertEquals(0, otherRequiredCount, "only yearId may be required — referenceYearId is "
-        + "conditionally required (compareTo), which the schema cannot express");
+  @Test
+  @DisplayName("declares breakdown as a closed none/month/quarter set")
+  void reportParametersDeclareBreakdownEnum() {
+    NeoReportParam breakdown = handler.reportParameters().orElseThrow().stream()
+        .filter(p -> "breakdown".equals(p.getName())).findFirst().orElseThrow();
+
+    assertEquals(List.of("none", "month", "quarter"), breakdown.getAllowedValues());
   }
 
   @Test
@@ -193,6 +195,125 @@ class ProfitLossReportHandlerTest {
       assertEquals(400, response.getHttpStatus());
       assertEquals("year_id_required", response.getBody().getString("error"));
     }
+  }
+
+  @Test
+  @DisplayName("POST without yearId and with only one date is still refused with 400")
+  void postWithoutYearIdAndOneDateIsRefused() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+
+      NeoResponse response = handler.handle(context("POST",
+          new JSONObject().put("dateFrom", "2026-07-01")));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("year_id_required", response.getBody().getString("error"));
+    }
+  }
+
+  @Test
+  @DisplayName("POST without yearId but with dateFrom and dateTo runs on the dates alone")
+  void postWithDatesOnlyRunsWithoutYearBind() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      NativeQuery<Object[]> query = stubHappyPathObContextAndDal(contextMock, obDalMock,
+          Collections.emptyList());
+
+      NeoResponse response = handler.handle(context("POST",
+          new JSONObject().put("dateFrom", "2026-07-01").put("dateTo", "2026-09-30")));
+
+      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
+      ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
+      verify(query, atLeastOnce()).setParameter(nameCaptor.capture(), any());
+      assertFalse(nameCaptor.getAllValues().contains("yearId"),
+          "with no yearId the query must not bind one (the SQL has no year bound then)");
+      assertTrue(nameCaptor.getAllValues().contains("dateTo"));
+    }
+  }
+
+  @Test
+  @DisplayName("POST with an unknown breakdown is refused with 400")
+  void postWithInvalidBreakdownIsRefused() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+
+      NeoResponse response = handler.handle(context("POST",
+          new JSONObject().put("yearId", "year1").put("breakdown", "week")));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("breakdown_invalid", response.getBody().getString("error"));
+    }
+  }
+
+  @Test
+  @DisplayName("POST with a breakdown and compareTo is refused with 400")
+  void postWithBreakdownAndCompareToIsRefused() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+
+      NeoResponse response = handler.handle(context("POST", new JSONObject()
+          .put("yearId", "year1").put("breakdown", "month").put("compareTo", true)
+          .put("referenceYearId", "year2")));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("breakdown_with_compare", response.getBody().getString("error"));
+    }
+  }
+
+  @Test
+  @DisplayName("a breakdown longer than 24 periods is refused with 400")
+  void breakdownWithTooManyPeriodsIsRefused() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+
+      NeoResponse response = handler.handle(context("POST", new JSONObject()
+          .put("dateFrom", "2024-01-01").put("dateTo", "2026-06-30").put("breakdown", "month")));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("breakdown_too_many_periods", response.getBody().getString("error"));
+    }
+  }
+
+  @Test
+  @DisplayName("a quarter breakdown lists its columns from the range's first month in meta")
+  void quarterBreakdownListsPeriodsInMeta() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+
+      NeoResponse response = handler.handle(context("POST", new JSONObject()
+          .put("dateFrom", "2026-07-01").put("dateTo", "2027-06-30").put("breakdown", "quarter")));
+
+      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
+      JSONObject meta = response.getBody().getJSONObject("response").getJSONObject("meta");
+      assertEquals("quarter", meta.getString("breakdown"));
+      assertEquals(4, meta.getJSONArray("periods").length());
+      assertEquals("2026-07/2026-09", meta.getJSONArray("periods").getJSONObject(0)
+          .getString("key"));
+      assertEquals("2027-04/2027-06", meta.getJSONArray("periods").getJSONObject(3)
+          .getString("key"));
+    }
+  }
+
+  @Test
+  @DisplayName("a month breakdown of a mid-month range clips its first and last slices")
+  void monthSlicesAreClippedToTheRange() {
+    List<java.time.LocalDate[]> slices = AbstractAccountTreeReportHandler.slices(
+        java.time.LocalDate.of(2026, 7, 15), java.time.LocalDate.of(2026, 9, 10), 1);
+
+    assertEquals(3, slices.size());
+    assertEquals(java.time.LocalDate.of(2026, 7, 15), slices.get(0)[0]);
+    assertEquals(java.time.LocalDate.of(2026, 7, 31), slices.get(0)[1]);
+    assertEquals(java.time.LocalDate.of(2026, 9, 1), slices.get(2)[0]);
+    assertEquals(java.time.LocalDate.of(2026, 9, 10), slices.get(2)[1]);
+    assertEquals("2026-08", AbstractAccountTreeReportHandler.sliceKey(slices.get(1)));
   }
 
   @Test

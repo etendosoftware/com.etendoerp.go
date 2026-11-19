@@ -17,10 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -63,6 +67,15 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
   static final String PARAM_REFERENCE_YEAR_ID = "referenceYearId";
   static final String PARAM_FROM_REFERENCE_DATE = "fromReferenceDate";
   static final String PARAM_TO_REFERENCE_DATE = "toReferenceDate";
+  static final String PARAM_BREAKDOWN = "breakdown";
+  static final String BREAKDOWN_NONE = "none";
+  static final String BREAKDOWN_MONTH = "month";
+  static final String BREAKDOWN_QUARTER = "quarter";
+  static final List<String> BREAKDOWNS = List.of(BREAKDOWN_NONE, BREAKDOWN_MONTH,
+      BREAKDOWN_QUARTER);
+  /** Most columns a breakdown may produce: two years of months. Each column is one more query. */
+  static final int MAX_BREAKDOWN_PERIODS = 24;
+  private static final DateTimeFormatter MONTH_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
 
   private static final String DEFAULT_ACCOUNT_LEVEL = "C";
   private static final List<String> ACCOUNT_LEVELS = List.of("C", "D", "E", "S");
@@ -80,12 +93,18 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
   /**
    * Whether {@code dateFrom}/{@code fromReferenceDate} narrow the query. When {@code false} they
    * are accepted but never validated, bound nor echoed (Balance Sheet's cumulative snapshot).
+   *
+   * <p>When {@code true} the dates alone can bound the report (ETP-5850): {@code yearId} may be
+   * left out when both {@code dateFrom} and {@code dateTo} are given, and {@code breakdown} splits
+   * the range into month or quarter columns. A snapshot has neither: its only bound is the year.</p>
    */
   abstract boolean hasLowerDateBounds();
 
   /**
    * One {@code SUM} CASE over {@code fa.amtacctdr - fa.amtacctcr} for one period: the year named by
    * the {@code yearParam} bind, narrowed by the optional {@code fromParam}/{@code toParam} binds.
+   * {@code yearParam} is {@code null} when the period has no year (dates only, see
+   * {@link #hasLowerDateBounds()}).
    */
   abstract String amountCase(String yearParam, boolean hasFrom, String fromParam, boolean hasTo,
       String toParam);
@@ -160,7 +179,7 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
     // Pure input checks run before anything touches OBContext or the database, so a malformed
     // request is refused without a single query.
     String yearId = body.optString(PARAM_YEAR_ID, "");
-    NeoResponse yearIdError = validateYearId(yearId);
+    NeoResponse yearIdError = validateYearId(yearId, body);
     if (yearIdError != null) {
       return yearIdError;
     }
@@ -187,6 +206,13 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
         PARAM_TO_REFERENCE_DATE);
     if (referenceError != null) {
       return referenceError;
+    }
+
+    String breakdown = hasLowerDateBounds() ? body.optString(PARAM_BREAKDOWN, BREAKDOWN_NONE)
+        : BREAKDOWN_NONE;
+    NeoResponse breakdownError = validateBreakdown(breakdown, compareTo);
+    if (breakdownError != null) {
+      return breakdownError;
     }
 
     boolean showOnlyWithValue = body.optBoolean(PARAM_SHOW_ONLY_WITH_VALUE, true);
@@ -222,7 +248,15 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
         accountLevel, showOnlyWithValue);
 
     JSONArray data = buildDataArray(tree, compareTo);
-    return reportResponse(data, data.length(), buildMeta(query, accountLevel, showOnlyWithValue));
+    JSONObject meta = buildMeta(query, accountLevel, showOnlyWithValue);
+    if (!BREAKDOWN_NONE.equals(breakdown)) {
+      NeoResponse breakdownRangeError = addBreakdown(query, breakdown, accountLevel, operandRows,
+          tree, data, meta);
+      if (breakdownRangeError != null) {
+        return breakdownRangeError;
+      }
+    }
+    return reportResponse(data, data.length(), meta);
   }
 
   // -------------------------------------------------------------------------
@@ -263,8 +297,18 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
     return raw.isEmpty() ? null : LocalDate.parse(raw, DATE_FORMATTER);
   }
 
-  private NeoResponse validateYearId(String yearId) {
+  /**
+   * {@code yearId} is required, except where the dates alone can bound the report (see
+   * {@link #hasLowerDateBounds()}) and both {@code dateFrom} and {@code dateTo} are given: an agent
+   * asking for a quarter then needs no year id, which it often cannot tell apart (a tenant can
+   * have two years with the same name, one per calendar).
+   */
+  private NeoResponse validateYearId(String yearId, JSONObject body) {
     if (yearId.isEmpty()) {
+      if (hasLowerDateBounds() && !body.optString(PARAM_DATE_FROM, "").isEmpty()
+          && !body.optString(PARAM_DATE_TO, "").isEmpty()) {
+        return null;
+      }
       return actionableError(400, "year_id_required",
           "yearId is required.",
           yearIdRequiredHint());
@@ -273,6 +317,20 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
       return actionableError(400, "year_id_invalid",
           "yearId '" + yearId + "' does not look like a valid Etendo year id.",
           "Pass a real C_Year id.");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateBreakdown(String breakdown, boolean compareTo) {
+    if (!BREAKDOWNS.contains(breakdown)) {
+      return actionableError(400, "breakdown_invalid",
+          "breakdown '" + breakdown + "' is not one of none, month, quarter.",
+          "Use none (one total column), month or quarter.");
+    }
+    if (compareTo && !BREAKDOWN_NONE.equals(breakdown)) {
+      return actionableError(400, "breakdown_with_compare",
+          "breakdown cannot be combined with compareTo.",
+          "Ask for the breakdown and the comparison in two calls.");
     }
     return null;
   }
@@ -305,8 +363,8 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
 
   private static NeoResponse validateYearsResolved(String yearId, boolean compareTo,
       String referenceYearId) {
-    // ETP-5793: another tenant's year answers like an unknown one.
-    if (TenantOwnership.loadOwned(Year.class, yearId) == null) {
+    // ETP-5793: another tenant's year answers like an unknown one. No year: dates only.
+    if (!yearId.isEmpty() && TenantOwnership.loadOwned(Year.class, yearId) == null) {
       return actionableError(422, "year_not_resolved",
           "Could not resolve year " + yearId + ".",
           "Pass a valid C_Year id readable by your role.");
@@ -346,11 +404,14 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
     }
   }
 
-  /** A period read from {@code body}; its lower bound is {@code null} unless {@link #hasLowerDateBounds()}. */
+  /**
+   * A period read from {@code body}; its lower bound is {@code null} unless {@link #hasLowerDateBounds()}.
+   * Without a year id the period has no year bind ({@code yearParam} null): its dates bound it.
+   */
   private Period period(JSONObject body, String yearParam, String yearId, String fromParam,
       String toParam) {
     LocalDate from = hasLowerDateBounds() ? parseOptionalDate(body, fromParam) : null;
-    return new Period(yearParam, fromParam, toParam, yearId, from,
+    return new Period(yearId.isEmpty() ? null : yearParam, fromParam, toParam, yearId, from,
         parseOptionalDate(body, toParam));
   }
 
@@ -458,7 +519,9 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
   }
 
   private static void bindPeriod(NativeQuery<?> query, Period p) {
-    query.setParameter(p.yearParam, p.yearId);
+    if (p.yearParam != null) {
+      query.setParameter(p.yearParam, p.yearId);
+    }
     if (p.from != null) {
       query.setParameter(p.fromParam, java.sql.Date.valueOf(p.from));
     }
@@ -591,5 +654,117 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
 
   private static String formatOrEmpty(LocalDate date) {
     return date == null ? "" : date.format(DATE_FORMATTER);
+  }
+
+  // -------------------------------------------------------------------------
+  // Breakdown (ETP-5850)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Adds one amount per month or quarter to every row: {@code byPeriod} maps each column's key to
+   * the row's amount over that slice of the range, and {@code meta.periods} lists the columns in
+   * order ({@code key}, {@code dateFrom}, {@code dateTo}). The range is the request's dates, a
+   * missing one taken from the year's own period bounds. Each slice is the same report run over
+   * its dates, with every row kept, so a row of the total always has a value in every column.
+   *
+   * @return a 400 when the range is empty, inverted or longer than {@link #MAX_BREAKDOWN_PERIODS}
+   *     slices; {@code null} once {@code data} and {@code meta} carry the breakdown
+   */
+  private NeoResponse addBreakdown(TreeQuery q, String breakdown, String accountLevel,
+      List<AccountReportTree.OperandRow> operandRows, List<AccountReportTree.OutputRow> tree,
+      JSONArray data, JSONObject meta) throws JSONException {
+    LocalDate[] yearBounds = q.period.from == null || q.period.to == null
+        ? queryYearBounds(q.period.yearId) : new LocalDate[2];
+    LocalDate from = q.period.from != null ? q.period.from : yearBounds[0];
+    LocalDate to = q.period.to != null ? q.period.to : yearBounds[1];
+    if (from == null || to == null || from.isAfter(to)) {
+      return actionableError(400, "breakdown_range_invalid",
+          "The report range " + formatOrEmpty(from) + " to " + formatOrEmpty(to)
+              + " cannot be split into periods.",
+          "Pass dateFrom on or before dateTo, or a yearId whose periods exist.");
+    }
+    List<LocalDate[]> slices = slices(from, to, BREAKDOWN_MONTH.equals(breakdown) ? 1 : 3);
+    if (slices.size() > MAX_BREAKDOWN_PERIODS) {
+      return actionableError(400, "breakdown_too_many_periods",
+          "A " + breakdown + " breakdown of " + formatOrEmpty(from) + " to " + formatOrEmpty(to)
+              + " has " + slices.size() + " periods; at most " + MAX_BREAKDOWN_PERIODS
+              + " are allowed.",
+          "Narrow dateFrom/dateTo, or use quarter instead of month.");
+    }
+
+    JSONArray periods = new JSONArray();
+    List<Map<String, BigDecimal>> amounts = new ArrayList<>();
+    for (LocalDate[] slice : slices) {
+      periods.put(new JSONObject().put("key", sliceKey(slice))
+          .put(PARAM_DATE_FROM, formatOrEmpty(slice[0]))
+          .put(PARAM_DATE_TO, formatOrEmpty(slice[1])));
+      TreeQuery sliceQuery = new TreeQuery(q.clientId, q.orgId, q.acctSchemaId,
+          new Period(null, PARAM_DATE_FROM, PARAM_DATE_TO, "", slice[0], slice[1]), false,
+          q.reference);
+      Map<String, BigDecimal> byRow = new HashMap<>();
+      for (AccountReportTree.OutputRow row : AccountReportTree.build(queryNodeRows(sliceQuery),
+          operandRows, accountLevel, false)) {
+        byRow.put(rowKey(row), row.amount);
+      }
+      amounts.add(byRow);
+    }
+
+    for (int i = 0; i < tree.size(); i++) {
+      JSONObject byPeriod = new JSONObject();
+      String key = rowKey(tree.get(i));
+      for (int s = 0; s < slices.size(); s++) {
+        byPeriod.put(periods.getJSONObject(s).getString("key"),
+            amounts.get(s).getOrDefault(key, BigDecimal.ZERO));
+      }
+      data.getJSONObject(i).put("byPeriod", byPeriod);
+    }
+    meta.put(PARAM_BREAKDOWN, breakdown);
+    meta.put("periods", periods);
+    return null;
+  }
+
+  /**
+   * Splits {@code from..to} (both inclusive) into consecutive slices of {@code months} calendar
+   * months, counted from {@code from}'s month: a quarter breakdown of a July-June year gives
+   * July-September first. The first and last slices are clipped to the range.
+   */
+  static List<LocalDate[]> slices(LocalDate from, LocalDate to, int months) {
+    List<LocalDate[]> slices = new ArrayList<>();
+    LocalDate blockStart = from.withDayOfMonth(1);
+    while (!blockStart.isAfter(to)) {
+      LocalDate blockEnd = blockStart.plusMonths(months).minusDays(1);
+      slices.add(new LocalDate[] { blockStart.isBefore(from) ? from : blockStart,
+          blockEnd.isAfter(to) ? to : blockEnd });
+      blockStart = blockStart.plusMonths(months);
+    }
+    return slices;
+  }
+
+  /** {@code 2026-07} for a slice within one month, {@code 2026-07/2026-09} otherwise. */
+  static String sliceKey(LocalDate[] slice) {
+    String start = slice[0].format(MONTH_FORMATTER);
+    String end = slice[1].format(MONTH_FORMATTER);
+    return start.equals(end) ? start : start + "/" + end;
+  }
+
+  private static String rowKey(AccountReportTree.OutputRow row) {
+    return row.nodeId + '\u0000' + (row.group == null ? "" : row.group) + '\u0000'
+        + row.isFormula;
+  }
+
+  /** The year's first period start and last period end; {@code null}s when it has no periods. */
+  private static LocalDate[] queryYearBounds(String yearId) {
+    Object[] bounds = (Object[]) OBDal.getInstance().getSession()
+        .createNativeQuery("SELECT MIN(p.startdate), MAX(p.enddate) FROM c_period p "
+            + "WHERE p.c_year_id = :yearId")
+        .setParameter(PARAM_YEAR_ID, yearId)
+        .uniqueResult();
+    return new LocalDate[] { toLocalDate(bounds == null ? null : bounds[0]),
+        toLocalDate(bounds == null ? null : bounds[1]) };
+  }
+
+  private static LocalDate toLocalDate(Object value) {
+    String iso = toIsoDate(value);
+    return iso.isEmpty() ? null : LocalDate.parse(iso, DATE_FORMATTER);
   }
 }

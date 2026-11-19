@@ -6346,6 +6346,7 @@ Other MCP-only refusals declared in §4.12.6:
 | contact `searchKey` on create (ETP-5852, M-107) | the SPA never sends it (the form hides it); `handle()` puts the name as a placeholder and `afterHandle()` replaces it with the contact's number | the same, but the placeholder is put before the MCP mandatory pre-check (`resolveServerCreateFields`) and the field is declared server-resolved, so `etendo_create` no longer demands it; a value the agent sent is replaced too and reported in `searchKeyNote` |
 | AD list selector whose validation rule names its table, e.g. `AD_Ref_List.Value IN (…)` (ETP-5852, M-173) | 500 `could not extract ResultSet`: the criteria query aliases `ad_ref_list` as `this_` | the table name is rewritten to the query alias (`ListReferenceSelectorExecutor#qualifyListTable`), so `etsgSifTerritory` lists Araba, Bizkaia and Gipuzkoa |
 | `etendo_list(parentId)` on a child whose parent link the spec excludes, e.g. `open-close-period-control/documents` (ETP-5852, M-118) | n/a | the parent link stays filterable (`McpQuerySupport#buildWhereFromFilters` drops it from the excluded set), so `parentId` scopes the list instead of a 422 `unknown_filter_field` on `period` |
+| `etendo_list` filter on a list field (a column with a list reference: `documentStatus`, the invoice inbox `status`...) with a value outside its codes, e.g. `status:"pending"` (ETP-5850) | answers an empty list | 422 `validation_error` on the field, `available` = its codes, for equality and every `in` value (`McpHqlConditions#requireAllowedValue`, `Property#getAllowedValues`); it matched no row, so the empty answer read as "there is none". Case matters. Ranges (`gt`/`lt`) and `contains` are not checked |
 | `orderBy` on a value many rows share (ETP-5852, M-188) | the grid's own sort | `id` is appended as the last key (`McpQuerySupport#withIdTieBreak`), so tied rows keep one order across pages; an order that already names `id` is sent as is |
 | labels in a create refusal's `missingFields` (ETP-5852, M-245) | n/a | the form's label in the session language, the one `etendo_schema` shows (`McpSchemaResponseHints#localizeLabels`), instead of the `AD_Column` name |
 | contact address created without `name` (ETP-5852, M-168) | the SPA always sends one: city and address line, else region and country, else "Location" | the same rule on the server (`ContactsLocationAddressHandler#addressName`, MCP only; the "." MCP's defaults pass puts in the body does not count as sent), instead of the AD default "." Whatever the source (sent, MCP display name, default), the stored name is capped at the 60 characters of `C_BPartner_Location.Name`, trailing ", " or spaces trimmed (ETP-6206, `ContactAddressName`; on every channel, on create and on update) |
@@ -7696,7 +7697,11 @@ That costs a couple of dozen tokens once and lets the agent link any record it l
 including the rows of a 100-record `etendo_list`, which deliberately carries no URLs of its own.
 
 **`etendo_get` and `etendo_create` add a ready-made `url`** to the record they return — the two moments
-an agent hands the user a link.
+an agent hands the user a link — and, next to it, **`urlNote`** (ETP-5850): the link opens only for
+users of the app (login required) and must never be sent to a customer or supplier; a customer's
+link to their documents is the contacts action `portalLink`. The discover `hint` says the same.
+Asked for "the portal link of customer X, to send by WhatsApp", the agent handed over the contact's
+record url in every pilot run, a link the customer cannot open.
 
 Two rules keep the links honest, and both are enforced in code:
 
@@ -10303,6 +10308,24 @@ start through its period end — further narrowed by BOTH `dateFrom` and `dateTo
 real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+**`generate_profit_loss`: dates without a year, and month/quarter columns (ETP-5850).** Two
+P&L-only parameters, so an agent can answer "how did we do this quarter" and "each month of the
+quarter" the way the SPA's interactive report shows them (ETP-6239's Total / Month / Quarter views):
+- `yearId` is optional when BOTH `dateFrom` and `dateTo` are given: the dates alone bound the
+  range (no year bind in the SQL). An agent often cannot pick the year id itself: a tenant can have
+  two years with the same name, one per calendar. With one date or none, `year_id_required` (400)
+  as before. Balance Sheet keeps `yearId` required (its only bound).
+- `breakdown` = `none` (default) | `month` | `quarter`. Every row gains `byPeriod` (period key ->
+  amount) and `meta` gains `breakdown` and `periods` (`key`, `dateFrom`, `dateTo`, in order). Keys
+  are `2026-07` for a month and `2026-07/2026-09` for a quarter. Periods are counted from the
+  range's first month (`dateFrom`, or the year's first period start), so a July-June year's first
+  quarter is July-September; the first and last slices are clipped to the range. Each slice is the
+  same query over its dates with every row kept, so every row of the total has a value per column.
+  Refused with 400: an unknown value (`breakdown_invalid`), with `compareTo`
+  (`breakdown_with_compare`), more than 24 periods (`breakdown_too_many_periods`, each period is
+  one more query), or an inverted or empty range (`breakdown_range_invalid`).
+- The SPA's Node report engines are untouched: the breakdown is computed in Java for this tool.
 
 **Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
 bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
