@@ -282,6 +282,12 @@ class ConversionRateStore {
     return id == null ? null : OBDal.getInstance().get(ConversionRate.class, id);
   }
 
+  /** The row when it belongs to the current client, else {@code null} (unknown or foreign). */
+  ConversionRate ownRate(String id) {
+    ConversionRate row = rate(id);
+    return row != null && row.getClient().getId().equals(currentClientId()) ? row : null;
+  }
+
   /**
    * Every active range of the client between {@code fromId} and {@code toId}, both directions
    * folded into one {@link Range} per {@code (ValidFrom, ValidTo)}, oriented {@code fromId → toId}.

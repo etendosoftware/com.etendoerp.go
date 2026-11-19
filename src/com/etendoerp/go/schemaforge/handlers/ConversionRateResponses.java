@@ -17,11 +17,13 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.time.LocalDateTime;
 import java.util.Locale;
+
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -52,28 +54,38 @@ final class ConversionRateResponses {
   private ConversionRateResponses() {
   }
 
+  /** An end on the wire: {@code null} when open (empty, or year 2999 or later). */
+  static Object wireEnd(java.util.Date end) {
+    LocalDateTime local = ConversionRateStore.toLocal(end);
+    return local == null || local.getYear() >= ConversionRateRules.OPEN_YEAR ? JSONObject.NULL
+        : NeoDateFormat.toWireDateTime(end);
+  }
+
+  /** The 404 for an unknown rate or one of another tenant. */
+  static NeoResponse notFound(String recordId) {
+    return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+        "Conversion rate not found: " + recordId);
+  }
+
   /**
-   * The row as the generic write answers it: {@code {response:{status:0, data:[row]}}}, its dates
-   * as server-local wall clock ({@code yyyy-MM-dd'T'HH:mm:ss}) and its state columns read back.
+   * The row as the generic read serialises it, its dates as server-local wall clock
+   * ({@code yyyy-MM-dd'T'HH:mm:ss}; an open end — year 2999 or later — as {@code null}) and its
+   * state read back.
    *
-   * @param row   the written row
+   * @param row   the row
    * @param store reads the state
-   * @return the 200 response
-   * @throws JSONException if the body cannot be built
+   * @return the row's JSON
+   * @throws JSONException if the JSON cannot be built
    */
-  static NeoResponse recordResponse(ConversionRate row, ConversionRateStore store)
+  static JSONObject recordJson(ConversionRate row, ConversionRateStore store)
       throws JSONException {
     DataToJsonConverter converter = OBProvider.getInstance().get(DataToJsonConverter.class);
     JSONObject json = converter.toJsonObject(row, DataResolvingMode.FULL);
     json.put(ConversionRateWrites.F_VALID_FROM,
         NeoDateFormat.toWireDateTime(row.getValidFromDate()));
-    json.put(ConversionRateWrites.F_VALID_TO, row.getValidToDate() == null ? JSONObject.NULL
-        : NeoDateFormat.toWireDateTime(row.getValidToDate()));
+    json.put(ConversionRateWrites.F_VALID_TO, wireEnd(row.getValidToDate()));
     json.put(F_STATUS, store.statusOf(row.getId()));
-    JSONObject inner = new JSONObject();
-    inner.put("status", 0);
-    inner.put("data", new JSONArray().put(json));
-    return NeoResponse.ok(new JSONObject().put("response", inner));
+    return json;
   }
 
   /**

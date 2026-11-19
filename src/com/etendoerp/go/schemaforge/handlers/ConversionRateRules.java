@@ -37,8 +37,8 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  * (organization currency to X, multiply by the rate) and its inverse (X to the organization
  * currency, multiply by 1/rate), with the same {@code ValidFrom} / {@code ValidTo}. A range is
  * <b>open</b> when it has no end ({@code ValidTo} empty, or year {@value #OPEN_YEAR} or later: core's
- * {@code C_CONVERSION_RATE_TRG} stores an empty end as 9999-12-31 and the downloader writes
- * 2999-12-31).</p>
+ * {@code C_CONVERSION_RATE_TRG} stores an empty end as 9999-12-31; the downloader and this
+ * customization write 2999-12-31).</p>
  *
  * <p>Creating a range from {@code F} closes every earlier open range of the pair at
  * {@code F - 1 minute} (core's {@code ConversionRateEventHandler} compares ranges with an
@@ -52,8 +52,8 @@ final class ConversionRateRules {
   /** A {@code ValidTo} in this year or later means "no end". */
   static final int OPEN_YEAR = 2999;
 
-  /** The end written for an open range: what core's trigger stores for an empty one. */
-  static final LocalDateTime OPEN_END = LocalDateTime.of(9999, 12, 31, 0, 0);
+  /** The end written for an open range: 2999-12-31, what the rate downloader writes. */
+  static final LocalDateTime OPEN_END = LocalDateTime.of(2999, 12, 31, 0, 0);
 
   /** Decimal places of the inverse rate. */
   static final int RATE_SCALE = 12;

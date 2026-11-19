@@ -19,9 +19,8 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
-import java.util.Objects;
-import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
@@ -52,7 +51,7 @@ import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
  * {@code C_CONVERSION_RATE_TRG3} do not run for them: any manual range can be changed or deleted,
  * postings or not (only downloaded rows stay locked). What those triggers enforce and is still
  * wanted is checked here instead ({@link #checkRow}): an end is never empty (an open range is
- * written as 9999-12-31, what the trigger stores), the end is never before the start (the
+ * written as 2999-12-31, the downloader's value), the end is never before the start (the
  * trigger's {@code @20505@}) and the two currencies differ (TRG3's {@code @SameCurrency@}). Left
  * out on purpose: the trigger's {@code @20506@} "rate used in accounting" refusal, which is what
  * the bypass is for. Core's Java {@code ConversionRateEventHandler} (overlap, 20504) is not a
@@ -68,17 +67,11 @@ import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
 class ConversionRateWrites {
 
   static final String F_TO_CURRENCY = "toCurrency";
-  static final String F_CURRENCY = "currency";
   static final String F_RATE = "multipleRateBy";
-  static final String F_DIVIDE_RATE = "divideRateBy";
   static final String F_VALID_FROM = "validFromDate";
   static final String F_VALID_TO = "validToDate";
-  static final String F_RATE_TYPE = "conversionRateType";
   static final String SPOT_RATE_TYPE = "S";
   private static final String KEY_ID = "id";
-
-  /** Fields a stored range never changes: sending another value is refused. */
-  private static final Set<String> FIXED_REFERENCES = Set.of(F_CURRENCY, F_TO_CURRENCY);
 
   private final ConversionRateStore store;
   private final ConversionRateTriggerBypass bypass;
@@ -107,12 +100,26 @@ class ConversionRateWrites {
   // --- create --------------------------------------------------------------------------------
 
   /**
-   * Validates a create body ({@code toCurrency}, {@code multipleRateBy}, {@code validFromDate})
-   * against the request's organization currency.
+   * Which create a caller asked for: the window's "Nueva divisa" (a currency with no rate yet),
+   * its "Nueva tasa" (a manual currency that already has rates), or either.
+   */
+  enum CreateMode {
+    /** No check on the existing rates of the currency. */
+    ANY,
+    /** "Nueva divisa": the currency must have no rate yet. */
+    NEW_CURRENCY,
+    /** "Nueva tasa": the currency must already have rates. */
+    NEW_RATE
+  }
+
+  /**
+   * Validates a create ({@code toCurrency}, {@code multipleRateBy}, optional
+   * {@code validFromDate}, which defaults to the server's current minute) against the request's
+   * organization currency and the {@code mode} asked for.
    *
    * @throws ConversionRateRefusal for a missing or wrong value
    */
-  CreateRequest parseCreate(JSONObject body) {
+  CreateRequest parseCreate(JSONObject body, CreateMode mode) {
     String clientId = store.currentClientId();
     String orgCurrencyId = store.orgCurrencyId();
     if (orgCurrencyId == null) {
@@ -131,9 +138,21 @@ class ConversionRateWrites {
       throw ConversionRateRefusal.badRequest(ConversionRateRefusal.AUTO_CURRENCY, toIso)
           .on(F_TO_CURRENCY);
     }
+    checkMode(mode, store.currenciesWithRates(clientId, orgCurrencyId).contains(to.getId()));
     BigDecimal rate = requireRate(body.opt(F_RATE));
     LocalDateTime validFrom = requirePastValidFrom(body.opt(F_VALID_FROM));
     return new CreateRequest(clientId, orgCurrency, to, rate, validFrom);
+  }
+
+  private void checkMode(CreateMode mode, boolean hasRates) {
+    if (mode == CreateMode.NEW_CURRENCY && hasRates) {
+      throw ConversionRateRefusal.conflict(ConversionRateRefusal.CURRENCY_HAS_RATES, toIso)
+          .on(F_TO_CURRENCY);
+    }
+    if (mode == CreateMode.NEW_RATE && !hasRates) {
+      throw ConversionRateRefusal.conflict(ConversionRateRefusal.CURRENCY_NO_RATES, toIso)
+          .on(F_TO_CURRENCY);
+    }
   }
 
   /**
@@ -201,48 +220,94 @@ class ConversionRateWrites {
     return forward;
   }
 
-  // --- update --------------------------------------------------------------------------------
+  // --- rate change ---------------------------------------------------------------------------
 
   /**
-   * Changes the rate of the range {@code row} belongs to, on both directions:
-   * {@code multipleRateBy} is the rate of {@code row} itself, its twin gets the inverse. Nothing
-   * else of a range can change — the same as the window, which only edits the rate ("Para cambiar
-   * el periodo, elimine la tasa y cree una nueva").
+   * A validated change of the rate of one range, seen from the organization currency.
    *
-   * @throws ConversionRateRefusal when the range is downloaded, or the body changes anything but
-   *     the rate
+   * @param range      the range, oriented organization currency → other currency
+   * @param from       the organization currency (or the row's own origin for a pair without it)
+   * @param to         the other currency
+   * @param oldForward the stored rate from → to
+   * @param oldInverse the stored rate to → from
+   * @param newForward the new rate from → to
+   * @param newInverse its inverse
    */
-  ConversionRate applyUpdate(ConversionRate row, JSONObject body) {
-    rememberPair(row);
+  record RateChange(Range range, Currency from, Currency to, BigDecimal oldForward,
+      BigDecimal oldInverse, BigDecimal newForward, BigDecimal newInverse) {
+  }
+
+  /**
+   * Validates a change of the rate of the range {@code row} belongs to — either of its two rows.
+   * {@code rawRate} is always the forward rate: units of the other currency per 1 unit of the
+   * organization currency. Nothing else of a range can change: its period is changed by deleting
+   * it and creating a new one, as in the window.
+   *
+   * @throws ConversionRateRefusal when the range is downloaded or the rate is not a positive
+   *     number
+   */
+  RateChange planRateChange(ConversionRate row, Object rawRate) {
     checkEditable(row);
-    rejectFixedFields(row, body);
-    BigDecimal rate = body.has(F_RATE) ? requireRate(body.opt(F_RATE)) : null;
-    if (rate == null) {
-      return row;
-    }
-    Range target = targetOf(rangesOf(row), row);
+    BigDecimal rate = requireRate(rawRate);
+    boolean rowIsForward = isForward(row);
+    Currency from = rowIsForward ? row.getCurrency() : row.getToCurrency();
+    Currency to = rowIsForward ? row.getToCurrency() : row.getCurrency();
+    fromIso = from.getISOCode();
+    toIso = to.getISOCode();
+    Range range = targetOf(store.rangesOfPair(row.getClient().getId(), from.getId(), to.getId()),
+        row, rowIsForward);
+    ConversionRate forward = store.rate(range.forwardId());
+    ConversionRate inverse = store.rate(range.inverseId());
+    BigDecimal oldForward = forward != null ? forward.getMultipleRateBy()
+        : ConversionRateRules.inverse(inverse.getMultipleRateBy());
+    BigDecimal oldInverse = inverse != null ? inverse.getMultipleRateBy()
+        : ConversionRateRules.inverse(forward.getMultipleRateBy());
+    return new RateChange(range, from, to, oldForward, oldInverse, rate,
+        ConversionRateRules.inverse(rate));
+  }
+
+  /**
+   * Writes a planned rate change on both rows; a legacy range with one direction only gets its
+   * missing row.
+   *
+   * @return the forward row
+   */
+  ConversionRate applyRateChange(RateChange change) {
     return bypass.run(() -> {
-      writeRate(row, target, rate);
-      return row;
+      Range range = change.range();
+      ConversionRate forward = writeRate(range.forwardId(), change.newForward(),
+          change.newInverse());
+      ConversionRate inverse = writeRate(range.inverseId(), change.newInverse(),
+          change.newForward());
+      String clientId = (forward != null ? forward : inverse).getClient().getId();
+      if (forward == null) {
+        forward = newRow(clientId, change.from(), change.to(), change.newForward(),
+            change.newInverse(), range.validFrom(), range.validTo());
+      }
+      if (inverse == null) {
+        newRow(clientId, change.to(), change.from(), change.newInverse(), change.newForward(),
+            range.validFrom(), range.validTo());
+      }
+      return forward;
     });
   }
 
-  private void writeRate(ConversionRate row, Range target, BigDecimal rate) {
-    BigDecimal inverse = ConversionRateRules.inverse(rate);
-    row.setMultipleRateBy(rate);
-    row.setDivideRateBy(inverse);
-    String twinId = row.getId().equals(target.forwardId()) ? target.inverseId()
-        : target.forwardId();
-    ConversionRate twin = store.rate(twinId);
-    if (twin != null) {
-      twin.setMultipleRateBy(inverse);
-      twin.setDivideRateBy(rate);
-      return;
+  private ConversionRate writeRate(String rowId, BigDecimal multiply, BigDecimal divide) {
+    ConversionRate row = store.rate(rowId);
+    if (row != null) {
+      row.setMultipleRateBy(multiply);
+      row.setDivideRateBy(divide);
     }
-    // A legacy range with one direction only: the edit gives it its missing inverse.
-    newRow(row.getClient().getId(), row.getToCurrency(), row.getCurrency(), inverse, rate,
-        ConversionRateStore.toLocal(row.getValidFromDate()),
-        ConversionRateStore.toLocal(row.getValidToDate()));
+    return row;
+  }
+
+  /**
+   * Whether {@code row} goes from the organization currency; a row of a pair that does not
+   * involve it is taken in its own orientation.
+   */
+  private boolean isForward(ConversionRate row) {
+    String orgCurrencyId = store.orgCurrencyId();
+    return orgCurrencyId == null || !orgCurrencyId.equals(row.getToCurrency().getId());
   }
 
   // --- delete --------------------------------------------------------------------------------
@@ -256,7 +321,7 @@ class ConversionRateWrites {
   void applyDelete(ConversionRate row) {
     rememberPair(row);
     checkEditable(row);
-    Range target = targetOf(rangesOf(row), row);
+    Range target = targetOf(rangesOf(row), row, true);
     bypass.run(() -> {
       for (String id : target.rowIds()) {
         OBDal.getInstance().remove(store.rate(id));
@@ -279,7 +344,7 @@ class ConversionRateWrites {
 
   /**
    * What core's triggers enforced on a row and still holds with them bypassed: an end is set (an
-   * open range is 9999-12-31), the end is not before the start ({@code @20505@}) and the two
+   * open range is 2999-12-31), the end is not before the start ({@code @20505@}) and the two
    * currencies differ ({@code @SameCurrency@}). A violation is a planning bug, never a user
    * input — the input is refused before anything is written — so it fails the write (rolled back).
    *
@@ -299,52 +364,12 @@ class ConversionRateWrites {
     }
   }
 
-  private void rejectFixedFields(ConversionRate row, JSONObject body) {
-    for (String field : FIXED_REFERENCES) {
-      if (body.has(field) && !body.isNull(field)) {
-        String sent = idOf(body.opt(field));
-        StoredCurrency stored = new StoredCurrency(F_CURRENCY.equals(field) ? row.getCurrency()
-            : row.getToCurrency());
-        if (!stored.matches(sent)) {
-          throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE)
-              .on(field);
-        }
-      }
-    }
-    rejectChangedInstant(body, F_VALID_FROM, row.getValidFromDate());
-    rejectChangedInstant(body, F_VALID_TO, row.getValidToDate());
-  }
-
-  /** Refuses a date sent with another value than the stored one (minute precision). */
-  private static void rejectChangedInstant(JSONObject body, String field, java.util.Date stored) {
-    if (body.has(field) && !body.isNull(field)) {
-      LocalDateTime sent = ConversionRateRules.parseValidFrom(body.opt(field));
-      if (!Objects.equals(sent, truncated(stored))) {
-        throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE)
-            .on(field);
-      }
-    }
-  }
-
-  private static LocalDateTime truncated(java.util.Date date) {
-    LocalDateTime local = ConversionRateStore.toLocal(date);
-    return local == null ? null : local.withSecond(0).withNano(0);
-  }
-
-  /** A stored currency compared with what a caller sent: its id or its ISO code. */
-  private record StoredCurrency(Currency currency) {
-    boolean matches(String sent) {
-      return currency != null && (currency.getId().equals(sent)
-          || StringUtils.equalsIgnoreCase(currency.getISOCode(), sent));
-    }
-  }
-
   private List<Range> rangesOf(ConversionRate row) {
     return store.rangesOfPair(row.getClient().getId(), row.getCurrency().getId(),
         row.getToCurrency().getId());
   }
 
-  private static Range targetOf(List<Range> ranges, ConversionRate row) {
+  private static Range targetOf(List<Range> ranges, ConversionRate row, boolean rowIsForward) {
     for (Range range : ranges) {
       if (range.contains(row.getId())) {
         return range;
@@ -352,7 +377,8 @@ class ConversionRateWrites {
     }
     LocalDateTime from = ConversionRateStore.toLocal(row.getValidFromDate());
     LocalDateTime to = ConversionRateStore.toLocal(row.getValidToDate());
-    return new Range(row.getId(), null, from, to, false);
+    return rowIsForward ? new Range(row.getId(), null, from, to, false)
+        : new Range(null, row.getId(), from, to, false);
   }
 
   private void rememberPair(ConversionRate row) {
@@ -381,8 +407,9 @@ class ConversionRateWrites {
     rate.setMultipleRateBy(multiply);
     rate.setDivideRateBy(divide);
     rate.setValidFromDate(ConversionRateStore.toDate(validFrom));
-    // Open range: written as the 9999-12-31 that C_CONVERSION_RATE_TRG would store for an empty
-    // end, so core's overlap check (ConversionRateEventHandler) compares a real date at flush.
+    // Open range: written as 2999-12-31, the end the rate downloader writes, so every open range
+    // stores the same value (a read treats any end in 2999 or later as open). A real date also
+    // lets core's overlap check (ConversionRateEventHandler) compare it at flush.
     rate.setValidToDate(ConversionRateStore.toDate(validTo != null ? validTo
         : ConversionRateRules.OPEN_END));
     checkRow(rate);
@@ -426,6 +453,10 @@ class ConversionRateWrites {
    * the future, so a rate is in force the moment it is saved.
    */
   private LocalDateTime requirePastValidFrom(Object raw) {
+    if (raw == null || JSONObject.NULL.equals(raw) || StringUtils.isBlank(String.valueOf(raw))) {
+      // Not sent: the rate starts now, the default of the window's popups.
+      return store.now().truncatedTo(ChronoUnit.MINUTES);
+    }
     LocalDateTime validFrom = ConversionRateRules.parseValidFrom(raw);
     if (validFrom == null) {
       throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_VALID_FROM)

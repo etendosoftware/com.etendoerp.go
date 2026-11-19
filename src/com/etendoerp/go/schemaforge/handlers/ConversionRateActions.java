@@ -43,9 +43,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
- * ETP-6365: the three read actions of {@code conversion-rates/conversionRate}, served on every
- * channel ({@code POST /sws/neo/conversion-rates/conversionRate/new/action/<name>}, MCP
- * {@code etendo_action}). None of them is tied to a record — the id is ignored — and none writes.
+ * ETP-6365: the actions of {@code conversion-rates/conversionRate}, served on every channel
+ * ({@code POST /sws/neo/conversion-rates/conversionRate/<id|new>/action/<name>}, MCP
+ * {@code etendo_action}). The read ones below are not tied to a record (the id is ignored) and
+ * write nothing; the write ones are in {@link ConversionRateWriteActions}.
  *
  * <ul>
  *   <li>{@value #MANUAL_CURRENCY_OPTIONS}: the currencies a manual rate can be created for;
@@ -78,11 +79,26 @@ final class ConversionRateActions {
   private static final String K_RATE = "rate";
   private static final String K_VALID_FROM = "validFrom";
 
-  private static final String CREATE_HINT = " To create the rate, call etendo_create on"
-      + " conversion-rates/conversionRate with the same three fields: the inverse row and the"
-      + " closing of the previous range are done by the server in the same transaction. An"
-      + " existing rate can only change its multipleRateBy (etendo_update; the inverse follows);"
-      + " to change its period, delete it with etendo_delete and create a new one.";
+  /** Optional option of {@value #PREVIEW_MANUAL_RATE}: which create to preview. */
+  static final String P_MODE = "mode";
+
+  private static final String CREATE_HINT = " To create it, call createManualCurrency (mode"
+      + " newCurrency) or createManualRate (mode newRate) with the same parameters. An existing"
+      + " rate only changes its rate (updateManualRate); to change its period, delete it with"
+      + " etendo_delete and create a new one.";
+
+  /** One request of the customization, run with the per-request writer. */
+  @FunctionalInterface
+  interface Work {
+    /**
+     * Runs the request.
+     *
+     * @param writes the per-request writer
+     * @return the answer
+     * @throws JSONException if the answer cannot be built
+     */
+    NeoResponse run(ConversionRateWrites writes) throws JSONException;
+  }
 
   static final Map<String, NeoActionContract> CONTRACTS = buildContracts();
 
@@ -97,8 +113,9 @@ final class ConversionRateActions {
             + " currencies whose rate is downloaded automatically every day (they have a"
             + " download rule). With withoutRates:true it also excludes the currencies that"
             + " already have any conversion rate with the organization currency (the \"new"
-            + " currency\" list); to add a range to one of those, use currentRates or etendo_list."
-            + " Use an id or isoCode as toCurrency of etendo_create.",
+            + " currency\" list of createManualCurrency); to add a rate to one of those, use"
+            + " createManualRate."
+            + " Use an id or isoCode as toCurrency of createManualCurrency / createManualRate.",
         Param.optional(P_WITHOUT_RATES, NeoActionContract.TYPE_BOOLEAN,
             "true to list only currencies with no conversion rate yet against the organization"
                 + " currency, in either direction. Default false."))
@@ -118,9 +135,13 @@ final class ConversionRateActions {
         Param.required(ConversionRateWrites.F_RATE, NeoActionContract.TYPE_NUMBER,
             "Units of the destination currency per 1 unit of the organization currency;"
                 + " greater than zero."),
-        Param.required(ConversionRateWrites.F_VALID_FROM, NeoActionContract.TYPE_STRING,
+        Param.optional(ConversionRateWrites.F_VALID_FROM, NeoActionContract.TYPE_STRING,
             "Start of the range, server-local wall clock yyyy-MM-ddTHH:mm:ss (minutes are"
-                + " kept, seconds dropped; a bare yyyy-MM-dd means 00:00)."))
+                + " kept, seconds dropped; a bare yyyy-MM-dd means 00:00); default: now."),
+        Param.options(P_MODE, "newCurrency: preview createManualCurrency (refused when the"
+            + " currency already has rates); newRate: preview createManualRate (refused when it"
+            + " has none). Absent: no check on the existing rates.",
+            ConversionRateWriteActions.PREVIEW_MODES))
         .withIdDescription(ID_NOT_USED));
     contracts.put(CURRENT_RATES, NeoActionContract.read(CURRENT_RATES,
         "Lists the rates in force now, one per currency: [{currencyId, isoCode, name, symbol,"
@@ -134,6 +155,7 @@ final class ConversionRateActions {
             + " the time zone validFromDate is read in). A rate cannot start later than this"
             + " minute: use it as the default validFromDate of a new rate.")
         .withIdDescription(ID_NOT_USED));
+    ConversionRateWriteActions.addContracts(contracts);
     return Collections.unmodifiableMap(contracts);
   }
 
@@ -147,15 +169,20 @@ final class ConversionRateActions {
    *
    * @param context the ACTION context
    * @param store   the reads
+   * @param writes  the per-request writer
    * @return the 200 response, or the contract's 422
    * @throws JSONException if the body cannot be built
    */
-  static NeoResponse run(NeoContext context, ConversionRateStore store) throws JSONException {
+  static NeoResponse run(NeoContext context, ConversionRateStore store,
+      ConversionRateWrites writes) throws JSONException {
     String name = context.getFieldName();
     JSONObject params = parameters(context);
     NeoResponse invalid = NeoActionContract.validate(CONTRACTS, name, params);
     if (invalid != null) {
       return invalid;
+    }
+    if (ConversionRateWriteActions.serves(name)) {
+      return ConversionRateWriteActions.run(name, context.getRecordId(), params, store, writes);
     }
     JSONArray data;
     if (MANUAL_CURRENCY_OPTIONS.equals(name)) {
@@ -239,7 +266,8 @@ final class ConversionRateActions {
     result.put("closes", closes);
     ConversionRateWrites writes = new ConversionRateWrites(store);
     try {
-      CreatePlan plan = writes.planCreate(writes.parseCreate(params));
+      CreatePlan plan = writes.planCreate(writes.parseCreate(params,
+          ConversionRateWriteActions.previewMode(params.optString(P_MODE, null))));
       CreateRequest request = plan.request();
       String orgIso = request.orgCurrency().getISOCode();
       String toIso = request.toCurrency().getISOCode();
@@ -340,7 +368,7 @@ final class ConversionRateActions {
     return json;
   }
 
-  private static NeoResponse wrap(Object data) throws JSONException {
+  static NeoResponse wrap(Object data) throws JSONException {
     return NeoResponse.ok(new JSONObject().put("response", new JSONObject().put("data", data)));
   }
 }

@@ -39,9 +39,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <ul>
  *   <li>{@value #CURRENCY_REQUIRED}, {@value #CURRENCY_INVALID}, {@value #ORG_CURRENCY},
  *       {@value #AUTO_CURRENCY}, {@value #INVALID_RATE}, {@value #INVALID_VALID_FROM},
- *       {@value #FUTURE_START}, {@value #FIELD_NOT_EDITABLE} — 400, the request itself is
- *       wrong;</li>
- *   <li>{@value #OVERLAP}, {@value #SYNCED_LOCKED} — 409, the request
+ *       {@value #FUTURE_START} — 400, the request itself is wrong;</li>
+ *   <li>{@value #USE_ACTIONS} — 405, a create or update through the generic CRUD;</li>
+ *   <li>{@value #OVERLAP}, {@value #SYNCED_LOCKED}, {@value #CURRENCY_HAS_RATES},
+ *       {@value #CURRENCY_NO_RATES} — 409, the request
  *       collides with the stored ranges;</li>
  *   <li>{@value #NO_ORG_CURRENCY} — 422, the organization has no currency to convert from.</li>
  * </ul>
@@ -59,7 +60,11 @@ class ConversionRateRefusal extends RuntimeException {
   static final String OVERLAP = "ETGO_ConvRateOverlap";
   static final String SYNCED_LOCKED = "ETGO_ConvRateSyncedLocked";
   static final String FUTURE_START = "ETGO_ConvRateFutureStart";
-  static final String FIELD_NOT_EDITABLE = "ETGO_ConvRateFieldNotEditable";
+  static final String CURRENCY_HAS_RATES = "ETGO_ConvRateCurrencyHasRates";
+  static final String CURRENCY_NO_RATES = "ETGO_ConvRateCurrencyNoRates";
+  static final String USE_ACTIONS = "ETGO_ConvRateUseActions";
+  /** Not a refusal: the warning {@code updateManualRate} answers with its proposal. */
+  static final String UPDATE_WARNING = "ETGO_ConvRateUpdateWarning";
   static final String NO_ORG_CURRENCY = "ETGO_ConvRateNoOrgCurrency";
   /** Wording of an open end inside {@value #OVERLAP} ("sin fecha de fin"). */
   static final String NO_END_DATE = "ETGO_ConvRateNoEndDate";
