@@ -120,10 +120,22 @@ final class RemittanceIban {
 
   /**
    * Runs {@code generation} with {@code iban} standing in for the account's IBAN WHEN the account
-   * has none. Classic's generator reads the account's IBAN and refuses a blank one, while the file
-   * carries the remittance's; the stand-in is set in the session only: pending changes are flushed
-   * first, flushing is switched off meanwhile and the original value is restored afterwards, so
-   * nothing about the account reaches the database.
+   * has none. Classic's generator reads the account's IBAN ({@code
+   * remittance.getFinancialAccount().getIBAN()}, the same managed instance) and refuses a blank
+   * one, while the file carries the remittance's. The stand-in lives in the session only:
+   * <ol>
+   *   <li>pending changes are flushed first and the session's flush mode is {@code MANUAL} while
+   *       the generator runs, so no query auto-flushes the stand-in. The Classic generators
+   *       ({@code org.openbravo.sepa.iso20022.*}, {@code REM_RemittanceCreateFile}) never flush
+   *       nor commit; {@code MANUAL} does not stop an explicit {@code OBDal.flush()}, though, which
+   *       a hook they dispatch could still run;</li>
+   *   <li>the original value is restored afterwards and, when the generation returned, the session
+   *       is flushed again: had a flush inside the generation written the stand-in, the restored
+   *       value overwrites it in the same transaction (nothing is written when none did). When the
+   *       generation throws there is no second flush: every caller rolls the transaction back on
+   *       that failure ({@code RemittanceFileAction}).</li>
+   * </ol>
+   * So no stand-in IBAN can be committed on {@code FIN_FINANCIAL_ACCOUNT}.
    *
    * @param account    the remittance's account, may be {@code null}
    * @param iban       the remittance's valid IBAN
@@ -141,12 +153,16 @@ final class RemittanceIban {
     FlushMode previous = session.getHibernateFlushMode();
     String original = account.getIBAN();
     session.setHibernateFlushMode(FlushMode.MANUAL);
+    T result;
     try {
       account.setIBAN(iban);
-      return generation.get();
+      result = generation.get();
     } finally {
       account.setIBAN(original);
       session.setHibernateFlushMode(previous);
     }
+    // Guard: overwrites a stand-in an explicit flush inside the generation may have written.
+    dal.flush();
+    return result;
   }
 }

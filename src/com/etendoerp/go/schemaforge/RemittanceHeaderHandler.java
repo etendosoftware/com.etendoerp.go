@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,14 +32,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.LockMode;
+import org.hibernate.LockOptions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.module.remittance.Remittance;
 import org.openbravo.module.remittance.RemittanceType;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -477,7 +484,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * stream itself, later, in the default action. This handler answers every callout itself, so the
    * default action never runs and reading the stream here is safe.
    */
-  JSONObject readCalloutBody() throws java.io.IOException {
+  JSONObject readCalloutBody() throws IOException {
     HttpServletRequest request = currentRequest();
     if (request == null) {
       return null;
@@ -507,8 +514,20 @@ public class RemittanceHeaderHandler implements NeoHandler {
 
   /** Refresh after acquiring the row lock so validation sees the latest account and status. */
   void lockRemittance(Remittance remittance) {
-    org.openbravo.dal.service.OBDal.getInstance().getSession().refresh(remittance,
-        new org.hibernate.LockOptions(org.hibernate.LockMode.PESSIMISTIC_WRITE));
+    OBDal.getInstance().getSession().refresh(remittance,
+        new LockOptions(LockMode.PESSIMISTIC_WRITE));
+  }
+
+  /**
+   * Whether the role may edit financial accounts: write access ({@code PUT}) to the
+   * {@value FinancialAccountHandler#SPEC} spec's window, the same tiered check the servlet applies
+   * to a request on that spec ({@link NeoAccessHelper#hasWindowAccessForSpec}). Guards the
+   * creditor identifier's account default, a write on {@code FIN_FINANCIAL_ACCOUNT} that the
+   * remittance actions run in admin mode (ETP-6247).
+   */
+  boolean canWriteFinancialAccount() {
+    SFSpec spec = NeoServletSupport.findSpec(FinancialAccountHandler.SPEC);
+    return spec != null && NeoAccessHelper.hasWindowAccessForSpec(spec, "PUT");
   }
 
   FIN_FinancialAccount loadAccount(String id) {
@@ -536,8 +555,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** Saves a validated creditor identifier on the remittance, its own copy (ETP-6247). */
   void storeRemittanceCreditorId(Remittance remittance, String normalized) {
     remittance.set(RemittanceCreditorId.REMITTANCE_PROPERTY, normalized);
-    org.openbravo.dal.service.OBDal.getInstance().save(remittance);
-    org.openbravo.dal.service.OBDal.getInstance().flush();
+    OBDal.getInstance().save(remittance);
+    OBDal.getInstance().flush();
   }
 
   /** Saves a validated creditor identifier on the account (ETP-6247). */
@@ -577,8 +596,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
     if (value == null || JSONObject.NULL.equals(value)) {
       return null;
     }
-    if (value instanceof org.openbravo.base.structure.BaseOBObject) {
-      return (String) ((org.openbravo.base.structure.BaseOBObject) value).getId();
+    if (value instanceof BaseOBObject) {
+      return (String) ((BaseOBObject) value).getId();
     }
     if (value instanceof JSONObject) {
       return StringUtils.trimToNull(((JSONObject) value).optString("id", null));

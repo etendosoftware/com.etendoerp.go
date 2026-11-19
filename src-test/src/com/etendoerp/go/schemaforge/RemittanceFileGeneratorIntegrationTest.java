@@ -571,6 +571,69 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
         account.getId()));
   }
 
+  /**
+   * W4: FlushMode.MANUAL does not stop an explicit flush inside the generation (a hook Classic's
+   * generator dispatches could run one). The stand-in then reaches the row, and the guard flush
+   * after the run writes the original back in the same transaction, so nothing is left on it.
+   */
+  @Test
+  public void aFlushInsideTheGenerationDoesNotLeaveTheStandInIbanOnTheAccount() throws Exception {
+    Remittance remittance = processedCollection(r -> r.setIBAN(OWN_IBAN),
+        RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    FIN_FinancialAccount account = remittance.getFinancialAccount();
+    account.setIBAN(null);
+    OBDal.getInstance().save(account);
+    OBDal.getInstance().flush();
+    String sql = "select iban from fin_financial_account where fin_financial_account_id = ?";
+
+    Object duringTheRun = RemittanceIban.whileAccountHas(account, OWN_IBAN, () -> {
+      OBDal.getInstance().flush(); // forced, despite MANUAL
+      return nativeValue(sql, account.getId());
+    });
+
+    assertEquals("the forced flush did write the stand-in (the hazard is real)", OWN_IBAN,
+        duringTheRun);
+    assertNull("the account entity is restored", account.getIBAN());
+    assertNull("the guard wrote the original back, without any flush by the caller",
+        nativeValue(sql, account.getId()));
+  }
+
+  /**
+   * W1: a B2B collection gets the same EPC tidy as a CORE one: both agents NOTPROVIDED (never an
+   * empty FinInstnId), trimmed text; unlike CORE it keeps Dbtr/Id. Valid against the XSD.
+   */
+  @Test
+  public void aB2bCollectionIsTidiedLikeCoreKeepsTheDebtorIdAndValidates() throws Exception {
+    Remittance remittance = processedCollection(r -> {
+      r.getFinancialAccount().setSwiftCode("CAIXESBBXXX");
+      r.setCreditorIdentifier(OWN_CREDITOR_ID);
+      r.setIBAN(OWN_IBAN);
+      r.setDirectDebitScheme(RemittanceSepaOptions.SCHEME_B2B);
+    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    Location location = remittance.getOrganization().getOrganizationInformationList().get(0)
+        .getLocationAddress();
+    location.setOBSEPAStreetName(" Calle  Mayor ");
+    OBDal.getInstance().flush();
+    assertTrue("Classic writes the debtor id", values(dom(classicFile(remittance)),
+        "DrctDbtTxInf", "Dbtr", "Id", "OrgId", "Othr", "Id").size() >= 1);
+
+    String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
+    writeSample("collection-b2b.xml", xml);
+
+    Document doc = dom(xml);
+    assertEquals(xml, List.of("B2B"), values(doc, "PmtInf", "PmtTpInf", "LclInstrm", "Cd"));
+    assertEquals(xml, List.of("NOTPROVIDED"), values(doc, "CdtrAgt", "FinInstnId", "Othr", "Id"));
+    assertEquals(xml, List.of("NOTPROVIDED"), values(doc, "DbtrAgt", "FinInstnId", "Othr", "Id"));
+    assertTrue(xml, values(doc, "FinInstnId", "BICFI").isEmpty());
+    assertFalse(xml, xml.contains("<FinInstnId/>"));
+    assertEquals("Calle  Mayor",
+        doc.getElementsByTagNameNS("*", "StrtNm").item(0).getTextContent());
+    assertFalse("the B2B debtor id is kept: " + xml,
+        values(doc, "DrctDbtTxInf", "Dbtr", "Id", "OrgId", "Othr", "Id").isEmpty());
+    assertNull(xml, jdkSchemaFailure(xsdOf(RemittanceSepaFileSetup.CLASS_CORE, "pain.008.001.08"),
+        xml));
+  }
+
   // ---------------------------------------------------------------- fixtures
 
   /** Leaves the generated file where the {@code SEPA_SAMPLE_DIR} environment variable points, to inspect it by hand. */

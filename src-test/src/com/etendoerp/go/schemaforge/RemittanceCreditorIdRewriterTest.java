@@ -185,6 +185,29 @@ class RemittanceCreditorIdRewriterTest {
     assertTrue(out.contains("<Dbtr><Nm>Sin id</Nm></Dbtr>"), out);
   }
 
+  /** W1: a B2B collection gets the same trim and agents as a CORE one, and keeps Dbtr/Id. */
+  @Test
+  void aB2bTidyTrimsAndFillsTheAgentsButKeepsTheDebtorId() throws Exception {
+    String id = "<Id><OrgId><Othr><Id>" + DEBTOR + "</Id></Othr></OrgId></Id>";
+    String xml = "<Document xmlns=\"" + NS + "\"><CstmrDrctDbtInitn><PmtInf><CdtrAgt><FinInstnId/>"
+        + "</CdtrAgt><DrctDbtTxInf><DbtrAgt><FinInstnId/></DbtrAgt><Dbtr><Nm> Juan </Nm>" + id
+        + "</Dbtr></DrctDbtTxInf></PmtInf></CstmrDrctDbtInitn></Document>";
+
+    byte[] cleaned = RemittanceCreditorIdRewriter.tidy(
+        RemittanceCreditorIdRewriter.parse(xml.getBytes(StandardCharsets.UTF_8)), true, false);
+    Document tidy = RemittanceCreditorIdRewriter.parse(cleaned);
+
+    assertEquals(2, tidy.getElementsByTagNameNS(NS, "FinInstnId").getLength());
+    for (String agent : new String[] { "CdtrAgt", "DbtrAgt" }) {
+      org.w3c.dom.Element element = (org.w3c.dom.Element) tidy.getElementsByTagNameNS(NS, agent)
+          .item(0);
+      assertEquals("NOTPROVIDED", element.getTextContent(), agent + " is identified");
+    }
+    assertEquals("Juan", tidy.getElementsByTagNameNS(NS, "Nm").item(0).getTextContent());
+    String out = new String(cleaned, StandardCharsets.UTF_8);
+    assertTrue(out.contains(DEBTOR), "the B2B debtor id stays: " + out);
+  }
+
   // ---------------------------------------------------------------- options (ETP-6247)
 
   private static String withInstrument(String msgId) {
@@ -216,6 +239,20 @@ class RemittanceCreditorIdRewriterTest {
     String longId = "X".repeat(35);
     assertTrue(options(withInstrument(longId), null, "FSDD")
         .contains("<MsgId>FSDD" + "X".repeat(31) + "</MsgId>"));
+  }
+
+  /** Nit: a long id keeps its unique END (the sequence), its start is what is cut. */
+  @Test
+  void aFinancedIdTooLongKeepsTheOriginalsUniqueTail() throws Exception {
+    String original = "HEAD-" + "0".repeat(20) + "-UNIQUE-0042"; // 37 characters
+    String expected = "FSDD" + original.substring(original.length() - 31);
+
+    assertEquals(expected, RemittanceCreditorIdRewriter.prefixedMsgId("FSDD", original));
+    assertTrue(expected.endsWith("-UNIQUE-0042"));
+    assertEquals(35, expected.length());
+    assertEquals("FSDDREM-1", RemittanceCreditorIdRewriter.prefixedMsgId("FSDD", "REM-1"));
+    assertTrue(options(withInstrument(original), null, "FSDD")
+        .contains("<MsgId>" + expected + "</MsgId>"));
   }
 
   @Test

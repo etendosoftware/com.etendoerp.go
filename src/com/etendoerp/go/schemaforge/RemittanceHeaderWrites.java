@@ -310,33 +310,12 @@ final class RemittanceHeaderWrites {
     if (!hasScheme && !hasFinanced) {
       return null;
     }
-    String scheme = null;
-    if (hasScheme) {
-      Object raw = body.opt(RemittanceHeaderHandler.FIELD_SCHEME);
-      String text = raw == null || JSONObject.NULL.equals(raw) ? "" : raw.toString().trim();
-      if (text.isEmpty()) {
-        body.remove(RemittanceHeaderHandler.FIELD_SCHEME);
-      } else {
-        scheme = RemittanceSepaOptions.normalizeScheme(text);
-        if (scheme == null) {
-          return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_SCHEME_INVALID);
-        }
-        body.put(RemittanceHeaderHandler.FIELD_SCHEME, scheme);
-      }
+    if (hasScheme && !normalizeSchemeField(body)) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_SCHEME_INVALID);
     }
-    boolean financed = false;
-    if (hasFinanced) {
-      Object raw = body.opt(RemittanceHeaderHandler.FIELD_FINANCED);
-      String text = raw == null ? "" : raw.toString().trim();
-      financed = "true".equalsIgnoreCase(text) || "Y".equalsIgnoreCase(text);
-      body.put(RemittanceHeaderHandler.FIELD_FINANCED, financed);
-    }
-    String typeId = body.has(RemittanceHeaderHandler.FIELD_TYPE)
-        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
-        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
-    RemittanceType type = typeId != null ? handler.loadType(typeId) : null;
-    if (type == null
-        || RemittanceSepaProvisioning.SCHEME_CORE.equals(RemittanceSepaFileSetup.schemeOf(type))) {
+    String scheme = body.optString(RemittanceHeaderHandler.FIELD_SCHEME, null);
+    boolean financed = hasFinanced && normalizeFinancedField(body);
+    if (!isPaymentType(handler, effectiveTypeId(body, stored))) {
       return null;
     }
     if (RemittanceSepaOptions.SCHEME_B2B.equals(scheme) || financed) {
@@ -346,6 +325,50 @@ final class RemittanceHeaderWrites {
     body.remove(RemittanceHeaderHandler.FIELD_SCHEME);
     body.remove(RemittanceHeaderHandler.FIELD_FINANCED);
     return null;
+  }
+
+  /**
+   * Normalizes the body's scheme in place: a blank one is dropped, a known one upper-cased.
+   *
+   * @return {@code false} when the scheme is neither blank nor CORE/B2B (left untouched)
+   */
+  private static boolean normalizeSchemeField(JSONObject body) throws JSONException {
+    Object raw = body.opt(RemittanceHeaderHandler.FIELD_SCHEME);
+    String text = raw == null || JSONObject.NULL.equals(raw) ? "" : raw.toString().trim();
+    if (text.isEmpty()) {
+      body.remove(RemittanceHeaderHandler.FIELD_SCHEME);
+      return true;
+    }
+    String scheme = RemittanceSepaOptions.normalizeScheme(text);
+    if (scheme == null) {
+      return false;
+    }
+    body.put(RemittanceHeaderHandler.FIELD_SCHEME, scheme);
+    return true;
+  }
+
+  /** Normalizes the body's financed flag in place to a boolean ({@code true} / {@code Y}). */
+  private static boolean normalizeFinancedField(JSONObject body) throws JSONException {
+    Object raw = body.opt(RemittanceHeaderHandler.FIELD_FINANCED);
+    String text = raw == null ? "" : raw.toString().trim();
+    boolean financed = "true".equalsIgnoreCase(text) || "Y".equalsIgnoreCase(text);
+    body.put(RemittanceHeaderHandler.FIELD_FINANCED, financed);
+    return financed;
+  }
+
+  /** The type the write leaves on the remittance: the body's, else the stored one's; may be null. */
+  private static String effectiveTypeId(JSONObject body, Remittance stored) {
+    if (body.has(RemittanceHeaderHandler.FIELD_TYPE)) {
+      return RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE));
+    }
+    return stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
+  }
+
+  /** Whether {@code typeId} names a known type that is not a collection (CORE) one. */
+  private static boolean isPaymentType(RemittanceHeaderHandler handler, String typeId) {
+    RemittanceType type = typeId != null ? handler.loadType(typeId) : null;
+    return type != null
+        && !RemittanceSepaProvisioning.SCHEME_CORE.equals(RemittanceSepaFileSetup.schemeOf(type));
   }
 
   /**

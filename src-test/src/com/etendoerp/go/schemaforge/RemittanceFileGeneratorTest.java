@@ -439,12 +439,36 @@ class RemittanceFileGeneratorTest {
     assertFalse(file.contains(UNKNOWN_AGENT), file);
   }
 
+  /** W1: a B2B file gets the same IBAN-only agent policy as a CORE one (no empty FinInstnId). */
   @Test
-  void aB2bFileKeepsItsOwnAgentPolicy() throws Exception {
+  void aB2bFileGetsTheSameAgentPolicyAsCore() throws Exception {
     String b2b = collectionBlocks().replace("<Cd>CORE</Cd>", "<Cd>B2B</Cd>");
     String xml = new String(generateCollection(b2b), StandardCharsets.UTF_8);
-    assertTrue(xml.contains("<DbtrAgt><FinInstnId/></DbtrAgt>"), xml);
-    assertFalse(xml.contains(UNKNOWN_AGENT), xml);
+    assertFalse(xml.contains("<FinInstnId/>"), xml);
+    assertEquals(4, xml.split(UNKNOWN_AGENT, -1).length - 1, xml);
+    assertFalse(xml.contains(BIC), xml);
+  }
+
+  /**
+   * W1: B2B chosen on the REMITTANCE (withOptions rewrites CORE to B2B before validation) is still
+   * tidied (agents, trimmed text) and checked by the EPC rules, and keeps Dbtr/Id.
+   */
+  @Test
+  void aB2bChosenOnTheRemittanceIsTidiedAndCheckedLikeCoreAndKeepsTheDebtorId() throws Exception {
+    when(remittance.get(RemittanceSepaOptions.PROPERTY_SCHEME))
+        .thenReturn(RemittanceSepaOptions.SCHEME_B2B);
+    String withIds = collectionBlocks().replace("<Nm>Debtor</Nm>",
+        "<Nm> Debtor </Nm>" + DEBTOR_ID);
+
+    String xml = new String(generateCollection(withIds), StandardCharsets.UTF_8);
+
+    assertEquals(2, xml.split("<Cd>B2B</Cd>", -1).length - 1, xml);
+    assertEquals(4, xml.split(UNKNOWN_AGENT, -1).length - 1, xml);
+    assertFalse(xml.contains("<FinInstnId/>"), xml);
+    assertEquals(2, xml.split("<Nm>Debtor</Nm>", -1).length - 1, "trimmed: " + xml);
+    assertEquals(2, xml.split("ES31ZZZK01927367", -1).length - 1, "Dbtr/Id kept: " + xml);
+    assertRuleRefusal(collectionBlocks().replace(">message<", ">/message<"),
+        RemittanceSepaRules.MSG_SLASH, "/GrpHdr/MsgId");
   }
 
   @Test

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import javax.xml.parsers.ParserConfigurationException;
@@ -34,7 +35,9 @@ import org.xml.sax.SAXException;
 /**
  * Checks the agent identifications, party names and control totals of an XSD-valid pain.008.001.08.
  * The EPC130-08 (Core) 2025 Customer-to-PSP Implementation Guidelines
- * v1.0 specify these fields in sections 1.4–1.7, 2.4–2.5, 2.20, 2.48, 2.154 and 2.167.
+ * v1.0 specify these fields in sections 1.4–1.7, 2.4–2.5, 2.20, 2.48, 2.154 and 2.167; the B2B
+ * guidelines (EPC222-07) specify them alike, so a B2B collection is checked the same way
+ * ({@link #isSepaDirectDebit}).
  */
 final class RemittanceSepaRules {
 
@@ -86,8 +89,34 @@ final class RemittanceSepaRules {
     return firstViolation(document, false);
   }
 
-  /** Classic can override the default scheme and GO can select B2B for an individual remittance. */
+  /**
+   * Whether every payment information block is a CORE direct debit. Classic can override the
+   * default scheme and GO can select B2B for an individual remittance, so this reads the file as
+   * it will be sent ({@code LclInstrm/Cd} after {@code withOptions}). It decides only what is
+   * CORE-specific: dropping the debtor identification ({@link RemittanceCreditorIdRewriter#tidy}).
+   *
+   * @param document a pain.008 document
+   * @return {@code true} when every {@code LclInstrm/Cd} is CORE
+   */
   static boolean isCore(Document document) {
+    return everyInstrumentIn(document, RemittanceSepaOptions.SCHEME_CORE);
+  }
+
+  /**
+   * Whether every payment information block is a SEPA direct debit of either scheme, CORE or B2B
+   * (ETP-6247). Decides whether the EPC tidy and the rules here apply: they are the same for both
+   * schemes (EPC130-08 Core and EPC222-07 B2B Customer-to-PSP IGs, same sections), so the scheme a
+   * remittance picks, which rewrites {@code LclInstrm/Cd}, must not switch them off.
+   *
+   * @param document a pain.008 document
+   * @return {@code true} when every {@code LclInstrm/Cd} is CORE or B2B
+   */
+  static boolean isSepaDirectDebit(Document document) {
+    return everyInstrumentIn(document, RemittanceSepaOptions.SCHEME_CORE,
+        RemittanceSepaOptions.SCHEME_B2B);
+  }
+
+  private static boolean everyInstrumentIn(Document document, String... schemes) {
     NodeList instruments = document.getElementsByTagNameNS(
         document.getDocumentElement().getNamespaceURI(), "LclInstrm");
     if (instruments.getLength() == 0) {
@@ -95,7 +124,7 @@ final class RemittanceSepaRules {
     }
     for (int i = 0; i < instruments.getLength(); i++) {
       Element code = child((Element) instruments.item(i), "Cd");
-      if (code == null || !RemittanceSepaOptions.SCHEME_CORE.equals(code.getTextContent().trim())) {
+      if (code == null || !Arrays.asList(schemes).contains(code.getTextContent().trim())) {
         return false;
       }
     }

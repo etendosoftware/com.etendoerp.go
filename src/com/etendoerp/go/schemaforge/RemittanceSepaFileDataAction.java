@@ -51,6 +51,8 @@ final class RemittanceSepaFileDataAction {
   static final String MSG_NEEDS_ACCOUNT = "ETGO_RemittanceCreditorIdNeedsAccount";
   /** Save for a remittance that is not a collection or is on another account. */
   static final String MSG_NOT_APPLICABLE = "ETGO_RemittanceCreditorIdNotApplicable";
+  /** Save to the account by a role without write access to the financial-account window. */
+  static final String MSG_ACCOUNT_WRITE_DENIED = "ETGO_RemittanceCreditorIdAccountWriteDenied";
 
   private RemittanceSepaFileDataAction() {
   }
@@ -62,6 +64,12 @@ final class RemittanceSepaFileDataAction {
    * account's refusal when it is not a Bank account with the remittance payment methods. An
    * account without a valid IBAN is answered, with {@code iban} in {@code missing}: the block is
    * where the user gives it one.
+   *
+   * <p>{@value RemittanceSepaFileData#ACTION_SAVE_CREDITOR_ID} with {@code saveToAccount} (the only
+   * way to write the account default, and the only way to save without a remittance) also needs
+   * write access to the {@code financial-account} spec's window
+   * ({@link RemittanceHeaderHandler#canWriteFinancialAccount}): 403
+   * {@value #MSG_ACCOUNT_WRITE_DENIED} otherwise, before any record is loaded, locked or written.
    *
    * @param handler the remittance header customization (its seams)
    * @param context the action request
@@ -84,6 +92,12 @@ final class RemittanceSepaFileDataAction {
       if (invalid != null) {
         return invalid;
       }
+      boolean saveToAccount = params.optBoolean(RemittanceSepaFileData.P_SAVE_TO_ACCOUNT, false);
+      if (save && saveToAccount && !handler.canWriteFinancialAccount()) {
+        // The account default is a write on FIN_FINANCIAL_ACCOUNT, done in admin mode: the
+        // remittance spec's access is not enough, the role must be able to edit accounts.
+        return NeoMessageText.error(HttpServletResponse.SC_FORBIDDEN, MSG_ACCOUNT_WRITE_DENIED);
+      }
       FIN_FinancialAccount account =
           handler.loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
       if (account == null) {
@@ -95,7 +109,6 @@ final class RemittanceSepaFileDataAction {
       }
       String remittanceRef = remittanceRef(context, params);
       Remittance remittance = remittanceRef != null ? handler.loadRemittance(remittanceRef) : null;
-      boolean saveToAccount = params.optBoolean(RemittanceSepaFileData.P_SAVE_TO_ACCOUNT, false);
       if (save) {
         NeoResponse refusal2 = saveRefusal(handler, remittanceRef, remittance, account,
             saveToAccount);

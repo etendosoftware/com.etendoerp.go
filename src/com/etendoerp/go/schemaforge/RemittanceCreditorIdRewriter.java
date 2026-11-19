@@ -152,8 +152,9 @@ final class RemittanceCreditorIdRewriter {
    * ETP-6247 — applies the per-remittance direct debit options to a pain.008 document, by
    * structure: {@code LclInstrm/Cd} of every payment information block becomes {@code scheme}
    * (CORE or B2B) and, for a financed remittance, {@code GrpHdr/MsgId} starts with {@code
-   * msgIdPrefix} (cut to {@value RemittanceSepaOptions#MSG_ID_MAX_LENGTH} characters, left as is
-   * when it already starts with it).
+   * msgIdPrefix} ({@link #prefixedMsgId}: the original is cut from its start so the result fits
+   * {@value RemittanceSepaOptions#MSG_ID_MAX_LENGTH} characters and keeps its unique end; left as
+   * is when it already starts with the prefix).
    *
    * @param xml         the document the generator wrote, UTF-8
    * @param scheme      the scheme to write, or {@code null} to leave it
@@ -187,15 +188,29 @@ final class RemittanceCreditorIdRewriter {
         Node id = ids.item(0);
         String current = id.getTextContent() == null ? "" : id.getTextContent();
         if (!current.startsWith(msgIdPrefix)) {
-          String joined = msgIdPrefix + current;
-          id.setTextContent(joined.length() > RemittanceSepaOptions.MSG_ID_MAX_LENGTH
-              ? joined.substring(0, RemittanceSepaOptions.MSG_ID_MAX_LENGTH) : joined);
+          id.setTextContent(prefixedMsgId(msgIdPrefix, current));
         }
       }
       return write(document);
     } catch (SAXException | ParserConfigurationException | TransformerException e) {
       throw new IOException("Could not apply the direct debit options: " + e.getMessage(), e);
     }
+  }
+
+  /**
+   * {@code prefix + original}, at most {@value RemittanceSepaOptions#MSG_ID_MAX_LENGTH}
+   * characters. When it does not fit, the ORIGINAL is cut, keeping its end: the generator's id ends
+   * in what makes it unique (the timestamp), which cutting the joined value at its end would drop.
+   *
+   * @param prefix   the financed prefix, shorter than the maximum
+   * @param original the identifier the generator wrote
+   * @return the prefixed identifier
+   */
+  static String prefixedMsgId(String prefix, String original) {
+    int room = Math.max(0, RemittanceSepaOptions.MSG_ID_MAX_LENGTH - prefix.length());
+    String kept = original.length() > room ? original.substring(original.length() - room)
+        : original;
+    return prefix + kept;
   }
 
   /** Agent elements whose empty institution identification the EPC does not accept. */
@@ -209,7 +224,8 @@ final class RemittanceCreditorIdRewriter {
    * structure and for every element:
    * <ul>
    *   <li>the debtor identification ({@code Dbtr/Id}) is dropped (see
-   *       {@link #removeDebtorIdentifications});</li>
+   *       {@link #removeDebtorIdentifications}) — CORE only, a B2B file keeps it
+   *       ({@link #tidy(Document, boolean, boolean)});</li>
    *   <li>the text of every leaf element is trimmed (the generator copies the address data as it
    *       is stored, e.g. {@code <StrtNm> Calle X</StrtNm>}); nothing else is collapsed;</li>
    *   <li>the IBAN-only profile identifies each bank with {@code Othr/Id = NOTPROVIDED} even
@@ -225,16 +241,29 @@ final class RemittanceCreditorIdRewriter {
    */
   static byte[] tidy(byte[] xml, boolean ibanOnly) throws IOException {
     try {
-      return tidy(parse(xml), ibanOnly);
+      return tidy(parse(xml), ibanOnly, true);
     } catch (SAXException | ParserConfigurationException | TransformerException e) {
       throw new IOException("Could not tidy the SEPA file: " + e.getMessage(), e);
     }
   }
 
-
-  static byte[] tidy(Document document, boolean ibanOnly) throws TransformerException {
+  /**
+   * {@link #tidy(byte[], boolean)} on a parsed document (modified in place), for either scheme:
+   * a B2B collection gets the same trim and agent identification as a CORE one and keeps its
+   * debtor identification (ETP-6247: the B2B debtor is an organisation its bank identifies).
+   *
+   * @param document            the parsed pain.008 document
+   * @param ibanOnly            whether the collection type is configured without a BIC requirement
+   * @param dropDebtorIds       whether {@code Dbtr/Id} is dropped: CORE only
+   * @return the document, UTF-8
+   * @throws TransformerException when it cannot be written
+   */
+  static byte[] tidy(Document document, boolean ibanOnly, boolean dropDebtorIds)
+      throws TransformerException {
     trimLeaves(document.getDocumentElement());
-    removeDebtorIdentifications(document);
+    if (dropDebtorIds) {
+      removeDebtorIdentifications(document);
+    }
     if (ibanOnly) {
       for (String agent : AGENTS) {
         NodeList agents = document.getElementsByTagNameNS(

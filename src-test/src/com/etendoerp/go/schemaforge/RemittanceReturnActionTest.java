@@ -23,8 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -48,6 +51,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -82,6 +86,10 @@ import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
  *   <li>the run: the order of the steps, what the module is given, the answer; a thrown exception,
  *       a module that swallowed its error (payment not void, settlement row still there, no return
  *       row, no settlement row to begin with) is each a 422 with the transaction rolled back;</li>
+ *   <li>concurrency: {@code returnLines} locks the remittance row BEFORE reading the line states,
+ *       so two concurrent returns cannot both pass the check; {@code returnState} (a read) does
+ *       not lock;</li>
+ *   <li>a request whose line ids are all blank is a 422 before anything is read;</li>
  *   <li>the reason keys and their catalog entries.</li>
  * </ul>
  *
@@ -176,6 +184,7 @@ class RemittanceReturnActionTest {
     doReturn(true).when(handler).isFlagEnabled();
     doReturn(remittance).when(handler).loadRemittance(REM_ID);
     doReturn(TODAY).when(handler).today();
+    doNothing().when(handler).lockRemittance(any());
   }
 
   @AfterEach
@@ -252,6 +261,66 @@ class RemittanceReturnActionTest {
     assertTrue(RemittanceReturnAction.serves("returnLines"));
     assertFalse(RemittanceReturnAction.serves("confirm"));
     assertFalse(RemittanceReturnAction.serves(null));
+  }
+
+  /** B2: the row lock comes before the states are read, so a concurrent return waits and re-reads. */
+  @Test
+  void returnLinesLocksTheRemittanceBeforeReadingTheLineStates() throws Exception {
+    settled("L1", "P1");
+    boolean[] locked = { false };
+    doAnswer(inv -> {
+      // An AssertionError is not caught by the action: it fails the test from here.
+      state.verify(() -> RemittanceReturnState.of(any()), never());
+      locked[0] = true;
+      return null;
+    }).when(handler).lockRemittance(remittance);
+
+    assertEquals(200, returnLines(null, "L1").getHttpStatus());
+
+    assertTrue(locked[0], "the remittance was locked");
+    InOrder order = inOrder(handler);
+    order.verify(handler).loadRemittance(REM_ID);
+    order.verify(handler).lockRemittance(remittance);
+    state.verify(() -> RemittanceReturnState.of(remittance));
+  }
+
+  @Test
+  void aLockThatFailsIsA500AndNothingIsReturned() throws Exception {
+    settled("L1", "P1");
+    doThrow(new IllegalStateException("lock timeout")).when(handler).lockRemittance(remittance);
+
+    assertEquals(500, returnLines(null, "L1").getHttpStatus());
+
+    state.verify(() -> RemittanceReturnState.of(any()), never());
+    removal.verifyNoInteractions();
+    assertTrue(module.constructed().isEmpty());
+    errors.verify(NeoErrorResponses::rollbackUnlessBatchOwned);
+  }
+
+  @Test
+  void returnStateIsAReadAndDoesNotLock() throws Exception {
+    handler.handle(context("POST", "returnState", new JSONObject()));
+
+    verify(handler, never()).lockRemittance(any());
+  }
+
+  /**
+   * Nit: blank line ids are nothing to return. Through the action the contract already refuses
+   * them (an array of non-blank strings); a direct caller of returnLines gets the explicit 422.
+   * Neither reads a state nor touches anything.
+   */
+  @Test
+  void lineIdsThatAreAllBlankAreA422BeforeAnythingIsRead() throws Exception {
+    NeoResponse viaAction = returnLines(null, " ", "");
+    NeoResponse direct = RemittanceReturnAction.returnLines(handler, remittance,
+        new JSONObject().put("lineIds", new JSONArray(List.of(" ", ""))));
+
+    assertEquals(422, viaAction.getHttpStatus());
+    assertEquals(422, direct.getHttpStatus());
+    assertEquals(RemittanceReturnAction.MSG_NO_LINES, messageKey(direct));
+    state.verify(() -> RemittanceReturnState.of(any()), never());
+    removal.verifyNoInteractions();
+    assertTrue(module.constructed().isEmpty());
   }
 
   // ---------------------------------------------------------------- returnState
@@ -607,7 +676,7 @@ class RemittanceReturnActionTest {
   @ParameterizedTest
   @ValueSource(strings = { "ETGO_RemittanceReturnNotAllowed", "ETGO_RemittanceReturnLineNotFound",
       "ETGO_RemittanceReturnDateInvalid", "ETGO_RemittanceReturnFailed",
-      "ETGO_RemittanceFileHasReturns" })
+      "ETGO_RemittanceFileHasReturns", "ETGO_RemittanceReturnNoLines" })
   void everyRefusalKeyIsInTheCatalogInBothLanguages(String key) {
     for (String lang : new String[] { "en", "es" }) {
       ResourceBundle bundle = ResourceBundle.getBundle(

@@ -114,7 +114,10 @@ final class RemittanceStatusAction {
 
   /**
    * Runs one of the actions: 405 when not a POST, the contract's 422 for a malformed call, 404 for
-   * an unknown remittance.
+   * an unknown remittance. The remittance row is locked ({@code SELECT ... FOR UPDATE}, through
+   * {@link RemittanceHeaderHandler#lockRemittance}) before its status is validated, so two
+   * concurrent requests cannot both pass the check and settle twice: the second waits, then sees
+   * the status the first one left.
    *
    * @param handler the remittance header customization (its seams)
    * @param context the action request
@@ -139,6 +142,9 @@ final class RemittanceStatusAction {
       if (remittance == null) {
         return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Remittance not found");
       }
+      // Row lock BEFORE the state check: two concurrent «Cobrada» (or «Enviada» racing
+      // «Cobrada») would otherwise both see PR/SB and settle every payment twice.
+      handler.lockRemittance(remittance);
       return ACTION_MARK_SENT.equals(action) ? markSent(remittance) : markCollected(remittance);
     } catch (Exception e) {
       log.error("remittance action {} failed on {}", action, context.getRecordId(), e);
@@ -153,8 +159,9 @@ final class RemittanceStatusAction {
   /**
    * «Enviada al banco».
    *
-   * @param remittance a remittance of the tenant
+   * @param remittance a remittance of the tenant, already row-locked by the caller
    * @return {@code {status}}, or 422
+   * @throws JSONException when the answer body cannot be built
    */
   static NeoResponse markSent(Remittance remittance) throws JSONException {
     if (!Boolean.TRUE.equals(remittance.isProcessed())) {
@@ -170,8 +177,9 @@ final class RemittanceStatusAction {
   /**
    * «Cobrada».
    *
-   * @param remittance a remittance of the tenant
+   * @param remittance a remittance of the tenant, already row-locked by the caller
    * @return {@code {status, settledOn}}, or 422
+   * @throws JSONException when the answer body cannot be built
    */
   static NeoResponse markCollected(Remittance remittance) throws JSONException {
     if (!Boolean.TRUE.equals(remittance.isProcessed())) {

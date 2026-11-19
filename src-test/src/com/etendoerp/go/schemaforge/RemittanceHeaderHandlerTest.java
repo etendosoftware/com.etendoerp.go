@@ -127,6 +127,8 @@ class RemittanceHeaderHandlerTest {
     doReturn("es_ES").when(handler).currentLanguage();
     // The due-date rule compares with today: pinned, so the fixed dates below never go stale.
     doReturn(TODAY).when(handler).today();
+    // Granted by default; the account-default permission tests (W5) deny it themselves.
+    doReturn(true).when(handler).canWriteFinancialAccount();
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getReadableOrganizations()).thenReturn(new String[] { "0", "ORG-1" });
@@ -1533,6 +1535,75 @@ class RemittanceHeaderHandlerTest {
     assertEquals(422, response.getHttpStatus());
     assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED, messageKey(response));
     verify(handler, never()).storeCreditorId(any(), any());
+  }
+
+  /**
+   * W5: the account default is a write on FIN_FINANCIAL_ACCOUNT run in admin mode, so it needs
+   * write access to the financial-account window too: 403 before anything is loaded or locked.
+   */
+  @Test
+  void savingTheAccountDefaultWithoutWriteAccessToAccountsIsA403AndSavesNothing()
+      throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    draftRemittance(account, null);
+    doReturn(false).when(handler).canWriteFinancialAccount();
+
+    NeoResponse fromAccountForm = handler.handle(accountAction("saveCreditorId",
+        params().put("creditorId", CI).put("saveToAccount", true)));
+    NeoResponse fromRemittance = handler.handle(action("POST", "saveCreditorId",
+        params().put("creditorId", CI).put("saveToAccount", true)));
+
+    for (NeoResponse response : List.of(fromAccountForm, fromRemittance)) {
+      assertEquals(403, response.getHttpStatus(), String.valueOf(response.getBody()));
+      assertEquals(RemittanceSepaFileDataAction.MSG_ACCOUNT_WRITE_DENIED, messageKey(response));
+    }
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).lockRemittance(any());
+    verify(handler, never()).storeCreditorId(any(), any());
+    verify(handler, never()).storeRemittanceCreditorId(any(), any());
+    for (String lang : new String[] { "en", "es" }) {
+      assertTrue(java.util.ResourceBundle.getBundle(
+          "com.etendoerp.go.schemaforge.messages.neo_hints", new java.util.Locale(lang))
+          .containsKey(RemittanceSepaFileDataAction.MSG_ACCOUNT_WRITE_DENIED), lang);
+    }
+  }
+
+  /** Saving only the remittance's own copy is not an account write: no account permission asked. */
+  @Test
+  void savingOnlyTheRemittanceCopyDoesNotNeedWriteAccessToAccounts() throws Exception {
+    FIN_FinancialAccount account = sepaAccount();
+    Remittance remittance = draftRemittance(account, null);
+    doReturn(false).when(handler).canWriteFinancialAccount();
+    try (MockedStatic<RemittanceSepaFileSetup> schemes =
+        scheme(RemittanceSepaProvisioning.SCHEME_CORE)) {
+      NeoResponse response = handler.handle(action("POST", "saveCreditorId",
+          params().put("creditorId", CI)));
+
+      assertEquals(200, response.getHttpStatus(), String.valueOf(response.getBody()));
+      verify(handler).storeRemittanceCreditorId(remittance, CI);
+      verify(handler, never()).canWriteFinancialAccount();
+    }
+  }
+
+  /** The seam asks the financial-account spec for the write tier (PUT), like the servlet does. */
+  @Test
+  void canWriteFinancialAccountAsksTheFinancialAccountSpecForTheWriteTier() {
+    Mockito.doCallRealMethod().when(handler).canWriteFinancialAccount();
+    com.etendoerp.go.schemaforge.data.SFSpec spec =
+        mock(com.etendoerp.go.schemaforge.data.SFSpec.class);
+    try (MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+        MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccessHelper> access =
+            mockStatic(com.etendoerp.go.schemaforge.util.NeoAccessHelper.class)) {
+      support.when(() -> NeoServletSupport.findSpec("financial-account")).thenReturn(spec);
+      access.when(() -> com.etendoerp.go.schemaforge.util.NeoAccessHelper
+          .hasWindowAccessForSpec(spec, "PUT")).thenReturn(true, false);
+
+      assertTrue(handler.canWriteFinancialAccount());
+      assertFalse(handler.canWriteFinancialAccount());
+
+      support.when(() -> NeoServletSupport.findSpec("financial-account")).thenReturn(null);
+      assertFalse(handler.canWriteFinancialAccount(), "no spec, no access");
+    }
   }
 
   // ---------------------------------------------------------------- remittance IBAN (ETP-6247)

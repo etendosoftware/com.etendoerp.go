@@ -333,16 +333,19 @@ final class RemittanceFileGenerator {
       throw new Refusal(MSG_SCHEMA_MISSING, StringUtils.defaultIfBlank(version, "-"));
     }
     try {
-      Document core = null;
+      Document collection = null;
       Document transfer = null;
       boolean requireBic = false;
       byte[] content = xml;
       if ("pain.008.001.08".equals(version)) {
         Document directDebit = RemittanceCreditorIdRewriter.parse(xml);
-        if (RemittanceSepaRules.isCore(directDebit)) {
-          core = directDebit;
+        // CORE and B2B alike get the EPC tidy and rules: withOptions has already rewritten Cd to
+        // B2B, so gating on CORE would skip them for B2B. Only Dbtr/Id removal is CORE-only.
+        if (RemittanceSepaRules.isSepaDirectDebit(directDebit)) {
+          collection = directDebit;
           requireBic = SEPAUtil.isMandatoryBIC(remittance);
-          content = RemittanceCreditorIdRewriter.tidy(core, !requireBic);
+          content = RemittanceCreditorIdRewriter.tidy(collection, !requireBic,
+              RemittanceSepaRules.isCore(directDebit));
         }
       }
       if ("pain.001.001.09".equals(version)) {
@@ -354,8 +357,9 @@ final class RemittanceFileGenerator {
       if (failure != null) {
         throw new Refusal(MSG_INVALID, version, failure);
       }
-      if (core != null) {
-        RemittanceSepaRules.Violation violation = RemittanceSepaRules.firstViolation(core, requireBic);
+      if (collection != null) {
+        RemittanceSepaRules.Violation violation =
+            RemittanceSepaRules.firstViolation(collection, requireBic);
         if (violation != null) {
           throw new Refusal(violation.key, violation.args);
         }

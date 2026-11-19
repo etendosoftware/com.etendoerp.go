@@ -21,7 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -37,6 +40,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
@@ -57,7 +61,9 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  *   <li>{@code markCollected}: allowed from PR and SB only; settles through the hook seam, verifies
  *       the outcome (CT/PT), flags the remittance settled and answers {@code {status, settledOn}};
  *       a failure of the settlement, or an outcome that is not CT/PT, is a 422 with the
- *       transaction rolled back.</li>
+ *       transaction rolled back;</li>
+ *   <li>concurrency: both lock the remittance row BEFORE reading its state, so two concurrent
+ *       requests cannot both pass the check (a double settlement).</li>
  * </ul>
  * The REM status util, the settlement and the request-context scope are mocked seams; {@code
  * RemittanceProcessHookImplTest} (automated.remittance) specifies the settlement itself.
@@ -106,6 +112,7 @@ class RemittanceStatusActionTest {
     handler = spy(new RemittanceHeaderHandler());
     doReturn(true).when(handler).isFlagEnabled();
     doReturn(remittance).when(handler).loadRemittance(REM_ID);
+    doNothing().when(handler).lockRemittance(any());
   }
 
   @AfterEach
@@ -151,6 +158,47 @@ class RemittanceStatusActionTest {
     assertTrue(RemittanceStatusAction.serves("markSent"));
     assertTrue(RemittanceStatusAction.serves("markCollected"));
     assertFalse(RemittanceStatusAction.serves("confirm"));
+  }
+
+  // ---------------------------------------------------------------- concurrency
+
+  /** B2: the row lock comes before any read of the state, so a concurrent call waits and re-reads. */
+  @ParameterizedTest
+  @ValueSource(strings = { "markSent", "markCollected" })
+  void theRemittanceIsLockedBeforeItsStateIsChecked(String name) throws Exception {
+    action.when(() -> RemittanceStatusAction.markSentToBank(remittance)).thenReturn(true);
+    Remittance settled = remittance(true, "CT");
+    when(dal.get(Remittance.class, REM_ID)).thenReturn(settled);
+
+    assertEquals(200, handler.handle(context("POST", name)).getHttpStatus());
+
+    InOrder order = inOrder(handler, remittance);
+    order.verify(handler).loadRemittance(REM_ID);
+    order.verify(handler).lockRemittance(remittance);
+    order.verify(remittance).isProcessed();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "markSent", "markCollected" })
+  void aLockThatFailsIsA500AndNothingIsSettledNorMarked(String name) throws Exception {
+    doThrow(new IllegalStateException("lock timeout")).when(handler).lockRemittance(remittance);
+
+    NeoResponse response = handler.handle(context("POST", name));
+
+    assertEquals(500, response.getHttpStatus());
+    action.verify(() -> RemittanceStatusAction.settle(any()), never());
+    action.verify(() -> RemittanceStatusAction.markSentToBank(any()), never());
+    errors.verify(NeoErrorResponses::rollbackUnlessBatchOwned);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "markSent", "markCollected" })
+  void anUnknownRemittanceIsNotLocked(String name) throws Exception {
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+
+    handler.handle(context("POST", name));
+
+    verify(handler, never()).lockRemittance(any());
   }
 
   // ---------------------------------------------------------------- markSent

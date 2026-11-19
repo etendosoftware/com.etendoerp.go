@@ -91,6 +91,8 @@ final class RemittanceReturnAction {
 
   static final String MSG_NOT_ALLOWED = "ETGO_RemittanceReturnNotAllowed";
   static final String MSG_LINE_NOT_FOUND = "ETGO_RemittanceReturnLineNotFound";
+  /** Every requested line id was blank: nothing to return. */
+  static final String MSG_NO_LINES = "ETGO_RemittanceReturnNoLines";
   static final String MSG_DATE_INVALID = "ETGO_RemittanceReturnDateInvalid";
   static final String MSG_FAILED = "ETGO_RemittanceReturnFailed";
   /** Reason for a payment shared with lines the request did not name. */
@@ -137,7 +139,9 @@ final class RemittanceReturnAction {
 
   /**
    * Runs one of the actions: 405 for {@value #ACTION_RETURN} that is not a POST, the contract's 422
-   * for a malformed call, 404 for an unknown remittance.
+   * for a malformed call, 404 for an unknown remittance. {@value #ACTION_RETURN} locks the
+   * remittance row ({@link RemittanceHeaderHandler#lockRemittance}) before validating any line, so
+   * two concurrent returns cannot both pass the check.
    *
    * @param handler the remittance header customization (its seams)
    * @param context the action request
@@ -162,8 +166,13 @@ final class RemittanceReturnAction {
       if (remittance == null) {
         return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Remittance not found");
       }
-      return ACTION_STATE.equals(action) ? NeoResponse.ok(state(remittance))
-          : returnLines(handler, remittance, params);
+      if (ACTION_STATE.equals(action)) {
+        return NeoResponse.ok(state(remittance));
+      }
+      // Row lock BEFORE the line states are read: two concurrent returns of the same line would
+      // otherwise both see it SETTLED and return it twice.
+      handler.lockRemittance(remittance);
+      return returnLines(handler, remittance, params);
     } catch (Exception e) {
       log.error("remittance action {} failed on {}", action, context.getRecordId(), e);
       NeoErrorResponses.rollbackUnlessBatchOwned();
@@ -213,7 +222,8 @@ final class RemittanceReturnAction {
    * @param handler    the remittance header customization (its seams)
    * @param remittance a remittance of the tenant
    * @param params     {@value #P_LINE_IDS}, {@value #P_RETURN_DATE}
-   * @return the answer, or 422
+   * @return the answer, or 422 (also when every requested line id is blank)
+   * @throws JSONException when the answer body cannot be built
    */
   static NeoResponse returnLines(RemittanceHeaderHandler handler, Remittance remittance,
       JSONObject params) throws JSONException {
@@ -222,6 +232,11 @@ final class RemittanceReturnAction {
       return NeoMessageText.error(SC_UNPROCESSABLE, MSG_DATE_INVALID);
     }
     Set<String> requested = lineIds(params);
+    if (requested.isEmpty()) {
+      // Through handle() the contract already refuses blank ids; this guards a direct caller,
+      // which would otherwise run a return of nothing.
+      return NeoMessageText.error(SC_UNPROCESSABLE, MSG_NO_LINES);
+    }
     Map<String, LineState> states = RemittanceReturnState.of(remittance);
     for (String id : requested) {
       if (!states.containsKey(id)) {

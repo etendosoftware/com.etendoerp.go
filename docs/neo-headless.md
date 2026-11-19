@@ -2614,7 +2614,13 @@ everything is Classic's model.
     remittance** (record id `new`, the financial-account form) the only write is the account's
     default and `saveToAccount: true` is required (422 `ETGO_RemittanceCreditorIdNeedsAccount`).
     The answer is the `sepaFileData` block. The value cannot be cleared through it. Window access is
-    the remittance spec's: the columns are not exposed in the financial-account spec.
+    the remittance spec's: the columns are not exposed in the financial-account spec. **Writing the
+    account default** (`saveToAccount: true`, the only way to save without a remittance) is a write
+    on `FIN_FINANCIAL_ACCOUNT` done in admin mode, so it ALSO needs write access to the
+    `financial-account` spec's window (`RemittanceHeaderHandler.canWriteFinancialAccount`: the same
+    tiered `NeoAccessHelper.hasWindowAccessForSpec(spec, "PUT")` the servlet applies to that spec);
+    otherwise 403 `ETGO_RemittanceCreditorIdAccountWriteDenied`, before any record is loaded,
+    locked or written. Saving only the remittance's copy does not ask for it.
   - **Write from the header's CRUD (preferred), field `creditorIdentifier`** (decisions, editable, not in
     the generic form; needs the NEO push). Like `iBAN`: the SPA preloads it with the account's default
     or the computed `suggestedCreditorId` and saves it with the general «Guardar».
@@ -2693,7 +2699,12 @@ everything is Classic's model.
     touched. No such account, or no valid IBAN, is a refusal. Classic's generator refuses an account
     without IBAN (`OBSEPA_FINANCIALACCOUNT_NOIBAN`), so while it runs the remittance's IBAN stands
     in for a blank account IBAN in the session only (`RemittanceIban.whileAccountHas`: pending
-    changes flushed first, flushing off, original restored): nothing reaches the database.
+    changes flushed first, flush mode `MANUAL` while the generator runs, original restored). `MANUAL`
+    stops auto-flushes, not an explicit `OBDal.flush()`; the Classic generators
+    (`org.openbravo.sepa.iso20022.*`, `REM_RemittanceCreateFile`) never flush nor commit, and as a
+    guard the session is flushed once more after a successful run, with the original back, so a
+    stand-in an explicit flush may have written is overwritten in the same transaction (a failed run
+    is rolled back by the caller). No stand-in IBAN can be committed on the account.
   - **fileReadiness** `ETGO_RemittanceFileAccountNoIban` now judges the remittance's IBAN (its copy,
     else its account's).
 - **Direct debit scheme and financed flag (ETP-6247).** A COLLECTION remittance carries two options
@@ -2715,8 +2726,10 @@ everything is Classic's model.
   - **File.** `CoreDirectDebit` reads both from the type and has no per-remittance hook, so, as for the
     IBAN and the creditor identifier, the output is rewritten by structure
     (`RemittanceCreditorIdRewriter.applyOptions`) and then validated against the XSD: `B2B` sets
-    `PmtInf/PmtTpInf/LclInstrm/Cd` of every block; financed gives `GrpHdr/MsgId` the prefix, cut to 35
-    characters (untouched when it already starts with it). A plain CORE, non-financed remittance is
+    `PmtInf/PmtTpInf/LclInstrm/Cd` of every block; financed gives `GrpHdr/MsgId` the prefix within
+    35 characters: when it does not fit, the ORIGINAL id is cut from its start
+    (`RemittanceCreditorIdRewriter.prefixedMsgId`), so its unique end (the document number) is kept
+    (untouched when it already starts with the prefix). A plain CORE, non-financed remittance is
     not rewritten (the type already writes CORE); a file without `LclInstrm/Cd` or `MsgId` to change
     is a `ETGO_RemittanceFileGenerationFailed`. The prefix is the type's own
     `SEPA_DD_Financed_58` value when it has one, else `RemittanceSepaOptions.FINANCED_PREFIX`
@@ -2926,8 +2939,15 @@ everything is Classic's model.
     debtor's tax ID (`ES31ZZZ<taxId>`, always as `OrgId`), which is the creditor-identifier format
     applied to a debtor. The debtor identification is optional in the EPC guidelines (EPC130-08
     2025 v1.0, 2.185); `Dbtr/Nm` and `Dbtr/PstlAdr` stay, and `InitgPty/Id` and `CdtrSchmeId` are
-    not touched (`Use_Id_ForIdentifiers` governs all three, so the parameter is not changed). B2B
-    files keep what the generator writes.
+    not touched (`Use_Id_ForIdentifiers` governs all three, so the parameter is not changed).
+  - **B2B collections get the same treatment (ETP-6247).** The trim, the agent identification and
+    every rule below (slash, agents, names, counts and totals) apply to a pain.008 whose every
+    `LclInstrm/Cd` is CORE **or** B2B (`RemittanceSepaRules.isSepaDirectDebit`; the B2B guidelines,
+    EPC222-07, specify those fields alike). The decision cannot hang on CORE: `withOptions` rewrites
+    `Cd` to B2B for a remittance with `directDebitScheme = B2B` BEFORE validation, which used to skip
+    the whole tidy and every rule for B2B. The one CORE-only step is the `Dbtr/Id` removal: a B2B
+    file keeps the debtor identification (`RemittanceCreditorIdRewriter.tidy(document, ibanOnly,
+    dropDebtorIds)`, `dropDebtorIds = RemittanceSepaRules.isCore`).
   - **SEPA credit transfer files, `pain.001.001.09` (ETP-6247, EPC132-08 2025 v1.0).** GO post-processes
     the generator output, as for collections, before the XSD validation: every leaf text is trimmed
     (`<StrtNm> Calle X</StrtNm>`). `DbtrAgt` is 1..1 (2.53, 2.54, 2.61): the generator wrote an
@@ -2956,7 +2976,11 @@ everything is Classic's model.
     create (`markAutomaticOnCreate`, removed); remittances created then and still unprocessed are
     reset to `'N'` by `confirm` / `process`.
   - **Step-by-step flow: `PE` → `PR` → `SB` → `CT`/`PT`** (`RemittanceStatusAction`, ETP-6247).
-    Both actions are POST, no parameters, flag-gated (403), 405 otherwise, 404 unknown remittance:
+    Both actions are POST, no parameters, flag-gated (403), 405 otherwise, 404 unknown remittance.
+    Both lock the remittance row (`lockRemittance`, `SELECT … FOR UPDATE` + refresh) BEFORE checking
+    its status, as `confirm` / `generateFile` / `saveCreditorId` do: two concurrent «Cobrada» (or
+    «Enviada» racing «Cobrada») cannot both pass the check and settle twice; the second waits and
+    then sees the status the first one left:
     - `markSent` («Enviada al banco») — `PR → SB`, purely informational: only the status changes
       (`RemittanceStatusUtil.markSentToBank`); no payment, settlement or accounting row is touched.
       422 `ETGO_RemittanceMarkSentNotAllowed` unless the remittance is processed and `PR`. → `{status: "SB"}`.
@@ -2998,7 +3022,12 @@ everything is Classic's model.
     scope), `RECONCILED` (bank transaction reconciled). `paymentLineIds`: the lines sharing the
     payment (grouping `GGPD`); the payment is the returnable unit.
   - `returnLines` (POST `{fieldValues: {lineIds: [...], returnDate?: yyyy-MM-dd}}`; date default
-    today, not in the future) — all or nothing, one transaction. Validated first: 422
+    today, not in the future) — all or nothing, one transaction. The remittance row is locked
+    (`lockRemittance`) before any line state is read, so two concurrent returns of the same line
+    cannot both see it `SETTLED`; `returnState` (a read) does not lock. Blank line ids are refused
+    by the contract (422, an array of non-blank strings); `returnLines` called directly with no
+    usable id answers 422 `ETGO_RemittanceReturnNoLines` instead of running a return of nothing.
+    Validated first: 422
     `ETGO_RemittanceReturnNotAllowed` with `error.problems: [{lineId, reasonCode, documentNo,
     message}]` (reasons as above plus `SHARED_PAYMENT`: the payment covers lines not named),
     `ETGO_RemittanceReturnLineNotFound`, `ETGO_RemittanceReturnDateInvalid`. Then, with the
