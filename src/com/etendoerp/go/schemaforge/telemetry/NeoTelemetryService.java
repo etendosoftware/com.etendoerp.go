@@ -212,6 +212,7 @@ public class NeoTelemetryService {
   private final NeoTelemetrySink sink;
   private final LongSupplier nanoClock;
   private final Clock clock;
+  private final NeoTelemetryIdentityResolver identityResolver;
 
   /**
    * Creates the default logging backend telemetry service.
@@ -233,13 +234,14 @@ public class NeoTelemetryService {
     if (!config.isConfigured()) {
       log.info("Backend Mixpanel telemetry is not configured enabled={} tokenPresent={}",
           config.isEnabled(), config.getToken() != null);
-      return new NeoTelemetryService(logSink, System::nanoTime, Clock.systemUTC());
+      return new NeoTelemetryService(logSink, System::nanoTime, Clock.systemUTC(),
+          NeoTelemetryIdentityResolver.none());
     }
     log.info("Backend Mixpanel telemetry is configured apiHost={} distinctId={}",
         config.getApiHost(), config.getDistinctId());
     return new NeoTelemetryService(
         new CompositeNeoTelemetrySink(logSink, new MixpanelNeoTelemetrySink(config)),
-        System::nanoTime, Clock.systemUTC());
+        System::nanoTime, Clock.systemUTC(), RuntimeNeoTelemetryIdentityResolver.INSTANCE);
   }
 
   /**
@@ -253,6 +255,13 @@ public class NeoTelemetryService {
   }
 
   NeoTelemetryService(NeoTelemetrySink sink, LongSupplier nanoClock, Clock clock) {
+    this(sink, nanoClock, clock, NeoTelemetryIdentityResolver.none());
+  }
+
+  NeoTelemetryService(NeoTelemetrySink sink, LongSupplier nanoClock, Clock clock,
+      NeoTelemetryIdentityResolver identityResolver) {
+    this.identityResolver = identityResolver == null ? NeoTelemetryIdentityResolver.none()
+        : identityResolver;
     this.sink = sink == null ? NeoTelemetrySink.noop() : sink;
     this.nanoClock = nanoClock == null ? System::nanoTime : nanoClock;
     this.clock = clock == null ? Clock.systemUTC() : clock;
@@ -284,11 +293,33 @@ public class NeoTelemetryService {
     }
     try {
       sink.emit(new NeoTelemetryEvent(eventName, sanitizeProperties(properties),
-          Instant.now(clock), StringUtils.trimToNull(clientId)));
+          Instant.now(clock), StringUtils.trimToNull(clientId), identityOf(clientId)));
     } catch (Exception e) {
       log.warn("Backend telemetry sink failed for event {}: {} {}", eventName,
           e.getClass().getSimpleName(), e.getMessage());
     }
+  }
+
+  /**
+   * Captures the identity of the current session with this service's own resolver, on the calling
+   * thread, for an emitter that sends from a background thread that has no session (ETP-6228);
+   * hand it over with {@link NeoTelemetryIdentity#runWith}. Never throws.
+   *
+   * @param clientId the client the event happened under, or {@code null} for the session's
+   * @param userId the user, or {@code null} for the session's
+   * @return the identity, {@link NeoTelemetryIdentity#NONE} when nothing resolves
+   */
+  public NeoTelemetryIdentity captureIdentity(String clientId, String userId) {
+    return identityResolver.resolve(clientId, userId);
+  }
+
+  /**
+   * The identity of the event being built (ETP-6228): the one handed to this thread by an emitter
+   * that sends from a background thread, else the one of the current session.
+   */
+  private NeoTelemetryIdentity identityOf(String clientId) {
+    NeoTelemetryIdentity handedOff = NeoTelemetryIdentity.handedOff();
+    return handedOff != null ? handedOff : identityResolver.resolve(clientId, null);
   }
 
   /**
