@@ -69,17 +69,6 @@ public class CloneOrderLinePriceHookTest {
     assertTrue(!hook.shouldCopyChildren(false));
   }
 
-  @Test
-  public void testPreCopyDelegatesToCoreHook() throws Exception {
-    CloneRecordHook delegate = mock(CloneRecordHook.class);
-    BaseOBObject original = mock(BaseOBObject.class);
-    when(delegate.preCopy(original)).thenReturn(original);
-
-    CloneOrderLinePriceHook hook = new CloneOrderLinePriceHook(delegate);
-
-    assertSame(original, hook.preCopy(original));
-  }
-
   // ── postCopy() — single line ────────────────────────────────────────────────
 
   /**

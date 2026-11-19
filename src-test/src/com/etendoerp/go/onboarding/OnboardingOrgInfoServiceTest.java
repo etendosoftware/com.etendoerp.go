@@ -482,20 +482,6 @@ public class OnboardingOrgInfoServiceTest {
     }
   }
 
-  @Test
-  public void testResolveClientDelegatesToObDalGet() {
-    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
-    Client client = mock(Client.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Client.class, "CLIENT-1")).thenReturn(client);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(client, service.resolveClient("CLIENT-1"));
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // createOrgInfo() — real OBProvider-backed body (shared PK)
   // ---------------------------------------------------------------------------

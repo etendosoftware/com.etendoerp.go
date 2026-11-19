@@ -193,5 +193,6 @@ class PisRejectedPaymentHandlerTest {
     when(payment.getStatus()).thenThrow(new IllegalStateException("detached"));
 
     handler.onUpdate(event("failed", payment));
+    verify(payment, never()).setStatus(anyString());
   }
 }

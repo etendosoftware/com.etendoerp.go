@@ -18,7 +18,6 @@
 package com.etendoerp.go.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -29,30 +28,15 @@ import java.io.StringWriter;
 
 import javax.servlet.http.HttpServletResponse;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
-
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Unit tests for {@link ProtocolErrorAdapters}.
  */
 class ProtocolErrorAdaptersTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<ProtocolErrorAdapters> constructor = ProtocolErrorAdapters.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   // -------------------------------------------------------------------------

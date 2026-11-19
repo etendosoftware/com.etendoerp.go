@@ -6,7 +6,7 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (56)
+# --- con mocks (52)
 com.etendoerp.go.portal.PortalContactShareTest
 com.etendoerp.go.portal.PortalDecisionEntryTest
 com.etendoerp.go.portal.PortalDecisionServiceTest
@@ -39,7 +39,6 @@ com.etendoerp.go.schemaforge.GoodsShipmentLineHandlerTest
 com.etendoerp.go.schemaforge.NeoReturnReceiptServiceTest
 com.etendoerp.go.schemaforge.QuotationDecisionsTest
 com.etendoerp.go.schemaforge.RejectQuotationHandlerTest
-com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerPostingTest
 com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerTest
 com.etendoerp.go.schemaforge.ReturnMaterialReceiptLineHandlerTest
 com.etendoerp.go.schemaforge.ReturnShipmentUtilsTest
@@ -51,15 +50,12 @@ com.etendoerp.go.schemaforge.SalesQuotationHeaderHandlerTest
 com.etendoerp.go.schemaforge.email.contracts.PortalDecisionEmailContractsTest
 com.etendoerp.go.schemaforge.email.contracts.PortalLinkRenewalEmailContractTest
 com.etendoerp.go.schemaforge.email.contracts.SalesDocumentEmailContractsTest
-com.etendoerp.go.schemaforge.handlers.BusinessPartnerCategoryAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.ContactHandlerTest
 com.etendoerp.go.schemaforge.handlers.ContactRoleListScopeTest
 com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaultsTest
 com.etendoerp.go.schemaforge.handlers.ContactTypeRulesTest
 com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetryTest
-com.etendoerp.go.schemaforge.handlers.CustomerAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetryTest
-com.etendoerp.go.schemaforge.handlers.VendorAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
 com.etendoerp.go.schemaforge.util.StructuredAddressComposerTest

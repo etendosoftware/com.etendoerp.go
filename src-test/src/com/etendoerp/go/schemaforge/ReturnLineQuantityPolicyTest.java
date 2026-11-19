@@ -184,6 +184,7 @@ public class ReturnLineQuantityPolicyTest {
     JSONArray arr = new JSONArray().put("not-an-object");
     // optJSONObject(i) returns null for a non-object entry — must not throw.
     ReturnLineQuantityPolicy.applyDisplaySignToRecords(arr, LOG);
+    assertEquals("[\"not-an-object\"]", arr.toString());
   }
 
   @Test

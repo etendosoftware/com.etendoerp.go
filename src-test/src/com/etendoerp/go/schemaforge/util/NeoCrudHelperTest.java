@@ -361,28 +361,42 @@ class NeoCrudHelperTest {
       }
     }
 
+    /** Runs the cascade and asserts none of its steps ran and the body is left as it was. */
+    private void assertCascadeSkipped(Tab tab) throws Exception {
+      JSONObject body = new JSONObject().put("name", "Test");
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
+              NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+           MockedStatic<NeoMandatoryDefaultsService> defaultsMock = mockStatic(NeoMandatoryDefaultsService.class)) {
+
+        NeoCrudHelper.executePostCalloutCascade(body, tab, context, "parent-1",
+            Collections.singleton("name"));
+
+        cascadeMock.verifyNoInteractions();
+        docTypeMock.verifyNoInteractions();
+        defaultsMock.verifyNoInteractions();
+      }
+      assertEquals("{\"name\":\"Test\"}", body.toString());
+    }
+
     @Test
     @DisplayName("should skip cascade when adTab is null")
-    void shouldSkipWhenAdTabNull() {
-      JSONObject body = new JSONObject();
-      NeoCrudHelper.executePostCalloutCascade(body, null, context, null, null);
-      // No exception means success - method returned early
+    void shouldSkipWhenAdTabNull() throws Exception {
+      assertCascadeSkipped(null);
     }
 
     @Test
     @DisplayName("should skip cascade when tab level is null")
-    void shouldSkipWhenTabLevelNull() {
-      JSONObject body = new JSONObject();
+    void shouldSkipWhenTabLevelNull() throws Exception {
       when(adTab.getTabLevel()).thenReturn(null);
-      NeoCrudHelper.executePostCalloutCascade(body, adTab, context, null, null);
+      assertCascadeSkipped(adTab);
     }
 
     @Test
     @DisplayName("should skip cascade for line tabs (tabLevel > 0)")
-    void shouldSkipForLineTabs() {
-      JSONObject body = new JSONObject();
+    void shouldSkipForLineTabs() throws Exception {
       when(adTab.getTabLevel()).thenReturn(1L);
-      NeoCrudHelper.executePostCalloutCascade(body, adTab, context, null, null);
+      assertCascadeSkipped(adTab);
     }
 
     @Test

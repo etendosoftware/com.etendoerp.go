@@ -29,9 +29,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SupportMessage;
 
@@ -55,13 +52,8 @@ final class SupportAttachmentHelpers {
    * this id, confirming with an actual JSON parse (the {@code LIKE} below is only a cheap
    * pre-filter, not the authorization decision — a substring collision here would just make this
    * candidate get rejected by {@link #findAttachmentMeta} returning null). */
-  static SupportMessage findMessageByAttachmentId(String jiraAttachmentId) {
-    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
-    crit.setFilterOnReadableClients(false);
-    crit.setFilterOnReadableOrganization(false);
-    crit.add(Restrictions.isNotNull(SupportMessage.PROPERTY_ATTACHMENTS));
-    crit.add(Restrictions.like(SupportMessage.PROPERTY_ATTACHMENTS, "%\"" + jiraAttachmentId + "\"%"));
-    for (SupportMessage msg : crit.list()) {
+  static SupportMessage findMessageByAttachmentId(SupportConversationStore store, String jiraAttachmentId) {
+    for (SupportMessage msg : store.listMessagesMentioningAttachment(jiraAttachmentId)) {
       if (findAttachmentMeta(msg, jiraAttachmentId) != null) return msg;
     }
     return null;

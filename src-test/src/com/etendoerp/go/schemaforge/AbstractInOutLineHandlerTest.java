@@ -18,8 +18,10 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -297,7 +299,8 @@ public class AbstractInOutLineHandlerTest {
       // Exception caught inside fetchLineData → empty map → afterHandle returns ok
       NeoResponse result = handler.afterHandle(ctx);
       assertNotNull("DB error in fetchLineData must not prevent a response", result);
-      assertNotNull(result.getBody());
+      assertSame(body, result.getBody());
+      assertFalse("no enrichment without line data", line.has("invoicedQuantity"));
     }
   }
 

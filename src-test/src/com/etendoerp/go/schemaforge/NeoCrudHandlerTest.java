@@ -4619,11 +4619,19 @@ class NeoCrudHandlerTest {
       NeoContext context = buildContext("POST", null, null,
           mock(SFEntity.class), body, null);
 
-      invokePrivate(handler, "executePostCalloutCascade",
-          new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-              java.util.Set.class, java.util.Set.class },
-          body, null, context, Collections.emptySet(), Collections.emptySet());
-      // no exception = success
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               Mockito.mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock =
+               Mockito.mockStatic(DocTypeResolver.class)) {
+        invokePrivate(handler, "executePostCalloutCascade",
+            new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
+                java.util.Set.class, java.util.Set.class },
+            body, null, context, Collections.emptySet(), Collections.emptySet());
+
+        cascadeMock.verifyNoInteractions();
+        docTypeMock.verifyNoInteractions();
+      }
+      assertEquals(0, body.length());
     }
 
     @Test

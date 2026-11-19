@@ -1166,8 +1166,9 @@ public class AutoMatchSupportTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.createCriteria(MatchRule.class)).thenThrow(new IllegalStateException("boom"));
 
-      // Must not throw.
+      // Must not throw, and nothing half-done is saved.
       AutoMatchSupport.incrementMatchCount("R1");
+      verify(dal, never()).save(any());
     }
   }
 

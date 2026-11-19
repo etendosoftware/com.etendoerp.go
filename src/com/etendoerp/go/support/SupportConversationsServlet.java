@@ -33,12 +33,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.core.SessionHandler;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
@@ -65,7 +60,8 @@ import com.etendoerp.go.schemaforge.data.SupportMessage;
  *   POST /sws/support/conversations/:id/messages             — Send a message
  *   POST /sws/support/conversations/:id/rating               — Submit satisfaction rating
  *
- * Conversations and messages are persisted via OBDal against the AD-registered entities
+ * Conversations and messages are persisted through a {@link SupportConversationStore}
+ * ({@link DalSupportConversationStore}: OBDal) against the AD-registered entities
  * {@link SupportConversation}/{@link SupportMessage} (module com.etendoerp.go, DataAccessLevel
  * Client/Organization). Every new row is tagged with a real ad_client_id/ad_org_id resolved
  * from the JWT's client/organization claims (same claims NeoServletSupport already reads
@@ -181,6 +177,18 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final DateTimeFormatter ISO_NO_ZONE =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
 
+  private final SupportConversationStore store;
+
+  /** Servlet container entry point: persists through the DAL. */
+  public SupportConversationsServlet() {
+    this(new DalSupportConversationStore());
+  }
+
+  /** Package-private: tests hand in a stub store instead of the DAL. */
+  SupportConversationsServlet(SupportConversationStore store) {
+    this.store = store;
+  }
+
   // --- HTTP dispatchers ---
 
   @Override
@@ -233,7 +241,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private boolean dispatchInternalRoute(String pathInfo, HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     if ("/jira-webhook".equals(pathInfo)) {
-      SupportJiraWebhookHandler.handle(request, response);
+      SupportJiraWebhookHandler.handle(store, request, response);
       return true;
     }
     if ("/internal/set-ticket".equals(pathInfo)) {
@@ -283,17 +291,14 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws IOException {
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      User user = OBDal.getInstance().get(User.class, ctx.userId);
-      OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
-      crit.add(Restrictions.eq(SupportConversation.PROPERTY_USER, user));
-      crit.addOrderBy(SupportConversation.PROPERTY_LASTACTIVITY, false);
+      User user = store.findUser(ctx.userId);
       JSONArray arr = new JSONArray();
-      for (SupportConversation conv : crit.list()) {
+      for (SupportConversation conv : store.listConversationsOfUser(user)) {
         arr.put(toConvSummaryJson(conv));
       }
       JSONObject result = new JSONObject();
       result.put(FIELD_CONVERSATIONS, arr);
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error listing conversations for user {}", ctx.userId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -319,14 +324,14 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      User user = OBDal.getInstance().get(User.class, userId);
-      Client client = OBDal.getInstance().get(Client.class, ctx.clientId);
-      Organization org = OBDal.getInstance().get(Organization.class, ctx.orgId);
+      User user = store.findUser(userId);
+      Client client = store.findClient(ctx.clientId);
+      Organization org = store.findOrganization(ctx.orgId);
       String subject = firstMessage.length() > 60
           ? firstMessage.substring(0, 60) + "…" : firstMessage;
       Date now = new Date();
 
-      SupportConversation conv = OBProvider.getInstance().get(SupportConversation.class);
+      SupportConversation conv = store.newConversation();
       conv.setNewOBObject(true);
       conv.setId(newId());
       conv.setClient(client);
@@ -335,7 +340,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       conv.setSubject(subject);
       conv.setStatus(STATUS_OPEN);
       conv.setLastActivity(now);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
 
       // Insert user message
       saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user, attachments);
@@ -344,11 +349,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       // (the ADK's callback arrives via a separate HTTP request/transaction). Uses
       // SessionHandler directly (not a raw JDBC commit) so the Hibernate Transaction stays in
       // sync and the messages saved afterwards are actually committed at end of request.
-      SessionHandler.getInstance().commitAndStart();
+      store.commitAndStart();
 
       // AI reply
       String locale = body.optString("locale", "es");
-      String userEmail = SupportIntegrationClient.getUserEmail(userId);
+      String userEmail = SupportIntegrationClient.getUserEmail(store, userId);
       String environment = SupportIntegrationClient.resolveEnvironment(request.getServerName());
       SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail, ctx.clientId,
           environment);
@@ -357,12 +362,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       Date aiNow = new Date();
       saveMessage(conv, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow, user);
-      updateConvSummary(conv.getId(), aiReplyText, aiNow);
+      updateConvSummary(store, conv.getId(), aiReplyText, aiNow);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
       result.put(FIELD_MESSAGES, buildMessageArray(conv.getId()));
-      writeJson(response, HttpServletResponse.SC_CREATED, result);
+      writeJson(store, response, HttpServletResponse.SC_CREATED, result);
     } catch (Exception e) {
       log.error("Error creating conversation for user {}", userId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -375,16 +380,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws IOException {
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      SupportConversation conv = store.findConversation(convId);
       if (!belongsToUser(conv, ctx.userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
         return;
       }
       conv.setUnread(false);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
       JSONObject result = new JSONObject();
       result.put(FIELD_MESSAGES, buildMessageArray(convId));
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error loading messages for conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -408,9 +413,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    */
   private void handleGetAttachment(HttpServletResponse response, AuthContext ctx, String jiraAttachmentId)
       throws IOException {
-    OBContext.setAdminMode(true);
+    store.enterAdminMode();
     try {
-      SupportMessage msg = SupportAttachmentHelpers.findMessageByAttachmentId(jiraAttachmentId);
+      SupportMessage msg = SupportAttachmentHelpers.findMessageByAttachmentId(store, jiraAttachmentId);
       if (msg == null || !belongsToUser(msg.getConversation(), ctx.userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_ATTACHMENT_NOT_FOUND);
         return;
@@ -424,7 +429,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       log.error("Error proxying Jira attachment {}", jiraAttachmentId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     } finally {
-      OBContext.restorePreviousMode();
+      store.restorePreviousMode();
     }
   }
 
@@ -445,7 +450,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     String userId = ctx.userId;
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      SupportConversation conv = store.findConversation(convId);
       if (!belongsToUser(conv, userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
         return;
@@ -485,7 +490,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         JSONObject result = new JSONObject();
         result.put(FIELD_MESSAGES,     buildMessageArray(convId));
         result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
-        writeJson(response, HttpServletResponse.SC_OK, result);
+        writeJson(store, response, HttpServletResponse.SC_OK, result);
         return;
       }
 
@@ -517,12 +522,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       Date aiNow = new Date();
       saveMessage(conv, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow, user);
-      updateConvSummary(convId, aiReplyText, aiNow);
+      updateConvSummary(store, convId, aiReplyText, aiNow);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_MESSAGES,     buildMessageArray(convId));
       result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error sending message to conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -546,11 +551,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
       if (assigneeIsBot) {
         conv.setHumanTakeover(false);
-        OBDal.getInstance().save(conv);
+        store.saveConversation(conv);
       }
     } else if (assigneeKnown && !assigneeIsBot) {
       conv.setHumanTakeover(true);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
     }
   }
 
@@ -573,7 +578,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      SupportConversation conv = store.findConversation(convId);
       if (!belongsToUser(conv, ctx.userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
         return;
@@ -582,7 +587,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       conv.setRated(true);
       conv.setRatingScore((long) score);
       conv.setRatingComment(comment);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
 
       final String finalJiraKey = conv.getJiraTicketKey();
       final int finalScore = score;
@@ -596,7 +601,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, "success");
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error submitting rating for conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -609,16 +614,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws IOException {
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      SupportConversation conv = store.findConversation(convId);
       if (!belongsToUser(conv, ctx.userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
         return;
       }
       conv.setStatus(STATUS_CLOSED);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
       JSONObject result = new JSONObject();
       result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error closing conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -631,7 +636,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws IOException {
     OBContext previous = enterTenantAdminMode(ctx);
     try {
-      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      SupportConversation conv = store.findConversation(convId);
       if (!belongsToUser(conv, ctx.userId)) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
         return;
@@ -651,14 +656,14 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         conv.setJiraTicketKey(null);
       }
       conv.setHumanTakeover(false);
-      OBDal.getInstance().save(conv);
+      store.saveConversation(conv);
       // System message to mark reopen in the thread
       saveMessage(conv, SENDER_AI, AI_AGENT_NAME,
           "La conversación ha sido reabierta. ¿En qué más puedo ayudarte?", now, conv.getUser());
       JSONObject result = new JSONObject();
       result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
       result.put(FIELD_MESSAGES, buildMessageArray(convId));
-      writeJson(response, HttpServletResponse.SC_OK, result);
+      writeJson(store, response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error reopening conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
@@ -686,22 +691,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  /** Switches the ambient {@code OBContext} to the request's user/role/client/org so {@code OBDal}
-   * criteria queries see this tenant's rows, then enters admin mode on top to bypass entity-level
-   * access checks. The real role (not System Administrator) matters here: {@code OBContext}
-   * computes readable clients from {@code role.getUserLevel()} — a System-level role (like role
-   * "0") always resolves readable clients to {@code ["0"]} regardless of the clientId passed in,
-   * silently hiding every other client's rows even with {@code setAdminMode(true)} active. */
-  private static OBContext enterTenantAdminMode(AuthContext ctx) {
-    OBContext previous = OBContext.getOBContext();
-    OBContext.setOBContext(ctx.userId, ctx.roleId, ctx.clientId, ctx.orgId);
-    OBContext.setAdminMode(true);
-    return previous;
+  /** Switches the ambient {@code OBContext} to the request's user/role/client/org and enters admin
+   * mode on top — see {@link DalSupportConversationStore#enterTenantAdminMode} for why the
+   * request's real role (not System Administrator) matters. */
+  private OBContext enterTenantAdminMode(AuthContext ctx) {
+    return store.enterTenantAdminMode(ctx.userId, ctx.roleId, ctx.clientId, ctx.orgId);
   }
 
-  private static void restoreTenantContext(OBContext previous) {
-    OBContext.restorePreviousMode();
-    OBContext.setOBContext(previous);
+  private void restoreTenantContext(OBContext previous) {
+    store.restoreTenantContext(previous);
   }
 
   /**
@@ -753,9 +751,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
     try {
-      OBContext.setAdminMode(true);
+      store.enterAdminMode();
       try {
-        SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+        SupportConversation conv = store.findConversation(convId);
         if (conv == null) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
@@ -769,7 +767,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         if (existingKey != null && !existingKey.isEmpty() && !existingKey.equals(jiraKey)) {
           log.warn("set-ticket for conversation {} ignored — already linked to {} (incoming: {})",
               convId, existingKey, jiraKey);
-          writeJson(response, HttpServletResponse.SC_OK,
+          writeJson(store, response, HttpServletResponse.SC_OK,
               new JSONObject().put(FIELD_STATUS, "ignored_already_linked").put("existingKey", existingKey));
           return;
         }
@@ -777,11 +775,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         if (!reporterAccountId.isEmpty()) {
           conv.setJiraReporterAccountId(reporterAccountId);
         }
-        OBDal.getInstance().save(conv);
+        store.saveConversation(conv);
         log.info("Linked conversation {} to Jira ticket {}", convId, jiraKey);
-        writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
+        writeJson(store, response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
       } finally {
-        OBContext.restorePreviousMode();
+        store.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error in set-ticket", e);
@@ -803,19 +801,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
     try {
-      OBContext.setAdminMode(true);
+      store.enterAdminMode();
       try {
-        SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+        SupportConversation conv = store.findConversation(convId);
         if (conv == null) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         conv.setHumanTakeover(true);
-        OBDal.getInstance().save(conv);
+        store.saveConversation(conv);
         log.info("Human takeover set for conversation {}", convId);
-        writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
+        writeJson(store, response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
       } finally {
-        OBContext.restorePreviousMode();
+        store.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error in set-human-takeover", e);
@@ -838,20 +836,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
     try {
-      OBContext.setAdminMode(true);
+      store.enterAdminMode();
       try {
         List<SupportConversation> matches;
         if (!convId.isEmpty()) {
-          SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+          SupportConversation conv = store.findConversation(convId);
           matches = conv == null ? List.of() : List.of(conv);
         } else {
           // System/webhook call with no per-request tenant to scope to — must see every client's
           // conversations to resolve the Jira ticket key.
-          OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
-          crit.setFilterOnReadableClients(false);
-          crit.setFilterOnReadableOrganization(false);
-          crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
-          matches = crit.list();
+          matches = store.listConversationsByJiraKey(jiraKey);
         }
         if (matches.isEmpty()) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
@@ -859,12 +853,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         }
         for (SupportConversation conv : matches) {
           conv.setHumanTakeover(false);
-          OBDal.getInstance().save(conv);
+          store.saveConversation(conv);
         }
         log.info("Human takeover reset for conversation '{}' / jira '{}'", convId, jiraKey);
-        writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
+        writeJson(store, response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
       } finally {
-        OBContext.restorePreviousMode();
+        store.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error in reset-human-takeover", e);
@@ -878,7 +872,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     return conv != null && conv.getUser() != null && userId.equals(conv.getUser().getId());
   }
 
-  private static void saveMessage(SupportConversation conv, String sender, String senderName,
+  private void saveMessage(SupportConversation conv, String sender, String senderName,
       String text, Date timestamp, User createdBy) {
     saveMessage(conv, sender, senderName, text, timestamp, createdBy, null);
   }
@@ -890,9 +884,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    * own just-sent message. Mirrors {@link SupportJiraWebhookHandler#insertJiraMessage}'s
    * null-vs-empty convention: the column is left {@code null} (never an empty-array string) when
    * {@code attachments} is null/empty/all-malformed. */
-  private static void saveMessage(SupportConversation conv, String sender, String senderName,
+  private void saveMessage(SupportConversation conv, String sender, String senderName,
       String text, Date timestamp, User createdBy, JSONArray attachments) {
-    SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
+    SupportMessage msg = store.newMessage();
     msg.setNewOBObject(true);
     msg.setId(newId());
     msg.setClient(conv.getClient());
@@ -908,15 +902,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     if (attachmentsJson != null) {
       msg.setAttachments(attachmentsJson);
     }
-    OBDal.getInstance().save(msg);
+    store.saveMessage(msg);
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} when storing an inbound Jira comment. */
-  static void updateConvSummary(String convId, String lastMsg, Date ts) {
-    SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+  static void updateConvSummary(SupportConversationStore store, String convId, String lastMsg, Date ts) {
+    SupportConversation conv = store.findConversation(convId);
     conv.setLastMessage(lastMsg.length() > 120 ? lastMsg.substring(0, 120) + "…" : lastMsg);
     conv.setLastActivity(ts);
-    OBDal.getInstance().save(conv);
+    store.saveConversation(conv);
   }
 
   private JSONObject toConvSummaryJson(SupportConversation conv) throws JSONException {
@@ -948,12 +942,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private JSONArray buildMessageArray(String convId) throws JSONException {
     // The session flush mode is COMMIT (not AUTO), so a criteria query run in the same
     // transaction as an earlier saveMessage() would not see it without an explicit flush first.
-    OBDal.getInstance().flush();
+    store.flush();
     JSONArray arr = new JSONArray();
-    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
-    crit.add(Restrictions.eq(SupportMessage.PROPERTY_CONVERSATION + ".id", convId));
-    crit.addOrderBy(SupportMessage.PROPERTY_MESSAGEDATE, true);
-    for (SupportMessage msg : crit.list()) {
+    for (SupportMessage msg : store.listMessages(convId)) {
       JSONObject json = new JSONObject();
       json.put("id",             msg.getId());
       json.put(FIELD_CONVERSATION_ID, convId);
@@ -1022,11 +1013,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler}. */
-  static void writeJson(HttpServletResponse response, int status, JSONObject body)
-      throws IOException {
+  static void writeJson(SupportConversationStore store, HttpServletResponse response, int status,
+      JSONObject body) throws IOException {
     // The session flush mode is COMMIT (not AUTO); flushing here — instead of trusting the
     // end-of-request auto-commit — is what makes pending saves in this response durable.
-    OBDal.getInstance().flush();
+    store.flush();
     response.setStatus(status);
     response.setContentType(CONTENT_TYPE_JSON);
     response.setCharacterEncoding(CHARSET_UTF8);

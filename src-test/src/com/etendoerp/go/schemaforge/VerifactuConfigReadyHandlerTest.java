@@ -205,7 +205,14 @@ public class VerifactuConfigReadyHandlerTest {
     doThrow(new RuntimeException("boom")).when(handler).markReadyIfNeeded(RECORD_ID);
     NeoContext ctx = NeoContext.builder().httpMethod("PUT").recordId(RECORD_ID).build();
 
-    assertNull(handler.afterHandle(ctx));
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      // The failure must come from markReadyIfNeeded itself, not from entering admin mode.
+      assertNull(handler.afterHandle(ctx));
+      verify(handler, times(1)).markReadyIfNeeded(RECORD_ID);
+      // Admin mode is left even though the auto-fill threw inside it.
+      obCtxMock.verify(() -> OBContext.setAdminMode(true));
+      obCtxMock.verify(OBContext::restorePreviousMode);
+    }
   }
 
   // ─── handle(): smart deactivation dispatch guards ────────────────────────────

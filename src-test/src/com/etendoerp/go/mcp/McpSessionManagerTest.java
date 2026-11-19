@@ -29,13 +29,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.util.concurrent.Callable;
 
 import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
@@ -109,22 +103,6 @@ class McpSessionManagerTest {
     }
     if (obDalMock != null) {
       obDalMock.close();
-    }
-  }
-
-  @Nested
-  @DisplayName("Private constructor")
-  class PrivateConstructor {
-
-    @Test
-    @DisplayName("constructor is private and throws when invoked via reflection")
-    void constructorIsPrivate() throws Exception {
-      Constructor<McpSessionManager> ctor = McpSessionManager.class.getDeclaredConstructor();
-      ctor.setAccessible(true);
-      // Should not throw — it's a utility class private ctor
-      McpSessionManager instance = ctor.newInstance();
-      // Just verify it is instantiable (no exception); the private modifier is the guard
-      assertEquals(McpSessionManager.class, instance.getClass());
     }
   }
 

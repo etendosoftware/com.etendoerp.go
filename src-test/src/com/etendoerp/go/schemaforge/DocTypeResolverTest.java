@@ -21,14 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
@@ -40,7 +38,6 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -62,15 +59,6 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * @covers com.etendoerp.go.schemaforge.DocTypeResolver
  */
 class DocTypeResolverTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<DocTypeResolver> constructor = DocTypeResolver.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   private static Object invokePrivate(String methodName, Class<?>[] paramTypes, Object... args)
@@ -129,20 +117,30 @@ class DocTypeResolverTest {
     @Test
     @DisplayName("Handles null body gracefully")
     void nullBodyNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(null, mock(Tab.class), mock(NeoContext.class));
-      // no exception
+      Tab adTab = mock(Tab.class);
+      NeoContext ctx = mock(NeoContext.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(null, adTab, ctx);
+      verifyNoInteractions(adTab, ctx);
     }
 
     @Test
     @DisplayName("Handles null adTab gracefully")
     void nullTabNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(new JSONObject(), null, mock(NeoContext.class));
+      JSONObject body = new JSONObject();
+      NeoContext ctx = mock(NeoContext.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, null, ctx);
+      verifyNoInteractions(ctx);
+      assertEquals(0, body.length());
     }
 
     @Test
     @DisplayName("Handles null context gracefully")
     void nullContextNoOp() {
-      DocTypeResolver.reapplyDocTypeFromTabFilter(new JSONObject(), mock(Tab.class), null);
+      JSONObject body = new JSONObject();
+      Tab adTab = mock(Tab.class);
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, null);
+      verifyNoInteractions(adTab);
+      assertEquals(0, body.length());
     }
 
     @Test

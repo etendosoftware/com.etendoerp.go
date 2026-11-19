@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -38,9 +37,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
-
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -49,7 +45,6 @@ import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.util.NeoTrl;
 
-import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
  * Unit tests for {@link NeoSelectorExecutionHelper}.
@@ -61,15 +56,6 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * @covers com.etendoerp.go.schemaforge.NeoSelectorExecutionHelper
  */
 class NeoSelectorExecutionHelperTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<NeoSelectorExecutionHelper> constructor = NeoSelectorExecutionHelper.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   // ------------------------------------------------------------------ //

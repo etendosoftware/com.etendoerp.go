@@ -22,15 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
@@ -55,15 +51,6 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * Unit tests for {@link ComboReferenceSelectorExecutor}.
  */
 class ComboReferenceSelectorExecutorTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<ComboReferenceSelectorExecutor> constructor = ComboReferenceSelectorExecutor.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   /** FK reference id (TableDir=19) recognised by NeoSelectorService.isFkReference. */

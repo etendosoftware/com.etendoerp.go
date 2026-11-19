@@ -3,8 +3,10 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=contabilidad [-Pkind=mock|integration|all]
 
-# --- con mocks (44)
+# --- con mocks (46)
 com.etendoerp.go.mcp.McpAccountingKpiObserverTest
+com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandlerTest
+com.etendoerp.go.schemaforge.AbstractSqlReportHandlerTest
 com.etendoerp.go.schemaforge.AccountReportTreeTest
 com.etendoerp.go.schemaforge.AccountingDimensionsSupportTest
 com.etendoerp.go.schemaforge.AccountingPostingCustomizationsTest
@@ -31,6 +33,7 @@ com.etendoerp.go.schemaforge.ProfitLossReportHandlerTest
 com.etendoerp.go.schemaforge.TrialBalanceFoldingTest
 com.etendoerp.go.schemaforge.TrialBalanceReportHandlerTest
 com.etendoerp.go.schemaforge.YearCloseHandlerTest
+com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHandlerTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsCriteriaTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsHandlerTest
 com.etendoerp.go.schemaforge.handlers.ChartOfAccountsTreeMathTest
@@ -39,7 +42,6 @@ com.etendoerp.go.schemaforge.handlers.GLJournalLineHandlerTest
 com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupportTest
 com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandlerTest
 com.etendoerp.go.schemaforge.handlers.ReactivationUnpostTest
-com.etendoerp.go.schemaforge.handlers.TaxAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.YearAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.PostingAccountCombinationSelectorPolicyTest
 com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetryTest

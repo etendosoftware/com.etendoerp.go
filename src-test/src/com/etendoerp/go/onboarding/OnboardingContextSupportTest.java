@@ -29,7 +29,6 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * Unit tests for {@link OnboardingContextSupport}, the shared DAL/execution-context scaffolding for
@@ -52,22 +51,8 @@ public class OnboardingContextSupportTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // resolveOrganization() / flushChanges() — OBDal delegation
+  // flushChanges() — OBDal delegation
   // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testResolveOrganizationDelegatesToObDalGet() {
-    Probe probe = new Probe();
-    Organization org = mock(Organization.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Organization.class, "ORG-1")).thenReturn(org);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(org, probe.resolveOrganization("ORG-1"));
-    }
-  }
 
   @Test
   public void testFlushChangesDelegatesToObDalFlush() {

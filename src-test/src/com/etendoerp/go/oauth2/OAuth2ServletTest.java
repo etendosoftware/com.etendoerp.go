@@ -1189,18 +1189,26 @@ public class OAuth2ServletTest {
     assertTrue(body.getString("error_description").contains("code_verifier"));
   }
 
+  /**
+   * A JSON token request without {@code code} is refused even when a {@code code} form
+   * parameter is present: on a JSON request only the body counts.
+   */
   @Test
   public void tokenAuthCodeJsonMissingCode() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("POST", "/token");
-    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
-    when(req.getParameter("grant_type")).thenReturn("authorization_code");
-    when(req.getParameter("code")).thenReturn(null);
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject requestBody = new JSONObject()
+        .put("grant_type", "authorization_code")
+        .put("code_verifier", "some-verifier");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(requestBody.toString())));
+    when(req.getParameter("code")).thenReturn("form-code");
 
     servlet.doPost(req, resp.response);
 
     JSONObject body = new JSONObject(resp.body());
     assertEquals("invalid_request", body.getString("error"));
+    assertEquals("code is required", body.getString("error_description"));
   }
 
   // ===================== doPost /clients — Create Client =====================

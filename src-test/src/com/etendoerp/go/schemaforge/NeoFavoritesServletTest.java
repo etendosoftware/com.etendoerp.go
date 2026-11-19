@@ -23,7 +23,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
@@ -54,12 +56,17 @@ public class NeoFavoritesServletTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     try (MockedStatic<CorsUtils> corsMock = mockStatic(CorsUtils.class);
-         MockedStatic<JwtAuthUtils> authMock = mockStatic(JwtAuthUtils.class)) {
+         MockedStatic<JwtAuthUtils> authMock = mockStatic(JwtAuthUtils.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoFavoritesService> svcMock = mockStatic(NeoFavoritesService.class)) {
       authMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
           .thenReturn(false);
 
       servlet.doGet(req, resp);
-      // No exception — early return on auth failure
+      // Early return: the auth helper already answered, nothing is read or written here.
+      svcMock.verifyNoInteractions();
+      ctxMock.verifyNoInteractions();
+      verifyNoInteractions(resp);
     }
   }
 
@@ -103,7 +110,12 @@ public class NeoFavoritesServletTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
       servlet.doGet(req, resp);
-      // No exception propagated — error is handled
+
+      // Handled: the transaction is rolled back, the caller gets a 500, and admin mode is left.
+      verify(obDal).rollbackAndClose();
+      verify(resp).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      verify(resp, never()).setStatus(HttpServletResponse.SC_OK);
+      ctxMock.verify(OBContext::restorePreviousMode);
     }
   }
 
@@ -113,11 +125,17 @@ public class NeoFavoritesServletTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     try (MockedStatic<CorsUtils> corsMock = mockStatic(CorsUtils.class);
-         MockedStatic<JwtAuthUtils> authMock = mockStatic(JwtAuthUtils.class)) {
+         MockedStatic<JwtAuthUtils> authMock = mockStatic(JwtAuthUtils.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoFavoritesService> svcMock = mockStatic(NeoFavoritesService.class)) {
       authMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
           .thenReturn(false);
 
       servlet.doPut(req, resp);
+      // Early return: the body is never read and nothing is saved.
+      svcMock.verifyNoInteractions();
+      ctxMock.verifyNoInteractions();
+      verifyNoInteractions(req, resp);
     }
   }
 

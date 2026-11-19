@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -123,8 +124,9 @@ public class ProductDefaultsHandlerTest {
 
   // ── guard conditions ──────────────────────────────────────────────────────
 
+  /** A null context (no request at all) must pass through without an NPE. */
   @Test
-  public void testHandleReturnsNullForNullContext() {
+  public void testHandleToleratesNullContext() {
     assertNull(new ProductDefaultsHandler().handle(null));
   }
 
@@ -1071,9 +1073,13 @@ public class ProductDefaultsHandlerTest {
           .thenReturn(mock(ProductPrice.class));
       when(mocks.dal.createCriteria(Costing.class))
           .thenThrow(new IllegalStateException("session closed"));
+      NeoContext ctx = createdProductCtx(PRODUCT_ID, obContext);
 
       // No annotation could be produced, so the generic create response passes through unchanged.
-      assertNull(new ProductDefaultsHandler().afterHandle(createdProductCtx(PRODUCT_ID, obContext)));
+      assertNull(new ProductDefaultsHandler().afterHandle(ctx));
+      verify(mocks.dal).createCriteria(Costing.class);
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).has("etgoHasCost"));
     }
   }
 
@@ -1092,6 +1098,8 @@ public class ProductDefaultsHandlerTest {
           .when(mocks.dal).save(any());
 
       assertNull(new ProductDefaultsHandler().afterHandle(createdProductCtx(PRODUCT_ID, obContext)));
+      // The write was really attempted, so it is its failure that was swallowed.
+      verify(mocks.dal, atLeastOnce()).save(any(ProductPrice.class));
     }
   }
 

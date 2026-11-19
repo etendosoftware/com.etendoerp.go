@@ -311,8 +311,11 @@ class PisDeferredPaymentServiceTest {
     @Test
     @DisplayName("a payment with no bank transfer behind it is left alone")
     void ignoresNonPisPayments() {
-      PisDeferredPaymentService.reconcileAttemptsFor(null);
       // No exception, no DB access: the vast majority of payments never went through PIS.
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        PisDeferredPaymentService.reconcileAttemptsFor(null);
+        dal.verifyNoInteractions();
+      }
     }
 
     @Test
@@ -325,6 +328,7 @@ class PisDeferredPaymentServiceTest {
         dal.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
         PisDeferredPaymentService.reconcileAttemptsFor(payment);
       }
+      verify(payment, never()).setStatus(any());
     }
   }
 

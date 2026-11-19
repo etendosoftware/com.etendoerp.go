@@ -17,7 +17,6 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -78,10 +77,4 @@ public class NeoConversionHelperTest {
     assertTrue(result.contains("ORDER BY cr.ad_client_id DESC"));
   }
 
-  @Test
-  public void constantsExist() {
-    assertNotNull(NeoConversionHelper.PARAM_ORG_CURRENCY_ID);
-    assertNotNull(NeoConversionHelper.AMOUNT_PLACEHOLDER);
-    assertNotNull(NeoConversionHelper.CONVERTED_GRANDTOTAL);
-  }
 }

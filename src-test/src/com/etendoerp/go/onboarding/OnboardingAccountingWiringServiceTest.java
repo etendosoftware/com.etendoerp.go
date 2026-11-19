@@ -1146,24 +1146,6 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // resolveClient() — real OBDal.get delegation
-  // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testResolveClientDelegatesToObDalGet() {
-    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
-    Client client = mock(Client.class);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(Client.class, "C1")).thenReturn(client);
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(client, service.resolveClient("C1"));
-    }
-  }
-
-  // ---------------------------------------------------------------------------------------------
   // contextSubject()
   // ---------------------------------------------------------------------------------------------
 
@@ -1179,9 +1161,10 @@ public class OnboardingAccountingWiringServiceTest {
   @Test
   public void testProvisionGlItemsForImportedChartNoOpsWhenLedgerNull() {
     OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
-    // No OBDal mocking at all — a real (unmocked) static touch would blow up this test if the
-    // null-ledger guard did not return immediately.
-    service.provisionGlItemsForImportedChart(mock(Client.class), null);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      service.provisionGlItemsForImportedChart(mock(Client.class), null);
+      obDal.verifyNoInteractions();
+    }
   }
 
   @Test

@@ -230,15 +230,11 @@ public class InvoiceReactivationGuardTest {
     assertNull(checkWithNoRectificativaQuery(reactivateAction(rootBody("RE")), invoice));
   }
 
-  @Test
-  public void aFiscallyAcceptedInvoiceWithNoRectificativaAtAllIsNotBlocked() throws Exception {
-    Invoice invoice = invoice(true);
-    when(invoice.getAeatsiiEstado()).thenReturn("CO");
-
-    assertNull(check(reactivateAction(rootBody("RE")), invoice, rectificativaRows()));
-  }
-
-  /** Explicit "no regression" case: a DRAFT rectificativa must never block reactivation. */
+  /**
+   * Explicit "no regression" case: a DRAFT rectificativa must never block reactivation. It is
+   * also the case of a fiscally accepted invoice with no rectificativa at all: both leave the
+   * completed-rectificativa query empty.
+   */
   @Test
   public void aDraftRectificativaDoesNotBlock() throws Exception {
     Invoice invoice = invoice(true);

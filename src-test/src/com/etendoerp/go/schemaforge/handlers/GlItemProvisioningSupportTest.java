@@ -166,20 +166,31 @@ public class GlItemProvisioningSupportTest {
 
   // ── ensureGlItemForSubaccount — guards ─────────────────────────────────────
 
+  /** Runs {@code call} and asserts it never reached the DAL nor created an entity. */
+  private static void assertNoDalTouch(Runnable call) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      call.run();
+      obDal.verifyNoInteractions();
+      obProvider.verifyNoInteractions();
+    }
+  }
+
   @Test
   public void ensureGlItemForSubaccountNoOpsWhenSubaccountNull() {
-    support.ensureGlItemForSubaccount(null, Collections.singletonList(mock(AcctSchema.class)));
-    // no exception, no static OBDal/OBProvider touch — nothing to assert beyond "did not throw"
+    assertNoDalTouch(() -> support.ensureGlItemForSubaccount(null,
+        Collections.singletonList(mock(AcctSchema.class))));
   }
 
   @Test
   public void ensureGlItemForSubaccountNoOpsWhenSchemasEmpty() {
-    support.ensureGlItemForSubaccount(mock(ElementValue.class), Collections.emptyList());
+    assertNoDalTouch(() -> support.ensureGlItemForSubaccount(mock(ElementValue.class),
+        Collections.emptyList()));
   }
 
   @Test
   public void ensureGlItemForSubaccountNoOpsWhenSchemasNull() {
-    support.ensureGlItemForSubaccount(mock(ElementValue.class), null);
+    assertNoDalTouch(() -> support.ensureGlItemForSubaccount(mock(ElementValue.class), null));
   }
 
   // ── ensureGlItemForSubaccount — Case 3: no natural combination ─────────────
@@ -677,6 +688,7 @@ public class GlItemProvisioningSupportTest {
       // Must not throw — a GL Item provisioning defect can never block the caller's save.
       support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
     }
+    verify(dal, never()).save(any());
   }
 
   @Test
@@ -1064,6 +1076,8 @@ public class GlItemProvisioningSupportTest {
       support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
           false);
     }
+    verify(linkCrit).uniqueResult();
+    verify(dal, never()).save(any());
   }
 
   @Test
@@ -1080,6 +1094,7 @@ public class GlItemProvisioningSupportTest {
       support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
           true);
     }
+    verify(dal, never()).save(any());
   }
 
   @Test
@@ -1112,22 +1127,20 @@ public class GlItemProvisioningSupportTest {
 
   @Test
   public void setGlItemAccountsActiveNoOpsWhenSubaccountNull() {
-    support.setGlItemAccountsActiveForSubaccount(null, Collections.singletonList(mock(AcctSchema.class)),
-        true);
+    assertNoDalTouch(() -> support.setGlItemAccountsActiveForSubaccount(null,
+        Collections.singletonList(mock(AcctSchema.class)), true));
   }
 
   @Test
   public void setGlItemAccountsActiveNoOpsWhenSchemasNull() {
-    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasNull — no exception, no static
-    // OBDal touch — nothing to assert beyond "did not throw".
-    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), null, true);
+    assertNoDalTouch(() -> support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class),
+        null, true));
   }
 
   @Test
   public void setGlItemAccountsActiveNoOpsWhenSchemasEmpty() {
-    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasEmpty.
-    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), Collections.emptyList(),
-        false);
+    assertNoDalTouch(() -> support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class),
+        Collections.emptyList(), false));
   }
 
   // ── Full bug-scenario regression (ETP-5101) ────────────────────────────────

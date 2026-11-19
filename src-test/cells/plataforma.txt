@@ -4,7 +4,12 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (651)
+# --- con mocks (649)
+com.etendoerp.go.modulescript.EnsureDocumentStatusTranslationsScriptTest
+com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
+com.etendoerp.go.payment.CheckoutPromotionTermsTest
+com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
+com.etendoerp.go.payment.PromotionRecoveryTest
 com.etendoerp.go.accounts.AccountDemoExpiryHandlerTest
 com.etendoerp.go.accounts.AccountGroupKeyHandlerTest
 com.etendoerp.go.agentchat.AgentChatConversationsServletTest
@@ -130,7 +135,6 @@ com.etendoerp.go.mcp.NeoExtensionSurfaceCoverageTest
 com.etendoerp.go.mcp.SelectorContextParamsTest
 com.etendoerp.go.mcp.ToolRegistryGenerateToolsTest
 com.etendoerp.go.mcp.ToolRegistryTest
-com.etendoerp.go.modulescript.EnsureDocumentStatusTranslationsScriptTest
 com.etendoerp.go.modulescript.EnsureLegacyPlanScriptTest
 com.etendoerp.go.modulescript.SeedAllowedPlanChangesScriptTest
 com.etendoerp.go.oauth2.ApiScopesTest
@@ -175,7 +179,6 @@ com.etendoerp.go.onboarding.OnboardingInitialPeriodStateServiceTest
 com.etendoerp.go.onboarding.OnboardingMarkOrgReadyServiceTest
 com.etendoerp.go.onboarding.OnboardingOrgInfoServiceTest
 com.etendoerp.go.onboarding.OnboardingPeriodControlServiceTest
-com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.onboarding.OnboardingSampleDataDefinitionTest
 com.etendoerp.go.onboarding.OnboardingSampleDataNormalizerTest
 com.etendoerp.go.onboarding.OnboardingSampleDataServiceTest
@@ -188,7 +191,6 @@ com.etendoerp.go.onboarding.pool.TenantPoolConfigTest
 com.etendoerp.go.onboarding.pool.TenantPoolFillerTest
 com.etendoerp.go.onboarding.pool.TenantPoolFixtureIsolationTest
 com.etendoerp.go.payment.CheckoutConfigurationTest
-com.etendoerp.go.payment.CheckoutPromotionTermsTest
 com.etendoerp.go.payment.CheckoutRequestProvisioningStatusTest
 com.etendoerp.go.payment.CheckoutRequestStoreSubscriptionFinderTest
 com.etendoerp.go.payment.CheckoutWebhookProcessorTest
@@ -205,7 +207,6 @@ com.etendoerp.go.payment.EnvironmentPlanCacheTest
 com.etendoerp.go.payment.HostedCheckoutLegacyFallbackTest
 com.etendoerp.go.payment.HostedCheckoutServiceTest
 com.etendoerp.go.payment.HostedCheckoutSessionPlanTest
-com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
 com.etendoerp.go.payment.PausedSubscriptionAlertTest
 com.etendoerp.go.payment.PlanCatalogServiceTest
 com.etendoerp.go.payment.PlanChangeCatalogTest
@@ -213,7 +214,6 @@ com.etendoerp.go.payment.PlanChangeServiceTest
 com.etendoerp.go.payment.PlanNotAvailableExceptionTest
 com.etendoerp.go.payment.PlanPriceDerivationHandlerTest
 com.etendoerp.go.payment.PlanQuotaSchemaInvariantTest
-com.etendoerp.go.payment.PromotionRecoveryTest
 com.etendoerp.go.payment.StripeApiClientTest
 com.etendoerp.go.payment.StripeCurrencyScaleTest
 com.etendoerp.go.payment.StripeCustomerPortalServiceTest
@@ -473,8 +473,7 @@ com.etendoerp.go.schemaforge.TenantIsolationPolicyTest
 com.etendoerp.go.schemaforge.TenantOwnershipTest
 com.etendoerp.go.schemaforge.WidgetAccessPolicyTest
 com.etendoerp.go.schemaforge.WidgetActivityHandlerTest
-com.etendoerp.go.schemaforge.WidgetBestProductsHandlerTest
-com.etendoerp.go.schemaforge.WidgetBestSellersHandlerTest
+com.etendoerp.go.schemaforge.WidgetBestProductsAndSellersHandlerTest
 com.etendoerp.go.schemaforge.WidgetKpisHandlerTest
 com.etendoerp.go.schemaforge.WidgetPendingAmountsHandlerTest
 com.etendoerp.go.schemaforge.WidgetPendingTasksHandlerTest
@@ -566,8 +565,7 @@ com.etendoerp.go.schemaforge.webhooks.SFAssignUserRolesTest
 com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypassTest
 com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistoryTest
 com.etendoerp.go.schemaforge.webhooks.SFListMenuTest
-com.etendoerp.go.schemaforge.webhooks.SFListProcessesTest
-com.etendoerp.go.schemaforge.webhooks.SFListWindowsTest
+com.etendoerp.go.schemaforge.webhooks.SFListWindowsAndProcessesTest
 com.etendoerp.go.schemaforge.webhooks.SFMyReportAccessTest
 com.etendoerp.go.schemaforge.webhooks.SFPopulateSpecTest
 com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRoleTest
@@ -657,7 +655,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (51)
+# --- integración (BD) (52)
 com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
 com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
@@ -706,6 +704,7 @@ com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest
 com.etendoerp.go.schemaforge.webhooks.McpFeedbackTriageWebhooksIntegrationTest
 com.etendoerp.go.session.JdbcGoSessionStoreIntegrationTest
 com.etendoerp.go.startup.TemplateRoleSyncStoreIntegrationTest
+com.etendoerp.go.support.DalSupportConversationStoreIntegrationTest
 com.etendoerp.go.usage.IsolatedDalReadIntegrationTest
 com.etendoerp.go.usage.UsageAggregationServiceIntegrationTest
 com.etendoerp.go.usage.quota.DalConsumptionReaderPeriodWindowIntegrationTest

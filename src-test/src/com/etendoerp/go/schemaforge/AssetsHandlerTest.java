@@ -70,30 +70,40 @@ public class AssetsHandlerTest {
   // Passthrough guards
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /** A body that would get a computed end date if the handler did not bail out first. */
+  private static JSONObject computableBody() throws Exception {
+    return new JSONObject().put("depreciationStartDate", "2026-01-15").put("usableLifeMonths", 12);
+  }
+
   @Test
-  public void testHandleNonCrudEndpointReturnsNull() throws Exception {
+  public void testHandleNonCrudEndpointLeavesBodyUntouched() throws Exception {
+    JSONObject body = computableBody();
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.DEFAULTS)
         .httpMethod("POST")
-        .requestBody(new JSONObject())
+        .requestBody(body)
         .build();
     assertNull(handler.handle(ctx));
+    assertFalse("endDate should not be injected", body.has("depreciationEndDate"));
   }
 
   @Test
-  public void testHandleGetMethodReturnsNull() throws Exception {
-    NeoContext ctx = buildContext("GET", new JSONObject(), null);
-    assertNull(handler.handle(ctx));
+  public void testHandleGetMethodLeavesBodyUntouched() throws Exception {
+    JSONObject body = computableBody();
+    assertNull(handler.handle(buildContext("GET", body, null)));
+    assertFalse("endDate should not be injected", body.has("depreciationEndDate"));
   }
 
   @Test
-  public void testHandleDeleteMethodReturnsNull() throws Exception {
-    NeoContext ctx = buildContext("DELETE", new JSONObject(), null);
-    assertNull(handler.handle(ctx));
+  public void testHandleDeleteMethodLeavesBodyUntouched() throws Exception {
+    JSONObject body = computableBody();
+    assertNull(handler.handle(buildContext("DELETE", body, null)));
+    assertFalse("endDate should not be injected", body.has("depreciationEndDate"));
   }
 
+  /** A POST without a body has nothing to compute on: it must pass through without an NPE. */
   @Test
-  public void testHandleNullBodyReturnsNull() throws Exception {
+  public void testHandleToleratesNullBody() throws Exception {
     NeoContext ctx = buildContext("POST", null, null);
     assertNull(handler.handle(ctx));
   }
@@ -417,8 +427,9 @@ public class AssetsHandlerTest {
   // afterHandle — passthrough guards
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /** Without a previous result there is nothing to recompute: it must pass through without an NPE. */
   @Test
-  public void testAfterHandleReturnsNullWhenNoPreviousResult() throws Exception {
+  public void testAfterHandleToleratesMissingPreviousResult() throws Exception {
     NeoContext ctx = buildContext("GET", new JSONObject(), "record-123");
     // No previousResult set on the context builder.
     assertNull(handler.afterHandle(ctx));

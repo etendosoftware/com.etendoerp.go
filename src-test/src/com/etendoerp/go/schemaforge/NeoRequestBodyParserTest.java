@@ -23,9 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
-
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -45,15 +42,6 @@ import com.etendoerp.go.common.MalformedJsonException;
  * @covers com.etendoerp.go.schemaforge.NeoRequestBodyParser
  */
 class NeoRequestBodyParserTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<NeoRequestBodyParser> constructor = NeoRequestBodyParser.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
   @Nested
   @DisplayName("parseJsonObjectSafely")

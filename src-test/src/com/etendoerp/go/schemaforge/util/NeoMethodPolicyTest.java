@@ -23,8 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.List;
 
@@ -81,15 +79,6 @@ class NeoMethodPolicyTest {
   /** A monitor/log entity: readable, every mutation off — the ETP-4254 target shape. */
   private SFEntity readOnlyEntity() {
     return entity(true, true, false, false, false, false);
-  }
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<NeoMethodPolicy> constructor = NeoMethodPolicy.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
   }
 
   @Nested

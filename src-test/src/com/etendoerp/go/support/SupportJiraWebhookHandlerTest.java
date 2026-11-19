@@ -21,11 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,7 +31,6 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Set;
@@ -47,12 +43,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedStatic;
-import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
@@ -61,11 +51,18 @@ import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
 
 /**
- * Tests for {@link SupportJiraWebhookHandler}.
+ * Tests for {@link SupportJiraWebhookHandler}. Persistence goes through a mocked
+ * {@link SupportConversationStore}, so no test touches the DAL or its statics.
+ *
+ * @covers com.etendoerp.go.support.SupportJiraWebhookHandler
+ * @covers com.etendoerp.go.support.SupportAdfAttachmentCorrelator
  */
 class SupportJiraWebhookHandlerTest {
 
   private static final String IGNORED_BODY = "{\"status\":\"ignored\"}";
+
+  /** Unstubbed lookups answer {@code null} and unstubbed lists answer empty, as an empty table would. */
+  private final SupportConversationStore store = mock(SupportConversationStore.class);
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
@@ -79,12 +76,6 @@ class SupportJiraWebhookHandlerTest {
     return request;
   }
 
-  private static OBDal mockObDal(MockedStatic<OBDal> dalMock) {
-    OBDal obDal = mock(OBDal.class);
-    dalMock.when(OBDal::getInstance).thenReturn(obDal);
-    return obDal;
-  }
-
   private static SupportConversation mockConversation(String id) {
     SupportConversation conv = mock(SupportConversation.class);
     when(conv.getId()).thenReturn(id);
@@ -93,14 +84,17 @@ class SupportJiraWebhookHandlerTest {
     return conv;
   }
 
-  @SuppressWarnings("unchecked")
-  private static <T extends BaseOBObject> void mockCriteria(OBDal obDal, Class<T> clazz, List<T> results) {
-    OBCriteria<T> crit = mock(OBCriteria.class);
-    when(obDal.createCriteria(clazz)).thenReturn(crit);
-    when(crit.add(any())).thenReturn(crit);
-    when(crit.setMaxResults(anyInt())).thenReturn(crit);
-    when(crit.list()).thenReturn(results);
-    when(crit.uniqueResult()).thenReturn(results.isEmpty() ? null : results.get(0));
+  /** Stubs what {@code storeJiraWebhookComment} reads to persist a comment: {@code conv} linked to
+   * {@code jiraKey}, no message stored yet for the external id (the store answers {@code null}
+   * unstubbed), the system user, and the conversation re-read by id by {@code updateConvSummary}.
+   * Returns the new message the handler fills in, so callers can verify what was set on it. */
+  private SupportMessage stubPersistence(SupportConversation conv, String jiraKey) {
+    when(store.findConversationByJiraKey(jiraKey)).thenReturn(conv);
+    when(store.findUser(SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+    when(store.findConversation(conv.getId())).thenReturn(conv);
+    SupportMessage msg = mock(SupportMessage.class);
+    when(store.newMessage()).thenReturn(msg);
+    return msg;
   }
 
   // -------------------------------------------------------------------------
@@ -396,7 +390,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject body = new JSONObject();
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNull(result);
       assertEquals(IGNORED_BODY, capture.toString());
@@ -410,7 +404,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject body = new JSONObject().put("issue", new JSONObject().put("key", ""));
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNull(result);
       assertEquals(IGNORED_BODY, capture.toString());
@@ -424,7 +418,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject body = new JSONObject().put("issue", new JSONObject().put("key", "SUP-1"));
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNull(result);
       assertEquals(IGNORED_BODY, capture.toString());
@@ -441,7 +435,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNull(result);
       assertEquals("{\"status\":\"skipped_internal\"}", capture.toString());
@@ -463,7 +457,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertEquals("SUP-7", result.jiraKey);
@@ -489,7 +483,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertEquals("acc-123", result.authorAccountId);
@@ -507,7 +501,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertEquals("", result.authorAccountId);
@@ -523,7 +517,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertNotNull(result.commentId);
@@ -540,7 +534,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertEquals("Agente de soporte", result.authorName);
@@ -563,7 +557,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(store, response, body);
 
       assertNotNull(result);
       assertTrue(result.text.contains("!Captura desde 2026-07-15 13-21-04.png"));
@@ -587,7 +581,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject issue = new JSONObject();
       JSONObject body = new JSONObject();
 
-      SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
+      SupportJiraWebhookHandler.handleJiraNonCommentEvent(store, response, issue, body, "SUP-1");
 
       assertEquals(IGNORED_BODY, capture.toString());
     }
@@ -605,16 +599,17 @@ class SupportJiraWebhookHandlerTest {
       // isBotEmail only recognizes the DEDICATED bot-email property (never the API-auth
       // username — see isBotEmail's javadoc for why) — configure it explicitly and restore
       // afterward.
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.listConversationsByJiraKey("SUP-1")).thenReturn(List.of(conv));
       System.setProperty(JiraConfig.PROP_BOT_EMAIL, "info@smfconsulting.es");
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
-
-        SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
+      try {
+        SupportJiraWebhookHandler.handleJiraNonCommentEvent(store, response, issue, body, "SUP-1");
       } finally {
         System.clearProperty(JiraConfig.PROP_BOT_EMAIL);
       }
+
+      verify(conv).setHumanTakeover(false);
+      verify(store).saveConversation(conv);
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
       assertTrue(capture.toString().contains("SUP-1"));
@@ -635,13 +630,12 @@ class SupportJiraWebhookHandlerTest {
       JSONObject issue = new JSONObject().put("fields", fields);
       JSONObject body = new JSONObject();
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.listConversationsByJiraKey("SUP-1")).thenReturn(List.of(conv));
 
-        SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
-      }
+      SupportJiraWebhookHandler.handleJiraNonCommentEvent(store, response, issue, body, "SUP-1");
+
+      verify(conv).setHumanTakeover(false);
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
       assertTrue(capture.toString().contains("SUP-1"));
@@ -658,13 +652,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject changelog = new JSONObject().put("items", items);
       JSONObject body = new JSONObject().put("changelog", changelog);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, Collections.emptyList()); // no matching conversation
-
-        SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-2");
-      }
+      SupportJiraWebhookHandler.handleJiraNonCommentEvent(store, response, issue, body, "SUP-2");
 
       assertTrue(capture.toString().contains("no_conversation"));
     }
@@ -679,7 +667,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject issue = new JSONObject().put("fields", fields);
       JSONObject body = new JSONObject();
 
-      SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-3");
+      SupportJiraWebhookHandler.handleJiraNonCommentEvent(store, response, issue, body, "SUP-3");
 
       assertEquals(IGNORED_BODY, capture.toString());
     }
@@ -699,15 +687,15 @@ class SupportJiraWebhookHandlerTest {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.listConversationsByJiraKey("SUP-1")).thenReturn(List.of(conv));
 
-        SupportJiraWebhookHandler.handleAssigneeReset(response, "SUP-1");
-      }
+      SupportJiraWebhookHandler.handleAssigneeReset(store, response, "SUP-1");
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
+      verify(conv).setHumanTakeover(false);
+      verify(store).saveConversation(conv);
+      verify(store).restorePreviousMode();
     }
 
     @Test
@@ -716,14 +704,12 @@ class SupportJiraWebhookHandlerTest {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        dalMock.when(OBDal::getInstance).thenThrow(new RuntimeException("db down"));
+      when(store.listConversationsByJiraKey("SUP-1")).thenThrow(new RuntimeException("db down"));
 
-        SupportJiraWebhookHandler.handleAssigneeReset(response, "SUP-1");
-      }
+      SupportJiraWebhookHandler.handleAssigneeReset(store, response, "SUP-1");
 
       verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      verify(store).restorePreviousMode();
     }
 
     @Test
@@ -732,13 +718,7 @@ class SupportJiraWebhookHandlerTest {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
-
-        SupportJiraWebhookHandler.handleTicketClosed(response, "SUP-4");
-      }
+      SupportJiraWebhookHandler.handleTicketClosed(store, response, "SUP-4");
 
       assertTrue(capture.toString().contains("no_conversation"));
     }
@@ -749,14 +729,14 @@ class SupportJiraWebhookHandlerTest {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-99")));
+      SupportConversation conv = mockConversation("conv-99");
+      when(store.findConversationByJiraKey("SUP-5")).thenReturn(conv);
 
-        SupportJiraWebhookHandler.handleTicketClosed(response, "SUP-5");
-      }
+      SupportJiraWebhookHandler.handleTicketClosed(store, response, "SUP-5");
 
+      verify(conv).setStatus("closed");
+      verify(conv).setUnread(true);
+      verify(store).saveConversation(conv);
       assertTrue(capture.toString().contains("conv-99"));
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }
@@ -767,14 +747,12 @@ class SupportJiraWebhookHandlerTest {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        dalMock.when(OBDal::getInstance).thenThrow(new RuntimeException("db down"));
+      when(store.findConversationByJiraKey("SUP-6")).thenThrow(new RuntimeException("db down"));
 
-        SupportJiraWebhookHandler.handleTicketClosed(response, "SUP-6");
-      }
+      SupportJiraWebhookHandler.handleTicketClosed(store, response, "SUP-6");
 
       verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      verify(store).restorePreviousMode();
     }
   }
 
@@ -794,7 +772,7 @@ class SupportJiraWebhookHandlerTest {
       HttpServletRequest request = mock(HttpServletRequest.class);
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
       assertNull(result);
       assertEquals("{\"status\":\"ignored_no_key\"}", capture.toString());
@@ -813,19 +791,18 @@ class SupportJiraWebhookHandlerTest {
       // isBotEmail only recognizes the DEDICATED bot-email property (never the API-auth
       // username — see isBotEmail's javadoc for why) — configure it explicitly and restore
       // afterward.
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.listConversationsByJiraKey("SUP-10")).thenReturn(List.of(conv));
       System.setProperty(JiraConfig.PROP_BOT_EMAIL, "info@smfconsulting.es");
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
-
-        SupportJiraWebhookHandler.JiraWebhookComment result =
-            SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
-
-        assertNull(result);
+      SupportJiraWebhookHandler.JiraWebhookComment result;
+      try {
+        result = SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
       } finally {
         System.clearProperty(JiraConfig.PROP_BOT_EMAIL);
       }
+
+      assertNull(result);
+      verify(conv).setHumanTakeover(false);
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }
 
@@ -840,16 +817,14 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("action")).thenReturn("assignee_reset");
       when(request.getParameter("authorName")).thenReturn("Information Etendo");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.listConversationsByJiraKey("SUP-11")).thenReturn(List.of(conv));
 
-        SupportJiraWebhookHandler.JiraWebhookComment result =
-            SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+      SupportJiraWebhookHandler.JiraWebhookComment result =
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
-        assertNull(result);
-      }
+      assertNull(result);
+      verify(conv).setHumanTakeover(false);
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }
 
@@ -864,7 +839,7 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("authorEmail")).thenReturn("someone@example.com");
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
       assertNull(result);
       assertEquals("{\"status\":\"ignored_not_bot\"}", capture.toString());
@@ -879,16 +854,10 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("issueKey")).thenReturn("SUP-12");
       when(request.getParameter("action")).thenReturn("ticket_closed");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
+      SupportJiraWebhookHandler.JiraWebhookComment result =
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
-        SupportJiraWebhookHandler.JiraWebhookComment result =
-            SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
-
-        assertNull(result);
-      }
+      assertNull(result);
       assertTrue(capture.toString().contains("no_conversation"));
     }
 
@@ -904,7 +873,7 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("commentText")).thenReturn("Hello from automation");
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
       assertNotNull(result);
       assertEquals("SUP-13", result.jiraKey);
@@ -922,7 +891,7 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("issueKey")).thenReturn("SUP-14");
 
       SupportJiraWebhookHandler.JiraWebhookComment result =
-          SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+          SupportJiraWebhookHandler.parseAutomationJiraWebhook(store, request, response);
 
       assertNotNull(result);
       assertEquals("SUP-14", result.jiraKey);
@@ -1352,7 +1321,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject comment = new JSONObject().put("body", body);
 
       SupportJiraWebhookHandler.ResolvedAttachments result =
-          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-1", comment);
+          SupportJiraWebhookHandler.resolveCommentAttachments(store, "SUP-1", comment);
 
       assertNull(result.attachments);
       assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
@@ -1367,7 +1336,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject comment = new JSONObject().put("body", body);
 
       SupportJiraWebhookHandler.ResolvedAttachments result =
-          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-2", comment);
+          SupportJiraWebhookHandler.resolveCommentAttachments(store, "SUP-2", comment);
 
       assertNull(result.attachments);
       assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
@@ -1380,7 +1349,7 @@ class SupportJiraWebhookHandlerTest {
           "!screenshot.png|width=989,alt=\"screenshot.png\"!");
 
       SupportJiraWebhookHandler.ResolvedAttachments result =
-          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-40", comment);
+          SupportJiraWebhookHandler.resolveCommentAttachments(store, "SUP-40", comment);
 
       assertNull(result.attachments);
       assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
@@ -1393,7 +1362,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject comment = new JSONObject().put("body", "[^Hoja de cálculo sin título.xlsx]");
 
       SupportJiraWebhookHandler.ResolvedAttachments result =
-          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-41", comment);
+          SupportJiraWebhookHandler.resolveCommentAttachments(store, "SUP-41", comment);
 
       assertNull(result.attachments);
       assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
@@ -1732,37 +1701,28 @@ class SupportJiraWebhookHandlerTest {
     @Test
     @DisplayName("No matching conversation returns an empty set")
     void noConversation() {
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
+      Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds(store, "SUP-30");
 
-        Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds("SUP-30");
-
-        assertTrue(ids.isEmpty());
-      }
+      assertTrue(ids.isEmpty());
     }
 
     @Test
     @DisplayName("Collects attachment ids across multiple earlier messages, skipping malformed JSON")
     void collectsIdsAcrossMessages() {
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+      SupportConversation conv = mockConversation("conv-1");
+      when(store.findConversationByJiraKey("SUP-31")).thenReturn(conv);
 
-        SupportMessage msg1 = mock(SupportMessage.class);
-        when(msg1.getAttachments()).thenReturn("[{\"id\":\"att-1\"},{\"id\":\"att-2\"}]");
-        SupportMessage msg2 = mock(SupportMessage.class);
-        when(msg2.getAttachments()).thenReturn("not valid json");
-        SupportMessage msg3 = mock(SupportMessage.class);
-        when(msg3.getAttachments()).thenReturn("[{\"id\":\"att-3\"}]");
-        mockCriteria(obDal, SupportMessage.class, List.of(msg1, msg2, msg3));
+      SupportMessage msg1 = mock(SupportMessage.class);
+      when(msg1.getAttachments()).thenReturn("[{\"id\":\"att-1\"},{\"id\":\"att-2\"}]");
+      SupportMessage msg2 = mock(SupportMessage.class);
+      when(msg2.getAttachments()).thenReturn("not valid json");
+      SupportMessage msg3 = mock(SupportMessage.class);
+      when(msg3.getAttachments()).thenReturn("[{\"id\":\"att-3\"}]");
+      when(store.listMessagesWithAttachments("conv-1")).thenReturn(List.of(msg1, msg2, msg3));
 
-        Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds("SUP-31");
+      Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds(store, "SUP-31");
 
-        assertEquals(Set.of("att-1", "att-2", "att-3"), ids);
-      }
+      assertEquals(Set.of("att-1", "att-2", "att-3"), ids);
     }
   }
 
@@ -1781,7 +1741,7 @@ class SupportJiraWebhookHandlerTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = mockRequestWithBody("");
 
-      SupportJiraWebhookHandler.handle(request, response);
+      SupportJiraWebhookHandler.handle(store, request, response);
 
       assertEquals("{\"status\":\"ignored_no_key\"}", capture.toString());
     }
@@ -1798,7 +1758,7 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
       HttpServletRequest request = mockRequestWithBody(json.toString());
 
-      SupportJiraWebhookHandler.handle(request, response);
+      SupportJiraWebhookHandler.handle(store, request, response);
 
       assertTrue(capture.toString().contains("empty_body"));
     }
@@ -1816,22 +1776,15 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
       HttpServletRequest request = mockRequestWithBody(json.toString());
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        SupportConversation conv = mockConversation("conv-77");
-        mockCriteria(obDal, SupportConversation.class, List.of(conv));
-        mockCriteria(obDal, SupportMessage.class, Collections.emptyList()); // no duplicate external_id
-        when(obDal.get(SupportConversation.class, "conv-77")).thenReturn(conv);
-        when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+      SupportConversation conv = mockConversation("conv-77");
+      SupportMessage msg = stubPersistence(conv, "SUP-21");
 
-        OBProvider provider = mock(OBProvider.class);
-        providerMock.when(OBProvider::getInstance).thenReturn(provider);
-        when(provider.get(SupportMessage.class)).thenReturn(mock(SupportMessage.class));
+      SupportJiraWebhookHandler.handle(store, request, response);
 
-        SupportJiraWebhookHandler.handle(request, response);
-      }
+      verify(msg).setExternalId("jira:SUP-21:c2");
+      verify(msg).setText("Thanks for reaching out");
+      verify(store).saveMessage(msg);
+      verify(conv).setUnread(true);
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
       assertTrue(capture.toString().contains("conv-77"));
@@ -1850,25 +1803,11 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment = new SupportJiraWebhookHandler.JiraWebhookComment(
           "SUP-23", "c4", "Agent Smith", "agent@example.com", "", "", attachments);
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        SupportConversation conv = mockConversation("conv-88");
-        mockCriteria(obDal, SupportConversation.class, List.of(conv));
-        mockCriteria(obDal, SupportMessage.class, Collections.emptyList()); // no duplicate external_id
-        when(obDal.get(SupportConversation.class, "conv-88")).thenReturn(conv);
-        when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+      SupportMessage msg = stubPersistence(mockConversation("conv-88"), "SUP-23");
 
-        OBProvider provider = mock(OBProvider.class);
-        providerMock.when(OBProvider::getInstance).thenReturn(provider);
-        SupportMessage msg = mock(SupportMessage.class);
-        when(provider.get(SupportMessage.class)).thenReturn(msg);
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
-        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
-
-        verify(msg).setAttachments(attachments.toString());
-      }
+      verify(msg).setAttachments(attachments.toString());
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
       assertTrue(capture.toString().contains("conv-88"));
@@ -1887,15 +1826,10 @@ class SupportJiraWebhookHandlerTest {
           .put("comment", comment);
       HttpServletRequest request = mockRequestWithBody(json.toString());
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
-
-        SupportJiraWebhookHandler.handle(request, response);
-      }
+      SupportJiraWebhookHandler.handle(store, request, response);
 
       assertTrue(capture.toString().contains("no_conversation"));
+      verify(store, never()).newMessage();
     }
   }
 
@@ -1916,24 +1850,6 @@ class SupportJiraWebhookHandlerTest {
           authorAccountId, text, null);
     }
 
-    /** Stubs the DB round-trip {@code storeJiraWebhookComment} needs to actually persist a
-     * message: a matching conversation, no existing message for the external id (dedupe check),
-     * the system user lookup, and a fresh {@code SupportMessage} mock handed back by
-     * {@code OBProvider}. Returns that message mock so callers can verify what was set on it. */
-    private SupportMessage stubPersistence(OBDal obDal, MockedStatic<OBProvider> providerMock,
-        SupportConversation conv) {
-      mockCriteria(obDal, SupportConversation.class, List.of(conv));
-      mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
-      when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
-      // updateConvSummary (called after a successful insert) re-fetches the conversation by id.
-      when(obDal.get(SupportConversation.class, conv.getId())).thenReturn(conv);
-      OBProvider provider = mock(OBProvider.class);
-      providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      SupportMessage msg = mock(SupportMessage.class);
-      when(provider.get(SupportMessage.class)).thenReturn(msg);
-      return msg;
-    }
-
     @Test
     @DisplayName("Bot comment recognized by display name when the author email is empty is skipped as "
         + "bot echo (JIRA_BOT_NAME defaults to 'Information Etendo'; JIRA_BOT_EMAIL defaults to empty in "
@@ -1945,7 +1861,7 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment =
           comment("SUP-60", "c60", "Information Etendo", "", "acc-bot", "Echo of our own comment");
 
-      SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
       assertEquals("{\"status\":\"skipped_bot\"}", capture.toString());
     }
@@ -1959,14 +1875,9 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment =
           comment("SUP-61", "c61", "Agent Smith", "agent@example.com", "acc-agent", "Real human reply");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        stubPersistence(obDal, providerMock, mockConversation("conv-61"));
+      stubPersistence(mockConversation("conv-61"), "SUP-61");
 
-        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
-      }
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
       assertFalse(capture.toString().contains("skipped_bot"));
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
@@ -1983,18 +1894,13 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment =
           comment("SUP-62", "c62", "Jane Reporter", "jane@example.com", "reporter-acc-1", "Replying via email");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        SupportConversation conv = mockConversation("conv-62");
-        when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
-        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+      SupportConversation conv = mockConversation("conv-62");
+      when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
+      SupportMessage msg = stubPersistence(conv, "SUP-62");
 
-        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
-        verify(msg).setSender("user");
-      }
+      verify(msg).setSender("user");
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
       assertTrue(capture.toString().contains("conv-62"));
@@ -2009,18 +1915,13 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment =
           comment("SUP-63", "c63", "Agent Smith", "agent@example.com", "acc-agent", "Support reply");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        SupportConversation conv = mockConversation("conv-63");
-        when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
-        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+      SupportConversation conv = mockConversation("conv-63");
+      when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
+      SupportMessage msg = stubPersistence(conv, "SUP-63");
 
-        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
-        verify(msg).setSender("human");
-      }
+      verify(msg).setSender("human");
     }
 
     @Test
@@ -2033,19 +1934,14 @@ class SupportJiraWebhookHandlerTest {
       SupportJiraWebhookHandler.JiraWebhookComment comment =
           comment("SUP-64", "c64", "Agent Smith", "agent@example.com", "", "Support reply via automation");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
-        OBDal obDal = mockObDal(dalMock);
-        SupportConversation conv = mockConversation("conv-64");
-        // conv.getJiraReporterAccountId() defaults to null (not stubbed) — this is the case the
-        // null-safety matters for.
-        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+      SupportConversation conv = mockConversation("conv-64");
+      // conv.getJiraReporterAccountId() defaults to null (not stubbed) — this is the case the
+      // null-safety matters for.
+      SupportMessage msg = stubPersistence(conv, "SUP-64");
 
-        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+      SupportJiraWebhookHandler.storeJiraWebhookComment(store, response, comment);
 
-        verify(msg).setSender("human");
-      }
+      verify(msg).setSender("human");
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }

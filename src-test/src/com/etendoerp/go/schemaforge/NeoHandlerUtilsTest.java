@@ -1276,6 +1276,9 @@ public class NeoHandlerUtilsTest {
 
       // Must not propagate — a re-anchor failure should never block the documentAction request.
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse("inout-1", LOG);
+      // Admin mode entered for the lookup is left even though the lookup blew up.
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
     }
   }
 

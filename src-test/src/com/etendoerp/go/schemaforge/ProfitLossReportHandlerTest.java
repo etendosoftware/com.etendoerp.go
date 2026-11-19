@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandlerTest.describeFailure;
+import static com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandlerTest.stubHappyPathObContextAndDal;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -23,10 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
@@ -34,7 +34,6 @@ import java.util.List;
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -42,10 +41,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
-import org.openbravo.model.financialmgmt.calendar.Year;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -55,11 +50,11 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * {@code generate_profit_loss}, a faithful Java port of {@code
  * artifacts/profit-loss/report-contract.json}'s {@code sql.query}/{@code sql.operandsQuery} plus
  * {@link AccountReportTree} (reused UNCHANGED from {@link BalanceSheetReportHandler}; its own
- * roll-up/formula rules are covered by {@code AccountReportTreeTest}, not here).
+ * roll-up/formula rules are covered by {@code AccountReportTreeTest}, not here). What it inherits
+ * from {@link AbstractAccountTreeReportHandler} is covered by
+ * {@code AbstractAccountTreeReportHandlerTest}.
  *
  * @covers com.etendoerp.go.schemaforge.ProfitLossReportHandler
- * @covers com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandler
- * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class ProfitLossReportHandlerTest {
 
@@ -105,15 +100,6 @@ class ProfitLossReportHandlerTest {
     assertEquals(List.of("none", "month", "quarter"), breakdown.getAllowedValues());
   }
 
-  @Test
-  @DisplayName("declares accountLevel as a closed C/D/E/S set")
-  void reportParametersDeclaresAccountLevelEnum() {
-    NeoReportParam accountLevel = handler.reportParameters().orElseThrow().stream()
-        .filter(p -> "accountLevel".equals(p.getName())).findFirst().orElseThrow();
-
-    assertEquals(List.of("C", "D", "E", "S"), accountLevel.getAllowedValues());
-  }
-
   /**
    * Unlike {@link BalanceSheetReportHandler}, dateFrom/fromReferenceDate DO have effect here —
    * P&L is a period-activity report, not a cumulative snapshot. The descriptions must NOT contain
@@ -152,50 +138,8 @@ class ProfitLossReportHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // Access gate
-  // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without the grant is refused with 403 before any validation runs")
-  void postWithoutGrantIsRefused() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      // An empty body would fail yearId validation too, but the gate must be checked first.
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  @Test
-  @DisplayName("GET without the grant does not leak the descriptor")
-  void getWithoutGrantDoesNotLeakDescriptor() {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
-
-      NeoResponse response = handler.handle(context("GET", null));
-
-      assertEquals(403, response.getHttpStatus());
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Validation — 400s, all reachable without touching the DB (pure input checks first)
   // -------------------------------------------------------------------------
-
-  @Test
-  @DisplayName("POST without yearId is refused with 400")
-  void postWithoutYearIdIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      NeoResponse response = handler.handle(context("POST", new JSONObject()));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("year_id_required", response.getBody().getString("error"));
-    }
-  }
 
   @Test
   @DisplayName("POST without yearId and with only one date is still refused with 400")
@@ -317,39 +261,6 @@ class ProfitLossReportHandlerTest {
   }
 
   @Test
-  @DisplayName("POST with a malformed yearId is refused with 400")
-  void postWithMalformedYearIdIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "not an id!");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("year_id_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with an invalid accountLevel is refused with 400")
-  void postWithInvalidAccountLevelIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("accountLevel", "X");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("account_level_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
   @DisplayName("POST with a malformed dateFrom is refused with 400")
   void postWithMalformedDateFromIsRefused() throws Exception {
     try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
@@ -366,231 +277,9 @@ class ProfitLossReportHandlerTest {
     }
   }
 
-  @Test
-  @DisplayName("POST with a malformed dateTo is refused with 400")
-  void postWithMalformedDateToIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("dateTo", "24/09/2026");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("dateTo_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with compareTo=true and no referenceYearId is refused with 400")
-  void postWithCompareToAndNoReferenceYearIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("compareTo", true);
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("reference_year_id_required", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with compareTo=true and a malformed referenceYearId is refused with 400")
-  void postWithCompareToAndMalformedReferenceYearIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("compareTo", true);
-      body.put("referenceYearId", "not an id!");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("reference_year_id_invalid", response.getBody().getString("error"));
-    }
-  }
-
-  @Test
-  @DisplayName("POST with compareTo=false ignores an absent referenceYearId entirely")
-  void postWithCompareToFalseDoesNotRequireReferenceYear() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("compareTo", false);
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
-    }
-  }
-
-  /**
-   * ETP-5793: another tenant's year answers exactly like an unknown one
-   * ({@code AbstractAccountTreeReportHandler#validateYearsResolved}).
-   */
-  @Test
-  @DisplayName("POST with another tenant's yearId answers exactly like an unknown one")
-  void postWithForeignYearAnswersLikeUnknown() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
-      Client otherClient = mock(Client.class);
-      when(otherClient.getId()).thenReturn("otherClientId");
-      Year foreignYear = mock(Year.class);
-      when(foreignYear.getClient()).thenReturn(otherClient);
-      OBDal dal = OBDal.getInstance();
-      when(dal.get(Year.class, "foreignYear1")).thenReturn(foreignYear);
-
-      NeoResponse foreign = handler.handle(context("POST", new JSONObject().put("yearId", "foreignYear1")));
-      NeoResponse unknown = handler.handle(context("POST", new JSONObject().put("yearId", "unknownYear1")));
-
-      assertEquals(422, foreign.getHttpStatus());
-      assertEquals("year_not_resolved", foreign.getBody().getString("error"));
-      assertEquals(unknown.getBody().toString().replace("unknownYear1", "foreignYear1"),
-          foreign.getBody().toString());
-    }
-  }
-
-  /** ETP-5793: the comparison year gets the same tenant check as the main one. */
-  @Test
-  @DisplayName("POST with another tenant's referenceYearId answers exactly like an unknown one")
-  void postWithForeignReferenceYearAnswersLikeUnknown() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
-      Client otherClient = mock(Client.class);
-      when(otherClient.getId()).thenReturn("otherClientId");
-      Year foreignYear = mock(Year.class);
-      when(foreignYear.getClient()).thenReturn(otherClient);
-      OBDal dal = OBDal.getInstance();
-      when(dal.get(Year.class, "foreignYear1")).thenReturn(foreignYear);
-
-      NeoResponse foreign = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
-          .put("compareTo", true).put("referenceYearId", "foreignYear1")));
-      NeoResponse unknown = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
-          .put("compareTo", true).put("referenceYearId", "unknownYear1")));
-
-      assertEquals(422, foreign.getHttpStatus());
-      assertEquals("reference_year_not_resolved", foreign.getBody().getString("error"));
-      assertEquals(unknown.getBody().toString().replace("unknownYear1", "foreignYear1"),
-          foreign.getBody().toString());
-    }
-  }
-
-  /**
-   * ETP-5793: another tenant's org answers exactly like an unknown one
-   * ({@code AbstractSqlReportHandler#validateOrgId}, shared by every SQL report).
-   */
-  @Test
-  @DisplayName("POST with another tenant's orgId answers exactly like an unknown one")
-  void postWithForeignOrgAnswersLikeUnknown() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
-      Client otherClient = mock(Client.class);
-      when(otherClient.getId()).thenReturn("otherClientId");
-      Organization foreignOrg = mock(Organization.class);
-      when(foreignOrg.getClient()).thenReturn(otherClient);
-      OBDal dal = OBDal.getInstance();
-      when(dal.get(Organization.class, "foreignOrg1")).thenReturn(foreignOrg);
-
-      NeoResponse foreign = handler.handle(context("POST",
-          new JSONObject().put("yearId", "year1").put("orgId", "foreignOrg1")));
-      NeoResponse unknown = handler.handle(context("POST",
-          new JSONObject().put("yearId", "year1").put("orgId", "unknownOrg1")));
-
-      assertEquals(400, foreign.getHttpStatus());
-      assertEquals("organization_not_resolved", foreign.getBody().getString("error"));
-      assertEquals(unknown.getBody().toString().replace("unknownOrg1", "foreignOrg1"),
-          foreign.getBody().toString());
-    }
-  }
-
-  @Test
-  @DisplayName("POST with a malformed orgId is refused with 400")
-  void postWithMalformedOrgIdIsRefused() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      Organization sessionOrg = mock(Organization.class);
-      when(sessionOrg.getId()).thenReturn("sessionOrg");
-      OBContext obContext = mock(OBContext.class);
-      when(obContext.getCurrentOrganization()).thenReturn(sessionOrg);
-      contextMock.when(OBContext::getOBContext).thenReturn(obContext);
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("orgId", "not an id!");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(400, response.getHttpStatus());
-      assertEquals("org_id_invalid", response.getBody().getString("error"));
-    }
-  }
-
   // -------------------------------------------------------------------------
-  // Client scoping — from OBContext, never from the request body
+  // Period filter — dateFrom has a real effect here
   // -------------------------------------------------------------------------
-
-  /**
-   * The core scoping guarantee, mirroring {@code BalanceSheetReportHandlerTest}'s own test of the
-   * same name: even if a caller stuffs an {@code ad_client_id}-shaped value somewhere in the body,
-   * the query is bound to the SESSION's client — there is no body key this handler reads for it at
-   * all.
-   */
-  @Test
-  @DisplayName("binds the query to OBContext's client, with no client id read from the body")
-  void clientIdComesFromObContextNotBody() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      NativeQuery<Object[]> query = stubHappyPathObContextAndDal(contextMock, obDalMock,
-          Collections.emptyList());
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-      body.put("clientId", "attacker-supplied-client-id");
-      body.put("ad_client_id", "attacker-supplied-client-id");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
-
-      ArgumentCaptor<Object> valueCaptor = ArgumentCaptor.forClass(Object.class);
-      ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
-      verify(query, atLeastOnce()).setParameter(nameCaptor.capture(), valueCaptor.capture());
-
-      int clientIdParamIndex = nameCaptor.getAllValues().indexOf("clientId");
-      assertTrue(clientIdParamIndex >= 0, "the query must bind a clientId parameter");
-      assertEquals("sessionClientId1", valueCaptor.getAllValues().get(clientIdParamIndex),
-          "clientId must come from OBContext's current client, never from the request body");
-
-      JSONObject responseData = response.getBody().getJSONObject("response");
-      assertFalse(responseData.getJSONObject("meta").toString().contains("attacker-supplied"),
-          "the body's spoofed client id must never reach the response either");
-    }
-  }
 
   @Test
   @DisplayName("dateFrom, when given, is bound as a real query parameter")
@@ -618,27 +307,6 @@ class ProfitLossReportHandlerTest {
     }
   }
 
-  @Test
-  @DisplayName("an empty result set still returns a 200 with an empty data array")
-  void emptyResultReturnsEmptyDataArray() throws Exception {
-    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
-         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
-      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
-
-      JSONObject body = new JSONObject();
-      body.put("yearId", "year1");
-
-      NeoResponse response = handler.handle(context("POST", body));
-
-      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
-      JSONObject responseData = response.getBody().getJSONObject("response");
-      assertEquals(0, responseData.getInt("count"));
-      assertEquals(0, responseData.getJSONArray("data").length());
-    }
-  }
-
   // -------------------------------------------------------------------------
   // ShowValueCond columns (ETP-5662)
   // -------------------------------------------------------------------------
@@ -650,64 +318,5 @@ class ProfitLossReportHandlerTest {
     assertTrue(cols.indexOf("own_amt_ref") < cols.indexOf("ev.showvaluecond"),
         "positional COL_* mapping relies on these coming last");
     assertTrue(cols.indexOf("ev.showvaluecond") < cols.indexOf("ev.issummary"));
-  }
-
-  // -------------------------------------------------------------------------
-  // Test helpers
-  // -------------------------------------------------------------------------
-
-  private static String describeFailure(NeoResponse response) {
-    try {
-      return "Unexpected status " + response.getHttpStatus() + ": " + response.getBody();
-    } catch (Exception e) {
-      return "Unexpected non-200 response, and the body could not be read either";
-    }
-  }
-
-  /**
-   * Wires the happy path through {@link OBContext}/{@link OBDal}: a session client + organization,
-   * an organization whose general ledger resolves an accounting schema, and a resolvable
-   * {@link Year}. Every {@code createNativeQuery} call returns the SAME mocked query, configured to
-   * return {@code rows} for every {@code list()} call — sufficient for the node-rows AND
-   * operand-rows queries this handler issues.
-   *
-   * @return the shared mocked {@link NativeQuery}, for assertions on bound parameters
-   */
-  @SuppressWarnings("unchecked")
-  private static NativeQuery<Object[]> stubHappyPathObContextAndDal(
-      MockedStatic<OBContext> contextMock, MockedStatic<OBDal> obDalMock, List<Object[]> rows) {
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn("sessionClientId1");
-
-    Organization org = mock(Organization.class);
-    when(org.getId()).thenReturn("sessionOrgId1");
-    AcctSchema schema = mock(AcctSchema.class);
-    when(schema.getId()).thenReturn("schemaId1");
-    when(org.getGeneralLedger()).thenReturn(schema);
-
-    OBContext obContext = mock(OBContext.class);
-    when(obContext.getCurrentClient()).thenReturn(client);
-    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
-    when(org.getClient()).thenReturn(client);
-    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
-    when(obContext.getCurrentOrganization()).thenReturn(org);
-    contextMock.when(OBContext::getOBContext).thenReturn(obContext);
-
-    Session session = mock(Session.class);
-    NativeQuery<Object[]> query = mock(NativeQuery.class);
-    when(session.createNativeQuery(anyString())).thenReturn(query);
-    when(query.setParameter(anyString(), any())).thenReturn(query);
-    when(query.list()).thenReturn((List) rows);
-
-    Year year = mock(Year.class);
-    when(year.getClient()).thenReturn(client);
-
-    OBDal dal = mock(OBDal.class);
-    when(dal.getSession()).thenReturn(session);
-    when(dal.get(Organization.class, "sessionOrgId1")).thenReturn(org);
-    when(dal.get(Year.class, "year1")).thenReturn(year);
-    obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-    return query;
   }
 }

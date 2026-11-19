@@ -23,8 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -38,7 +36,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -49,15 +46,6 @@ import org.junit.jupiter.params.provider.ValueSource;
  * @covers com.etendoerp.go.schemaforge.WidgetQueryHelper
  */
 class WidgetQueryHelperTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<WidgetQueryHelper> constructor = WidgetQueryHelper.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   /**

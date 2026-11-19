@@ -414,13 +414,16 @@ public class SiiTbaiAutoSendScheduleServiceTest {
     SiiTbaiAutoSendScheduleService service = new SiiTbaiAutoSendScheduleService();
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(ProcessRequest.class, NEW_REQUEST_ID)).thenReturn(null);
 
       service.activateSchedule(NEW_REQUEST_ID);
-      // No exception; nothing further attempted.
+      // Nothing is scheduled, and admin mode is left.
+      obScheduler.verifyNoInteractions();
+      obContext.verify(OBContext::restorePreviousMode);
     }
   }
 

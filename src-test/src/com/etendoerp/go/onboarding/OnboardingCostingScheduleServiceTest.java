@@ -221,7 +221,9 @@ public class OnboardingCostingScheduleServiceTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       service.activateSchedule(CLIENT_ID);
-      // No exception propagated — best-effort contract holds.
+      // No exception propagated, nothing scheduled, and admin mode is still left.
+      verify(service, never()).findExistingRequest(any(), any());
+      obContext.verify(OBContext::restorePreviousMode);
     }
   }
 }
