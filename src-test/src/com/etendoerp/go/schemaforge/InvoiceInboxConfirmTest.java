@@ -327,15 +327,24 @@ class InvoiceInboxConfirmTest {
   void aFailedUnitIsRecordedAndAnswered() throws Exception {
     claimOpens(false);
     work.when(() -> InvoiceInboxConfirmWork.run(any(), any(), any()))
-        .thenThrow(new InvoiceInboxConfirmWork.Stop("line 2: tax is required"));
+        .thenThrow(new InvoiceInboxConfirmWork.Stop(InvoiceInboxFailureDetail.of(
+            InvoiceInboxFailureDetail.STEP_FAILED, "step", "line", "n", 2, "reason",
+            "tax is required")));
 
     NeoResponse response = InvoiceInboxConfirm.confirm(ROW_ID, null);
 
     assertRefusal(response, 422, "confirm_failed");
-    assertEquals("line 2: tax is required",
-        response.getBody().getJSONObject("error").getString("detail"));
+    org.codehaus.jettison.json.JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("line 2: tax is required", error.getString("detail"));
+    // error.code stays the envelope's own; the identifier travels next to the English detail
+    assertEquals("confirm_failed", error.getString("code"));
+    assertEquals("step_failed", error.getString("detailCode"));
+    assertEquals(2, error.getJSONObject("detailParams").getInt("n"));
+    assertEquals("line", error.getJSONObject("detailParams").getString("step"));
     verify(dal).rollbackAndClose();
-    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID, "line 2: tax is required"));
+    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(eq(ROW_ID),
+        org.mockito.ArgumentMatchers.argThat(d -> "step_failed".equals(d.code())
+            && "line 2: tax is required".equals(d.text()))));
     telemetry.verifyNoInteractions();
   }
 
@@ -403,7 +412,9 @@ class InvoiceInboxConfirmTest {
     NeoResponse response = InvoiceInboxConfirm.confirm(ROW_ID, null);
 
     assertRefusal(response, 422, "confirm_failed");
-    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID, "SIF fields are missing"));
+    failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(eq(ROW_ID),
+        org.mockito.ArgumentMatchers.argThat(d -> "refused".equals(d.code())
+            && "SIF fields are missing".equals(d.params().get("message")))));
     telemetry.verifyNoInteractions();
   }
 
@@ -423,8 +434,9 @@ class InvoiceInboxConfirmTest {
       assertRefusal(response, 422, "confirm_failed");
       assertEquals("The operation could not be completed",
           response.getBody().getJSONObject("error").getString("detail"));
-      failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(ROW_ID,
-          "The operation could not be completed"));
+      failure.verify(() -> InvoiceInboxConfirmFailure.recordFailure(eq(ROW_ID),
+          org.mockito.ArgumentMatchers.argThat(d -> "refused".equals(d.code())
+              && "The operation could not be completed".equals(d.params().get("message")))));
       assertFalse(response.getBody().toString().contains("SELECT"));
     }
   }

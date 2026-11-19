@@ -64,7 +64,7 @@ final class InvoiceInboxConfirmAttachment {
         incomingDocumentId);
     if (copy == null) {
       throw new InvoiceInboxConfirmWork.Stop(
-          InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_NO_FILE));
+          InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.NO_FILE));
     }
     try {
       NeoResponse stored = NeoAttachmentStore.store(new NeoAttachmentUpload(TABLE_NAME, invoiceId,
@@ -72,7 +72,7 @@ final class InvoiceInboxConfirmAttachment {
       if (stored.getHttpStatus() >= 400) {
         OBDal.getInstance().rollbackAndClose();
         throw new InvoiceInboxConfirmWork.Stop(
-            InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_ATTACH_FAILED));
+            InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.ATTACH_FAILED));
       }
     } finally {
       NeoAttachmentsHelper.cleanupTempFile(copy);

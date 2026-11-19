@@ -125,6 +125,7 @@ class InvoiceInboxConfirmWorkTest {
     session = mock(Session.class);
     when(dal.getSession()).thenReturn(session);
     invoice = mock(Invoice.class);
+    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("12.10"));
     when(dal.get(Invoice.class, "REC-inv")).thenReturn(invoice);
     dalStatic = mockStatic(OBDal.class);
     dalStatic.when(OBDal::getInstance).thenReturn(dal);
@@ -287,12 +288,23 @@ class InvoiceInboxConfirmWorkTest {
   }
 
   @Test
+  @DisplayName("an invoice without a grand total leaves the list total of the row as it was")
+  void aMissingInvoiceGrandTotalKeepsTheListTotal() throws Exception {
+    when(invoice.getGrandTotalAmount()).thenReturn(null);
+
+    run(document(LINKED, EXISTING_LINE));
+
+    verify(row, never()).setGrandTotalAmount(any());
+  }
+
+  @Test
   @DisplayName("everything is written before the completion: file attached, row linked CONFIRMED, then completed once")
   void theOrderOfTheUnit() throws Exception {
     run(document(LINKED, EXISTING_LINE));
 
     InOrder order = inOrder(dal, row);
     order.verify(row).setInvoice(invoice);
+    order.verify(row).setGrandTotalAmount(new BigDecimal("12.10"));
     order.verify(row).setStatus("CONFIRMED");
     order.verify(row).setErrorCode(null);
     order.verify(row).setErrorDetail(null);
@@ -326,6 +338,7 @@ class InvoiceInboxConfirmWorkTest {
         () -> InvoiceInboxConfirmWork.run(row, document(LINKED, EXISTING_LINE), Optional.empty()));
 
     assertTrue(stop.getMessage().contains("no lookups for the document type"));
+    assertEquals("no_lookups", stop.detail().code());
     assertTrue(batches.isEmpty());
   }
 
@@ -394,6 +407,7 @@ class InvoiceInboxConfirmWorkTest {
         () -> run(document(LINKED, NEW_PRODUCT_LINE)));
 
     assertTrue(stop.getMessage().contains("no document sequence"));
+    assertEquals("no_product_sequence", stop.detail().code());
   }
 
   @Test
@@ -417,6 +431,7 @@ class InvoiceInboxConfirmWorkTest {
     InvoiceInboxConfirmWork.Stop stop = assertThrows(InvoiceInboxConfirmWork.Stop.class,
         () -> run(document(NEW_VENDOR, EXISTING_LINE)));
     assertTrue(stop.getMessage().contains("Proveedor"), stop.getMessage());
+    assertEquals("no_vendor_category", stop.detail().code());
     assertTrue(batches.isEmpty());
 
     flagOn = false;
@@ -499,8 +514,9 @@ class InvoiceInboxConfirmWorkTest {
   @Test
   @DisplayName("a refused creation names the step: the new vendor, its address, a product by name, the header, a line")
   void aRefusedCreationNamesTheStep() throws Exception {
-    String[][] cases = { { "bp", "new vendor" }, { "loc", "new vendor address" },
-        { "p0", "new product 'Arandela M8'" } };
+    String[][] cases = { { "bp", "new vendor", "vendor" },
+        { "loc", "new vendor address", "vendorAddress" },
+        { "p0", "new product 'Arandela M8'", "product" } };
     for (String[] c : cases) {
       batches.clear();
       batchFailures.clear();
@@ -510,6 +526,9 @@ class InvoiceInboxConfirmWorkTest {
           () -> run(document(NEW_VENDOR, NEW_PRODUCT_LINE)));
 
       assertEquals(c[1] + ": Name is required", stop.getMessage());
+      assertEquals("step_failed", stop.detail().code());
+      assertEquals(c[2], stop.detail().params().get("step"));
+      assertEquals("Name is required", stop.detail().params().get("reason"));
       assertNull(stop.refusal());
     }
   }
@@ -523,6 +542,9 @@ class InvoiceInboxConfirmWorkTest {
     InvoiceInboxConfirmWork.Stop line = assertThrows(InvoiceInboxConfirmWork.Stop.class,
         () -> run(document(LINKED, EXISTING_LINE, EXISTING_LINE.replace("index:0", "index:1"))));
     assertEquals("line 2: Required fields are missing (unitPrice, tax)", line.getMessage());
+    assertEquals(2, line.detail().params().get("n"));
+    assertEquals(java.util.List.of("unitPrice", "tax"), line.detail().params().get("missing"));
+    assertEquals("Required fields are missing", line.detail().params().get("reason"));
 
     batches.clear();
     batchFailures.clear();
@@ -530,6 +552,7 @@ class InvoiceInboxConfirmWorkTest {
     InvoiceInboxConfirmWork.Stop header = assertThrows(InvoiceInboxConfirmWork.Stop.class,
         () -> run(document(LINKED, EXISTING_LINE)));
     assertEquals("invoice header: Currency is not valid", header.getMessage());
+    assertEquals("header", header.detail().params().get("step"));
     completion.verifyNoInteractions();
   }
 
@@ -542,6 +565,8 @@ class InvoiceInboxConfirmWorkTest {
         () -> run(document(LINKED, NEW_PRODUCT_LINE)));
 
     assertTrue(stop.getMessage().endsWith("the search key already exists"), stop.getMessage());
+    assertEquals("search_key_exists", stop.detail().code());
+    assertEquals("product", stop.detail().params().get("step"));
     completion.verifyNoInteractions();
     verify(row, never()).setStatus(anyString());
   }
@@ -551,16 +576,22 @@ class InvoiceInboxConfirmWorkTest {
   void stepLabelAndReason() throws Exception {
     JSONArray ops = new JSONArray().put(new JSONObject().put("id", "p3")
         .put("body", new JSONObject().put("name", "Cable")));
-    assertEquals("new vendor", InvoiceInboxConfirmWork.stepLabel(failureOf("bp", "x", null), ops));
-    assertEquals("invoice header",
-        InvoiceInboxConfirmWork.stepLabel(failureOf("inv", "x", null), ops));
-    assertEquals("line 8", InvoiceInboxConfirmWork.stepLabel(failureOf("ln7", "x", null), ops));
-    assertEquals("new product 'Cable'",
-        InvoiceInboxConfirmWork.stepLabel(failureOf("p3", "x", null), ops));
-    assertEquals("new product 'p9'",
-        InvoiceInboxConfirmWork.stepLabel(failureOf("p9", "x", null), ops));
-    assertEquals("creation", InvoiceInboxConfirmWork.stepLabel(failureOf("zzz", "x", null), ops));
-    assertEquals("creation", InvoiceInboxConfirmWork.stepLabel(new JSONObject(), ops));
+    assertEquals(java.util.Map.of("step", "vendor"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("bp", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "vendorAddress"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("loc", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "header"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("inv", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "line", "n", 8),
+        InvoiceInboxConfirmWork.stepParams(failureOf("ln7", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "product", "name", "Cable"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("p3", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "product", "name", "p9"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("p9", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "creation"),
+        InvoiceInboxConfirmWork.stepParams(failureOf("zzz", "x", null), ops));
+    assertEquals(java.util.Map.of("step", "creation"),
+        InvoiceInboxConfirmWork.stepParams(new JSONObject(), ops));
 
     assertEquals("nested", InvoiceInboxConfirmWork.reasonOf(failureOf("bp", "nested", null)));
     assertEquals("The creation was refused", InvoiceInboxConfirmWork.reasonOf(new JSONObject()));
@@ -582,6 +613,8 @@ class InvoiceInboxConfirmWorkTest {
         () -> run(document(LINKED, EXISTING_LINE)));
 
     assertEquals("Period is closed", stop.getMessage());
+    assertEquals("refused", stop.detail().code());
+    assertEquals("Period is closed", stop.detail().params().get("message"));
     scope.verify(NeoBatchScope::runAfterCommitActions, never());
   }
 
@@ -596,6 +629,7 @@ class InvoiceInboxConfirmWorkTest {
 
     assertFalse(stop.getMessage().contains("violates"), stop.getMessage());
     assertTrue(stop.getMessage().contains("could not be completed"), stop.getMessage());
+    assertEquals("completion_error", stop.detail().code());
   }
 
   @Test
@@ -616,7 +650,8 @@ class InvoiceInboxConfirmWorkTest {
   @DisplayName("a divergence the verification finds stops before the file is attached or the row linked")
   void aVerificationStopComesFirst() throws Exception {
     totalsVerify.when(() -> InvoiceInboxConfirmVerify.verify(any(), any(), any()))
-        .thenThrow(new InvoiceInboxConfirmWork.Stop("Internal totals divergence"));
+        .thenThrow(new InvoiceInboxConfirmWork.Stop(InvoiceInboxFailureDetail.of(
+            InvoiceInboxFailureDetail.TOTAL_MISMATCH, "invoice", "1", "document", "2")));
 
     assertThrows(InvoiceInboxConfirmWork.Stop.class, () -> run(document(LINKED, EXISTING_LINE)));
 

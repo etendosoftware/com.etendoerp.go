@@ -165,6 +165,14 @@ final class InvoiceInboxReview {
     }
   }
 
+  /**
+   * The grand total of the linked invoice read now (so rows confirmed before the list column was
+   * kept equal to it also answer it), {@code null} when the engine has not set one.
+   */
+  private static Object grandTotal(Invoice invoice) {
+    return invoice.getGrandTotalAmount() == null ? JSONObject.NULL : invoice.getGrandTotalAmount();
+  }
+
   private static JSONObject answer(IncomingDocument row) throws JSONException {
     String status = row.getStatus();
     String errorCode = row.getErrorCode();
@@ -175,6 +183,12 @@ final class InvoiceInboxReview {
     out.put("errorCode", errorCode == null ? JSONObject.NULL : errorCode);
     if (!StringUtils.isBlank(row.getErrorDetail())) {
       out.put("errorDetail", row.getErrorDetail());
+      Optional<InvoiceInboxFailureDetail.Detail> info =
+          InvoiceInboxFailureDetail.parse(row.getErrorDetail());
+      if (info.isPresent()) {
+        out.put("errorInfo", new JSONObject().put("code", info.get().code())
+            .put("params", info.get().paramsJson()));
+      }
     }
     out.put("reviewed", Boolean.TRUE.equals(row.isReviewed()));
     out.put("adjusted", Boolean.TRUE.equals(row.isAdjusted()));
@@ -187,7 +201,8 @@ final class InvoiceInboxReview {
     out.put("invoice", invoice == null ? JSONObject.NULL
         : new JSONObject().put("id", invoice.getId())
             .put("documentNo", StringUtils.defaultString(invoice.getDocumentNo()))
-            .put("identifier", invoice.getIdentifier()));
+            .put("identifier", invoice.getIdentifier())
+            .put("grandTotal", grandTotal(invoice)));
     out.put("attachment", attachment(row.getId()));
     JSONObject document = document(row);
     out.put("currency", currency(row, document));

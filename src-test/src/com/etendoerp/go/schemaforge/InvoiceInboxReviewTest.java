@@ -226,8 +226,12 @@ class InvoiceInboxReviewTest {
     when(invoice.getDocumentNo()).thenReturn("F-001");
     when(invoice.getIdentifier()).thenReturn("F-001 - 2026-01-01 - 10.00");
     when(row.getInvoice()).thenReturn(invoice);
+    assertTrue(ok().getJSONObject("invoice").isNull("grandTotal"));
+    when(invoice.getGrandTotalAmount()).thenReturn(new java.math.BigDecimal("217.80"));
 
     JSONObject out = ok().getJSONObject("invoice");
+    assertEquals(0, new java.math.BigDecimal("217.80").compareTo(
+        new java.math.BigDecimal(out.get("grandTotal").toString())));
     assertEquals("INV-1", out.getString("id"));
     assertEquals("F-001", out.getString("documentNo"));
     assertEquals("F-001 - 2026-01-01 - 10.00", out.getString("identifier"));
@@ -390,11 +394,40 @@ class InvoiceInboxReviewTest {
   // ------------------------------------------------------------------ ETP-6051: the confirm failure and the warning
 
   @Test
+  void aStoredIdentifierIsAnsweredRawAndAsErrorInfo() throws Exception {
+    String stored = InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.STEP_FAILED, "step",
+        "line", "n", 2, "reason", "tax is required").stored();
+    when(row.getStatus()).thenReturn("ERROR");
+    when(row.getErrorCode()).thenReturn("CONFIRM_FAILED");
+    when(row.getErrorDetail()).thenReturn(stored);
+
+    JSONObject answer = ok();
+
+    assertEquals(stored, answer.getString("errorDetail"));
+    assertEquals("step_failed", answer.getJSONObject("errorInfo").getString("code"));
+    assertEquals(2, answer.getJSONObject("errorInfo").getJSONObject("params").getInt("n"));
+  }
+
+  @Test
+  void aValueThatIsNotOurJsonGetsNoErrorInfo() throws Exception {
+    when(row.getStatus()).thenReturn("ERROR");
+    when(row.getErrorCode()).thenReturn("CONFIRM_FAILED");
+    for (String legacy : new String[] { "{not json", "{\"foo\":1}", "{\"code\":\"x\"}",
+        "{\"v\":1}", "[1]" }) {
+      when(row.getErrorDetail()).thenReturn(legacy);
+      JSONObject answer = ok();
+      assertEquals(legacy, answer.getString("errorDetail"));
+      assertFalse(answer.has("errorInfo"), legacy);
+    }
+  }
+
+  @Test
   void theErrorDetailOfAFailedConfirmationIsAnsweredOnlyWhenThereIsOne() throws Exception {
     when(row.getStatus()).thenReturn("ERROR");
     when(row.getErrorCode()).thenReturn("CONFIRM_FAILED");
     when(row.getErrorDetail()).thenReturn("line 2: tax is required");
     assertEquals("line 2: tax is required", ok().getString("errorDetail"));
+    assertFalse(ok().has("errorInfo"), "legacy free text carries no errorInfo");
 
     when(row.getErrorDetail()).thenReturn("  ");
     assertFalse(ok().has("errorDetail"));
