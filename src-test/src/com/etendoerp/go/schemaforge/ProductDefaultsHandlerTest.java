@@ -123,8 +123,9 @@ public class ProductDefaultsHandlerTest {
 
   // ── guard conditions ──────────────────────────────────────────────────────
 
+  /** A null context (no request at all) must pass through without an NPE. */
   @Test
-  public void testHandleReturnsNullForNullContext() {
+  public void testHandleToleratesNullContext() {
     assertNull(new ProductDefaultsHandler().handle(null));
   }
 

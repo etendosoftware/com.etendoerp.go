@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -109,83 +110,116 @@ public class InventoryLineHandlerTest {
 
   // ── afterCallout() guard clauses ──────────────────────────────────────────
 
-  /**
-   * afterCallout() must be a no-op when the endpoint is not CALLOUT.
-   */
-  @Test
-  public void testAfterCalloutReturnsNullForNonCalloutEndpoint() {
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  /** Callout updates as the core callout leaves them, before the warehouse-scoped override. */
+  private static JSONObject quantityUpdates() throws Exception {
+    return new JSONObject()
+        .put("bookQuantity", new JSONObject().put("value", 100.0))
+        .put("quantityCount", new JSONObject().put("value", 100.0));
+  }
+
+  /** A complete callout body: product plus the inventory the line belongs to. */
+  private static JSONObject calloutBody() throws Exception {
+    return new JSONObject().put("value", "prod-1").put("formState",
+        new JSONObject().put("physInventory", "inv-1"));
   }
 
   /**
-   * afterCallout() must return null without throwing when the request body is absent.
+   * Runs afterCallout() and asserts it bailed out before any database access, leaving the
+   * callout's updates exactly as they came in.
    */
-  @Test
-  public void testAfterCalloutReturnsNullWhenBodyIsNull() {
-    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  private static void assertAfterCalloutSkipsWithoutDatabase(NeoContext ctx, JSONObject updates) {
+    String before = updates == null ? null : updates.toString();
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(HANDLER.afterCallout(ctx));
+      obDalMock.verifyNoInteractions();
+    }
+    if (updates != null) {
+      assertEquals(before, updates.toString());
+    }
   }
 
   /**
-   * afterCallout() must return null when no previous callout result exists.
+   * afterCallout() must leave the updates alone when the endpoint is not CALLOUT, even if the
+   * rest of the context would allow the override.
    */
   @Test
-  public void testAfterCalloutReturnsNullWhenPreviousResultIsNull() throws Exception {
-    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).requestBody(
-        new JSONObject().put("value", "prod-1")).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  public void testAfterCalloutSkipsNonCalloutEndpoint() throws Exception {
+    JSONObject updates = quantityUpdates();
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(calloutBody())
+        .previousResult(NeoResponse.ok(new JSONObject().put("updates", updates))).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, updates);
   }
 
   /**
-   * afterCallout() must skip override when the updates object has no quantity fields.
+   * afterCallout() must leave the updates alone, without throwing, when the request body is absent.
    */
   @Test
-  public void testAfterCalloutReturnsNullWhenUpdatesLacksQuantityFields() throws Exception {
-    JSONObject prevBody = new JSONObject().put("updates", new JSONObject().put("someOtherField", "x"));
-    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).requestBody(
-        new JSONObject().put("value", "prod-1")).previousResult(NeoResponse.ok(prevBody)).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  public void testAfterCalloutSkipsWhenBodyIsNull() throws Exception {
+    JSONObject updates = quantityUpdates();
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .previousResult(NeoResponse.ok(new JSONObject().put("updates", updates))).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, updates);
   }
 
   /**
-   * afterCallout() must return null when the product ID value is blank.
+   * afterCallout() must not look anything up when no previous callout result exists.
    */
   @Test
-  public void testAfterCalloutReturnsNullWhenProductIdBlank() throws Exception {
-    JSONObject updates = new JSONObject().put("bookQuantity", new JSONObject().put("value", 100.0)).put("quantityCount",
-        new JSONObject().put("value", 100.0));
-    JSONObject prevBody = new JSONObject().put("updates", updates);
-    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).requestBody(
-        new JSONObject().put("value", "")).previousResult(NeoResponse.ok(prevBody)).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  public void testAfterCalloutSkipsWhenPreviousResultIsNull() throws Exception {
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(calloutBody()).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, null);
   }
 
   /**
-   * afterCallout() must return null when the body carries no formState object.
+   * afterCallout() must skip the override when the updates object has no quantity fields.
    */
   @Test
-  public void testAfterCalloutReturnsNullWhenFormStateAbsent() throws Exception {
-    JSONObject updates = new JSONObject().put("bookQuantity", new JSONObject().put("value", 100.0));
-    JSONObject prevBody = new JSONObject().put("updates", updates);
-    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).requestBody(
-        new JSONObject().put("value", "prod-1")).previousResult(NeoResponse.ok(prevBody)).build();
-    assertNull(HANDLER.afterCallout(ctx));
+  public void testAfterCalloutSkipsWhenUpdatesLacksQuantityFields() throws Exception {
+    JSONObject updates = new JSONObject().put("someOtherField", "x");
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(calloutBody())
+        .previousResult(NeoResponse.ok(new JSONObject().put("updates", updates))).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, updates);
   }
 
   /**
-   * afterCallout() must silently return null when the inventory record does not exist.
+   * afterCallout() must leave the quantities untouched when the product ID value is blank.
    */
   @Test
-  public void testAfterCalloutReturnsNullWhenInventoryNotFound() throws Exception {
-    JSONObject updates = new JSONObject().put("bookQuantity", new JSONObject().put("value", 100.0)).put("quantityCount",
-        new JSONObject().put("value", 100.0));
-    JSONObject prevBody = new JSONObject().put("updates", updates);
+  public void testAfterCalloutSkipsWhenProductIdBlank() throws Exception {
+    JSONObject updates = quantityUpdates();
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(calloutBody().put("value", ""))
+        .previousResult(NeoResponse.ok(new JSONObject().put("updates", updates))).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, updates);
+  }
+
+  /**
+   * afterCallout() must leave the quantities untouched when the body carries no formState object.
+   */
+  @Test
+  public void testAfterCalloutSkipsWhenFormStateAbsent() throws Exception {
+    JSONObject updates = quantityUpdates();
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(new JSONObject().put("value", "prod-1"))
+        .previousResult(NeoResponse.ok(new JSONObject().put("updates", updates))).build();
+    assertAfterCalloutSkipsWithoutDatabase(ctx, updates);
+  }
+
+  /**
+   * afterCallout() must keep the core callout's quantities, and never query stock, when the
+   * inventory record does not exist.
+   */
+  @Test
+  public void testAfterCalloutKeepsQuantitiesWhenInventoryNotFound() throws Exception {
+    JSONObject updates = quantityUpdates();
     JSONObject body = new JSONObject().put("value", "prod-1").put("formState",
         new JSONObject().put("physInventory", "inv-missing"));
 
     NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT).requestBody(body).previousResult(
-        NeoResponse.ok(prevBody)).build();
+        NeoResponse.ok(new JSONObject().put("updates", updates))).build();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -193,7 +227,11 @@ public class InventoryLineHandlerTest {
       when(dal.get(eq(InventoryCount.class), eq("inv-missing"))).thenReturn(null);
 
       assertNull(HANDLER.afterCallout(ctx));
+      verify(dal).get(InventoryCount.class, "inv-missing");
+      verify(dal, never()).getSession();
     }
+    assertEquals(100.0, updates.getJSONObject("bookQuantity").getDouble("value"), 0.0);
+    assertEquals(100.0, updates.getJSONObject("quantityCount").getDouble("value"), 0.0);
   }
 
   // ── queryProductStock() ───────────────────────────────────────────────────

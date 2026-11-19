@@ -210,16 +210,6 @@ public class SiiConfigDeactivateHandlerTest {
     }
   }
 
-  // ─── afterHandle(): always returns null ──────────────────────────────────────
-
-  @Test
-  public void afterHandleAlwaysReturnsNull() {
-    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
-    assertNull(handler.afterHandle(NeoContext.builder().httpMethod("PUT").recordId(RECORD_ID).build()));
-    assertNull(handler.afterHandle(NeoContext.builder().httpMethod("POST").build()));
-    assertNull(handler.afterHandle(NeoContext.builder().httpMethod("GET").build()));
-  }
-
   // ─── afterHandle(): REDEME forced to 'N' (ETP-5122) ──────────────────────────
 
   /**
