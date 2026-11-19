@@ -20,10 +20,15 @@ package com.etendoerp.go.schemaforge;
 import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 
 /**
  * What a NEW vendor is created with when an inbox document is confirmed (ETP-6051): the Java twin of
@@ -56,6 +61,18 @@ final class InvoiceInboxConfirmSeeds {
 
   /** The labels that identify the default country, as {@code DEFAULT_COUNTRY_LABEL_ALIASES}. */
   private static final List<String> DEFAULT_COUNTRY_ALIASES = List.of("espana", "spain");
+
+  /**
+   * Matches "Street[,] Number" — the overwhelmingly common order in the Spanish/European invoices
+   * this flow handles (e.g. {@code "Calle Mayor 45"}, {@code "Av. Libertador 1234"}). The number
+   * token may carry a single trailing letter (e.g. {@code "45B"}).
+   */
+  private static final Pattern TRAILING_NUMBER =
+      Pattern.compile("(?s)(.+?)[\\s,]+(\\d+[A-Za-z]?)\\s*$");
+
+  /** Matches "Number[,] Street" — the less common but still realistic reverse order. */
+  private static final Pattern LEADING_NUMBER =
+      Pattern.compile("(?s)^\\s*(\\d+[A-Za-z]?)[\\s,]+(.+)$");
 
   private InvoiceInboxConfirmSeeds() {
   }
@@ -160,10 +177,61 @@ final class InvoiceInboxConfirmSeeds {
    */
   static JSONObject addressBody(JSONObject extracted, String countryId) throws JSONException {
     JSONObject body = new JSONObject().put(K_COUNTRY, countryId);
-    putIfPresent(body, "addressLine1", text(extracted, K_ADDRESS));
+    String addressLine = text(extracted, K_ADDRESS);
+    putIfPresent(body, "addressLine1", addressLine);
     putIfPresent(body, K_POSTAL_CODE, text(extracted, K_POSTAL_CODE));
     putIfPresent(body, "cityName", text(extracted, K_CITY));
+    // ETP-5806 follow-up — `structured-address-for-sepa` mandatorily requires streetName,
+    // buildingNumber and cityName on every NEW C_Location, but only for the account it is enabled
+    // for (ContactsLocationAddressHandler#rejectUnusableCreatePayload). While it is off for this
+    // account that check does not run, so the pre-ETP-5806 addressLine1-only body is still
+    // perfectly valid and this parsing is skipped — not just unneeded but actively undesirable,
+    // since it would send fields the handler does not expect from an unmigrated account. While it
+    // is on, the OCR extraction only ever prints ONE combined free-text line (`vendor_address`),
+    // so it is split into street + number the same way a human reading the invoice would; a blank
+    // buildingNumber is left for StructuredAddressComposer#effectiveBuildingNumber's own "s/n"
+    // fallback rather than invented here.
+    if (StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail())) {
+      String[] streetAndNumber = splitStreetAndNumber(addressLine);
+      putIfPresent(body, "streetName", streetAndNumber[0]);
+      putIfPresent(body, "buildingNumber", streetAndNumber[1]);
+    }
     return body;
+  }
+
+  /**
+   * Splits a free-text OCR address line into a Street Name and a Building Number (ETP-5806
+   * follow-up). Pragmatic, scoped to the invoice-inbox OCR use case, not a general address parser:
+   *
+   * <ol>
+   *   <li>"Street[,] Number" (e.g. {@code "Calle Mayor 45"}) — the overwhelmingly common order for
+   *       the Spanish/European vendor addresses this flow sees.</li>
+   *   <li>"Number[,] Street" (e.g. {@code "45 Main Street"}) — the reverse order, still realistic.</li>
+   *   <li>No number token found at either end — the whole line becomes the Street Name and the
+   *       Building Number is left blank, rather than failing: a blank Building Number with a
+   *       present Street Name falls back to {@code "s/n"} downstream (see
+   *       {@link StructuredAddressComposer#effectiveBuildingNumber}).</li>
+   * </ol>
+   *
+   * @param addressLine the raw, possibly blank, printed address line
+   * @return a 2-element array: {@code [streetName, buildingNumber]}, each possibly blank, never
+   *     {@code null}
+   */
+  static String[] splitStreetAndNumber(String addressLine) {
+    String trimmed = StringUtils.trim(addressLine);
+    if (StringUtils.isBlank(trimmed)) {
+      return new String[] {"", ""};
+    }
+    Matcher trailing = TRAILING_NUMBER.matcher(trimmed);
+    if (trailing.matches()) {
+      String street = StringUtils.stripEnd(trailing.group(1).trim(), ", ");
+      return new String[] {street, trailing.group(2)};
+    }
+    Matcher leading = LEADING_NUMBER.matcher(trimmed);
+    if (leading.matches()) {
+      return new String[] {leading.group(2).trim(), leading.group(1)};
+    }
+    return new String[] {trimmed, ""};
   }
 
   /** Lowercase with the accents removed, trimmed: the comparison of a printed country. */
