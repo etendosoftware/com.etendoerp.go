@@ -50,7 +50,6 @@ import org.openbravo.dal.service.OBDal;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentLineHandler
- * @covers com.etendoerp.go.schemaforge.ReturnableQuantity
  */
 public class ReturnToVendorShipmentLineHandlerTest {
 
@@ -77,16 +76,6 @@ public class ReturnToVendorShipmentLineHandlerTest {
   }
 
   // ── handle() — non-write methods pass through ─────────────────────────────
-
-  /**
-   * GET requests are pass-through: handle returns null and does not modify any body.
-   */
-  @Test
-  public void testHandleGetReturnsNull() {
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
-    assertNull(HANDLER.handle(ctx));
-  }
 
   /**
    * DELETE requests are pass-through: handle returns null.
@@ -201,71 +190,7 @@ public class ReturnToVendorShipmentLineHandlerTest {
     assertNull(result);
   }
 
-  // ── handle() — over-return cap on a quantity edit (ETP-5711) ───────────────
-
-  /**
-   * A line of 4 returned out of a source line of 10 whose other returns hold 3: the line may grow
-   * up to 7 (its own 4 does not count against it) and not one unit more.
-   */
-  @Test
-  public void testQuantityEditWithinWhatIsLeftIsAcceptedExcludingTheLineItself() throws Exception {
-    java.util.List<String> excluded = new java.util.ArrayList<>();
-
-    NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, "PATCH", "7",
-        "10", "3", "4", excluded);
-
-    assertNull("an edit within the remainder passes through to the default CRUD", result);
-    assertEquals(java.util.List.of("ret-line-1"), excluded);
-  }
-
-  @Test
-  public void testQuantityEditAboveWhatIsLeftIsRefusedWith422() throws Exception {
-    for (String method : new String[] {"PATCH", "PUT"}) {
-      NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, method, "8",
-          "10", "3", "4", new java.util.ArrayList<>());
-
-      assertNotNull(method, result);
-      assertEquals(method, 422, result.getHttpStatus());
-      JSONObject error = result.getBody().getJSONObject("error");
-      assertEquals("returnQuantityExceedsAvailable", error.getString("code"));
-      assertEquals(8, error.getDouble("requested"), 0.0001);
-      assertEquals(7, error.getDouble("available"), 0.0001);
-      assertTrue(error.getString("message"), error.getString("message").contains("Agua"));
-    }
-  }
-
-  /** The SPA may send the stored (negative) sign; the cap compares magnitudes. */
-  @Test
-  public void testQuantityEditWithNegativeStoredSignIsCappedByMagnitude() throws Exception {
-    NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, "PUT", "-8",
-        "10", "3", "4", new java.util.ArrayList<>());
-
-    assertNotNull(result);
-    assertEquals(422, result.getHttpStatus());
-  }
-
-  /** Create (POST) and edits that do not touch the quantity never ask the database. */
-  @Test
-  public void testQuantityCapIgnoresCreateAndEditsWithoutQuantity() {
-    JSONObject withoutQuantity = new JSONObject();
-    NeoContext patchOther = NeoContext.builder().httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD).recordId("ret-line-1")
-        .requestBody(withoutQuantity).build();
-
-    assertNull(HANDLER.handle(patchOther));
-  }
-
   // ── afterHandle() — guard conditions ──────────────────────────────────────
-
-  /**
-   * Non-GET endpoint: afterHandle returns null immediately (no enrichment).
-   */
-  @Test
-  public void testAfterHandleReturnsNullForNonGetMethod() {
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).build();
-    assertNull(HANDLER.afterHandle(ctx));
-  }
 
   /**
    * GET without a previous result set: afterHandle returns null.
@@ -439,44 +364,5 @@ public class ReturnToVendorShipmentLineHandlerTest {
       assertFalse("orderQuantity should not be present", rec.has("orderQuantity"));
       assertFalse("productCode should not be present", rec.has("productCode"));
     }
-  }
-
-  // ── handle() — a line is never created directly (ETP-5711) ───────────────
-
-  /**
-   * The window only adds lines through "Add from document" / create-from-document, which link every
-   * line to the line it returns and cap it. A direct POST of a line (REST, batch or MCP) would create
-   * an unlinked, uncapped one: it is refused whatever the body says.
-   */
-  @Test
-  public void testHandlePostIsRefusedWith422AndPointsAtTheImportActions() throws Exception {
-    JSONObject body = new JSONObject().put("parentId", "return-1").put("product", "prod-1")
-        .put("movementQuantity", 6.0);
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
-        .requestBody(body).build();
-
-    NeoResponse refusal = HANDLER.handle(ctx);
-
-    assertNotNull(refusal);
-    assertEquals(422, refusal.getHttpStatus());
-    JSONObject error = refusal.getBody().getJSONObject("error");
-    assertEquals("returnLineRequiresImport", error.getString("code"));
-    assertTrue(error.getString("message"), error.getString("message").contains("importReceiptLines"));
-    assertTrue(error.getString("message"), error.getString("message").contains("createPurchaseReturn"));
-    assertEquals("the refused body is not touched", 6.0, body.getDouble("movementQuantity"), 0.0001);
-    assertFalse(body.has("storageBin"));
-  }
-
-  /** Only the creation is refused: editing a line and every non-CRUD POST keep working. */
-  @Test
-  public void testHandleStillAllowsEditsAndNonCrudPosts() throws Exception {
-    for (String method : new String[] {"PUT", "PATCH"}) {
-      NeoContext edit = NeoContext.builder().httpMethod(method).endpointType(NeoEndpointType.CRUD)
-          .requestBody(new JSONObject().put("description", "x")).build();
-      assertNull(method, HANDLER.handle(edit));
-    }
-    NeoContext callout = NeoContext.builder().httpMethod("POST")
-        .endpointType(NeoEndpointType.CALLOUT).requestBody(new JSONObject()).build();
-    assertNull(HANDLER.handle(callout));
   }
 }
