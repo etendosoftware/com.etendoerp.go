@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -618,7 +619,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String DRAFT_INVOICES_HOLDING_LINES_HQL = "select ml.id, i.documentNo "
       + "from MaterialMgmtShipmentInOutLine ml, InvoiceLine il join il.invoice i "
       + "where ml.shipmentReceipt.id = :io and ml.active = true and il.active = true "
-      + "and i.documentStatus = 'DR' and i.id <> :inv and i.client.id = :client "
+      + "and i.active = true and i.documentStatus = 'DR' and i.id <> :inv "
+      + "and i.client.id = :client "
       + "and i.organization.id in (:orgs) and (il.goodsShipmentLine.id = ml.id "
       + "or (ml.salesOrderLine is not null and il.salesOrderLine.id = ml.salesOrderLine.id)) "
       + "group by ml.id, i.documentNo order by i.documentNo";
@@ -638,8 +640,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         .list();
     Map<String, Set<String>> holders = new LinkedHashMap<>();
     for (Object[] row : rows) {
-      holders.computeIfAbsent((String) row[0], k -> new java.util.LinkedHashSet<>())
-          .add((String) row[1]);
+      holders.computeIfAbsent((String) row[0], k -> new LinkedHashSet<>()).add((String) row[1]);
     }
     return holders;
   }

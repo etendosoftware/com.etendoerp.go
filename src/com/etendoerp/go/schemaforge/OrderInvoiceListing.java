@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -102,7 +103,7 @@ final class OrderInvoiceListing {
       return order -> isReturn(order) ? Map.of() : handler.pendingToInvoice(order, false);
     }
     Map<String, Map<String, BigDecimal>> baseByOrder = new HashMap<>();
-    Set<String> lineIds = new java.util.LinkedHashSet<>();
+    Set<String> lineIds = new LinkedHashSet<>();
     for (Order candidate : candidates) {
       if (!isReturn(candidate)) {
         Map<String, BigDecimal> base = OrderInvoicePending.beforeDrafts(candidate);
