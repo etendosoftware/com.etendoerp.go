@@ -291,28 +291,29 @@ public class NeoWritePreflightTest {
   }
 
   /**
-   * ETP-5880: another tenant's id is refused with the guard's 404 on every record write verb,
-   * before any reference check, so it never reaches a customization or the {@code updated} check.
+   * ETP-5880: another tenant's id is refused with the guard's 404 on PUT and PATCH (waiver-aware
+   * guard) and on DELETE (strict guard); each verb asks only its own guard.
    */
   @Test
-  public void aForeignRecordIsRefusedOnEveryWriteVerb() throws Exception {
-    for (String method : new String[] {"PUT", "PATCH", "DELETE"}) {
-      assertForeignRecordRefused(method);
-    }
-  }
-
-  private void assertForeignRecordRefused(String method) throws Exception {
-    NeoContext request = NeoContext.builder().httpMethod(method).recordId("foreign-1")
-        .requestBody(new JSONObject().put("name", "x")).adTab(adTab).sfEntity(sfEntity).build();
+  public void aForeignRecordIsRefusedByTheGuardOfItsVerb() throws Exception {
     NeoResponse notFound = NeoResponse.error(404, "Record not found");
-    targets.when(() -> NeoActionRecordGuard.updateRefusalFor(sfEntity, request))
-        .thenReturn(notFound);
+    for (String method : new String[] {"PUT", "PATCH"}) {
+      NeoContext update = NeoContext.builder().httpMethod(method).recordId("foreign-1")
+          .requestBody(new JSONObject().put("name", "x")).adTab(adTab).sfEntity(sfEntity).build();
+      targets.when(() -> NeoActionRecordGuard.updateRefusalFor(sfEntity, update))
+          .thenReturn(notFound);
+
+      assertEquals(404, NeoWritePreflight.refusalFor(update).getHttpStatus());
+    }
+    targets.verify(() -> NeoActionRecordGuard.writeRefusalFor(any(), any()), Mockito.never());
+
+    NeoContext delete = NeoContext.builder().httpMethod("DELETE").recordId("foreign-1")
+        .adTab(adTab).sfEntity(sfEntity).build();
     targets.when(() -> NeoActionRecordGuard.writeRefusalFor(sfEntity, "foreign-1"))
         .thenReturn(notFound);
 
-    NeoResponse refusal = NeoWritePreflight.refusalFor(request);
-
-    assertEquals(404, refusal.getHttpStatus());
+    assertEquals(404, NeoWritePreflight.refusalFor(delete).getHttpStatus());
+    targets.verify(() -> NeoActionRecordGuard.updateRefusalFor(any(), any()), Mockito.times(2));
     ownership.verifyNoInteractions();
   }
 
