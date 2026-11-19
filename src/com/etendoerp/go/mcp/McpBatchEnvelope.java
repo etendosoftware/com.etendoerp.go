@@ -165,8 +165,28 @@ final class McpBatchEnvelope {
     clean.put(McpConstants.KEY_ERROR, McpSupportInternals.errorCodeForStatus(status));
     clean.put(McpConstants.KEY_DETAIL, dalMessage == null ? message : message + ": " + dalMessage);
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    liftRefusalDetails(clean, detail);
     result.put(McpConstants.KEY_ERROR, clean);
     return result;
+  }
+
+  /**
+   * Keeps what the failing operation's refusal says about itself (its {@code code} and details),
+   * as {@code etendo_create} answers it. Additive: a key the envelope already has keeps its value,
+   * and the refusal's own {@code message} is left out, as the envelope states it in {@code detail}.
+   */
+  private static void liftRefusalDetails(JSONObject clean, JSONObject detail)
+      throws JSONException {
+    JSONObject nested = detail == null ? null : detail.optJSONObject(McpConstants.KEY_ERROR);
+    if (nested == null) {
+      return;
+    }
+    for (java.util.Iterator<?> keys = nested.keys(); keys.hasNext();) {
+      String key = String.valueOf(keys.next());
+      if (!McpConstants.KEY_MESSAGE.equals(key) && !clean.has(key)) {
+        clean.put(key, nested.get(key));
+      }
+    }
   }
 
   /**

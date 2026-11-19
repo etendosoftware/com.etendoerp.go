@@ -556,7 +556,7 @@ class InvoiceInboxApplyTest {
     assertEquals(12, lineAt(0).getDouble("quantity"), 0);
     // 12 x 10 + 2 x 20 = 160, tax 21 % = 33.60
     assertEquals(193.6, header().getDouble("totalAmount"), 0.0001);
-    verify(row).setGrandTotalAmount(BigDecimal.valueOf(193.6));
+    verify(row).setGrandTotalAmount(new BigDecimal("193.60"));
     assertTrue(state.adjusted);
   }
 

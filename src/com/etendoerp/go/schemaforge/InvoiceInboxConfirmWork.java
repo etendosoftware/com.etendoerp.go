@@ -90,19 +90,30 @@ final class InvoiceInboxConfirmWork {
   private static final String K_ERROR = "error";
   private static final String K_MESSAGE = "message";
 
-  /** A failure of the unit: a reason to record, or a refusal to answer as it is. */
+  /**
+   * A failure of the unit: a reason to record (an identifier with its parameters, plus its English
+   * text as the message, for the logs and the live answer), or a refusal to answer as it is.
+   */
   static final class Stop extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final transient NeoResponse refusal;
+    private final transient InvoiceInboxFailureDetail.Detail detail;
 
-    Stop(String reason) {
-      super(reason);
+    Stop(InvoiceInboxFailureDetail.Detail detail) {
+      super(detail.text());
       this.refusal = null;
+      this.detail = detail;
     }
 
     Stop(NeoResponse refusal) {
       super("refused");
       this.refusal = refusal;
+      this.detail = null;
+    }
+
+    /** Returns the reason to record, {@code null} when the failure is a refusal. */
+    InvoiceInboxFailureDetail.Detail detail() {
+      return detail;
     }
 
     /** Returns the refusal to answer as it is, {@code null} when the failure is to be recorded. */
@@ -162,8 +173,7 @@ final class InvoiceInboxConfirmWork {
    */
   static Done run(IncomingDocument row, JSONObject document, Optional<OcrLookups> lookups) {
     if (lookups.isEmpty()) {
-      throw new Stop(InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_FAILED, "reason",
-          "no lookups for the document type"));
+      throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.NO_LOOKUPS));
     }
     InvoiceInboxConfirmWork work = new InvoiceInboxConfirmWork(row, document, lookups.get());
     OBContext.setAdminMode(true);
@@ -179,7 +189,7 @@ final class InvoiceInboxConfirmWork {
       return new Done(invoiceId, adjusted, work.createdVendor, work.productIds.size(), mismatch);
     } catch (JSONException | IOException e) {
       log.warn("Inbox confirm: the unit failed: {}", e.getMessage());
-      throw new Stop(InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_COMPLETION_ERROR));
+      throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.COMPLETION_ERROR));
     } finally {
       NeoBatchScope.close(previous);
       OBContext.restorePreviousMode();
@@ -246,7 +256,7 @@ final class InvoiceInboxConfirmWork {
         row.getClient().getId());
     if (category == null && categoryType) {
       // The popup stops here too: never a customer-only contact by accident.
-      throw new Stop(InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_NO_CATEGORY));
+      throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.NO_VENDOR_CATEGORY));
     }
     ops.put(op(OP_VENDOR, SPEC_CONTACTS, K_BUSINESS_PARTNER, null, withOrganization(
         InvoiceInboxConfirmSeeds.vendorBody(extracted, categoryType, category))));
@@ -284,7 +294,7 @@ final class InvoiceInboxConfirmWork {
     String key = Utility.getDocumentNoConnection(OBDal.getInstance().getConnection(false),
         new DalConnectionProvider(false), row.getClient().getId(), "M_Product", true);
     if (StringUtils.isBlank(key)) {
-      throw new Stop("no document sequence for the search key of a new product");
+      throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.NO_PRODUCT_SEQUENCE));
     }
     return key;
   }
@@ -361,16 +371,26 @@ final class InvoiceInboxConfirmWork {
     try {
       InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, OBContext.getOBContext());
     } catch (OBException e) {
-      throw new Stop(e.getMessage());
+      // The message is built by the completion (already translated): it cannot be an identifier.
+      throw new Stop(InvoiceInboxFailureDetail.ofRefusal(e.getMessage()));
     } catch (IllegalStateException e) {
       log.warn("Inbox confirm: the completion failed: {}", e.getMessage());
-      throw new Stop(InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_COMPLETION_ERROR));
+      throw new Stop(InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.COMPLETION_ERROR));
     }
   }
 
-  /** The row now points at its invoice and is CONFIRMED; rolled back with everything on a failure. */
+  /**
+   * The row now points at its invoice and is CONFIRMED; rolled back with everything on a failure.
+   * Its list total becomes the invoice's grand total (the document's printed total can differ from
+   * what was created); nothing rewrites the column afterwards: {@code syncFrom} only runs for rows
+   * still being processed or edited. {@code TOTAL_MISMATCH} is left as it was (it records that the
+   * document diverged, and nothing reads it for a confirmed row).
+   */
   private void link(Invoice invoice) {
     row.setInvoice(invoice);
+    if (invoice.getGrandTotalAmount() != null) {
+      row.setGrandTotalAmount(invoice.getGrandTotalAmount());
+    }
     row.setStatus(InvoiceInboxConfirmClaim.STATUS_CONFIRMED);
     row.setErrorCode(null);
     row.setErrorDetail(null);
@@ -394,13 +414,14 @@ final class InvoiceInboxConfirmWork {
   private static Map<String, String> runOps(JSONArray ops) throws JSONException {
     JSONObject result = BatchService.forBatchOnly().executeInCallerTransaction(ops);
     if (result.has("failedAt")) {
-      String step = stepLabel(result, ops);
-      log.warn("Inbox confirm: the creation failed at {}: {}", step, result);
+      Map<String, Object> step = stepParams(result, ops);
+      String stepText = InvoiceInboxFailureDetail.stepText(step);
+      log.warn("Inbox confirm: the creation failed at {}: {}", stepText, result);
       JSONArray persisted = result.optJSONArray("persisted");
       if (persisted != null && persisted.length() > 0 || !result.optBoolean("atomic", true)) {
-        log.warn("Inbox confirm: records survived the rollback at {}: {}", step, persisted);
+        log.warn("Inbox confirm: records survived the rollback at {}: {}", stepText, persisted);
       }
-      throw new Stop(step + ": " + friendly(reasonOf(result)));
+      throw new Stop(stepFailure(step, result));
     }
     Map<String, String> ids = new HashMap<>();
     JSONArray done = result.optJSONArray("operations");
@@ -411,32 +432,54 @@ final class InvoiceInboxConfirmWork {
     return ids;
   }
 
-  /** Names the step that failed: the new vendor, its address, a new product, the header, a line. */
-  static String stepLabel(JSONObject failure, JSONArray ops) {
+  /**
+   * The step that failed as parameters: {@code step} (vendor, vendorAddress, header, line, product,
+   * creation) plus {@code n} for a line (1-based) and {@code name} for a new product.
+   */
+  static Map<String, Object> stepParams(JSONObject failure, JSONArray ops) {
     JSONObject failedAt = failure.optJSONObject("failedAt");
     String id = failedAt == null ? "" : failedAt.optString("id", "");
+    Map<String, Object> step = new java.util.LinkedHashMap<>();
     if (OP_VENDOR.equals(id)) {
-      return "new vendor";
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_VENDOR);
+    } else if (OP_ADDRESS.equals(id)) {
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_VENDOR_ADDRESS);
+    } else if (OP_INVOICE.equals(id)) {
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_HEADER);
+    } else if (id.startsWith(OP_LINE) && id.length() > OP_LINE.length()) {
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_LINE);
+      step.put(InvoiceInboxFailureDetail.P_N,
+          Integer.parseInt(id.substring(OP_LINE.length())) + 1);
+    } else if (id.startsWith(OP_PRODUCT) && id.length() > OP_PRODUCT.length()) {
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_PRODUCT);
+      step.put(InvoiceInboxFailureDetail.P_NAME, productName(ops, id));
+    } else {
+      step.put(InvoiceInboxFailureDetail.P_STEP, InvoiceInboxFailureDetail.STEP_CREATION);
     }
-    if (OP_ADDRESS.equals(id)) {
-      return "new vendor address";
-    }
-    if (OP_INVOICE.equals(id)) {
-      return "invoice header";
-    }
-    if (id.startsWith(OP_LINE) && id.length() > OP_LINE.length()) {
-      return "line " + (Integer.parseInt(id.substring(OP_LINE.length())) + 1);
-    }
-    if (id.startsWith(OP_PRODUCT) && id.length() > OP_PRODUCT.length()) {
-      return "new product '" + productName(ops, id) + "'";
-    }
-    return "creation";
+    return step;
   }
 
-  /** Names the failure of a duplicated search key; any other reason is returned as it is. */
-  private static String friendly(String reason) {
-    return reason.contains("Search Key") && reason.contains("unique")
-        ? InvoiceInboxMessages.text(InvoiceInboxMessages.CONFIRM_SEARCH_KEY_EXISTS) : reason;
+  /** The reason of a failed step: a duplicated search key has its own code, any other is raw. */
+  private static InvoiceInboxFailureDetail.Detail stepFailure(Map<String, Object> step,
+      JSONObject result) {
+    String reason = reasonOf(result);
+    Object[] params = new Object[step.size() * 2 + 4];
+    int i = 0;
+    for (Map.Entry<String, Object> entry : step.entrySet()) {
+      params[i++] = entry.getKey();
+      params[i++] = entry.getValue();
+    }
+    if (reason.contains("Search Key") && reason.contains("unique")) {
+      return InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.SEARCH_KEY_EXISTS,
+          java.util.Arrays.copyOf(params, i));
+    }
+    params[i++] = InvoiceInboxFailureDetail.P_REASON;
+    params[i++] = reason;
+    params[i++] = InvoiceInboxFailureDetail.P_MISSING;
+    List<String> missing = missingOf(result);
+    // an empty list stays out of the params, exactly as the former null did
+    params[i] = missing.isEmpty() ? null : missing;
+    return InvoiceInboxFailureDetail.of(InvoiceInboxFailureDetail.STEP_FAILED, params);
   }
 
   private static String productName(JSONArray ops, String id) {
@@ -449,18 +492,20 @@ final class InvoiceInboxConfirmWork {
     return id;
   }
 
-  /** The names of the missing fields the failed operation reported, as ": fields a, b" or empty. */
-  private static String missingFields(JSONObject detail) {
+  /** The names of the missing fields the failed operation reported; empty when none. */
+  private static List<String> missingOf(JSONObject failure) {
+    JSONObject error = failure.optJSONObject(K_ERROR);
+    JSONObject detail = error == null ? null : error.optJSONObject("detail");
     JSONObject nested = detail == null ? null : detail.optJSONObject(K_ERROR);
     JSONArray fields = nested == null ? null : nested.optJSONArray("fields");
     if (fields == null || fields.length() == 0) {
-      return "";
+      return new ArrayList<>();
     }
     List<String> names = new ArrayList<>();
     for (int i = 0; i < fields.length(); i++) {
       names.add(fields.optString(i));
     }
-    return " (" + String.join(", ", names) + ")";
+    return names;
   }
 
   /** The reason a batch failure carries: the detail of the operation, else the batch's own. */
@@ -475,6 +520,6 @@ final class InvoiceInboxConfirmWork {
     if (reason.isEmpty() && error != null) {
       reason = error.optString(K_MESSAGE, "");
     }
-    return (reason.isEmpty() ? "The creation was refused" : reason) + missingFields(detail);
+    return reason.isEmpty() ? "The creation was refused" : reason;
   }
 }

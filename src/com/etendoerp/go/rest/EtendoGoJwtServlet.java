@@ -79,6 +79,7 @@ import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.invoicing.PaymentLedger;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
@@ -566,6 +567,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
+  /** ETP-6322 — records each paid invoice for the ERP to invoice; package-visible for tests. */
+  PaymentLedger paymentLedger = new PaymentLedger();
   /**
    * ETP-5047 — one guard for the servlet's life. It reads {@link #tenantEnvironmentLifecycleService}
    * at every check, so a test that replaces that field keeps working.
@@ -2447,6 +2450,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Recorded in this event's transaction, which the result mark below commits: if applying
     // fails, it is rolled back with it and the redelivery records it again. Never throws.
     HubSpotOutbox.stripeEvent(type, event);
+    // ETP-6322 — the payment the ERP invoices, in the same transaction. Unlike the HubSpot row it
+    // may throw: the event is then marked failed and redelivered, so no payment is ever
+    // acknowledged without being kept.
+    paymentLedger.recordPayment(type, event);
     if (CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
       applyCheckoutPaid(eventId, type, event);
       return;
