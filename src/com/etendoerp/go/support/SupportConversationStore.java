@@ -46,11 +46,19 @@ interface SupportConversationStore {
    * Switches the ambient context to the request's user, role, client and organization and enters
    * admin mode on top of it.
    *
+   * @param userId   the requesting user
+   * @param roleId   the requesting role
+   * @param clientId the request's client
+   * @param orgId    the request's organization
    * @return the context to hand back to {@link #restoreTenantContext(OBContext)}
    */
   OBContext enterTenantAdminMode(String userId, String roleId, String clientId, String orgId);
 
-  /** Leaves the admin mode entered by {@link #enterTenantAdminMode} and puts back {@code previous}. */
+  /**
+   * Leaves the admin mode entered by {@link #enterTenantAdminMode} and puts back {@code previous}.
+   *
+   * @param previous the context {@link #enterTenantAdminMode} returned
+   */
   void restoreTenantContext(OBContext previous);
 
   /** Enters admin mode on the current context. Pair with {@link #restorePreviousMode()}. */
@@ -59,47 +67,122 @@ interface SupportConversationStore {
   /** Leaves the admin mode entered by {@link #enterAdminMode()}. */
   void restorePreviousMode();
 
+  /**
+   * Looks up a user.
+   *
+   * @param userId the user id
+   * @return the user, or {@code null}
+   */
   User findUser(String userId);
 
+  /**
+   * Looks up a client.
+   *
+   * @param clientId the client id
+   * @return the client, or {@code null}
+   */
   Client findClient(String clientId);
 
+  /**
+   * Looks up an organization.
+   *
+   * @param orgId the organization id
+   * @return the organization, or {@code null}
+   */
   Organization findOrganization(String orgId);
 
-  /** The conversation with this id, or {@code null}. */
+  /**
+   * Looks up a conversation.
+   *
+   * @param conversationId the conversation id
+   * @return the conversation with this id, or {@code null}
+   */
   SupportConversation findConversation(String conversationId);
 
-  /** The conversations {@code user} owns, most recent activity first. */
+  /**
+   * Lists the conversations a user owns.
+   *
+   * @param user the owner
+   * @return the conversations {@code user} owns, most recent activity first
+   */
   List<SupportConversation> listConversationsOfUser(User user);
 
-  /** Every conversation linked to {@code jiraKey}, in any client. */
+  /**
+   * Lists the conversations linked to a Jira ticket, in any client.
+   *
+   * @param jiraKey the Jira issue key
+   * @return every conversation linked to {@code jiraKey}
+   */
   List<SupportConversation> listConversationsByJiraKey(String jiraKey);
 
-  /** One conversation linked to {@code jiraKey}, in any client, or {@code null}. */
+  /**
+   * Looks up one conversation linked to a Jira ticket, in any client.
+   *
+   * @param jiraKey the Jira issue key
+   * @return one conversation linked to {@code jiraKey}, or {@code null}
+   */
   SupportConversation findConversationByJiraKey(String jiraKey);
 
-  /** The messages of a conversation, oldest first. */
+  /**
+   * Lists the messages of a conversation.
+   *
+   * @param conversationId the conversation id
+   * @return its messages, oldest first
+   */
   List<SupportMessage> listMessages(String conversationId);
 
-  /** The messages of a conversation that carry attachments, in any client. */
+  /**
+   * Lists the messages of a conversation that carry attachments, in any client.
+   *
+   * @param conversationId the conversation id
+   * @return its messages with attachments
+   */
   List<SupportMessage> listMessagesWithAttachments(String conversationId);
 
   /**
-   * The messages, in any client, whose attachments column mentions {@code jiraAttachmentId}. A
-   * cheap pre-filter: the caller confirms the match by parsing the column.
+   * Lists the messages, in any client, whose attachments column mentions
+   * {@code jiraAttachmentId}. A cheap pre-filter: the caller confirms the match by parsing the
+   * column.
+   *
+   * @param jiraAttachmentId the Jira attachment id
+   * @return the candidate messages
    */
   List<SupportMessage> listMessagesMentioningAttachment(String jiraAttachmentId);
 
-  /** The message stored for this external (Jira comment) id, in any client, or {@code null}. */
+  /**
+   * Looks up the message stored for an external (Jira comment) id, in any client.
+   *
+   * @param externalId the external id
+   * @return the message, or {@code null}
+   */
   SupportMessage findMessageByExternalId(String externalId);
 
-  /** A new, unsaved conversation. */
+  /**
+   * Creates a conversation without saving it.
+   *
+   * @return a new, unsaved conversation
+   */
   SupportConversation newConversation();
 
-  /** A new, unsaved message. */
+  /**
+   * Creates a message without saving it.
+   *
+   * @return a new, unsaved message
+   */
   SupportMessage newMessage();
 
+  /**
+   * Saves a conversation in the current transaction.
+   *
+   * @param conversation the conversation to save
+   */
   void saveConversation(SupportConversation conversation);
 
+  /**
+   * Saves a message in the current transaction.
+   *
+   * @param message the message to save
+   */
   void saveMessage(SupportMessage message);
 
   /** Writes the pending saves to the database, in the current transaction. */

@@ -592,7 +592,8 @@ class SupportIntegrationClientTest {
     void createAdkSessionPostsTheInitialState() throws Exception {
       answer(200, "{}");
 
-      SupportIntegrationClient.createAdkSession(client, ADK, "user1", "session1", "es",
+      SupportIntegrationClient.createAdkSession(
+          new SupportIntegrationClient.AdkEndpoint(client, ADK), "user1", "session1", "es",
           "user@example.com", "client1", "development");
 
       HttpRequest request = sentRequest();
@@ -612,7 +613,8 @@ class SupportIntegrationClientTest {
     void createAdkSessionWithoutEmailAndFailingCallIsSwallowed() throws Exception {
       when(client.send(any(HttpRequest.class), any())).thenThrow(new IOException("connection refused"));
 
-      SupportIntegrationClient.createAdkSession(client, ADK, "user1", "session1", "es", null,
+      SupportIntegrationClient.createAdkSession(
+          new SupportIntegrationClient.AdkEndpoint(client, ADK), "user1", "session1", "es", null,
           "client1", "development");
 
       JSONObject state = new JSONObject(bodyOf(sentRequest()));

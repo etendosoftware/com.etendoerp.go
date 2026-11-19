@@ -273,7 +273,7 @@ final class SupportJiraWebhookHandler {
         return;
       }
       Date ts = new Date();
-      insertJiraMessage(store, conv, sender, comment.authorName, text, ts, externalId, comment.attachments);
+      insertJiraMessage(store, conv, sender, comment, text, ts, externalId);
       SupportConversationsServlet.updateConvSummary(store, conv.getId(), text, ts);
       conv.setUnread(true);
       store.saveConversation(conv);
@@ -289,11 +289,13 @@ final class SupportJiraWebhookHandler {
    * as the owning conversation. {@code sender} is {@code "user"} when the comment is the
    * reporter replying to their own ticket via email/portal (see the isReporterReply check in
    * {@link #storeJiraWebhookComment}), {@code "human"} for a genuinely different support agent.
-   * {@code attachments} is the resolved {@code [{id, filename, mimeType}]} array (see
+   * The comment's {@code attachments} are the resolved {@code [{id, filename, mimeType}]} array (see
    * {@link #resolveCommentAttachments}), or {@code null} when the comment carried none — stored
    * as-is (null column), never as an empty-array string. */
   private static void insertJiraMessage(SupportConversationStore store, SupportConversation conv, String sender,
-      String authorName, String text, Date ts, String externalId, JSONArray attachments) {
+      JiraWebhookComment comment, String text, Date ts, String externalId) {
+    String authorName = comment.authorName;
+    JSONArray attachments = comment.attachments;
     User systemUser = store.findUser(SupportConversationsServlet.SYSTEM_USER_ID);
     SupportMessage msg = store.newMessage();
     msg.setNewOBObject(true);

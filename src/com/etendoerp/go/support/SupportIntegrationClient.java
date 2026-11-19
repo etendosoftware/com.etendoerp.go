@@ -123,15 +123,25 @@ final class SupportIntegrationClient {
 
   static void createAdkSession(String userId, String sessionId, String locale, String userEmail,
       String clientId, String environment) {
-    createAdkSession(HTTP_CLIENT, ADK_BASE_URL, userId, sessionId, locale, userEmail, clientId,
-        environment);
+    createAdkSession(new AdkEndpoint(HTTP_CLIENT, ADK_BASE_URL), userId, sessionId, locale,
+        userEmail, clientId, environment);
   }
 
-  /** Package-private: tests pass a stub {@code client} and the {@code adkBaseUrl} it answers for,
-   * instead of the shared client and the configured {@code support.adk.url}. */
-  static void createAdkSession(HttpClient client, String adkBaseUrl, String userId, String sessionId,
+  /**
+   * The HTTP client and the ADK base URL it calls.
+   *
+   * @param client  the client that sends the requests
+   * @param baseUrl the ADK base URL, without a trailing slash
+   */
+  record AdkEndpoint(HttpClient client, String baseUrl) {
+  }
+
+  /** Package-private: tests pass an {@code adk} endpoint with a stub client and the base URL it
+   * answers for, instead of the shared client and the configured {@code support.adk.url}. */
+  static void createAdkSession(AdkEndpoint adk, String userId, String sessionId,
       String locale, String userEmail, String clientId, String environment) {
-    String url = adkBaseUrl + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
+    HttpClient client = adk.client();
+    String url = adk.baseUrl() + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
       // The body IS the initial state dict directly — NOT wrapped in a "state" key.
       // Seeding it here (once, at session creation) is the only reliable channel:
