@@ -1573,6 +1573,23 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("etendo_delete of another tenant's id answers 404 before the hook or the delete (ETP-5880)")
+    void deleteOfForeignRecordIsRefusedBeforeAnyWork() throws Exception {
+      guardMock.when(() -> NeoActionRecordGuard.writeRefusalFor(any(SFEntity.class), anyString()))
+          .thenReturn(NeoResponse.error(404, "Record not found"));
+      JSONObject args = buildCrudArgs();
+      args.put("id", RECORD_ID);
+
+      JSONObject result = router.route("etendo_delete", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      guardMock.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, RECORD_ID));
+      dispatcherMock.verifyNoInteractions();
+      batchMock.verify(com.etendoerp.go.schemaforge.BatchService::currentJsonService, never());
+    }
+
+    @Test
     @DisplayName("a mixed body on a System row is refused before any field mapping or hook")
     void mixedBodyIsRefusedBeforeAnyWork() throws Exception {
       guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),

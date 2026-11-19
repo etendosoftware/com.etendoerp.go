@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
@@ -33,6 +35,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -47,12 +50,14 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 /**
  * Unit tests for {@link InvoicePendingResolver} (ETP-5576): the invoice eligibility rules, how a
  * row of the pending query becomes a {@link PendingResolver.SourceLine} under the shared order
- * cap, the per-invoice verdict, the direction's match table and the lock order.
+ * cap, the per-invoice verdict, the direction's match table and the lock order; and the unfloored
+ * remainder per line the shipment cap re-checks (ETP-6002 CP-30).
  *
  * <p>The direction is only ever observed through behaviour ({@code WRONG_DIRECTION}, the match
  * table the SQL reads), never through an accessor.
@@ -204,7 +209,65 @@ class InvoicePendingResolverTest {
     verify(orderLinesRs, times(3)).next();
   }
 
+  // ── remainingByLine (ETP-6002 CP-30) ──────────────────────────────────────
+
+  /**
+   * What is left of each line, by the same statement as the pending but NOT floored at 0: the
+   * smaller of the line's own remainder and the order line's, negative when either was
+   * over-moved. The shipment cap's re-check reads that excess; the pending cannot show it.
+   */
+  @Test
+  void remainingByLineKeepsTheExcessUnflooredUnderTheSameStatementAsThePending()
+      throws Exception {
+    PreparedStatement ps = prepared(rows(
+        remainingRow("il-1", "2", null),   // no order line: the line's own remainder
+        remainingRow("il-2", "-1", "5"),   // the line is over-moved: its excess shows
+        remainingRow("il-3", "3", "-2"),   // the order line is over-moved: its excess wins
+        remainingRow("il-4", "4", "1"),    // the smaller of the two
+        remainingRow(null, null, null)));  // an invoice without a candidate line lists nothing
+
+    Map<String, BigDecimal> remaining = resolver(InOutTargetBuilder.Direction.SALES)
+        .remainingByLine("inv-1");
+
+    assertEquals(4, remaining.size());
+    assertEquals(0, new BigDecimal("2").compareTo(remaining.get("il-1")));
+    assertEquals(0, new BigDecimal("-1").compareTo(remaining.get("il-2")));
+    assertEquals(0, new BigDecimal("-2").compareTo(remaining.get("il-3")));
+    assertEquals(0, new BigDecimal("1").compareTo(remaining.get("il-4")));
+    verify(conn).prepareStatement(
+        InvoicePendingResolver.pendingSql(InOutInvoiceLinks.MatchTable.SALES, 1));
+    InOrder binds = inOrder(ps);
+    binds.verify(ps).setString(1, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    binds.verify(ps).setString(2, "inv-1");
+  }
+
+  /**
+   * A failed read is thrown, never answered with an empty map: the cap reads a line absent from
+   * the map as within the cap, so an empty answer would keep a line in excess silently.
+   */
+  @Test
+  void remainingByLineThrowsWhenTheQueryFails() throws Exception {
+    SQLException cause = new SQLException("connection lost");
+    when(conn.prepareStatement(anyString())).thenThrow(cause);
+
+    OBException thrown = assertThrows(OBException.class,
+        () -> resolver(InOutTargetBuilder.Direction.SALES).remainingByLine("inv-1"));
+
+    assertSame(cause, thrown.getCause());
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
+
+  /** One row of the pending query as {@code remainingByLine} reads it. */
+  private static Map<String, Object> remainingRow(String lineId, String ownRemaining,
+      String upstreamRemaining) {
+    Map<String, Object> row = new HashMap<>();
+    row.put("c_invoiceline_id", lineId);
+    row.put("own_remaining", ownRemaining != null ? new BigDecimal(ownRemaining) : null);
+    row.put("upstream_remaining",
+        upstreamRemaining != null ? new BigDecimal(upstreamRemaining) : null);
+    return row;
+  }
 
   private static InvoicePendingResolver resolver(InOutTargetBuilder.Direction direction) {
     return new InvoicePendingResolver(direction, FAC_DOC_TYPE::equals);

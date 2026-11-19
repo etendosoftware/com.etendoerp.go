@@ -1,0 +1,979 @@
+{
+  "_comment": "ETP-6050 S2 — shared by the SPA (invoiceInboxReviewModel.test.js) and the backend (InvoiceInboxTotals JUnit). Formula: unit6 = round6(unitPrice*(1-discount/100)); net = round2(quantity*unit6); tax per rate = round2(sum(net)*rate/100); HALF_UP away from zero. Lines without taxRate add to the base only. Expected values are exact decimal STRINGS (unit6 with 6 decimals, money with 2). Rate rule (both sides): effective rate = the line's taxRate, else tax.rate of its resolved tax block; rounded HALF_UP to 2 decimals BEFORE grouping by rate and computing the tax; no rate at all = base only. Optional per case: `scale` (decimals of the document currency, default 2: money strings, nets, bases and amounts use it; unit6 stays 6). Optional per line: tax.docTaxAmount 'D' (default: tax once per rate on the sum of the nets) or 'L' (tax of each line rounded and summed). Expected taxes rows: one per (rate, mode), ascending by rate, D before L, with `docTaxAmount` when 'L'.",
+  "cases": [
+    {
+      "name": "no discount, one rate",
+      "lines": [
+        {
+          "quantity": 2,
+          "unitPrice": 10,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "10.000000",
+            "net": "20.00"
+          }
+        ],
+        "base": "20.00",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "20.00",
+            "amount": "4.20"
+          }
+        ],
+        "linesTotal": "24.20"
+      }
+    },
+    {
+      "name": "plain 10 percent discount",
+      "lines": [
+        {
+          "quantity": 3,
+          "unitPrice": 100,
+          "discount": 10,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "90.000000",
+            "net": "270.00"
+          }
+        ],
+        "base": "270.00",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "270.00",
+            "amount": "56.70"
+          }
+        ],
+        "linesTotal": "326.70"
+      }
+    },
+    {
+      "name": "two rates and a line without rate",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 33.33,
+          "taxRate": 21
+        },
+        {
+          "quantity": 2,
+          "unitPrice": 12.5,
+          "taxRate": 10
+        },
+        {
+          "quantity": 4,
+          "unitPrice": 1.1
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "33.330000",
+            "net": "33.33"
+          },
+          {
+            "unit6": "12.500000",
+            "net": "25.00"
+          },
+          {
+            "unit6": "1.100000",
+            "net": "4.40"
+          }
+        ],
+        "base": "62.73",
+        "taxes": [
+          {
+            "rate": 10,
+            "base": "25.00",
+            "amount": "2.50"
+          },
+          {
+            "rate": 21,
+            "base": "33.33",
+            "amount": "7.00"
+          }
+        ],
+        "linesTotal": "72.23"
+      }
+    },
+    {
+      "name": "half-cent line rounds away from zero",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 0.125,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.125000",
+            "net": "0.13"
+          }
+        ],
+        "base": "0.13",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "0.13",
+            "amount": "0.03"
+          }
+        ],
+        "linesTotal": "0.16"
+      }
+    },
+    {
+      "name": "negative twin of the half-cent line",
+      "lines": [
+        {
+          "quantity": -1,
+          "unitPrice": 0.125,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.125000",
+            "net": "-0.13"
+          }
+        ],
+        "base": "-0.13",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "-0.13",
+            "amount": "-0.03"
+          }
+        ],
+        "linesTotal": "-0.16"
+      }
+    },
+    {
+      "name": "discount absent",
+      "lines": [
+        {
+          "quantity": 5,
+          "unitPrice": 9.99,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "9.990000",
+            "net": "49.95"
+          }
+        ],
+        "base": "49.95",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "49.95",
+            "amount": "10.49"
+          }
+        ],
+        "linesTotal": "60.44"
+      }
+    },
+    {
+      "name": "discount explicit zero equals absent",
+      "lines": [
+        {
+          "quantity": 5,
+          "unitPrice": 9.99,
+          "discount": 0,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "9.990000",
+            "net": "49.95"
+          }
+        ],
+        "base": "49.95",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "49.95",
+            "amount": "10.49"
+          }
+        ],
+        "linesTotal": "60.44"
+      }
+    },
+    {
+      "name": "tax rounded per rate on the sum of nets",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 0.05,
+          "taxRate": 21
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.05,
+          "taxRate": 21
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.05,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.050000",
+            "net": "0.05"
+          },
+          {
+            "unit6": "0.050000",
+            "net": "0.05"
+          },
+          {
+            "unit6": "0.050000",
+            "net": "0.05"
+          }
+        ],
+        "base": "0.15",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "0.15",
+            "amount": "0.03"
+          }
+        ],
+        "linesTotal": "0.18"
+      }
+    },
+    {
+      "name": "order case 1: two roundings, not one (3056.78)",
+      "lines": [
+        {
+          "quantity": 48324,
+          "unitPrice": 0.2771,
+          "discount": 77.1721,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.063256",
+            "net": "3056.78"
+          }
+        ],
+        "base": "3056.78",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "3056.78",
+            "amount": "641.92"
+          }
+        ],
+        "linesTotal": "3698.70"
+      }
+    },
+    {
+      "name": "order case 2: (33000.71)",
+      "lines": [
+        {
+          "quantity": 88782,
+          "unitPrice": 0.5049,
+          "discount": 26.3805,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.371705",
+            "net": "33000.71"
+          }
+        ],
+        "base": "33000.71",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "33000.71",
+            "amount": "6930.15"
+          }
+        ],
+        "linesTotal": "39930.86"
+      }
+    },
+    {
+      "name": "order case 3: (10170.65)",
+      "lines": [
+        {
+          "quantity": 80422,
+          "unitPrice": 0.3477,
+          "discount": 63.6278,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.126466",
+            "net": "10170.65"
+          }
+        ],
+        "base": "10170.65",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "10170.65",
+            "amount": "2135.84"
+          }
+        ],
+        "linesTotal": "12306.49"
+      }
+    },
+    {
+      "name": "full discount",
+      "lines": [
+        {
+          "quantity": 7,
+          "unitPrice": 3.5,
+          "discount": 100,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.000000",
+            "net": "0.00"
+          }
+        ],
+        "base": "0.00",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "0.00",
+            "amount": "0.00"
+          }
+        ],
+        "linesTotal": "0.00"
+      }
+    },
+    {
+      "name": "rate falls back to the resolved tax's rate when the line prints none",
+      "lines": [
+        {
+          "quantity": 2,
+          "unitPrice": 10,
+          "tax": {
+            "state": "resolved",
+            "rate": 21
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 5,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "10.000000",
+            "net": "20.00"
+          },
+          {
+            "unit6": "5.000000",
+            "net": "5.00"
+          }
+        ],
+        "base": "25.00",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "25.00",
+            "amount": "5.25"
+          }
+        ],
+        "linesTotal": "30.25"
+      }
+    },
+    {
+      "name": "a non-numeric taxRate (empty or text) falls back to the resolved tax's rate",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 10,
+          "taxRate": "",
+          "tax": {
+            "state": "resolved",
+            "rate": 21
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 10,
+          "taxRate": "abc",
+          "tax": {
+            "state": "resolved",
+            "rate": 21
+          }
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "10.000000",
+            "net": "10.00"
+          },
+          {
+            "unit6": "10.000000",
+            "net": "10.00"
+          }
+        ],
+        "base": "20.00",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "20.00",
+            "amount": "4.20"
+          }
+        ],
+        "linesTotal": "24.20"
+      }
+    },
+    {
+      "name": "rate rounded to two decimals before grouping (10.555 is 10.56)",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 1000,
+          "taxRate": 10.555
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "1000.000000",
+            "net": "1000.00"
+          }
+        ],
+        "base": "1000.00",
+        "taxes": [
+          {
+            "rate": 10.56,
+            "base": "1000.00",
+            "amount": "105.60"
+          }
+        ],
+        "linesTotal": "1105.60"
+      }
+    },
+    {
+      "name": "scale 0 (JPY-like): 3 x 33.5 at 21%",
+      "scale": 0,
+      "lines": [
+        {
+          "quantity": 3,
+          "unitPrice": 33.5,
+          "taxRate": 21
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "33.500000",
+            "net": "101"
+          }
+        ],
+        "base": "101",
+        "taxes": [
+          {
+            "rate": 21,
+            "base": "101",
+            "amount": "21"
+          }
+        ],
+        "linesTotal": "122"
+      }
+    },
+    {
+      "name": "scale 3 (test-only): 3 x 1.2345 at 10%",
+      "scale": 3,
+      "lines": [
+        {
+          "quantity": 3,
+          "unitPrice": 1.2345,
+          "taxRate": 10
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "1.234500",
+            "net": "3.704"
+          }
+        ],
+        "base": "3.704",
+        "taxes": [
+          {
+            "rate": 10,
+            "base": "3.704",
+            "amount": "0.370"
+          }
+        ],
+        "linesTotal": "4.074"
+      }
+    },
+    {
+      "name": "tax on the sum (D): ten lines of 0.25 at 10% give 0.25",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          }
+        ],
+        "base": "2.50",
+        "taxes": [
+          {
+            "rate": 10,
+            "base": "2.50",
+            "amount": "0.25"
+          }
+        ],
+        "linesTotal": "2.75"
+      }
+    },
+    {
+      "name": "tax per line (L): ten lines of 0.25 at 10% give 0.30",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          }
+        ],
+        "base": "2.50",
+        "taxes": [
+          {
+            "rate": 10,
+            "docTaxAmount": "L",
+            "base": "2.50",
+            "amount": "0.30"
+          }
+        ],
+        "linesTotal": "2.80"
+      }
+    },
+    {
+      "name": "mixed D and L taxes at the same rate",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "D"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 0.25,
+          "taxRate": 10,
+          "tax": {
+            "state": "resolved",
+            "docTaxAmount": "L"
+          }
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          },
+          {
+            "unit6": "0.250000",
+            "net": "0.25"
+          }
+        ],
+        "base": "1.00",
+        "taxes": [
+          {
+            "rate": 10,
+            "base": "0.50",
+            "amount": "0.05"
+          },
+          {
+            "rate": 10,
+            "docTaxAmount": "L",
+            "base": "0.50",
+            "amount": "0.06"
+          }
+        ],
+        "linesTotal": "1.11"
+      }
+    },
+    {
+      "name": "negative rates (withholding) sort numerically ascending: -10, -5, then the positive one",
+      "lines": [
+        {
+          "quantity": 1,
+          "unitPrice": 100,
+          "taxRate": 21
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 100,
+          "taxRate": -5
+        },
+        {
+          "quantity": 1,
+          "unitPrice": 100,
+          "taxRate": -10
+        }
+      ],
+      "expected": {
+        "lines": [
+          {
+            "unit6": "100.000000",
+            "net": "100.00"
+          },
+          {
+            "unit6": "100.000000",
+            "net": "100.00"
+          },
+          {
+            "unit6": "100.000000",
+            "net": "100.00"
+          }
+        ],
+        "base": "300.00",
+        "taxes": [
+          {
+            "rate": -10,
+            "base": "100.00",
+            "amount": "-10.00"
+          },
+          {
+            "rate": -5,
+            "base": "100.00",
+            "amount": "-5.00"
+          },
+          {
+            "rate": 21,
+            "base": "100.00",
+            "amount": "21.00"
+          }
+        ],
+        "linesTotal": "306.00"
+      }
+    },
+    {
+      "name": "no lines",
+      "lines": [],
+      "expected": {
+        "lines": [],
+        "base": "0",
+        "taxes": [],
+        "linesTotal": "0"
+      }
+    }
+  ]
+}
