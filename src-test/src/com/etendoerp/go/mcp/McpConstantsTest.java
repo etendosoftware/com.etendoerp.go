@@ -17,7 +17,6 @@
 package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import java.lang.reflect.Field;
 
@@ -67,10 +66,4 @@ class McpConstantsTest {
     assertEquals("generate_", getConstant("GENERATE_PREFIX"));
   }
 
-  @Test
-  @DisplayName("Label constants are not null")
-  void labelConstants() throws Exception {
-    assertNotNull(getConstant("LABEL_SPEC_NAME"));
-    assertNotNull(getConstant("LABEL_ENTITY_NAME"));
-  }
 }

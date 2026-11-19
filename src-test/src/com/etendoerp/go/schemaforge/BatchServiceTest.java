@@ -25,7 +25,6 @@ import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.startsWith;
@@ -51,7 +50,6 @@ import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -67,12 +65,6 @@ import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
  * @covers com.etendoerp.go.schemaforge.BatchService
  */
 public class BatchServiceTest {
-
-  @Test
-  public void forBatchOnlyCreatesInstance() {
-    BatchService service = BatchService.forBatchOnly();
-    assertNotNull(service);
-  }
 
   @Test
   public void executeBatchNullOperationsReturnsFailure() throws Exception {

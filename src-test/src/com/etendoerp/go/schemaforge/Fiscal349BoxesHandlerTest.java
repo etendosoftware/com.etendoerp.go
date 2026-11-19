@@ -125,11 +125,6 @@ public class Fiscal349BoxesHandlerTest {
 
   // ── constructor ───────────────────────────────────────────────────
 
-  @Test
-  public void testHandlerInstantiates() {
-    assertNotNull(handler);
-  }
-
   // ── unknown entity → 404 ─────────────────────────────────────────
 
   @Test

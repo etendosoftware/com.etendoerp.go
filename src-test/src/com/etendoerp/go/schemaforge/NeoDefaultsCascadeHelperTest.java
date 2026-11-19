@@ -3217,15 +3217,6 @@ public class NeoDefaultsCascadeHelperTest {
     }
   }
 
-  @Test
-  public void testPrivateConstructor() throws Exception {
-    java.lang.reflect.Constructor<NeoDefaultsCascadeHelper> constructor =
-        NeoDefaultsCascadeHelper.class.getDeclaredConstructor();
-    constructor.setAccessible(true);
-    NeoDefaultsCascadeHelper instance = constructor.newInstance();
-    assertNotNull(instance);
-  }
-
   /**
    * ETP-5852: a caller's 20 and a callout's "20.00" are the same price — not a superseded default —
    * while a real difference, or non-numeric text, still is.

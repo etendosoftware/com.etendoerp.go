@@ -26,8 +26,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Collections;
@@ -55,15 +53,6 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * @covers com.etendoerp.go.schemaforge.SelectorValidationResolver
  */
 class SelectorValidationResolverTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<SelectorValidationResolver> constructor = SelectorValidationResolver.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)

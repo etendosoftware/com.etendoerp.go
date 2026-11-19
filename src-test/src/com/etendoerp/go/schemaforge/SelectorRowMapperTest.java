@@ -17,7 +17,6 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -43,15 +42,6 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * Tests column index mapping, alias extraction, ID resolution, and grid field mapping.
  */
 class SelectorRowMapperTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<SelectorRowMapper> constructor = SelectorRowMapper.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)

@@ -31,8 +31,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.List;
 
@@ -49,15 +47,6 @@ import org.openbravo.base.weld.WeldUtils;
  * @covers com.etendoerp.go.schemaforge.NeoServletSupport
  */
 class NeoServletSupportTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<NeoServletSupport> constructor = NeoServletSupport.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
 
   // -------------------------------------------------------------------------

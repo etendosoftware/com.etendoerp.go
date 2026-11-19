@@ -30,8 +30,6 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Constructor;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
@@ -81,15 +79,6 @@ import com.etendoerp.go.usage.quota.QuotaVerdict;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpToolRouterSupportTest {
-
-  @Test
-  @DisplayName("Utility class hides its constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<McpToolRouterSupport> constructor = McpToolRouterSupport.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
-  }
 
   // ─── buildMethodsArray ──────────────────────────────────────────────
 

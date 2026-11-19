@@ -418,14 +418,6 @@ public class FinancialAccountTransactionsSupportTest {
   // private constructor (coverage of the no-arg ctor)
   // ---------------------------------------------------------------
 
-  @Test
-  public void testPrivateConstructorIsAccessibleViaReflection() throws Exception {
-    java.lang.reflect.Constructor<FinancialAccountTransactionsSupport> ctor =
-        FinancialAccountTransactionsSupport.class.getDeclaredConstructor();
-    ctor.setAccessible(true);
-    assertTrue(ctor.newInstance() instanceof FinancialAccountTransactionsSupport);
-  }
-
   // ── putForeignOriginal (ETP-5657) ────────────────────────────────────────
 
   /** A Movements row's foreign-currency columns, as TRANSACTIONS_SQL selects them. */

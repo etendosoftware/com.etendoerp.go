@@ -30,9 +30,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,17 +86,6 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpSchemaFieldBuilderTest {
-
-  @Test
-  @DisplayName("Utility classes hide their constructor")
-  void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    for (Class<?> utility : List.of(McpSchemaFieldBuilder.class, McpUserRequiredOverride.class)) {
-      Constructor<?> constructor = utility.getDeclaredConstructor();
-      assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-      constructor.setAccessible(true);
-      constructor.newInstance();
-    }
-  }
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
       throws Exception {

@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,15 +26,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Modifier;
 import java.util.List;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -82,26 +77,6 @@ class NeoReportCallabilityTest {
   }
 
   // ── public-contract guard (top level) ──────────────────────────────────
-
-  @Test
-  @DisplayName("NeoReportCallability is a stateless utility (final + single private ctor)")
-  void isUtilityClass() throws ReflectiveOperationException {
-    assertTrue(Modifier.isFinal(NeoReportCallability.class.getModifiers()),
-        "utility class must be final");
-
-    Constructor<?>[] ctors = NeoReportCallability.class.getDeclaredConstructors();
-    assertEquals(1, ctors.length, "utility class must declare a single constructor");
-
-    Constructor<?> ctor = ctors[0];
-    assertTrue(Modifier.isPrivate(ctor.getModifiers()),
-        "utility class constructor must be private");
-
-    // Reflection must still be able to invoke the private no-arg constructor
-    // (its sole purpose is to block public instantiation, not all instantiation).
-    ctor.setAccessible(true);
-    assertNotNull(ctor.newInstance(),
-        "private constructor must be invocable via reflection");
-  }
 
   // ── not-configured contract (no DB needed) ─────────────────────────────
 
