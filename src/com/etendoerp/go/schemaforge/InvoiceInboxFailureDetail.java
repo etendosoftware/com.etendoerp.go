@@ -157,6 +157,87 @@ final class InvoiceInboxFailureDetail {
         throw new IllegalStateException("Could not serialize the failure detail", e);
       }
     }
+
+    private static JSONObject toJson(Map<String, Object> params) {
+      JSONObject out = new JSONObject();
+      try {
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+          Object value = entry.getValue();
+          out.put(entry.getKey(), value instanceof List ? new JSONArray((List<?>) value) : value);
+        }
+      } catch (JSONException e) {
+        throw new IllegalStateException("Could not build the failure parameters", e);
+      }
+      return out;
+    }
+
+    /**
+     * The strings other than {@code except} ({@code text} stands for the text): the length of the
+     * longest and how many are as long as {@code except} is (its equals).
+     */
+    private static int[] longestOthers(JSONObject params, String text, String except)
+        throws JSONException {
+      java.util.List<Integer> lengths = new java.util.ArrayList<>();
+      int own;
+      if (K_TEXT.equals(except)) {
+        own = text.length();
+      } else {
+        own = params.getString(except).length();
+        lengths.add(text.length());
+      }
+      Iterator<?> names = params.keys();
+      while (names.hasNext()) {
+        String name = (String) names.next();
+        Object value = params.get(name);
+        if (!name.equals(except) && value instanceof String) {
+          lengths.add(((String) value).length());
+        }
+      }
+      int longest = 0;
+      int equals = 0;
+      for (int length : lengths) {
+        longest = Math.max(longest, length);
+        equals += length == own ? 1 : 0;
+      }
+      return new int[] { longest, equals };
+    }
+
+    private static String assemble(String code, JSONObject params, String text)
+        throws JSONException {
+      return new JSONObject().put(K_VERSION, VERSION).put(K_CODE, code).put(K_PARAMS, params)
+          .put(K_TEXT, text).toString();
+    }
+
+    /** The key ({@code text} for the text) of the longest shortenable string; null when none. */
+    private static String longestString(JSONObject params, String text) throws JSONException {
+      String best = text.isEmpty() ? null : K_TEXT;
+      int bestLength = text.length();
+      Iterator<?> names = params.keys();
+      while (names.hasNext()) {
+        String name = (String) names.next();
+        Object value = params.get(name);
+        if (value instanceof String && ((String) value).length() > bestLength
+            && !((String) value).isEmpty()) {
+          best = name;
+          bestLength = ((String) value).length();
+        }
+      }
+      return best;
+    }
+
+    private static String shorten(String value, int over) {
+      int target = value.length() - over - 1;
+      return target < ELLIPSIS.length() + 1 ? "" : StringUtils.abbreviate(value, target);
+    }
+
+    /** Last resort when only structure is left: the list of missing fields, then every parameter. */
+    private static JSONObject dropBulk(JSONObject params) {
+      if (params.has(P_MISSING)) {
+        params.remove(P_MISSING);
+        return params;
+      }
+      return new JSONObject();
+    }
   }
 
   /**
@@ -222,89 +303,6 @@ final class InvoiceInboxFailureDetail {
       return list;
     }
     return value;
-  }
-
-  private static JSONObject toJson(Map<String, Object> params) {
-    JSONObject out = new JSONObject();
-    try {
-      for (Map.Entry<String, Object> entry : params.entrySet()) {
-        Object value = entry.getValue();
-        out.put(entry.getKey(), value instanceof List ? new JSONArray((List<?>) value) : value);
-      }
-    } catch (JSONException e) {
-      throw new IllegalStateException("Could not build the failure parameters", e);
-    }
-    return out;
-  }
-
-  // ── Serialization that never cuts the JSON ──────────────────────────────────────────────────
-
-  /**
-   * The strings other than {@code except} ({@code text} stands for the text): the length of the
-   * longest and how many are as long as {@code except} is (its equals).
-   */
-  private static int[] longestOthers(JSONObject params, String text, String except)
-      throws JSONException {
-    java.util.List<Integer> lengths = new java.util.ArrayList<>();
-    int own;
-    if (K_TEXT.equals(except)) {
-      own = text.length();
-    } else {
-      own = params.getString(except).length();
-      lengths.add(text.length());
-    }
-    Iterator<?> names = params.keys();
-    while (names.hasNext()) {
-      String name = (String) names.next();
-      Object value = params.get(name);
-      if (!name.equals(except) && value instanceof String) {
-        lengths.add(((String) value).length());
-      }
-    }
-    int longest = 0;
-    int equals = 0;
-    for (int length : lengths) {
-      longest = Math.max(longest, length);
-      equals += length == own ? 1 : 0;
-    }
-    return new int[] { longest, equals };
-  }
-
-  private static String assemble(String code, JSONObject params, String text)
-      throws JSONException {
-    return new JSONObject().put(K_VERSION, VERSION).put(K_CODE, code).put(K_PARAMS, params)
-        .put(K_TEXT, text).toString();
-  }
-
-  /** The key ({@code text} for the text) of the longest shortenable string; null when none. */
-  private static String longestString(JSONObject params, String text) throws JSONException {
-    String best = text.isEmpty() ? null : K_TEXT;
-    int bestLength = text.length();
-    Iterator<?> names = params.keys();
-    while (names.hasNext()) {
-      String name = (String) names.next();
-      Object value = params.get(name);
-      if (value instanceof String && ((String) value).length() > bestLength
-          && !((String) value).isEmpty()) {
-        best = name;
-        bestLength = ((String) value).length();
-      }
-    }
-    return best;
-  }
-
-  private static String shorten(String value, int over) {
-    int target = value.length() - over - 1;
-    return target < ELLIPSIS.length() + 1 ? "" : StringUtils.abbreviate(value, target);
-  }
-
-  /** Last resort when only structure is left: the list of missing fields, then every parameter. */
-  private static JSONObject dropBulk(JSONObject params) {
-    if (params.has(P_MISSING)) {
-      params.remove(P_MISSING);
-      return params;
-    }
-    return new JSONObject();
   }
 
   // ── The English default text ────────────────────────────────────────────────────────────────
