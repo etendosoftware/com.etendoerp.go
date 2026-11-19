@@ -88,13 +88,15 @@ import org.openbravo.model.ad.utility.Attachment;
  *       meaningful once a parent-derivation step exists, so it belongs to ETP-4570.</li>
  * </ul>
  *
- * <h2>Why group A asserts insecure behavior</h2>
+ * <h2>What group A pins</h2>
  *
- * <p>These tests <b>pin the vulnerable contract as it exists today</b> so the
- * reproduction is repeatable in CI without a provisioned environment. They are
- * expected to <b>fail once ETP-4570 lands</b> — that is the point. The target
- * contract is expressed in group B, disabled until the fix exists. Do not "repair"
- * a group A failure by relaxing it: invert it to the group B expectation.</p>
+ * <p>These tests call {@code NeoAttachmentsHelper} and {@code NeoAttachmentsDownloader} directly,
+ * so they pin the <b>helper-level</b> behaviour, which has no authorization of its own. Since
+ * ETP-4570 the HTTP handler guards every route with {@code NeoAttachmentAuthorizer} before it
+ * reaches these methods; that guard is tested in {@code NeoAttachmentParentAuthorizationTest} and
+ * {@code NeoBuiltInEndpointHandlerTest}. Group A therefore still passes and documents why the
+ * guard must stay in the handler: any new caller of the helpers must authorize first. The former
+ * group B (disabled target contract) is implemented in those two classes.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsDownloader

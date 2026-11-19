@@ -22,12 +22,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.withSettings;
 import static org.mockito.Mockito.when;
+
+import java.util.Set;
 
 import org.junit.After;
 import org.junit.Test;
@@ -57,7 +59,7 @@ import com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer.Access;
  * point shared by list, count, main, upload, download one, download all (zip), delete, update
  * description and mark-main. S8 is S1 under a role whose readable-organization set is broad —
  * there is no administrator branch (ADR-0003 D4). The dispatcher wiring is covered by
- * {@code NeoBuiltInEndpointHandlerAttachmentAuthorizationTest}.</p>
+ * {@code NeoBuiltInEndpointHandlerTest}.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer
  */
@@ -95,7 +97,7 @@ public class NeoAttachmentParentAuthorizationTest {
   public void s8MultiOrgRoleIsAllowedThroughTheNormalPermissionModel() {
     try (Env env = new Env(parent(OWN_CLIENT, OTHER_ORG, true))) {
       env.readableOrgs = new String[] {OWN_ORG, OTHER_ORG};
-      env.writableOrgs = java.util.Set.of(OWN_ORG, OTHER_ORG);
+      env.writableOrgs = Set.of(OWN_ORG, OTHER_ORG);
       assertNotNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.READ));
       assertNotNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.WRITE));
     }
@@ -144,7 +146,7 @@ public class NeoAttachmentParentAuthorizationTest {
   @Test
   public void readableButNotWritableOrganizationCannotWrite() {
     try (Env env = new Env(parent(OWN_CLIENT, OWN_ORG, true))) {
-      env.writableOrgs = java.util.Set.of();
+      env.writableOrgs = Set.of();
       assertNotNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.READ));
       assertNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.WRITE));
     }
@@ -187,6 +189,42 @@ public class NeoAttachmentParentAuthorizationTest {
     }
   }
 
+  // ── admin mode parity, entity-less tables ──────────────────────────────────
+
+  @Test
+  public void decisionIsTheSameWithAdminModeOnAndOffAtEntry() {
+    for (boolean adminMode : new boolean[] {true, false}) {
+      try (Env env = new Env(parent(OWN_CLIENT, OWN_ORG, true))) {
+        when(env.context.isInAdministratorMode()).thenReturn(adminMode);
+        assertNotNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.READ));
+        env.entityReadable = false;
+        assertNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.READ));
+      }
+      try (Env env = new Env(parent(OTHER_CLIENT, OWN_ORG, true))) {
+        when(env.context.isInAdministratorMode()).thenReturn(adminMode);
+        assertNull(NeoAttachmentAuthorizer.authorizeById(ATT_ID, Access.READ));
+      }
+    }
+  }
+
+  /** A table with no DAL entity has no record to judge: allowed here, left to the window tier. */
+  @Test
+  public void tableWithoutDalEntityIsLeftToTheWindowTier() {
+    try (Env env = new Env(null)) {
+      when(ModelProvider.getInstance().getEntityByTableId(TABLE_ID)).thenReturn(null);
+      assertTrue(NeoAttachmentAuthorizer.authorizeByRecord(TABLE_NAME, RECORD_ID, Access.READ));
+    }
+  }
+
+  /** Blank context and unknown tables are answered by the operation itself, not authorized here. */
+  @Test
+  public void blankOrUnknownTableIsLeftToTheOperation() {
+    try (Env env = new Env(null)) {
+      assertTrue(NeoAttachmentAuthorizer.authorizeByRecord("", RECORD_ID, Access.READ));
+      assertTrue(NeoAttachmentAuthorizer.authorizeByRecord(TABLE_NAME, "", Access.READ));
+    }
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────────
 
   private static BaseOBObject parent(String clientId, String orgId, boolean active) {
@@ -215,15 +253,13 @@ public class NeoAttachmentParentAuthorizationTest {
         mockStatic(NeoAttachmentAuthorizer.class, Mockito.CALLS_REAL_METHODS);
     final Entity entity = mock(Entity.class);
     final Attachment attachment = mock(Attachment.class);
-    final BaseOBObject parent;
     boolean attachmentPresent = true;
     boolean entityReadable = true;
     boolean entityWritable = true;
     String[] readableOrgs = {OWN_ORG};
-    java.util.Set<String> writableOrgs = java.util.Set.of(OWN_ORG);
+    Set<String> writableOrgs = Set.of(OWN_ORG);
 
     Env(BaseOBObject parent) {
-      this.parent = parent;
       obDal.when(OBDal::getInstance).thenReturn(dal);
       obContext.when(OBContext::getOBContext).thenReturn(context);
       ModelProvider provider = mock(ModelProvider.class);

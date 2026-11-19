@@ -104,6 +104,8 @@ public final class NeoAttachmentAuthorizer {
   /**
    * The one answer for a nonexistent attachment and for one the caller may not reach (ADR-0003 D5):
    * same status, same body, so an id cannot be probed for existence.
+   *
+   * @return a {@code 404 Attachment not found} response
    */
   public static NeoResponse notFound() {
     return NeoResponse.error(404, NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND);
@@ -113,6 +115,8 @@ public final class NeoAttachmentAuthorizer {
    * Parent-record authorization for an operation addressed by attachment id (ETP-4570, SEC-11b).
    * The table and record are read off the stored attachment row.
    *
+   * @param attachmentId the {@code C_File_ID} taken from the request
+   * @param access       whether the operation reads or writes the parent record
    * @return the attachment, or {@code null} when it does not exist or the caller may not reach its
    *         parent record; the caller answers {@link #notFound()} for both
    */
@@ -124,6 +128,13 @@ public final class NeoAttachmentAuthorizer {
    * Same as {@link #authorizeById(String, Access)}, additionally rejecting a client-supplied
    * {@code tableName}/{@code recordId} that disagrees with the attachment's real parent. The
    * supplied values never decide anything: a mismatch is a rejection, not a fallback.
+   *
+   * @param attachmentId      the {@code C_File_ID} taken from the request
+   * @param suppliedTableName the table name the client sent, or {@code null} when none
+   * @param suppliedRecordId  the record id the client sent, or {@code null} when none
+   * @param access            whether the operation reads or writes the parent record
+   * @return the attachment, or {@code null} when it does not exist, the caller may not reach its
+   *         parent record, or the supplied context does not match it
    */
   public static Attachment authorizeById(String attachmentId, String suppliedTableName,
       String suppliedRecordId, Access access) {
@@ -136,10 +147,10 @@ public final class NeoAttachmentAuthorizer {
     }
     String tableId = attachment.getTable().getId();
     String recordId = attachment.getRecord();
-    if (suppliedTableName != null && !suppliedTableName.isEmpty() && !isSameTable(suppliedTableName, tableId)) {
+    if (StringUtils.isNotEmpty(suppliedTableName) && !isSameTable(suppliedTableName, tableId)) {
       return null;
     }
-    if (suppliedRecordId != null && !suppliedRecordId.isEmpty() && !suppliedRecordId.equals(recordId)) {
+    if (StringUtils.isNotEmpty(suppliedRecordId) && !suppliedRecordId.equals(recordId)) {
       return null;
     }
     return canAccessParent(tableId, recordId, access) ? attachment : null;
@@ -147,21 +158,33 @@ public final class NeoAttachmentAuthorizer {
 
   /**
    * Parent-record authorization for an operation addressed by table and record (list, count, main,
-   * upload, download all). An unknown table is left to the operation, which reports it itself.
+   * upload, download all).
    *
+   * <p>Three cases are left to the operation instead of denied, and none discloses data: a blank
+   * table or record, and a table name that resolves to no table, are answered by the operation
+   * itself ({@code 400} / {@code 404 Unknown table}) before it reads any attachment; a table with no
+   * DAL entity is handled in {@link #canAccessParent}.</p>
+   *
+   * @param tableName the physical table name from the request path
+   * @param recordId  the record id from the request path
+   * @param access    whether the operation reads or writes the parent record
    * @return {@code true} when the caller may perform {@code access} on that record
    */
   public static boolean authorizeByRecord(String tableName, String recordId, Access access) {
-    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
-      return true;
+    String tableId = StringUtils.isBlank(recordId) ? null : tableIdOrNull(tableName);
+    return tableId == null || canAccessParent(tableId, recordId, access);
+  }
+
+  /** The table id for a request's table name, or {@code null} when it is blank or unknown. */
+  private static String tableIdOrNull(String tableName) {
+    if (StringUtils.isBlank(tableName)) {
+      return null;
     }
-    String tableId;
     try {
-      tableId = NeoAttachmentsHelper.resolveTableId(tableName);
+      return NeoAttachmentsHelper.resolveTableId(tableName);
     } catch (OBException e) {
-      return true;
+      return null;
     }
-    return canAccessParent(tableId, recordId, access);
   }
 
   private static boolean isSameTable(String tableName, String tableId) {
@@ -192,7 +215,8 @@ public final class NeoAttachmentAuthorizer {
    * be active. Both primitives read the session's role data, which admin mode does not widen
    * ({@code EntityAccessChecker} "does not take into account admin mode"), so the surrounding
    * {@code NeoServlet} admin mode cannot weaken the decision (ADR-0003 D3). A table with no DAL
-   * entity has no record to judge and is left to the window tier.
+   * entity has no record to judge (the platform's own attach manager skips it too), so it is
+   * allowed here and left to the window tier; the decision is pinned by a test.
    */
   static boolean canAccessParent(String tableId, String recordId, Access access) {
     Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
@@ -224,16 +248,8 @@ public final class NeoAttachmentAuthorizer {
    *         itself), otherwise a {@code 403} response
    */
   public static NeoResponse checkWriteOnTable(String tableName) {
-    if (StringUtils.isBlank(tableName)) {
-      return null;
-    }
-    String tableId;
-    try {
-      tableId = NeoAttachmentsHelper.resolveTableId(tableName);
-    } catch (OBException e) {
-      return null;
-    }
-    return checkWrite(tableId);
+    String tableId = tableIdOrNull(tableName);
+    return tableId == null ? null : checkWrite(tableId);
   }
 
   /**

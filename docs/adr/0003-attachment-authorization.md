@@ -102,7 +102,11 @@ Six call sites, one policy.
 > (`notFound()`); the 403 write tier is revealed only after the parent is authorized. A supplied
 > table/record that differs from the attachment's real parent is rejected (S7). No administrator
 > branch (D4). Because those primitives read session data admin mode does not widen, the check is
-> not weakened by `NeoServlet`'s wrapper, so no nested admin-mode juggling was needed. D6: the
+> not weakened by `NeoServlet`'s wrapper. **Deferred (D3 steps 1, 4, 5):** running the authorizer
+> with admin mode off and entering admin mode only for the file operation is NOT implemented; it
+> belongs to the `NeoServlet` admin-mode follow-up (open question 1). The issue's "use admin mode
+> only in a bounded way" item is therefore only partly met. Follow-up ticket: TODO owner — none
+> exists yet. D6 departure: the
 > `setFilterOnReadableOrganization(false)` suppressions remain, since the parent record is now
 > authorized before every listing; removing them is left to a follow-up. MCP callers of the
 > helpers are not covered by this change.
