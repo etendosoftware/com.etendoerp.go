@@ -241,7 +241,8 @@ class NeoTelemetryIdentityTest {
   @Test
   void theSessionSuppliesTheUserAndClientWhenTheEventNamesNone() {
     try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
-      ob.when(OBContext::getOBContext).thenReturn(sessionContext("C1", "U1"));
+      OBContext session = sessionContext("C1", "U1");
+      ob.when(OBContext::getOBContext).thenReturn(session);
 
       NeoTelemetryIdentity identity = factsResolver().resolve(null, null);
 
@@ -254,7 +255,8 @@ class NeoTelemetryIdentityTest {
   @Test
   void theSessionUserIsNotUsedForAnotherClient() {
     try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
-      ob.when(OBContext::getOBContext).thenReturn(sessionContext("C1", "U1"));
+      OBContext session = sessionContext("C1", "U1");
+      ob.when(OBContext::getOBContext).thenReturn(session);
 
       NeoTelemetryIdentity named = factsResolver().resolve("C2", null);
       NeoTelemetryIdentity sameClient = factsResolver().resolve("C1", null);
@@ -271,7 +273,8 @@ class NeoTelemetryIdentityTest {
   @Test
   void aSystemSessionOrNoSessionCarriesNothing() {
     try (MockedStatic<OBContext> ob = Mockito.mockStatic(OBContext.class)) {
-      ob.when(OBContext::getOBContext).thenReturn(sessionContext("0", "0"));
+      OBContext session = sessionContext("0", "0");
+      ob.when(OBContext::getOBContext).thenReturn(session);
       assertSame(NeoTelemetryIdentity.NONE, factsResolver().resolve(null, null));
 
       ob.when(OBContext::getOBContext).thenReturn(null);
