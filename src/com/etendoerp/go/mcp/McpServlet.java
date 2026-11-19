@@ -503,6 +503,8 @@ public class McpServlet extends HttpServlet {
    */
   private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
       JSONObject params, JSONObject result, String forcedErrorCode) {
+    // ETP-6230: before the usage-log switch below — the KPI must not depend on it.
+    observeAccountingKpi(identity, toolName, params, result);
     try {
       if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
         return;
@@ -555,6 +557,19 @@ public class McpServlet extends HttpServlet {
     } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
       log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
     }
+  }
+
+  /** Feeds the accounting KPI telemetry (ETP-6230) with one finished tool call; never throws. */
+  private static void observeAccountingKpi(AuthIdentity identity, String toolName,
+      JSONObject params, JSONObject result) {
+    McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+    String clientId = null;
+    if (tenant != null) {
+      clientId = tenant.getClientId();
+    } else if (identity != null) {
+      clientId = identity.clientId;
+    }
+    McpAccountingKpiObserver.observe(clientId, toolName, params, result);
   }
 
   /**
@@ -665,6 +680,15 @@ public class McpServlet extends HttpServlet {
 
     // Try OAuth2 token first
     Map<String, String> tokenIdentity = OAuth2Filter.validateToken(bearerToken);
+    if (tokenIdentity != null
+        && Boolean.parseBoolean(tokenIdentity.get(OAuth2Filter.ATTR_PUBLIC_API_KEY))) {
+      // ETP-6057 — a public API key is for the public API only (counted and limited there); the
+      // same refusal OAuth2Filter answers on the filtered mappings.
+      log.warn("Refused MCP request made with a public API key token");
+      sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
+          OAuth2Filter.MSG_PUBLIC_KEY_NOT_FOR_MCP);
+      return null;
+    }
     if (tokenIdentity != null) {
       return new AuthIdentity(
           tokenIdentity.get(OAuth2Filter.ATTR_USER_ID),

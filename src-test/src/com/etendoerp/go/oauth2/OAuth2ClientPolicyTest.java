@@ -200,4 +200,42 @@ public class OAuth2ClientPolicyTest {
   public void normalizeRedirectUrisRejectsMissingRedirectUris() throws Exception {
     OAuth2ClientPolicy.normalizeRedirectUris(null);
   }
+
+  @Test
+  public void isPublicApiKeyRecognizesTheMarkerAmongOtherScopes() {
+    assertTrue(PublicApiKeyPolicy.isPublicApiKey("neo:public-api-key"));
+    assertTrue(PublicApiKeyPolicy.isPublicApiKey("etendo:read  neo:public-api-key\tetendo:write"));
+    assertTrue(PublicApiKeyPolicy.isPublicApiKey("  neo:public-api-key  "));
+  }
+
+  @Test
+  public void isPublicApiKeyRejectsNullBlankAndLookAlikes() {
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey(null));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey(""));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey("   "));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey("neo:read neo:write"));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey("neo:public-api-key-2"));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey("xneo:public-api-key"));
+    assertFalse(PublicApiKeyPolicy.isPublicApiKey("NEO:PUBLIC-API-KEY"));
+  }
+
+  @Test
+  public void carriesPublicApiMarkerSeesTheKeyAndOwnerOrgMarkersAmongOtherScopes() {
+    assertTrue(PublicApiKeyPolicy.carriesPublicApiMarker("neo:public-api-key"));
+    assertTrue(PublicApiKeyPolicy.carriesPublicApiMarker("neo:public-api-owner-org:ORG1"));
+    assertTrue(PublicApiKeyPolicy.carriesPublicApiMarker("etendo:read   neo:public-api-key"));
+    assertTrue(PublicApiKeyPolicy.carriesPublicApiMarker("  etendo:*\tneo:public-api-owner-org:X "));
+  }
+
+  @Test
+  public void carriesPublicApiMarkerIgnoresNullBlankAndLookAlikes() {
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker(null));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker(""));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("     "));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("etendo:* neo:read"));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("neo:public-api"));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("xneo:public-api-key"));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("NEO:PUBLIC-API-KEY"));
+    assertFalse(PublicApiKeyPolicy.carriesPublicApiMarker("etendo:public-api-key"));
+  }
 }

@@ -107,6 +107,9 @@ public final class CopilotOcrServiceClient implements OcrServiceClient {
     try {
       String path = upload(pdf, remaining(deadline));
       return runTool(path, type, remaining(deadline));
+    } catch (HttpStatusException e) {
+      throw new OcrUnavailableException("The extraction service did not answer.", e,
+          e.isServerSide());
     } catch (IOException | JSONException | RuntimeException e) {
       throw new OcrUnavailableException("The extraction service did not answer.", e);
     } catch (InterruptedException e) {
@@ -167,13 +170,39 @@ public final class CopilotOcrServiceClient implements OcrServiceClient {
         HttpResponse.BodyHandlers.ofInputStream());
     try (InputStream body = response.body()) {
       if (response.statusCode() < HTTP_OK_MIN || response.statusCode() > HTTP_OK_MAX) {
-        throw new IOException("The service answered with status " + response.statusCode());
+        throw new HttpStatusException(response.statusCode());
       }
       byte[] bytes = body.readNBytes(MAX_RESPONSE_BYTES + 1);
       if (bytes.length > MAX_RESPONSE_BYTES) {
         throw new IOException("The service answer is larger than " + MAX_RESPONSE_BYTES + " bytes");
       }
       return BoundedJsonParser.parseObject(new String(bytes, StandardCharsets.UTF_8));
+    }
+  }
+
+  /**
+   * The service answered with a status that is not a success. A client error (4xx) will not change on
+   * a second try; anything else (5xx and the like) may.
+   */
+  private static final class HttpStatusException extends IOException {
+
+    private static final long serialVersionUID = 1L;
+    private static final int HTTP_CLIENT_ERROR_MIN = 400;
+    private static final int HTTP_CLIENT_ERROR_MAX = 499;
+    private static final int HTTP_REQUEST_TIMEOUT = 408;
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
+
+    private final int status;
+
+    HttpStatusException(int status) {
+      super("The service answered with status " + status);
+      this.status = status;
+    }
+
+    /** Whether the failure is on the service's side, so a later attempt may succeed. */
+    boolean isServerSide() {
+      boolean clientError = status >= HTTP_CLIENT_ERROR_MIN && status <= HTTP_CLIENT_ERROR_MAX;
+      return !clientError || status == HTTP_REQUEST_TIMEOUT || status == HTTP_TOO_MANY_REQUESTS;
     }
   }
 }

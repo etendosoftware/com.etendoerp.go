@@ -49,6 +49,7 @@ import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.terms.TermsAndConditionsService;
 import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
 import com.etendoerp.go.usage.quota.QuotaEvaluator;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -115,6 +116,9 @@ final class EtendoGoJwtDalHelper {
   static final String PROPERTY_VERIFY_TOKEN_HASH = "verifyTokenHash";
   static final String PROPERTY_VERIFY_TOKEN_EXPIRES = "verifyTokenExpires";
   static final String PROPERTY_EMAIL_VERIFIED = "emailVerified";
+  /** ETP-6081 — ETGO_ACCOUNT.PHONE. */
+  static final String PROPERTY_PHONE = "phone";
+  static final String PROPERTY_SECTOR = "sector";
   // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.
@@ -364,6 +368,18 @@ final class EtendoGoJwtDalHelper {
     AccountIdentityDalHelper.link(account, provider, subject, externalEmail, loginAt);
     flushAndCommitDalChanges();
     return account;
+  }
+
+  /**
+   * ETP-6081 — stamps the terms a new account accepted at sign-up. Saved but not committed: the
+   * caller's next commit (the account's HubSpot event) carries it.
+   *
+   * @param version    the accepted version, {@code null} when none is published
+   * @param acceptedAt when it was accepted
+   */
+  static void recordTermsAcceptance(Account account, String version, Date acceptedAt) {
+    TermsAndConditionsService.recordAcceptance(account, version, acceptedAt);
+    OBDal.getInstance().save(account);
   }
 
   static void updateSessionToken(Account account, String sessionToken) {

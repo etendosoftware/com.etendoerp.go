@@ -80,6 +80,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * the old discount. Each has its own section below, with the form's own payload as a no-op row.
  *
  * @covers com.etendoerp.go.schemaforge.OrderLineDiscountSupport
+ * @covers com.etendoerp.go.schemaforge.OrderLineCreateDiscount
+ * @covers com.etendoerp.go.schemaforge.OrderLineBodyRules
  */
 class OrderLineDiscountSupportTest {
 
@@ -133,7 +135,7 @@ class OrderLineDiscountSupportTest {
   void shouldApplyDiscount(String label, String body, Object listPrice, boolean expected)
       throws Exception {
     assertEquals(expected,
-        OrderLineDiscountSupport.shouldApplyDiscount(new JSONObject(body), listPrice), label);
+        OrderLineBodyRules.shouldApplyDiscount(new JSONObject(body), listPrice), label);
   }
 
   // ── alignStandardPriceWithCurrentPrice: the callout's INPUT only ──────
@@ -785,7 +787,7 @@ class OrderLineDiscountSupportTest {
       formState.put(key, body.get(key));
     }
 
-    assertEquals(expected, OrderLineDiscountSupport.shouldDeriveDiscountFromPrice(body, formState),
+    assertEquals(expected, OrderLineBodyRules.shouldDeriveDiscountFromPrice(body, formState),
         label);
   }
 
@@ -862,6 +864,130 @@ class OrderLineDiscountSupportTest {
     return Stream.of("PATCH", "PUT");
   }
 
+  // ── CP-13: an update of the list price alone re-prices the line ───────
+
+  /**
+   * Stored Monitor line: qty 10, list 200, the row's stored discount (JSON literal, {@code null}
+   * included) and the discount expected in the body and in the callout's input, 21 % VAT. The
+   * callout answer is what
+   * {@code SL_Order_Amt}'s {@code inpdiscount} branch publishes over list 300 (gross
+   * {@code grossUnitPrice × qty} = 0 on a net list).
+   */
+  static Stream<Arguments> listPriceOnlyUpdate() {
+    return Stream.of(
+        Arguments.of("CP-13: list 200 → 300 at discount 10", "PATCH", "10", "10", "180", "270",
+            "2700", "3267.00"),
+        Arguments.of("PUT, line at discount 0", "PUT", "0", "0", "200", "300", "3000", "3630.00"),
+        Arguments.of("stored NULL discount → 0, also in the callout's input", "PATCH", "null",
+            "0", "200", "300", "3000", "3630.00"));
+  }
+
+  /**
+   * QA CP-13: {@code etendo_update listPrice:300} alone used to keep the old price (180 / 1800 /
+   * 2178). Pinned: it takes the discount re-fire with the STORED discount (written into the body,
+   * protected), and the price and amounts follow the new list price.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("listPriceOnlyUpdate")
+  void updateOfTheListPriceAloneRepricesWithTheStoredDiscount(String label, String method,
+      String storedDiscount, String expectedDiscount, String storedPrice, String expectedPrice,
+      String expectedNet, String expectedGross) throws Exception {
+    JSONObject body = new JSONObject("{\"listPrice\":300}");
+    String stored = "{\"orderedQuantity\":10,\"listPrice\":200,\"discount\":" + storedDiscount
+        + ",\"unitPrice\":" + storedPrice + ",\"standardPrice\":200,\"tax\":\"" + TAX_ID
+        + "\",\"lineNetAmount\":" + new BigDecimal(storedPrice).multiply(BigDecimal.TEN) + "}";
+    JSONObject calloutWrites = new JSONObject();
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_UNIT_PRICE, expectedPrice);
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT, expectedNet);
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT, "0");
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_DISCOUNT, "33.333333");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+    List<Object> triggers = new ArrayList<>();
+    Set<String> protectedKeys = new HashSet<>();
+    List<Object> inputStandardPrice = new ArrayList<>();
+    List<Object> inputDiscount = new ArrayList<>();
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, stored);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      cascade.when(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            JSONObject formState = inv.getArgument(2);
+            inputStandardPrice.add(formState.opt(OrderLineDiscountSupport.FIELD_STANDARD_PRICE));
+            inputDiscount.add(formState.opt(OrderLineDiscountSupport.FIELD_DISCOUNT));
+            triggers.addAll(inv.<Collection<Object>>getArgument(4));
+            protectedKeys.addAll(inv.<Set<String>>getArgument(5));
+            JSONObject target = inv.getArgument(3);
+            Iterator<String> it = calloutWrites.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              if (!protectedKeys.contains(key)) {
+                target.put(key, calloutWrites.get(key));
+              }
+            }
+            return null;
+          });
+      coercion.when(() -> NeoTypeCoercionHelper.coerceTypes(any(JSONObject.class), anyString()))
+          .thenAnswer(inv -> {
+            JSONObject data = inv.getArgument(0);
+            Iterator<String> it = data.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              data.put(key, new BigDecimal(data.getString(key)));
+            }
+            return null;
+          });
+
+      OrderLineDiscountSupport.applyLineRules(updateCtx(method, body, tab));
+    }
+
+    assertEquals(Arrays.asList(OrderLineDiscountSupport.FIELD_DISCOUNT), triggers,
+        label + ": the re-fire is for the discount");
+    assertEquals(0, new BigDecimal(storedPrice).compareTo(
+        new BigDecimal(String.valueOf(inputStandardPrice.get(0)))),
+        label + ": the callout reads the stored price as its standard price");
+    assertEquals(0, new BigDecimal(expectedDiscount).compareTo(
+        new BigDecimal(String.valueOf(inputDiscount.get(0)))),
+        label + ": the callout reads the stored discount, a NULL one as 0");
+    assertTrue(protectedKeys.contains(OrderLineDiscountSupport.FIELD_DISCOUNT),
+        label + ": the stored discount is protected");
+    assertFalse(protectedKeys.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE),
+        label + ": the price is re-derived");
+    assertAmount(label, expectedDiscount, body, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertAmount(label, "300", body, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, expectedPrice, body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedNet, body, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount(label, expectedGross, body, OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+  }
+
+  /**
+   * The form's side-panel save of "Precio" sends {@code listPrice} with the {@code unitPrice} it
+   * computed from it and the discount: the lone-list-price rule never takes it, no callout runs and
+   * no discount is added — the gross alone is derived, as before.
+   */
+  @Test
+  void listPriceWithItsComputedUnitPriceIsLeftToTheCaller() throws Exception {
+    JSONObject body = new JSONObject("{\"listPrice\":300,\"unitPrice\":270}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, "{\"orderedQuantity\":10,"
+            + "\"listPrice\":200,\"discount\":10,\"unitPrice\":180,\"tax\":\"" + TAX_ID + "\"}");
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", body, tab));
+
+      cascade.verifyNoInteractions();
+    }
+
+    assertFalse(body.has(OrderLineDiscountSupport.FIELD_DISCOUNT), "no discount is added");
+    assertAmount("unitPrice", "270", body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("lineGrossAmount", "3267.00", body,
+        OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+  }
+
   /**
    * ETP-5852: a new line priced by the agent below its list price gets the discount that price
    * implies (33 → 29.70 is 10 %), with two decimals; a price on the list, a body that already says
@@ -919,6 +1045,67 @@ class OrderLineDiscountSupportTest {
   private static NeoContext mcpCtx(String method, JSONObject body) {
     return NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod(method)
         .endpointType(NeoEndpointType.CRUD).mcpOrigin(true).requestBody(body).build();
+  }
+
+  /**
+   * ETP-5528 live pre-QA, the "lone listPrice" create: {@code etendo_create} with
+   * {@code listPrice 100} and no discount or price reached the pre-hook carrying the defaults
+   * cascade's {@code unitPrice 0} and the {@code discount 100} {@code SL_Order_Amt} derives from it,
+   * and persisted a free line. Each row is the body as the pre-hook receives it plus the keys the
+   * agent sent ({@code null}: no attribute, as on REST and {@code etendo_batch}); the first two
+   * create-side line rules then run in their {@code applyLineRules} order. No product in the body,
+   * so the price-list lookup abstains and no DAL is needed. The governed set the customization
+   * then declares is {@code discount} exactly when the reset applied or the agent sent a discount
+   * over MCP (the cascade's {@code callout:100} / {@code 67} seen live), so only that
+   * {@code supersededDefaults} entry is dropped.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("loneListPriceOnCreate")
+  void loneListPriceOnCreateIsPricedAtTheDiscountTheAgentSent(String label, String body,
+      String sent, boolean mcp, String expectedUnitPrice, String expectedDiscount,
+      String expectedGoverned) throws Exception {
+    JSONObject json = new JSONObject(body);
+    NeoContext ctx = NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).mcpOrigin(mcp).requestBody(json).build();
+    if (sent != null) {
+      ctx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, keys(sent));
+    }
+
+    OrderLineDiscountSupport.setStandardPriceOnCreate(ctx);
+    OrderLineCreateDiscount.derive(ctx);
+
+    assertAmount(label, expectedUnitPrice, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedDiscount, json, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertEquals(keys(expectedGoverned),
+        new SalesQuotationLineHandler().governedCreateFields(ctx), label + ": governed");
+  }
+
+  static Stream<Arguments> loneListPriceOnCreate() {
+    String cascaded = "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100,\"orderedQuantity\":2}";
+    return Stream.of(
+        Arguments.of("lone listPrice: the cascade's 100 % is reset, priced at the list",
+            cascaded, "listPrice,orderedQuantity,product", true, "100", "0", "discount"),
+        Arguments.of("listPrice + discount sent: priced at that discount",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":10}", "listPrice,discount", true,
+            "90", "10", "discount"),
+        Arguments.of("explicit 100 % discount sent: kept, priced at 0",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100}", "listPrice,discount", true,
+            "0", "100", "discount"),
+        Arguments.of("genuine unitPrice below list: its discount is still derived (ETP-5852)",
+            "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "listPrice,unitPrice", true,
+            "29.7", "10", ""),
+        Arguments.of("listPrice 0 sent: no reset, the line stays at 0",
+            "{\"listPrice\":0,\"unitPrice\":0,\"discount\":0}", "listPrice", true, "0", "0", ""),
+        Arguments.of("grossUnitPrice sent: no reset, the explicit gross price wins",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100,\"grossUnitPrice\":121}",
+            "listPrice,grossUnitPrice", true, "0", "100", ""),
+        Arguments.of("body already priced (non-zero unitPrice): no reset",
+            "{\"listPrice\":100,\"unitPrice\":44,\"discount\":56}", "listPrice", true, "44",
+            "56", ""),
+        Arguments.of("non-MCP context with the attribute: no reset, nothing governed",
+            cascaded, "listPrice,discount", false, "0", "100", ""),
+        Arguments.of("no client-provided attribute (REST, batch): the body is the caller's",
+            cascaded, null, true, "0", "100", ""));
   }
 
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──

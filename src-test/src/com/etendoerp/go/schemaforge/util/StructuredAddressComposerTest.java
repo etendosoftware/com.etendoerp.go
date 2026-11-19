@@ -299,6 +299,43 @@ class StructuredAddressComposerTest {
   }
 
   @Nested
+  class EffectiveBuildingNumber {
+
+    /**
+     * ETP-5806 follow-up (QA finding): a present streetName with a blank/absent buildingNumber
+     * falls back to the "s/n" convention, instead of being reported as a missing mandatory field.
+     */
+    @Test
+    void blankBuildingNumberWithStreetNamePresentFallsBackToSlashN() {
+      assertEquals("s/n",
+          StructuredAddressComposer.effectiveBuildingNumber("Gran Via", ""));
+      assertEquals("s/n",
+          StructuredAddressComposer.effectiveBuildingNumber("Gran Via", null));
+      assertEquals("s/n",
+          StructuredAddressComposer.effectiveBuildingNumber("Gran Via", "   "));
+    }
+
+    /** A non-blank buildingNumber is trimmed and returned as-is, never replaced by the fallback. */
+    @Test
+    void nonBlankBuildingNumberIsTrimmedAndKeptAsIs() {
+      assertEquals("45", StructuredAddressComposer.effectiveBuildingNumber("Gran Via", "45"));
+      assertEquals("45", StructuredAddressComposer.effectiveBuildingNumber("Gran Via", "  45  "));
+    }
+
+    /**
+     * When streetName is itself blank, no fallback is applied: the raw (blank/null)
+     * buildingNumber is returned unchanged, so streetName remains the only reported missing
+     * field — there is nothing to anchor a "no building number" convention to without a street.
+     */
+    @Test
+    void blankStreetNameLeavesBuildingNumberUnchangedNoFallbackInvented() {
+      assertNull(StructuredAddressComposer.effectiveBuildingNumber(null, null));
+      assertEquals("", StructuredAddressComposer.effectiveBuildingNumber("", ""));
+      assertEquals("   ", StructuredAddressComposer.effectiveBuildingNumber("   ", "   "));
+    }
+  }
+
+  @Nested
   class FieldsExceedingMaxLength {
 
     @Test

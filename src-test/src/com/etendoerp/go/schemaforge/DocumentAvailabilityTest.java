@@ -67,10 +67,13 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *
  * @covers com.etendoerp.go.schemaforge.DocumentAvailability
  * @covers com.etendoerp.go.schemaforge.OrderDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderDocActionPolicy
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  *
  * <p>ETP-5876 adds, per invoice, the import actions that do not suit its kind (see
@@ -195,21 +198,33 @@ class DocumentAvailabilityTest {
     }
 
     @Test
+    @DisplayName("the order reactivation reason names the linked documents, with no trailing sentence")
+    void orderReactivationReasonHasNoTrailingSentence() throws Exception {
+      try (MockedStatic<OBDal> ignored = linkedDocuments(true)) {
+        String reason = OrderDocumentAvailability.unavailable(order("CO")).get("documentAction:RE");
+
+        assertEquals(OrderDocumentAvailability.REASON_LINKED_DOCUMENTS, reason);
+        assertTrue(reason.contains("linked shipments, receipts or invoices"), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
+      }
+    }
+
+    @Test
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
-        + "out — except, on a sales order, every documentAction value but CO on a draft or "
-        + "in-progress order")
+        + "out — except, on a sales or purchase order, every documentAction value but CO on a "
+        + "draft or in-progress order")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        // ETP-5704 / ETP-6026: the sales order is an allow-list — a draft or in-progress order
-        // takes CO and nothing else; a purchase order does not opt in.
+        // ETP-5704 / ETP-6026 / ETP-6108: the sales and purchase orders are an allow-list — a
+        // draft or in-progress order takes CO and nothing else.
         for (String status : new String[] { "DR", "IP" }) {
           assertEquals(keysExcept("CO"),
               new SalesOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
-          assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order(status)).isEmpty(),
-              status);
+          assertEquals(keysExcept("CO"),
+              new PurchaseOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
         }
         assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class)).isEmpty());
         assertTrue(new SalesOrderHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
@@ -220,8 +235,8 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a completed sales order rules Close and Void out, and Reactivate too only with "
-        + "linked documents; a purchase order never rules Close or Void out")
+    @DisplayName("a completed sales or purchase order rules Close and Void out, and Reactivate "
+        + "too only with linked documents")
     void completedSalesOrderRulesOutClose() throws Exception {
       for (boolean linked : new boolean[] { false, true }) {
         try (MockedStatic<OBDal> ignored = linkedDocuments(linked)) {
@@ -240,9 +255,17 @@ class DocumentAvailabilityTest {
           assertEquals(expected, sales.keySet().stream()
               .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
               .collect(java.util.stream.Collectors.toSet()), label);
-          assertFalse(purchase.containsKey(VOID), label);
           assertEquals(linked, sales.containsKey(REACTIVATE), label);
-          assertFalse(purchase.containsKey(CLOSE), label);
+          // ETP-6108: the purchase order is the same allow-list, with its own reasons
+          assertTrue(purchase.containsKey(CLOSE), label);
+          assertTrue(purchase.containsKey(VOID), label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_CLOSE_NOT_OFFERED, purchase.get(CLOSE),
+              label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_VOID_NOT_OFFERED, purchase.get(VOID),
+              label);
+          assertEquals(expected, purchase.keySet().stream()
+              .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
+              .collect(java.util.stream.Collectors.toSet()), label);
           assertEquals(linked, purchase.containsKey(REACTIVATE), label);
         }
       }
@@ -295,9 +318,10 @@ class DocumentAvailabilityTest {
     private static final String INVOICE = "createPurchaseInvoice";
 
     private final OrderDocumentAvailability.Flow purchase =
-        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false);
+        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false, false);
     private final OrderDocumentAvailability.Flow sales =
-        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true);
+        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true,
+            true);
 
     private OrderLine line(String productId, String ordered, String invoiced) {
       OrderLine line = mock(OrderLine.class);
@@ -322,6 +346,15 @@ class DocumentAvailabilityTest {
     private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
         boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices)
         throws Exception {
+      return judge(order, flow, goodsPending, goodsDrafts, draftInvoices, Map.of());
+    }
+
+    /** Same, with what the draft invoices hold per order line (ETP-5828, the net rule). */
+    private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
+        boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices,
+        Map<String, BigDecimal> heldByDrafts) throws Exception {
+      List<Object[]> heldRows = new java.util.ArrayList<>();
+      heldByDrafts.forEach((lineId, quantity) -> heldRows.add(new Object[] { lineId, quantity }));
       try (MockedStatic<InOutLineFromOrderFactory> factory =
           mockStatic(InOutLineFromOrderFactory.class);
           MockedStatic<AbstractOrderHeaderHandler> linked =
@@ -352,6 +385,13 @@ class DocumentAvailabilityTest {
         when(query.setParameter(anyString(), any())).thenReturn(query);
         when(query.setParameterList(anyString(), anyCollection())).thenReturn(query);
         when(query.list()).thenReturn(draftInvoices);
+        @SuppressWarnings("unchecked")
+        Query<Object[]> heldQuery = mock(Query.class);
+        when(session.createQuery(OrderInvoicePending.DRAFT_QUANTITIES_HQL, Object[].class))
+            .thenReturn(heldQuery);
+        when(heldQuery.setParameter(anyString(), any())).thenReturn(heldQuery);
+        when(heldQuery.setParameterList(anyString(), anyCollection())).thenReturn(heldQuery);
+        when(heldQuery.list()).thenReturn(heldRows);
         return OrderDocumentAvailability.unavailable(order, flow);
       }
     }
@@ -375,6 +415,48 @@ class DocumentAvailabilityTest {
       assertTrue(unavailable.get(RECEIVE).contains("draft goods receipt (GR-1)"));
       assertTrue(unavailable.get(RECEIVE).contains("complete or delete it"));
       assertTrue(unavailable.get(INVOICE).contains("draft invoice (INV-D1, INV-D2)"));
+    }
+
+    @Test
+    @DisplayName("sales: a draft invoice rules invoicing out only when it holds everything left")
+    void salesDraftInvoiceRulesOutOnlyWhenItCoversEverything() throws Exception {
+      Object[][] cases = {
+          // name, held by the drafts (null = no draft line of this order), expected reason
+          // fragment (null = available)
+          // linked by C_Invoice.C_Order_ID only: it is a draft of the order, yet holds nothing
+          { "a header-only draft holds no line", null, null },
+          { "a draft holds part", "2", null },
+          { "the drafts hold all", "5", "draft invoice (INV-D1) already covers what is left" },
+          { "the drafts hold more", "7", "draft invoice (INV-D1) already covers what is left" },
+      };
+      for (Object[] c : cases) {
+        OrderLine pending = line("P1", "5", "0");
+        when(pending.getId()).thenReturn("L1");
+        Map<String, BigDecimal> held = c[1] == null ? Map.of()
+            : Map.of("L1", new BigDecimal((String) c[1]));
+        Map<String, String> unavailable = judge(completed(pending), sales, true, Set.of(),
+            List.of("INV-D1"), held);
+        String reason = unavailable.get("createDraftInvoice");
+        if (c[2] == null) {
+          assertNull(reason, (String) c[0]);
+        } else {
+          assertTrue(reason != null && reason.contains((String) c[2]), c[0] + ": " + reason);
+        }
+      }
+      // the purchase flow keeps the ETP-5714 rule: any draft invoice rules it out
+      OrderLine pending = line("P1", "5", "0");
+      when(pending.getId()).thenReturn("L1");
+      assertTrue(judge(completed(pending), purchase, true, Set.of(), List.of("INV-D1"),
+          Map.of("L1", BigDecimal.ONE)).get(INVOICE).contains("already exists for this order"));
+    }
+
+    @Test
+    @DisplayName("draft-covers reason with no readable draft number: the sentence without an empty ()")
+    void draftCoversReasonWithoutNumbersHasNoEmptyParentheses() {
+      String reason = OrderDocumentAvailability.draftCoversInvoiceReason(List.of());
+
+      assertEquals(OrderDocumentAvailability.DRAFT_COVERS_INVOICE_UNNAMED, reason);
+      assertFalse(reason.contains("()"), reason);
     }
 
     @Test
@@ -543,6 +625,22 @@ class DocumentAvailabilityTest {
         assertTrue(unavailable.get("documentAction:RE").contains("R-1, R-2"));
         assertEquals(unavailable, new PurchaseInvoiceHeaderHandler()
             .unavailableActions(invoice("CO")));
+      }
+    }
+
+    @Test
+    @DisplayName("the reactivation reason is self-contained: it ends at the rectificativas, no trailing sentence")
+    void reactivationReasonHasNoTrailingSentence() {
+      try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
+        guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(
+            new InvoiceReactivationGuard.Block(List.of("SII"), List.of("R-1", "R-2")));
+
+        String reason = InvoiceDocumentAvailability.unavailable(invoice("CO"))
+            .get("documentAction:RE");
+
+        assertTrue(reason.startsWith("This invoice cannot be reactivated: it was accepted by "));
+        assertTrue(reason.endsWith("is already rectified by R-1, R-2."), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
       }
     }
 

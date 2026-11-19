@@ -37,7 +37,9 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.InvoiceInboxFlag;
 import com.etendoerp.go.schemaforge.ProductMovementsPolicy;
+import com.etendoerp.go.schemaforge.SepaRemittancesFlag;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -111,6 +113,18 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * requests nothing and emits no telemetry while it is {@code false}. It is read when the session loads
  * the access map, so a change on the control plane reaches a user at the next load.</p>
  *
+ * <p>{@code capabilities.invoiceInbox} (ETP-6049) mirrors the backend-only {@code invoice-inbox}
+ * flag. Same shape as {@code productMovements}: per account, evaluated for the account resolved for
+ * this request, outside the admin branch (an admin is not exempt from the flag). {@link
+ * InvoiceInboxFlag} stays the one evaluator of the key; the Invoice Inbox menu entry and window read
+ * this capability and never evaluate the flag.</p>
+ *
+ * <p>{@code capabilities.sepaRemittances} (ETP-6148) mirrors the backend-only
+ * {@code sepa-remittances} flag. Same shape as {@code invoiceInbox}: per account, outside the admin
+ * branch. {@link SepaRemittancesFlag} stays the one evaluator of the key; the Remittance menu entry
+ * and window and the SEPA mandate section of a contact read this capability and never evaluate the
+ * flag.</p>
+ *
  * GET /webhooks/SFWindowAccessMap
  */
 public class SFWindowAccessMap extends BaseWebhookService {
@@ -150,6 +164,20 @@ public class SFWindowAccessMap extends BaseWebhookService {
    * branches of {@link #buildAccessMap}, like {@code isOwner}.
    */
   private static final String PRODUCT_MOVEMENTS = "productMovements";
+
+  /**
+   * JSON key used for the {@code invoice-inbox} backend-only flag's capability signal (ETP-6049).
+   * Per account, same value in both branches of {@link #buildAccessMap}, like {@link
+   * #PRODUCT_MOVEMENTS}.
+   */
+  private static final String INVOICE_INBOX = "invoiceInbox";
+
+  /**
+   * JSON key used for the {@code sepa-remittances} backend-only flag's capability signal
+   * (ETP-6148). Per account, same value in both branches of {@link #buildAccessMap}, like {@link
+   * #INVOICE_INBOX}.
+   */
+  private static final String SEPA_REMITTANCES = "sepaRemittances";
 
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
@@ -258,6 +286,12 @@ public class SFWindowAccessMap extends BaseWebhookService {
 
     // ETP-5889 — same account, same reasoning: per account, identical in both branches above.
     capabilities.put(PRODUCT_MOVEMENTS, ProductMovementsPolicy.isEnabledFor(accountEmail));
+
+    // ETP-6049 — same account, same reasoning; InvoiceInboxFlag never throws (false on any error).
+    capabilities.put(INVOICE_INBOX, InvoiceInboxFlag.isEnabledFor(accountEmail));
+
+    // ETP-6148 — same account, same reasoning; SepaRemittancesFlag never throws (false on any error).
+    capabilities.put(SEPA_REMITTANCES, SepaRemittancesFlag.isEnabledFor(accountEmail));
 
     JSONObject result = new JSONObject();
     result.put(WINDOW_ACCESS, windowAccess);

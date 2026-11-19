@@ -23,18 +23,29 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+
+import org.hibernate.Session;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Column;
@@ -52,7 +63,8 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
  * ETP-6013 — the server-side render's executor: which MCP document actions queue a render, the
  * context it runs in, and the per-document serialization (a render in flight is joined, never
  * duplicated). The worker's own run (lock wait, render, store) needs a database and is verified live;
- * this pins what happens on the caller's thread, which must never throw.
+ * this pins what happens on the caller's thread, which must never throw, and whether a stored render
+ * counts as MCP usage.
  *
  * @covers com.etendoerp.go.schemaforge.NeoPrintAfterComplete
  */
@@ -112,7 +124,8 @@ class NeoPrintAfterCompleteTest {
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
       contextMock.when(OBContext::getOBContext).thenReturn(context);
 
-      NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD, null);
+      NeoPrintAfterComplete.Job job =
+          NeoPrintAfterComplete.jobFor(entity, RECORD, (String) null);
 
       assertNotNull(job);
       assertEquals("sales-invoice", job.specName);
@@ -134,12 +147,55 @@ class NeoPrintAfterCompleteTest {
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
       contextMock.when(OBContext::getOBContext).thenReturn(context);
 
-      assertNull(NeoPrintAfterComplete.jobFor(entity, " ", null));
-      assertNull(NeoPrintAfterComplete.jobFor(null, RECORD, null));
-      assertNull(NeoPrintAfterComplete.jobFor(mock(SFEntity.class), RECORD, null));
+      assertNull(NeoPrintAfterComplete.jobFor(entity, " ", (String) null));
+      assertNull(NeoPrintAfterComplete.jobFor(null, RECORD, (String) null));
+      assertNull(NeoPrintAfterComplete.jobFor(mock(SFEntity.class), RECORD, (String) null));
       when(context.getRole()).thenReturn(null);
-      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, null));
+      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, (String) null));
     }
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — a job for an explicit caller carries that identity, never the session's")
+  void jobForAnExplicitCallerCarriesItsIdentity() {
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class)) {
+      NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+          new NeoPrintAfterComplete.Caller("SENDER", "SENDER_ROLE", "TENANT", "DOC_ORG", "en_US"));
+
+      assertNotNull(job);
+      assertEquals("C_Invoice/" + RECORD, job.key());
+      assertEquals("SENDER", job.userId);
+      assertEquals("SENDER_ROLE", job.roleId);
+      assertEquals("TENANT", job.clientId);
+      assertEquals("DOC_ORG", job.orgId);
+      assertEquals("en_US", job.language);
+      contextMock.verifyNoInteractions();
+      assertNull(NeoPrintAfterComplete.jobFor(entity, RECORD, (NeoPrintAfterComplete.Caller) null),
+          "no caller: no job");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — renderAndWaitAs queues as the given identity, and never with a part missing")
+  void renderAndWaitAsNeedsTheWholeIdentity() {
+    // A render already in flight for the document: anything queued joins it and answers STORED,
+    // so a null below means nothing was queued at all.
+    NeoPrintAfterComplete.IN_FLIGHT.put("C_Invoice/" + RECORD,
+        CompletableFuture.completedFuture(NeoPrintableRenderer.Outcome.STORED));
+
+    assertEquals(NeoPrintableRenderer.Outcome.STORED, NeoPrintAfterComplete.renderAndWaitAs(
+        entity, RECORD, "es_ES", "USER9", "ROLE9", "CLIENT9", "ORG9"));
+    String[][] incomplete = { { null, "ROLE9", "CLIENT9", "ORG9", "es_ES" },
+        { "USER9", " ", "CLIENT9", "ORG9", "es_ES" },
+        { "USER9", "ROLE9", "", "ORG9", "es_ES" },
+        { "USER9", "ROLE9", "CLIENT9", null, "es_ES" },
+        { "USER9", "ROLE9", "CLIENT9", "ORG9", " " } };
+    for (String[] c : incomplete) {
+      assertNull(NeoPrintAfterComplete.renderAndWaitAs(entity, RECORD, c[4], c[0], c[1], c[2],
+          c[3]), java.util.Arrays.toString(c));
+    }
+    assertNull(NeoPrintAfterComplete.renderAndWaitAs(mock(SFEntity.class), RECORD, "es_ES",
+        "USER9", "ROLE9", "CLIENT9", "ORG9"), "not a printable entity: nothing queued");
   }
 
   @Test
@@ -236,6 +292,58 @@ class NeoPrintAfterCompleteTest {
           "nothing submitted while the call may still change the document");
       deferral.close();
       assertTrue(NeoPrintAfterComplete.IN_FLIGHT.isEmpty(), "never released: dropped, not run");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — a render asked for by the MCP stores and counts as MCP usage once")
+  void mcpRenderStoresAndRecordsTheUsageOnce() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+
+    storeThroughTheWorker(job, usage -> usage.verify(
+        () -> DocumentPdfUsage.recordServerRender("sales-invoice"), times(1)));
+  }
+
+  @Test
+  @DisplayName("ETP-6209 — a portal render stores and records no MCP usage")
+  void portalRenderStoresAndRecordsNoUsage() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobAs(entity, RECORD, "en_US", "SENDER",
+        "SENDER_ROLE", "TENANT", "DOC_ORG");
+
+    assertEquals("SENDER", job.userId, "the marked job keeps the identity it was given");
+    storeThroughTheWorker(job, MockedStatic::verifyNoInteractions);
+  }
+
+  /** Runs the worker over a document with no current PDF, and checks the store and the usage. */
+  private void storeThroughTheWorker(NeoPrintAfterComplete.Job job,
+      Consumer<MockedStatic<DocumentPdfUsage>> usageCheck) {
+    NeoDocumentPdf.Result noPdf = mock(NeoDocumentPdf.Result.class);
+    when(noPdf.getStatus()).thenReturn(NeoDocumentPdf.Status.MISSING);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class, RETURNS_DEEP_STUBS);
+    when(dal.getSession()).thenReturn(session);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenReturn(entity);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+        MockedStatic<NeoAttachmentTarget> targetMock = mockStatic(NeoAttachmentTarget.class);
+        MockedStatic<NeoDocumentPdf> pdfMock = mockStatic(NeoDocumentPdf.class);
+        MockedStatic<DocumentPdfUsage> usageMock = mockStatic(DocumentPdfUsage.class);
+        MockedConstruction<NeoPrintableRenderer> renderers = mockConstruction(
+            NeoPrintableRenderer.class, (renderer, construction) -> when(
+                renderer.renderAndStore(any(), any(), any(), any(), any()))
+                .thenReturn(NeoPrintableRenderer.Outcome.STORED))) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      pdfMock.when(() -> NeoDocumentPdf.resolveStored(any(), any())).thenReturn(noPdf);
+
+      assertEquals(NeoPrintableRenderer.Outcome.STORED, NeoPrintAfterComplete.run(job));
+
+      assertEquals(1, renderers.constructed().size(), "the document was rendered and stored");
+      verify(dal).commitAndClose();
+      usageCheck.accept(usageMock);
     }
   }
 

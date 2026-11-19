@@ -20,7 +20,10 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -93,6 +96,38 @@ final class ReactivationSupport {
           line != null ? line.getId() : NULL_ID, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Every transaction currently backing {@code line} — itself plus any ETGO match-group siblings —
+   * that belongs to {@code rec}. A shared-header batch (see
+   * {@code ReconciliationHandler.applySuggestions}) can hold transactions from OTHER statement lines
+   * too, so this scopes a whole-line undo/reactivate to just the ones the clicked line owns, never
+   * the reconciliation's full transaction list.
+   *
+   * <p>Moved out of {@link ReconciliationHandler} (java:S1448). The siblings still come from the
+   * handler's {@code loadMatchGroupLines} seam, so the unit tests keep stubbing it there.
+   *
+   * @param handler the reconciliation handler whose {@code loadMatchGroupLines} seam reads the
+   *                match-group siblings
+   * @param line    the clicked statement line
+   * @param rec     the reconciliation being undone or reactivated
+   * @return the transactions of {@code line} and its match-group siblings that belong to
+   *         {@code rec}, de-duplicated, in discovery order
+   */
+  static List<FIN_FinaccTransaction> transactionsOfLineIn(ReconciliationHandler handler,
+      FIN_BankStatementLine line, FIN_Reconciliation rec) {
+    List<FIN_FinaccTransaction> result = new ArrayList<>();
+    Set<String> seenIds = new HashSet<>();
+    ReconciliationHandlerSupport.addTransactionOwnedByRec(line, rec, result, seenIds);
+    String groupId = readMatchGroupId(line);
+    if (StringUtils.isNotBlank(groupId) && line.getBankStatement() != null) {
+      for (FIN_BankStatementLine sibling : handler.loadMatchGroupLines(line.getBankStatement(),
+          groupId)) {
+        ReconciliationHandlerSupport.addTransactionOwnedByRec(sibling, rec, result, seenIds);
+      }
+    }
+    return result;
   }
 
   /**

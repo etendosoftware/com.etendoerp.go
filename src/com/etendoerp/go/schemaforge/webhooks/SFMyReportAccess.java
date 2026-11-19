@@ -22,6 +22,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
@@ -61,6 +62,12 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *       {@code windowAccess}'s own "missing key means none" convention.</li>
  * </ol>
  *
+ * <p>Every answer also carries {@code governed}: the ids of {@link ReportAccessCatalog#ROWS}
+ * (ETP-6080). The report-server ({@code assertReportAccess} in schema_forge_core) refuses
+ * {@code /render} and {@code /query} for a governed report missing from {@code reportAccess},
+ * so the tiers are enforced server-side too, not only in the gallery. A report outside the list
+ * (a printable, a report left open on purpose) is not checked.</p>
+ *
  * GET /webhooks/SFMyReportAccess (reached via the NEO pseudo-spec bridge, {@code
  * NeoPseudoSpecDispatcher}'s {@code "myreportaccess"} case — see {@code docs/neo-headless.md}
  * §4.10–4.11 for why new Etendo-GO-authored webhooks default to that bridge).
@@ -71,6 +78,11 @@ public class SFMyReportAccess extends BaseWebhookService {
 
   /** JSON key used for the per-report access-tier map. */
   private static final String REPORT_ACCESS = "reportAccess";
+  /**
+   * Every report id the catalog controls (ETP-6080). The report-server refuses a governed report
+   * missing from {@code reportAccess}; a report outside this list is open to every role.
+   */
+  private static final String GOVERNED = "governed";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -104,6 +116,7 @@ public class SFMyReportAccess extends BaseWebhookService {
     try {
       JSONObject result = new JSONObject();
       result.put(REPORT_ACCESS, new JSONObject());
+      result.put(GOVERNED, governedIds());
       return result;
     } catch (JSONException e) {
       // JSONObject#put never throws for a non-null key; unreachable in practice.
@@ -135,6 +148,16 @@ public class SFMyReportAccess extends BaseWebhookService {
 
     JSONObject result = new JSONObject();
     result.put(REPORT_ACCESS, reportAccess);
+    result.put(GOVERNED, governedIds());
     return result;
+  }
+
+  /** The ids of {@link ReportAccessCatalog#ROWS}, in catalog order. */
+  private static JSONArray governedIds() {
+    JSONArray ids = new JSONArray();
+    for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
+      ids.put(row.id);
+    }
+    return ids;
   }
 }

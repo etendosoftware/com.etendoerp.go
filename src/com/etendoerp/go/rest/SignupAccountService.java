@@ -20,7 +20,9 @@ package com.etendoerp.go.rest;
 import java.io.PrintWriter;
 import java.io.Writer;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Date;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
@@ -35,9 +37,13 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.accounts.AccountGroupService;
+import com.etendoerp.go.accounts.DemoExpiryService;
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.terms.TermsAndConditionsService;
 
 /**
  * Accounts created through the signup API (ETP-5847): passwordless, with no confirmation mail, and
@@ -67,13 +73,27 @@ public class SignupAccountService {
   private static ExecutorService sharedExecutor;
   private static EtendoGoJwtServlet sharedProvisioner;
 
-  /** An account to create, already validated by the signup API. */
+  /**
+   * An account to create, already validated by the signup API.
+   *
+   * @param hubspotDealId the deal marketing created when the demo was booked, {@code null} for any
+   *                      other signup (ETP-6082)
+   */
   public record NewAccount(String email, String name, String onboardingDraft, String channel,
-      boolean sendEmails, String source, boolean termsAccepted) {
+      boolean sendEmails, String source, boolean termsAccepted, String hubspotDealId) {
   }
 
   /** What the signup API reports about an account it created. */
   public record Status(String accountId, String email, String status, String error) {
+  }
+
+  /**
+   * ETP-6223 — what {@code GET /accounts/{id}} adds to the state.
+   *
+   * @param demoExpiresAt the day the account's demo expires; null until its environment is ready
+   * @param groups the keys of the groups the account belongs to
+   */
+  public record Details(LocalDate demoExpiresAt, List<String> groups) {
   }
 
   /** Why no login link was issued. */
@@ -104,6 +124,9 @@ public class SignupAccountService {
   private final TransactionalAuthEmailSender emailSender;
   private final Consumer<Runnable> worker;
   private final Supplier<EtendoGoJwtServlet> provisioner;
+  private final TermsAndConditionsService termsService = new TermsAndConditionsService();
+  private final AccountGroupService groups = new AccountGroupService();
+  private final DemoExpiryService demoExpiry = new DemoExpiryService();
 
   /** Creates the service on the runtime email sender and the shared background workers. */
   public SignupAccountService() {
@@ -127,10 +150,19 @@ public class SignupAccountService {
   public String create(NewAccount request) {
     String accountId = SystemContext.call(OPERATION, () -> {
       try {
-        return SignupAccountDalHelper.createSignupAccount(request.email(), request.name(),
+        String id = SignupAccountDalHelper.createSignupAccount(request.email(), request.name(),
             request.onboardingDraft(), new SignupAccountDalHelper.SignupData(request.channel(),
                 request.sendEmails(), request.source(),
-                request.termsAccepted() ? new Date() : null)).getId();
+                request.termsAccepted() ? new Date() : null,
+                // ETP-6081: the site shows no version of its own; the one in force is recorded.
+                request.termsAccepted() ? termsService.resolveAcceptedVersion(null, null) : null))
+            .getId();
+        if (request.hubspotDealId() != null) {
+          // Before the environment exists, so its demo is reported on the booked deal.
+          HubSpotOutbox.demoDeal(id, request.hubspotDealId());
+          OBDal.getInstance().commitAndClose();
+        }
+        return id;
       } catch (RuntimeException e) {
         EtendoGoDalHelper.rollbackDalChanges("signup account creation", e, log);
         throw e;
@@ -153,6 +185,27 @@ public class SignupAccountService {
           : new Status(account.getId(), account.getEmail(), SignupAccountDalHelper.status(account),
               SignupAccountDalHelper.error(account));
     });
+  }
+
+  /**
+   * ETP-6223 — the account's demo expiry and groups.
+   *
+   * @param accountId the account the signup created
+   * @return its details, or {@code null} when the signup API did not create it
+   */
+  public Details details(String accountId) {
+    String environment = SystemContext.call(OPERATION, () -> {
+      Account account = SignupAccountDalHelper.findSignupAccount(accountId);
+      if (account == null) {
+        return null;
+      }
+      return SignupAccountDalHelper.STATUS_READY.equals(SignupAccountDalHelper.status(account))
+          ? StringUtils.defaultString(SignupAccountDalHelper.environment(account)) : "";
+    });
+    if (environment == null) {
+      return null;
+    }
+    return new Details(demoExpiry.expiryOf(environment), groups.groupKeysOf(accountId));
   }
 
   /**

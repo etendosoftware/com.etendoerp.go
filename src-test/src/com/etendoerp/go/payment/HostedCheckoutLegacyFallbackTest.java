@@ -20,6 +20,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
@@ -38,6 +39,7 @@ import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
 
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
@@ -102,6 +104,7 @@ class HostedCheckoutLegacyFallbackTest {
     stripe = mock(StripeApiClient.class);
     prices = mock(StripePriceService.class);
     service = new HostedCheckoutService();
+    service.promotionTerms = mock(CheckoutPromotionTerms.class);
     service.planCatalogService = catalog;
     service.checkoutRequestStore = store;
     service.stripeApiClient = stripe;
@@ -251,6 +254,7 @@ class HostedCheckoutLegacyFallbackTest {
   void aPricedPlanIsChargedItsOwnPriceNeverTheConfiguredOne(String interval, String mode)
       throws Exception {
     Plan priced = plan(PLAN_KEY, PLAN_PRICE_ID);
+    when(priced.getBillingInterval()).thenReturn(interval);
     when(catalog.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(priced));
     when(prices.retrievePrice(PLAN_PRICE_ID)).thenReturn(price(PLAN_PRICE_ID, interval));
 
@@ -286,6 +290,155 @@ class HostedCheckoutLegacyFallbackTest {
   }
 
   // ===================== reopen =====================
+
+  @Test
+  void anOlderClientNamingNoNewPlanCanStillResumeItsHistoricalPurchase() throws Exception {
+    assertTrue(service.matchesSelection(pendingPurchase(), null));
+    verifyNoInteractions(catalog, prices, stripe);
+  }
+
+  @Test
+  void anExplicitUnknownPlanCannotUseTheHistoricalResumeException() throws Exception {
+    when(catalog.findPurchasablePlan("unknown")).thenReturn(Optional.empty());
+    assertThrows(PlanNotAvailableException.class,
+        () -> service.matchesSelection(pendingPurchase(), "unknown"));
+    verifyNoInteractions(prices, stripe);
+  }
+
+  @Test
+  void anotherPlanOrPriceCannotSilentlyResumeAnOldPurchase() throws Exception {
+    Plan selected = plan(PLAN_KEY, PLAN_PRICE_ID);
+    when(catalog.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(selected));
+    when(prices.retrievePrice(PLAN_PRICE_ID)).thenReturn(price(PLAN_PRICE_ID, "month"));
+    CheckoutRequest previous = pendingPurchase();
+    Plan legacy = legacyPlan();
+    when(previous.getPlan()).thenReturn(legacy);
+    when(previous.getStripePrice()).thenReturn(LEGACY_PRICE_ID);
+
+    assertFalse(service.matchesSelection(previous, PLAN_KEY));
+    when(previous.getPlan()).thenReturn(selected);
+    assertFalse(service.matchesSelection(previous, PLAN_KEY));
+    when(previous.getStripePrice()).thenReturn(PLAN_PRICE_ID);
+    assertTrue(service.matchesSelection(previous, PLAN_KEY));
+    verify(stripe, never()).postForm(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void aMonthlyCatalogPriceCannotSellAnAnnualStripePrice() throws Exception {
+    Plan selected = plan(PLAN_KEY, PLAN_PRICE_ID);
+    when(catalog.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(selected));
+    when(prices.retrievePrice(PLAN_PRICE_ID)).thenReturn(price(PLAN_PRICE_ID, "year"));
+
+    assertThrows(HostedCheckoutService.CheckoutNotConfiguredException.class,
+        () -> createSession(PLAN_KEY));
+    verifyNothingRecordedOrSent();
+  }
+
+  @Test
+  void explicitReplacementExpiresTheOldSessionBeforeRecordingItsSuccessor() throws Exception {
+    configureReplacementPlan();
+    CheckoutRequest previous = pendingPurchase();
+    when(store.lockCheckout(REQUEST_ID, ACCOUNT_EMAIL)).thenReturn(previous);
+    when(stripe.get("/v1/checkout/sessions/cs_old")).thenReturn(new StripeResponse(200,
+        "{\"id\":\"cs_old\",\"status\":\"open\",\"payment_status\":\"unpaid\"}"));
+    when(stripe.postForm(eq("/v1/checkout/sessions/cs_old/expire"), eq(""), anyString()))
+        .thenReturn(new StripeResponse(200,
+            "{\"id\":\"cs_old\",\"status\":\"expired\",\"payment_status\":\"unpaid\"}"));
+
+    JSONObject result = service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
+        PLAN_KEY, HostedCheckoutService.SessionOptions.none(), REQUEST_ID);
+
+    assertFalse(REQUEST_ID.equals(result.getString("requestId")));
+    org.mockito.InOrder ordered = Mockito.inOrder(stripe, store);
+    ordered.verify(stripe).postForm(eq("/v1/checkout/sessions/cs_old/expire"), eq(""), anyString());
+    ordered.verify(store).recordRequested(eq(result.getString("requestId")), eq(ACCOUNT_ID),
+        eq(ACCOUNT_EMAIL), eq(CLIENT_NAME), any(), any(), eq(previous));
+    ordered.verify(stripe).postForm(eq("/v1/checkout/sessions"), anyString(), anyString());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"complete", "unknown"})
+  void aCompletedOrUncertainProviderSessionNeverCreatesASecondPurchase(String status)
+      throws Exception {
+    configureReplacementPlan();
+    CheckoutRequest previous = pendingPurchase();
+    when(store.lockCheckout(REQUEST_ID, ACCOUNT_EMAIL)).thenReturn(previous);
+    when(stripe.get("/v1/checkout/sessions/cs_old")).thenReturn(new StripeResponse(200,
+        new JSONObject().put("id", "cs_old").put("status", status)
+            .put("payment_status", "unpaid").toString()));
+
+    assertThrows(HostedCheckoutService.PurchaseSelectionChangedException.class,
+        () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
+            PLAN_KEY, HostedCheckoutService.SessionOptions.none(), REQUEST_ID));
+    verify(store, never()).recordRequested(anyString(), any(), any(), any(), any(), any(), any());
+    verify(stripe, never()).postForm(anyString(), anyString(), anyString());
+    verify(store).abortCheckoutOperation();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"PAID", "PROVISIONING", "PROVISIONED", "CREATING"})
+  void replacementCannotMutateAPaidOrUnconfirmedPurchase(String status) throws Exception {
+    configureReplacementPlan();
+    CheckoutRequest previous = pendingPurchase();
+    when(previous.getCheckoutRequestStatus()).thenReturn(status);
+    when(store.lockCheckout(REQUEST_ID, ACCOUNT_EMAIL)).thenReturn(previous);
+
+    assertThrows(HostedCheckoutService.PurchaseSelectionChangedException.class,
+        () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
+            PLAN_KEY, HostedCheckoutService.SessionOptions.none(), REQUEST_ID));
+    verify(stripe, never()).postForm(anyString(), anyString(), anyString());
+    verifyNoInteractions(stripe);
+    verify(store, never()).recordRequested(anyString(), any(), any(), any(), any(), any(), any());
+    verify(store).abortCheckoutOperation();
+  }
+
+  @Test
+  void anAmbiguousExpirationLeavesTheOldPurchaseAndCreatesNoSuccessor() throws Exception {
+    configureReplacementPlan();
+    CheckoutRequest previous = pendingPurchase();
+    when(store.lockCheckout(REQUEST_ID, ACCOUNT_EMAIL)).thenReturn(previous);
+    when(stripe.get("/v1/checkout/sessions/cs_old")).thenReturn(new StripeResponse(200,
+        "{\"id\":\"cs_old\",\"status\":\"open\",\"payment_status\":\"unpaid\"}"));
+    when(stripe.postForm(eq("/v1/checkout/sessions/cs_old/expire"), eq(""), anyString()))
+        .thenReturn(new StripeResponse(400, "{}"));
+
+    assertThrows(IOException.class, () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL,
+        CLIENT_NAME, ORIGIN, PLAN_KEY, HostedCheckoutService.SessionOptions.none(), REQUEST_ID));
+    verify(store, never()).recordRequested(anyString(), any(), any(), any(), any(), any(), any());
+    verify(stripe, never()).postForm(eq("/v1/checkout/sessions"), anyString(), anyString());
+    verify(store).abortCheckoutOperation();
+  }
+
+  @Test
+  void replacementIsBoundToTheAuthenticatedAccountAndCompany() throws Exception {
+    configureReplacementPlan();
+    CheckoutRequest previous = pendingPurchase();
+    when(previous.getClientName()).thenReturn("Another company");
+    when(store.lockCheckout(REQUEST_ID, ACCOUNT_EMAIL)).thenReturn(previous);
+
+    assertThrows(HostedCheckoutService.PurchaseSelectionChangedException.class,
+        () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
+            PLAN_KEY, HostedCheckoutService.SessionOptions.none(), REQUEST_ID));
+    verifyNoInteractions(stripe);
+    verify(store, never()).recordRequested(anyString(), any(), any(), any(), any(), any(), any());
+  }
+
+  private void configureReplacementPlan() throws Exception {
+    Plan selected = plan(PLAN_KEY, PLAN_PRICE_ID);
+    when(catalog.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(selected));
+    when(prices.retrievePrice(PLAN_PRICE_ID)).thenReturn(price(PLAN_PRICE_ID, "month"));
+  }
+
+  private static CheckoutRequest pendingPurchase() {
+    CheckoutRequest previous = mock(CheckoutRequest.class);
+    when(previous.getCheckoutRequestStatus()).thenReturn("CREATED");
+    when(previous.getStripeSession()).thenReturn("cs_old");
+    when(previous.getClientName()).thenReturn(CLIENT_NAME);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn(ACCOUNT_ID);
+    when(previous.getEtendoGoAccount()).thenReturn(account);
+    return previous;
+  }
 
   @Test
   void aReopenedLegacyCheckoutChargesItsStoredPriceAfterTheFallbackRetired() throws Exception {
@@ -358,6 +511,9 @@ class HostedCheckoutLegacyFallbackTest {
     Plan plan = mock(Plan.class);
     when(plan.getSearchKey()).thenReturn(key);
     when(plan.getProviderPriceID()).thenReturn(priceId);
+    when(plan.getDisplayPrice()).thenReturn(new BigDecimal("29.00"));
+    when(plan.getCurrencyCode()).thenReturn("EUR");
+    when(plan.getBillingInterval()).thenReturn("month");
     return plan;
   }
 

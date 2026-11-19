@@ -137,13 +137,14 @@ public final class GoFeatureFlags {
    * backend targets the account email. This flag targets the account email — the key the backend
    * targets on — and has no frontend end at all.
    *
-   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
-   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
-   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
-   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
-   * entry is gated, "because hiding the route would imply the flag was protecting something, which
-   * it is not". What protects the endpoints is the token. Revocation in particular must keep working
-   * whatever this flag says: it is the only kill switch for a link already out.
+   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the
+   * {@code /sws/portal/*} endpoints and the {@code etgo_portal_link} table ship unconditionally —
+   * the same pattern {@code docs/feature-flags.md} already documents as correct for
+   * {@code /upgrade}, where the route is registered unconditionally and only the menu entry is
+   * gated, "because hiding the route would imply the flag was protecting something, which it is
+   * not". What protects the endpoints is the token. Since ETP-6209 it gates the link of every
+   * sales document email (quotation, order, shipment, invoice), each link lives 48 hours, and the
+   * renewal of an expired link is not gated: it only replaces a link this flag already let out.
    */
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
@@ -436,6 +437,106 @@ public final class GoFeatureFlags {
    * (capability) and {@code ProductTransactionsHandler} (data).
    */
   public static final String FLAG_PRODUCT_MOVEMENTS_TAB = "product-movements-tab";
+
+  /**
+   * ETP-5581 — the automatic <b>bounce-pair suggestions</b> of the bank reconciliation of
+   * PSD2-synced financial accounts. A bounce is an outgoing bank-statement line plus the line that
+   * reverses it (same amount, opposite sign). Positive polarity: {@code true} = suggestions on;
+   * the default and every failure read {@code false}.
+   *
+   * <p><b>What it gates.</b> The bounce pairs in the {@code autoMatch} answer (and the {@code bounce}
+   * state and pair annotations of {@code pendingLines}), the {@code discardPair} and
+   * {@code restorePair} actions, the {@code bouncePair} groups of {@code applySuggestions}, and
+   * whether discarded lines are honoured at all (their exclusion, the {@code LINE_DISCARDED}
+   * refusal, {@code counts.discarded}, {@code status=discarded}, the {@code discarded} marker and
+   * {@code discardedCount}). With the flag off Etendo behaves as before ETP-5581 and the undo path
+   * of a discarded line is Classic's PSD2 Restore button. <b>Not gated:</b> the stored counters
+   * computed in SQL or in persistence events ({@code EM_ETGO_Pending_Count},
+   * {@code EM_ETGO_Discarded_Count}, {@code EM_ETGO_Status}).
+   *
+   * <p><b>One reader.</b> Only {@code BankBounceSuggestionsFlag} reads this key, evaluated per
+   * request and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the
+   * request user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed
+   * lookup reads off. Locally {@code etendo.go.flags.bank-bounce-suggestions} /
+   * {@code ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}; the web client renders only what
+   * the answers carry. TTL 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
+
+  /**
+   * ETP-6148 (epic ETP-3504, "SEPA remittances") — gates the <b>behaviour</b> of SEPA remittances,
+   * never their schema. Positive polarity: {@code true} = remittances are enabled. Strictly off by
+   * default: an unconfigured flag, an unreachable control plane and any evaluation error all read
+   * as {@code false}.
+   *
+   * <p><b>What it gates.</b> The remittance provisioning of a new Bank financial account — on,
+   * a Bank account created through NEO (REST, batch, MCP), the bank-connection flow or the
+   * onboarding sample data gets the two SEPA remittance payment methods, provisioning the client
+   * on first use; off, it is created as before; existing accounts are never revisited — the default
+   * SEPA mandate of a customer — off, its keys are dropped from the write body; and the
+   * {@code remittance} spec (header and lines) — off, 403 {@code feature_disabled}. <b>Not
+   * gated:</b> the messages, and the DAL observer that keeps remittance methods on Bank accounts —
+   * an observer cannot read a per-account flag, and remittance data only exists where the flag was
+   * on. The
+   * remittance status is not this module's: it is {@code REM_REMITTANCE.REMITTANCE_STATUS}, owned
+   * and maintained by {@code org.openbravo.module.remittance} (added by ETP-6148).
+   *
+   * <p><b>One reader.</b> Only {@code SepaRemittancesFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the context carries the {@code ETGO_ACCOUNT}
+   * email of the request user (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; a Datadog rule must be written on the lowercase {@code email} attribute alone.
+   * Locally {@code etendo.go.flags.sepa-remittances} / {@code ETGO_FLAG_SEPA_REMITTANCES}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. The web client reads
+   * {@code capabilities.sepaRemittances} off {@code SFWindowAccessMap} and never evaluates the flag.
+   * TTL 2027-03-31 (provisional, to confirm with product).
+   */
+  public static final String FLAG_SEPA_REMITTANCES = "sepa-remittances";
+
+  /**
+   * ETP-6151 — the <b>PSD2 statement import settings</b> of bank-connected financial accounts.
+   * Positive polarity: {@code true} = the new behaviour; the default and every failure read
+   * {@code false}, which is the behaviour before ETP-6151.
+   *
+   * <p><b>What it gates.</b> {@code link} / {@code createAndLink} requiring, validating and storing
+   * {@code importFromDate} and {@code statementGrouping} (and clearing a stale import-to date);
+   * {@code import-settings} requiring an import-from date and a valid grouping and answering a
+   * malformed date with 400; the {@code PUT}/{@code PATCH} of a financial account validating the
+   * PSD2 import keys; {@code accounts} answering {@code maxFetchInterval}; and deleting a statement
+   * of a bank-connected account (processed ones are reactivated and deleted instead of answering
+   * the 409 {@code Statements from a bank-connected account cannot be deleted.}). With the flag
+   * off every one of them answers as before ETP-6151.
+   *
+   * <p><b>One reader.</b> Only {@code Psd2ImportSettingsFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the request
+   * user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed lookup
+   * reads off. Locally {@code etendo.go.flags.psd2-statement-import-settings} /
+   * {@code ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS}.
+   *
+   * <p><b>Also evaluated by the SPA</b> (same key, same account email as targeting key), which
+   * shows the import-settings fields and the delete affordance only when it reads on. TTL
+   * 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_PSD2_STATEMENT_IMPORT_SETTINGS =
+      "psd2-statement-import-settings";
+
+  /**
+   * ETP-6236 — whether the MCP offers {@code etendo_routine}: several tool calls in one call, and
+   * personal, versioned routines saved to run them again. <b>Positive polarity, off by default</b>:
+   * unset, unreachable or not a boolean reads {@code false}, and the tool is neither listed in
+   * {@code tools/list} nor routed (a call by name answers {@code tool_disabled}). Saved routines
+   * and executions stay in their tables while it is off.
+   *
+   * <p><b>Per account</b> on a hosted arm (Datadog or ConfigCat), evaluated for the
+   * {@code ETGO_ACCOUNT} email of the request user; locally {@code etendo.go.flags.mcp-routines} /
+   * {@code ETGO_FLAG_MCP_ROUTINES} is a plain per-environment boolean. Its only evaluator is
+   * {@code McpRoutinesFlag}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. TTL 2027-03-31 (placeholder).
+   */
+  public static final String FLAG_MCP_ROUTINES = "mcp-routines";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

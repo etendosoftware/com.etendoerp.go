@@ -333,7 +333,8 @@ class NeoAuthenticatorSchemeParityTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
     identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:write");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
     HttpServletRequest request = oauth2Request();
     when(request.getMethod()).thenReturn("POST");
     when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action/documentAction");
@@ -429,7 +430,8 @@ class NeoAuthenticatorSchemeParityTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
     identity.put(OAuth2Filter.ATTR_SCOPES, "neo:*");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
   }
 
   private static HttpServletRequest cookieRequest() {

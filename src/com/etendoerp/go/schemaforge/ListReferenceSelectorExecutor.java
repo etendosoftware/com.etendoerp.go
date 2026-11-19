@@ -42,6 +42,13 @@ final class ListReferenceSelectorExecutor {
 
   static NeoResponse resolveListSelector(Column column, String search,
       int limit, int offset, Map<String, String> contextParams) throws Exception {
+    return resolveListSelector(column, search, limit, offset, contextParams, null);
+  }
+
+  /** As above, narrowed to the one list value {@code restrictToValue} (exact membership). */
+  static NeoResponse resolveListSelector(Column column, String search,
+      int limit, int offset, Map<String, String> contextParams, String restrictToValue)
+      throws Exception {
 
     org.openbravo.model.ad.domain.Reference listRef = column.getReferenceSearchKey();
     if (listRef == null) {
@@ -50,11 +57,11 @@ final class ListReferenceSelectorExecutor {
 
     String valRuleSql = SelectorValidationResolver.resolveValidationSql(column, contextParams);
     OBCriteria<org.openbravo.model.ad.domain.List> countCrit = buildCriteria(listRef.getId(),
-        valRuleSql, search);
+        valRuleSql, search, restrictToValue);
     int totalCount = countCrit.count();
 
     OBCriteria<org.openbravo.model.ad.domain.List> dataCrit = buildCriteria(listRef.getId(),
-        valRuleSql, search);
+        valRuleSql, search, restrictToValue);
     dataCrit.addOrderBy(org.openbravo.model.ad.domain.List.PROPERTY_SEQUENCENUMBER, true);
     // ETP-5903 — equal sequence numbers must not let a row sit on two pages or on none.
     dataCrit.addOrderBy(org.openbravo.model.ad.domain.List.PROPERTY_ID, true);
@@ -115,7 +122,7 @@ final class ListReferenceSelectorExecutor {
   }
 
   private static OBCriteria<org.openbravo.model.ad.domain.List> buildCriteria(String referenceId,
-      String valRuleSql, String search) {
+      String valRuleSql, String search, String restrictToValue) {
     OBCriteria<org.openbravo.model.ad.domain.List> criteria = OBDal.getInstance()
         .createCriteria(org.openbravo.model.ad.domain.List.class);
     criteria.add(Restrictions.eq(
@@ -123,6 +130,10 @@ final class ListReferenceSelectorExecutor {
     criteria.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
     if (valRuleSql != null) {
       criteria.add(Restrictions.sqlRestriction(qualifyListTable(valRuleSql)));
+    }
+    if (restrictToValue != null) {
+      criteria.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_SEARCHKEY,
+          restrictToValue));
     }
     if (StringUtils.isNotBlank(search)) {
       criteria.add(Restrictions.ilike(

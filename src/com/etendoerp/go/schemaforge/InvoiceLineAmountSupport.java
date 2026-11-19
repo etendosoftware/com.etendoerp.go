@@ -481,7 +481,7 @@ final class InvoiceLineAmountSupport {
    *
    * <p>Left alone (as before): a price within half a cent of what the stored list price and
    * discount already give — the SPA's body, which sends exactly that computed price (the tolerance
-   * of {@code OrderLineDiscountSupport.shouldDeriveDiscountFromPrice}); a price equal to the list
+   * of {@code OrderLineBodyRules.shouldDeriveDiscountFromPrice}); a price equal to the list
    * price (the discount rule applies it); a 100 % discount (nothing to work back from); a line with
    * no list price, or a price of 0.
    *

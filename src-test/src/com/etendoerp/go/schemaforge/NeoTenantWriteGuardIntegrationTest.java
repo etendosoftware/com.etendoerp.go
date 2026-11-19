@@ -25,6 +25,7 @@ import static org.junit.Assume.assumeNotNull;
 import java.util.Collections;
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Before;
@@ -45,6 +46,16 @@ import org.openbravo.model.common.uom.UOM;
 
 import com.etendoerp.go.roles.SystemRoleTemplates;
 import com.etendoerp.go.roles.UserRoleCompositionService;
+import com.etendoerp.go.schemaforge.email.DalEmailSafetyStore;
+import com.etendoerp.go.schemaforge.email.EmailAuditRecord;
+import com.etendoerp.go.schemaforge.email.EmailContractCommand;
+import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
+import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
+import com.etendoerp.go.schemaforge.email.EmailSendContext;
+import com.etendoerp.go.schemaforge.email.EmailThrottleResult;
+import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
+import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 
 /**
  * Two-tenant coverage of {@link NeoTenantWriteGuard} against a real database (ETP-5819).
@@ -58,6 +69,7 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
  * <p>Nothing here persists: every test rolls back in {@link #rollBack()}.
  *
  * @covers com.etendoerp.go.schemaforge.NeoTenantWriteGuard
+ * @covers com.etendoerp.go.schemaforge.email.DalEmailSafetyStore
  */
 public class NeoTenantWriteGuardIntegrationTest extends WeldBaseTest {
 
@@ -164,6 +176,27 @@ public class NeoTenantWriteGuardIntegrationTest extends WeldBaseTest {
         .contains(SystemRoleTemplates.SALES_ROLE_ID));
   }
 
+  /**
+   * Regression: before sending an email from a tenant request, the anti-abuse store writes its
+   * throttle and audit rows, which belong to client {@code 0} by design. The guard admits them;
+   * before, every email sent from NEO failed with "Write access denied".
+   */
+  @Test
+  public void testRecordingEmailSafetyRowsPasses() throws Exception {
+    DalEmailSafetyStore store = new DalEmailSafetyStore();
+    EmailSendContext context = emailSendContext();
+
+    EmailThrottleResult throttle = NeoTenantWriteGuard.call(() -> {
+      EmailThrottleResult result = store.checkAndIncrement(context,
+          Collections.singletonList(EmailThrottleRule.perTenant(1000, 60)));
+      store.recordAudit(EmailAuditRecord.create(context, null, 500,
+          TransactionalEmailService.STATUS_PROVIDER_FAILED, MARKER, null, false));
+      return result;
+    });
+
+    assertTrue(throttle.isAllowed());
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────────
 
   /** Runs {@code write} inside the guard and expects its closing flush to refuse it. */
@@ -179,6 +212,15 @@ public class NeoTenantWriteGuardIntegrationTest extends WeldBaseTest {
     }
     assertTrue("a refusal must mark the transaction for rollback",
         SessionHandler.getInstance().getDoRollback());
+  }
+
+  private static EmailSendContext emailSendContext() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(EmailContractCommandSupport.FIELD_TENANT_ID, TEST_CLIENT_ID)
+        .put(EmailContractCommandSupport.FIELD_RECORD_ID, MARKER);
+    return new EmailSendContext(new EmailContractCommand("document-send", body),
+        EmailRecipientResolution.serverResolved("person@example.test"),
+        new EmailProviderRequest("person@example.test", "document-send", new JSONObject(), null));
   }
 
   /** The refusal surfaces from inside Hibernate's flush, possibly wrapped. */

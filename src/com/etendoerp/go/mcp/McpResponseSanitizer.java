@@ -25,6 +25,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.ClassicMessageRemap;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
@@ -146,10 +147,34 @@ final class McpResponseSanitizer {
    * @throws JSONException if the body cannot be rendered
    */
   static String render(JSONObject body) throws JSONException {
+    return render(body, false);
+  }
+
+  /**
+   * {@link #render(JSONObject)} for the body of an error tool result: its root is the error object
+   * the client reads, so a Classic message recognised there publishes its key in a root
+   * {@code messageKeys} (ETP-6158).
+   *
+   * @param body the error body (may be {@code null})
+   * @return the rendered body, or {@code "{}"} when {@code body} is {@code null}
+   * @throws JSONException if the body cannot be rendered
+   */
+  static String renderError(JSONObject body) throws JSONException {
+    return render(body, true);
+  }
+
+  private static String render(JSONObject body, boolean errorBody) throws JSONException {
     if (body == null) {
       return "{}";
     }
     strip(body);
+    // ETP-6158: Classic fiscal messages that name Classic-only UI, reworded for GO (REST does the
+    // same in NeoServlet#writeResponse).
+    if (errorBody) {
+      ClassicMessageRemap.applyToErrorBody(body);
+    } else {
+      ClassicMessageRemap.applyToBody(body);
+    }
     // ETP-5684: a role without showAccountingFields reads no accounting status through the MCP,
     // whatever tool produced the body. The role flag is read only when there is one to remove.
     if (containsAccountingKey(body) && !NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {

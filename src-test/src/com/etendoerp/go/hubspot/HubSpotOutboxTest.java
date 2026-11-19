@@ -18,6 +18,7 @@ package com.etendoerp.go.hubspot;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -108,6 +109,25 @@ class HubSpotOutboxTest {
 
     assertEquals("Empresa SL", payload.getString("companyName"));
     assertEquals("", payload.getString("country"));
+    assertFalse(payload.has(HubSpotOutbox.FIELD_DEMO_DEAL));
+  }
+
+  @Test
+  void aBookedDemoCarriesItsDeal() throws Exception {
+    JSONObject payload = new JSONObject(HubSpotOutbox.demoPayload("Empresa SL", "España", "ES",
+        " 555 "));
+
+    assertEquals("555", payload.getString(HubSpotOutbox.FIELD_DEMO_DEAL));
+  }
+
+  @Test
+  void aBookedDealWithoutAccountOrIdRecordsNothing() {
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      HubSpotOutbox.demoDeal(null, "555");
+      HubSpotOutbox.demoDeal("A1", " ");
+
+      dal.verifyNoInteractions();
+    }
   }
 
   @Test

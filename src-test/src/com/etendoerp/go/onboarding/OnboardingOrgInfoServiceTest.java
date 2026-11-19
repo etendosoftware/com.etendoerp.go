@@ -32,6 +32,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
@@ -53,6 +54,15 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * @covers com.etendoerp.go.onboarding.OnboardingOrgInfoService
  */
 public class OnboardingOrgInfoServiceTest {
+
+  /**
+   * The context-restore tests install a mock OBContext as the "previous" context and assert the
+   * service puts it back; OBContext is a ThreadLocal, so it must not outlive the test (ETP-6069).
+   */
+  @After
+  public void clearContext() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   /** The account {@code structured-address-for-sepa} is targeted at in these tests. */
   private static final String TARGETED_ACCOUNT = "localization@etendo.software";
@@ -715,8 +725,15 @@ public class OnboardingOrgInfoServiceTest {
     verify(location, never()).setAddressLine1(anyString());
   }
 
+  /**
+   * ETP-5806 follow-up (QA finding): a blank/whitespace-only buildingNumber with a present
+   * streetName is no longer trimmed to {@code null} — it falls back to the {@code "s/n"}
+   * convention, via {@link com.etendoerp.go.schemaforge.util.StructuredAddressComposer
+   * #effectiveBuildingNumber}, the same rule the 3 NEO handlers (Contacts/Warehouse/BpLocation)
+   * already apply. {@code buildingName} has no such fallback and is still trimmed to {@code null}.
+   */
   @Test
-  public void testCreateLocationTrimsBlankBuildingNumberAndNameToNull() {
+  public void testCreateLocationBlankBuildingNumberFallsBackToSlashNBuildingNameStillTrimsToNull() {
     OnboardingOrgInfoService service = new OnboardingOrgInfoService();
     Client client = mock(Client.class);
     Organization org = mock(Organization.class);
@@ -738,8 +755,41 @@ public class OnboardingOrgInfoServiceTest {
           "lola@example.com"));
     }
 
-    verify(location).setOBSEPABuildingNumber(isNull());
+    verify(location).setOBSEPABuildingNumber("s/n");
     verify(location).setOBSEPABuildingName(isNull());
+    verify(location).setAddressLine1("Gran Via, s/n");
+  }
+
+  /**
+   * ETP-5806 follow-up (QA finding): a buildingNumber that is {@code null} (field omitted from
+   * the inbound payload, as opposed to sent blank) falls back to {@code "s/n"} exactly the same
+   * as a whitespace-only value — {@code effectiveBuildingNumber} treats both as blank.
+   */
+  @Test
+  public void testCreateLocationNullBuildingNumberFallsBackToSlashN() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+      service.createLocation(client, org, country, addressInput(null, "Gran Via", null, null, "Madrid",
+          "lola@example.com"));
+    }
+
+    verify(location).setOBSEPABuildingNumber("s/n");
+    verify(location).setAddressLine1("Gran Via, s/n");
   }
 
   /**

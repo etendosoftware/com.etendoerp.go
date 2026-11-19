@@ -55,7 +55,6 @@
 <!--051AFABD08C64E17B6E0E764262091B5-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--051AFABD08C64E17B6E0E764262091B5-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentLineHandler]]></JAVA_QUALIFIER>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <SEQNO><![CDATA[20]]></SEQNO>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <AGENT_PROMPT><![CDATA[Lots, serial numbers and expiry dates are not handled in Etendo GO yet: a shipment line cannot carry them. Tell the user they cannot be recorded here.]]></AGENT_PROMPT>
 <!--051AFABD08C64E17B6E0E764262091B5--></ETGO_SF_ENTITY>
@@ -561,7 +560,6 @@
 <!--1B610E49CE9249B8821B1485870BFE4B-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--1B610E49CE9249B8821B1485870BFE4B-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--1B610E49CE9249B8821B1485870BFE4B-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--1B610E49CE9249B8821B1485870BFE4B-->  <JAVA_QUALIFIER><![CDATA[financial-accounts-page]]></JAVA_QUALIFIER>
 <!--1B610E49CE9249B8821B1485870BFE4B-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--1B610E49CE9249B8821B1485870BFE4B--></ETGO_SF_ENTITY>
 
@@ -620,7 +618,6 @@
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <JAVA_QUALIFIER><![CDATA[productTransactionsHandler]]></JAVA_QUALIFIER>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"storageBin","reason":"M_Transaction's isparent column points at M_Product, but under this window the parent tab is the storage bin (M_Locator)."}}]]></MCP_CONFIG>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1--></ETGO_SF_ENTITY>
@@ -959,6 +956,44 @@
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"product","reason":"M_Storage_Detail's only isparent column is M_RefInventory_ID, which points at the referenced inventory, not at the M_Product parent tab. Auto-resolution would have picked the wrong column."}}]]></MCP_CONFIG>
 <!--296EE5752DA54E7880FECB13F5C7B40D--></ETGO_SF_ENTITY>
 
+<!--2976825B9C48472CA01F96ACC6625BD7--><ETGO_SF_ENTITY>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ETGO_SF_ENTITY_ID><![CDATA[2976825B9C48472CA01F96ACC6625BD7]]></ETGO_SF_ENTITY_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <NAME><![CDATA[bankInstructions]]></NAME>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <AD_TAB_ID><![CDATA[FF8080813075578701307561B4550020]]></AD_TAB_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISPUT><![CDATA[Y]]></ISPUT>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--2976825B9C48472CA01F96ACC6625BD7-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--2976825B9C48472CA01F96ACC6625BD7--></ETGO_SF_ENTITY>
+
+<!--299D1BD7B4C24B518803C9A9F1F6DE14--><ETGO_SF_ENTITY>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ETGO_SF_ENTITY_ID><![CDATA[299D1BD7B4C24B518803C9A9F1F6DE14]]></ETGO_SF_ENTITY_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <NAME><![CDATA[settled]]></NAME>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <AD_TAB_ID><![CDATA[00ACA8F9B07E491483DD9EA4F8D93ED0]]></AD_TAB_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISPUT><![CDATA[Y]]></ISPUT>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14-->  <SEQNO><![CDATA[40]]></SEQNO>
+<!--299D1BD7B4C24B518803C9A9F1F6DE14--></ETGO_SF_ENTITY>
+
 <!--2A0ACAA2D061485394A336A95148FBD5--><ETGO_SF_ENTITY>
 <!--2A0ACAA2D061485394A336A95148FBD5-->  <ETGO_SF_ENTITY_ID><![CDATA[2A0ACAA2D061485394A336A95148FBD5]]></ETGO_SF_ENTITY_ID>
 <!--2A0ACAA2D061485394A336A95148FBD5-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1091,6 +1126,7 @@
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--2FB4EB163355420D8DD676D5F92C546E-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The digital certificate is uploaded, replaced and removed only in the app (Configuración fiscal), which validates the PKCS#12 file and its password; agents only read its status","instead":"etendo_action(spec:'organization', entity:'organization', id:'<organizationId>', action:'certificate')"}}]]></MCP_CONFIG>
 <!--2FB4EB163355420D8DD676D5F92C546E--></ETGO_SF_ENTITY>
 
 <!--30DB5085A7D54F728F9445FC36591F40--><ETGO_SF_ENTITY>
@@ -1150,7 +1186,6 @@
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--34EBCCEE2E9643BF962CDF84379232C4-->  <JAVA_QUALIFIER><![CDATA[businessPartnerHandler]]></JAVA_QUALIFIER>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <AGENT_PROMPT><![CDATA[A new contact has no billing preferences of its own: price list, payment terms, payment method, financial account and blocking, for sales and for purchases. The ones you send on create are saved; the others stay empty until you set them with etendo_update, as in the app.]]></AGENT_PROMPT>
 <!--34EBCCEE2E9643BF962CDF84379232C4--></ETGO_SF_ENTITY>
@@ -1252,6 +1287,25 @@
 <!--3C41A98B225C4589854B1AB11F4D50D9-->  <SEQNO><![CDATA[40]]></SEQNO>
 <!--3C41A98B225C4589854B1AB11F4D50D9--></ETGO_SF_ENTITY>
 
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60--><ETGO_SF_ENTITY>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ETGO_SF_ENTITY_ID><![CDATA[3CE55B6C3FF746F0B7D026D4E8C5AE60]]></ETGO_SF_ENTITY_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <NAME><![CDATA[protested]]></NAME>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <AD_TAB_ID><![CDATA[BA373AF6034149378E1ACD65B0EEFE7D]]></AD_TAB_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISPUT><![CDATA[Y]]></ISPUT>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60-->  <SEQNO><![CDATA[50]]></SEQNO>
+<!--3CE55B6C3FF746F0B7D026D4E8C5AE60--></ETGO_SF_ENTITY>
+
 <!--3EF4B2A1016E44D6884908220B69BC2B--><ETGO_SF_ENTITY>
 <!--3EF4B2A1016E44D6884908220B69BC2B-->  <ETGO_SF_ENTITY_ID><![CDATA[3EF4B2A1016E44D6884908220B69BC2B]]></ETGO_SF_ENTITY_ID>
 <!--3EF4B2A1016E44D6884908220B69BC2B-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1307,7 +1361,6 @@
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--40D5EE72A0F24464BABD21886059F3D8-->  <JAVA_QUALIFIER><![CDATA[returnToVendorShipmentHeaderHandler]]></JAVA_QUALIFIER>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"RM_Shipment_Pickedit":"importReceiptLines","GenerateTo":"createReturnInvoice","Invoicefromshipment":"createReturnInvoice"},"reasons":{"GenerateTo":"Classic Generate Invoice from Shipment is not the path for a return; createReturnInvoice creates and confirms the factura rectificativa of this completed return","Invoicefromshipment":"Classic invoice-from-shipment button has no process connected for the agent; createReturnInvoice creates and confirms the factura rectificativa of this completed return","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"redirectReason":"The classic Pick/Edit Lines button has no process connected for the agent; importReceiptLines adds lines from goods receipts of the same vendor with the over-return cap the app applies","reason":"Classic Pick/Edit Lines is not an agent path; use importReceiptLines (or createPurchaseReturn on the goods receipt)"},"pdf":{"source":"rendered","print":{"document":"return-to-vendor-shipment"},"reason":"the return-to-vendor-shipment printable (movement template) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--40D5EE72A0F24464BABD21886059F3D8--></ETGO_SF_ENTITY>
@@ -1524,6 +1577,25 @@
 <!--4629C61FDD604064A8E76D21BDD8DF84-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--4629C61FDD604064A8E76D21BDD8DF84-->  <SEQNO><![CDATA[40]]></SEQNO>
 <!--4629C61FDD604064A8E76D21BDD8DF84--></ETGO_SF_ENTITY>
+
+<!--463DCD02861E496CB1449D913D8E568D--><ETGO_SF_ENTITY>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ETGO_SF_ENTITY_ID><![CDATA[463DCD02861E496CB1449D913D8E568D]]></ETGO_SF_ENTITY_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--463DCD02861E496CB1449D913D8E568D-->  <NAME><![CDATA[remittance]]></NAME>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <AD_TAB_ID><![CDATA[FF8080812E71F7C7012E71FE49BB0021]]></AD_TAB_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISPUT><![CDATA[Y]]></ISPUT>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
+<!--463DCD02861E496CB1449D913D8E568D-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--463DCD02861E496CB1449D913D8E568D-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--463DCD02861E496CB1449D913D8E568D--></ETGO_SF_ENTITY>
 
 <!--48F93690C31744A391CF09090EF1424E--><ETGO_SF_ENTITY>
 <!--48F93690C31744A391CF09090EF1424E-->  <ETGO_SF_ENTITY_ID><![CDATA[48F93690C31744A391CF09090EF1424E]]></ETGO_SF_ENTITY_ID>
@@ -1853,9 +1925,8 @@
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <JAVA_QUALIFIER><![CDATA[tbai-config-sequence-handler]]></JAVA_QUALIFIER>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--52E6AF2963894C128EE72E0A10D5F01B--></ETGO_SF_ENTITY>
 
 <!--5380CF0F9D53450D8B153F099104AC46--><ETGO_SF_ENTITY>
@@ -1876,6 +1947,25 @@
 <!--5380CF0F9D53450D8B153F099104AC46-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--5380CF0F9D53450D8B153F099104AC46-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--5380CF0F9D53450D8B153F099104AC46--></ETGO_SF_ENTITY>
+
+<!--54009FFBABCB4CB7912CA77C9364C3FA--><ETGO_SF_ENTITY>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ETGO_SF_ENTITY_ID><![CDATA[54009FFBABCB4CB7912CA77C9364C3FA]]></ETGO_SF_ENTITY_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <NAME><![CDATA[lines]]></NAME>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ETGO_SF_SPEC_ID><![CDATA[E90B933DDF96460F8536F03DDC8B6726]]></ETGO_SF_SPEC_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <AD_TAB_ID><![CDATA[FF8080812E71F7C7012E7202F3240031]]></AD_TAB_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--54009FFBABCB4CB7912CA77C9364C3FA-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--54009FFBABCB4CB7912CA77C9364C3FA--></ETGO_SF_ENTITY>
 
 <!--551E1CD113A84999A2D0C425CE6E1903--><ETGO_SF_ENTITY>
 <!--551E1CD113A84999A2D0C425CE6E1903-->  <ETGO_SF_ENTITY_ID><![CDATA[551E1CD113A84999A2D0C425CE6E1903]]></ETGO_SF_ENTITY_ID>
@@ -1951,9 +2041,8 @@
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <JAVA_QUALIFIER><![CDATA[sii-config-deactivate-handler]]></JAVA_QUALIFIER>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--57DE601DBE42468BA9963E81DA56BB1C--></ETGO_SF_ENTITY>
 
 <!--59B96B75153149EF993CD7FD3CE9439F--><ETGO_SF_ENTITY>
@@ -2011,9 +2100,8 @@
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <JAVA_QUALIFIER><![CDATA[verifactu-config-ready-handler]]></JAVA_QUALIFIER>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--5AAAB7DE44364794AE70BB19C9D66F90--></ETGO_SF_ENTITY>
 
 <!--5B942E443D7D4E4BA63F863F88CEF4D7--><ETGO_SF_ENTITY>
@@ -2167,7 +2255,6 @@
 <!--6102D47FD12A4162858D948885F80544-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6102D47FD12A4162858D948885F80544-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6102D47FD12A4162858D948885F80544-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--6102D47FD12A4162858D948885F80544-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--6102D47FD12A4162858D948885F80544-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"invoicefromshipment":"createPurchaseInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft goods receipt, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"pdf":{"source":"supplier","reason":"the receipt has no printable (hidePrint) and its preview shows the supplier delivery note the user uploads as the main attachment"},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."}}]]></MCP_CONFIG>
 <!--6102D47FD12A4162858D948885F80544--></ETGO_SF_ENTITY>
@@ -2558,7 +2645,6 @@
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--6B27214820954CE1A69B092D349E0E34-->  <JAVA_QUALIFIER><![CDATA[bankReconciliation]]></JAVA_QUALIFIER>
 <!--6B27214820954CE1A69B092D349E0E34-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6B27214820954CE1A69B092D349E0E34--></ETGO_SF_ENTITY>
 
@@ -2597,7 +2683,6 @@
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--6B95037D284B4A54B319FEE155968CA4-->  <JAVA_QUALIFIER><![CDATA[productTransactionsHandler]]></JAVA_QUALIFIER>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <SEQNO><![CDATA[100]]></SEQNO>
 <!--6B95037D284B4A54B319FEE155968CA4--></ETGO_SF_ENTITY>
 
@@ -2656,7 +2741,6 @@
 <!--6FC45AC1A1EA437D96F2871FD71DD242-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6FC45AC1A1EA437D96F2871FD71DD242-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6FC45AC1A1EA437D96F2871FD71DD242-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--6FC45AC1A1EA437D96F2871FD71DD242-->  <JAVA_QUALIFIER><![CDATA[financial-account-bank-connection]]></JAVA_QUALIFIER>
 <!--6FC45AC1A1EA437D96F2871FD71DD242-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6FC45AC1A1EA437D96F2871FD71DD242--></ETGO_SF_ENTITY>
 
@@ -2950,6 +3034,7 @@
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <JAVA_QUALIFIER><![CDATA[productDefaultsHandler]]></JAVA_QUALIFIER>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <AGENT_PROMPT><![CDATA[A product's name is not unique: two products can share it. Identify one by its searchKey (code) or id. When several match what the user said, do not pick one: show them (name, searchKey, prices) and ask. If the user cannot tell, suggest — for them to confirm — the one used in that contact's most recent order or invoice (etendo_list on sales-order/header filtered by businessPartner, newest first, then its lines).]]></AGENT_PROMPT>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <MCP_CONFIG><![CDATA[{"defaults":{"context":["productType"],"reason":"The tax category and the stocked and returnable flags follow the product type."}}]]></MCP_CONFIG>
 <!--7973D68DD39E4F4C8D759A3007A27D56--></ETGO_SF_ENTITY>
 
 <!--7ACF14A002FC4C66B993576581225D63--><ETGO_SF_ENTITY>
@@ -3837,7 +3922,6 @@
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <JAVA_QUALIFIER><![CDATA[bank-statements]]></JAVA_QUALIFIER>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7--></ETGO_SF_ENTITY>
 
@@ -3895,7 +3979,6 @@
 <!--B1EA45D0D7DE4E5DB83FB17C0204598F-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B1EA45D0D7DE4E5DB83FB17C0204598F-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B1EA45D0D7DE4E5DB83FB17C0204598F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--B1EA45D0D7DE4E5DB83FB17C0204598F-->  <JAVA_QUALIFIER><![CDATA[contactsLocationAddressHandler]]></JAVA_QUALIFIER>
 <!--B1EA45D0D7DE4E5DB83FB17C0204598F-->  <SEQNO><![CDATA[130]]></SEQNO>
 <!--B1EA45D0D7DE4E5DB83FB17C0204598F--></ETGO_SF_ENTITY>
 
@@ -4015,7 +4098,7 @@
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <SEQNO><![CDATA[20]]></SEQNO>
-<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked shipments or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search sales order lines by product or category across orders (which orders sold X); allParents keeps them to lines of sales orders, never purchase or quotation lines."}}]]></MCP_CONFIG>
 <!--B845C674D49D48BF950AE2389C56C49F--></ETGO_SF_ENTITY>
 
@@ -4035,7 +4118,6 @@
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <JAVA_QUALIFIER><![CDATA[document-sequence]]></JAVA_QUALIFIER>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--B898797B8C184821BFE6FD8B1304E943--></ETGO_SF_ENTITY>
 
@@ -4100,8 +4182,8 @@ Bank statements: create, preview or import them with the `bank-statements` spec 
 
 Manual movements of the account (a deposit or a withdrawal booked against a G/L item, what the Movements tab records): use this entity's actions — `etendo_action {spec:"financial-account", entity:"account", id:<this financial account id>, action:"createMovement"|"updateMovement"|"processMovement"|"reactivateMovement"|"deleteMovement"}`, with `listMovements` and `movementGlItems` to read; the catalogue is `etendo_schema({spec:"financial-account", entity:"account", view:"actions"})`. A movement is not a bank-statement line: a statement line is what the bank reports, waiting to be matched in a reconciliation. Transfers between two of the company's accounts: `transferFunds` (id = the source account; `transferDestinations` lists the destinations and today's rate between currencies). A transfer is dated today and cannot be deleted; undo it with a transfer back.
 
-Bank connection (PSD2): to stop an account's bank synchronization use `disconnectBank` (id = the financial account): it normally keeps the account's link and history so it can be reconnected from the Etendo UI, but a bank connection shared by several accounts is unlinked instead — read the returned `reconnectable` flag. A connected account refuses manual bank statements (409) until it is disconnected. `deleteBankConnection` PERMANENTLY deletes the connection at the bank aggregator and cannot be undone (reconnecting may import already reconciled movements again as duplicates): ask the user first and call it only after they explicitly confirm. Connecting a bank or reconnecting an account is done from the Etendo UI, because it needs the account holder to authenticate at the bank (SCA).]]></AGENT_PROMPT>
-<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["aPRMImportBankFile","aPRMMatchTransactions","aPRMMatchTransactionsForce","aPRMReconcile","aprmAddMultiplePayments","pSD2GetBankstatement","pSD2GetConsent","psd2ReconnectFa","psd2GetConnections","psd2RefreshConnections"],"reason":"The financial account window offers none of its Core buttons: statements are created and imported with the bank-statements spec, reconciled with the bank-reconciliation spec, manual movements and transfers are recorded with this entity's own actions (createMovement, transferFunds and the rest, see etendo_schema view:'actions'); the bank connection is disconnected with disconnectBank (reversible) or deleteBankConnection (permanent, ask the user first); PSD2 consent, connection and reconnection need a person to authorize at the bank (SCA)","redirect":{"aprmFundsTrans":"transferFunds"},"redirectReason":"the Classic Funds Transfer button is not the Etendo transfer flow"}}]]></MCP_CONFIG>
+Bank connection (PSD2): to import a connected account's new bank movements use `syncBank` (id = the financial account); only one synchronization of an account runs at a time, so when it answers `IN_PROGRESS` or times out, poll `bankSyncStatus` until `inProgress` is false instead of calling `syncBank` again. To stop an account's bank synchronization use `disconnectBank` (id = the financial account): it normally keeps the account's link and history so it can be reconnected from the Etendo UI, but a bank connection shared by several accounts is unlinked instead — read the returned `reconnectable` flag. A connected account refuses manual bank statements (409) until it is disconnected. `deleteBankConnection` PERMANENTLY deletes the connection at the bank aggregator and cannot be undone (reconnecting may import already reconciled movements again as duplicates): ask the user first and call it only after they explicitly confirm. Connecting a bank or reconnecting an account is done from the Etendo UI, because it needs the account holder to authenticate at the bank (SCA).]]></AGENT_PROMPT>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["aPRMImportBankFile","aPRMMatchTransactions","aPRMMatchTransactionsForce","aPRMReconcile","aprmAddMultiplePayments","pSD2GetBankstatement","pSD2GetConsent","psd2ReconnectFa","psd2GetConnections","psd2RefreshConnections"],"reason":"The financial account window offers none of its Core buttons: statements are created and imported with the bank-statements spec, reconciled with the bank-reconciliation spec, manual movements and transfers are recorded with this entity's own actions (createMovement, transferFunds and the rest, see etendo_schema view:'actions'); the bank connection is disconnected with disconnectBank (reversible) or deleteBankConnection (permanent, ask the user first); new bank movements are imported with syncBank instead of pSD2GetBankstatement (one synchronization per account at a time, followed with bankSyncStatus); PSD2 consent, connection and reconnection need a person to authorize at the bank (SCA)","redirect":{"aprmFundsTrans":"transferFunds"},"redirectReason":"the Classic Funds Transfer button is not the Etendo transfer flow"}}]]></MCP_CONFIG>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1--></ETGO_SF_ENTITY>
 
 <!--BE79CE1718074339AE35BE6DDD829308--><ETGO_SF_ENTITY>
@@ -4181,6 +4263,25 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <JAVA_QUALIFIER><![CDATA[match-rule]]></JAVA_QUALIFIER>
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--C0FB5CD0063142659C78CBE42B85891E--></ETGO_SF_ENTITY>
+
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--><ETGO_SF_ENTITY>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_ENTITY_ID><![CDATA[C24AEA2FDC3C460DB477EA58C8C5A864]]></ETGO_SF_ENTITY_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <NAME><![CDATA[header]]></NAME>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_SPEC_ID><![CDATA[7A63B6AA5CE44D77A52E41790BD8094A]]></ETGO_SF_SPEC_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_TAB_ID><![CDATA[AB6E71CD965B41B1913B44BE660456FA]]></AD_TAB_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--></ETGO_SF_ENTITY>
 
 <!--C339170F5740439186792CD2023D45A6--><ETGO_SF_ENTITY>
 <!--C339170F5740439186792CD2023D45A6-->  <ETGO_SF_ENTITY_ID><![CDATA[C339170F5740439186792CD2023D45A6]]></ETGO_SF_ENTITY_ID>
@@ -5419,9 +5520,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <JAVA_QUALIFIER><![CDATA[purchaseOrderHeaderHandler]]></JAVA_QUALIFIER>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO","VO","PR"],"IP":["CO","VO"],"CO":["CL","RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"purchase-order"},"reason":"the purchase-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
+<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"purchase-order"},"reason":"the purchase-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--F1775FF66155444992AC0B1E38CFA3BB--></ETGO_SF_ENTITY>
 
 <!--F25F57EA043045CD8E34377220D5BF36--><ETGO_SF_ENTITY>
@@ -5501,7 +5601,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <SEQNO><![CDATA[20]]></SEQNO>
-<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked receipts or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search purchase order lines by product across orders (which orders bought X); allParents keeps them to lines of purchase orders, never sales or return lines."}}]]></MCP_CONFIG>
 <!--F391AE6AB4D742DB8A38A8801BE6D513--></ETGO_SF_ENTITY>
 

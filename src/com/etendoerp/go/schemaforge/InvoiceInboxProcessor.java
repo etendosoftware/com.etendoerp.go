@@ -1,0 +1,357 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VALIDATION;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Date;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.InvoiceInboxWorkStore.Claimed;
+import com.etendoerp.go.schemaforge.data.IncomingDocument;
+import com.etendoerp.go.schemaforge.ocr.CopilotOcrServiceClient;
+import com.etendoerp.go.schemaforge.ocr.InboxMatcher;
+import com.etendoerp.go.schemaforge.ocr.OcrConfig;
+import com.etendoerp.go.schemaforge.ocr.OcrDocType;
+import com.etendoerp.go.schemaforge.ocr.OcrExtractionService;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups;
+import com.etendoerp.go.schemaforge.ocr.OcrServiceClient;
+import com.etendoerp.go.schemaforge.ocr.OcrUnavailableException;
+
+/**
+ * The background worker of the invoice inbox (ETP-6048): takes each {@code PROCESSING} row, reads its
+ * main attachment through the OCR, matches vendor, products, taxes and duplicates, validates, and
+ * leaves it in {@code PENDING_REVIEW} or {@code ERROR} with a code.
+ *
+ * <p><b>The {@code PROCESSING} row is the queue.</b> {@link #submit} is the fast path (an in-memory
+ * executor, {@value #THREADS} daemon threads, queue of {@value #QUEUE_CAPACITY}); a full queue or a
+ * restart loses nothing, because {@link #sweep} (run by {@code InvoiceInboxSweeperStartup}) re-submits
+ * every row nobody is working on.</p>
+ *
+ * <p><b>One document, one isolated unit.</b> The row is claimed atomically with a lease (several
+ * nodes may run), the OCR runs outside any transaction, the extraction is stored write-once before
+ * the matching (a later pass never pays for the OCR twice), and the final write is one transaction
+ * conditioned on the row still being {@code PROCESSING}. It never throws out of its thread. A
+ * service failure retries {@value #RETRIES} times with a growing wait; an unexpected failure leaves
+ * the row for the sweeper, and after {@value #MAX_ATTEMPTS} passes it ends as
+ * {@code SERVICE_FAILURE}.</p>
+ *
+ * <p>It acts as the user who uploaded: the context is the row's user, client and organization with
+ * the user's default role, in admin mode. It does not evaluate the feature flag: a {@code PROCESSING}
+ * row exists only because the flag was on at upload.</p>
+ */
+public final class InvoiceInboxProcessor {
+
+  static final int THREADS = 2;
+  static final int QUEUE_CAPACITY = 200;
+  static final int MAX_ATTEMPTS = 3;
+  static final int LEASE_MINUTES = 10;
+  static final int RETRIES = 3;
+  static final int SWEEP_BATCH = 50;
+  /** Seconds to wait before each OCR attempt of a pass. */
+  private static final long[] BACKOFF_SECONDS = { 0L, 15L, 45L };
+  private static final String ERR_UNREADABLE = "UNREADABLE";
+  private static final String ERR_SERVICE = "SERVICE_FAILURE";
+  private static final String SYSTEM_USER = "100";
+  private static final String SYSTEM_ID = "0";
+  private static final String SPEC_PURCHASE_INVOICE = "purchase-invoice";
+  /** The spec each target type is processed as; the review (ETP-6050) binds its lookups the same. */
+  static final Map<String, String> SPEC_BY_TARGET = Map.of(
+      InvoiceInboxIntake.TARGET_PURCHASE_INVOICE, SPEC_PURCHASE_INVOICE);
+  private static final Logger log = LogManager.getLogger(InvoiceInboxProcessor.class);
+
+  /** Waits between OCR attempts; a seam so tests do not sleep. */
+  interface Sleeper {
+    /**
+     * Waits for the given time.
+     *
+     * @param seconds how long to wait, in seconds
+     * @throws InterruptedException when the thread is interrupted while waiting
+     */
+    void sleep(long seconds) throws InterruptedException;
+  }
+
+  private static final class Holder {
+    static final InvoiceInboxProcessor INSTANCE = new InvoiceInboxProcessor(
+        new InvoiceInboxWorkStore(), new CopilotOcrServiceClient(), TimeUnit.SECONDS::sleep);
+  }
+
+  private final InvoiceInboxWorkStore store;
+  private final OcrServiceClient client;
+  private final Sleeper sleeper;
+  private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+  private final ExecutorService executor = buildExecutor();
+
+  InvoiceInboxProcessor(InvoiceInboxWorkStore store, OcrServiceClient client, Sleeper sleeper) {
+    this.store = store;
+    this.client = client;
+    this.sleeper = sleeper;
+  }
+
+  /**
+   * Queues rows for processing. Never throws: a full queue is logged and the sweeper picks the row up.
+   *
+   * @param incomingDocumentId the row id
+   */
+  public static void submit(String incomingDocumentId) {
+    Holder.INSTANCE.enqueue(incomingDocumentId);
+  }
+
+  /**
+   * The safety net: ends the rows that ran out of passes and re-submits those nobody is working on.
+   * Run at startup and periodically; safe to run on every node.
+   */
+  public static void sweep() {
+    Holder.INSTANCE.sweepNow();
+  }
+
+  /** Stops accepting work; what is in flight returns through its lease. */
+  public static void shutdown() {
+    Holder.INSTANCE.executor.shutdownNow();
+  }
+
+  void enqueue(String id) {
+    if (id == null || !inFlight.add(id)) {
+      return;
+    }
+    try {
+      executor.execute(() -> runOne(id));
+    } catch (RejectedExecutionException e) {
+      inFlight.remove(id);
+      log.warn("Invoice inbox: queue full, {} waits for the sweeper", id);
+    }
+  }
+
+  void sweepNow() {
+    try {
+      OBContext.setOBContext(SYSTEM_USER, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID);
+      int failed = store.failExhausted(MAX_ATTEMPTS);
+      if (failed > 0) {
+        log.warn("Invoice inbox: {} document(s) ended as {} after {} passes", failed, ERR_SERVICE,
+            MAX_ATTEMPTS);
+      }
+      store.stalledIds(MAX_ATTEMPTS, SWEEP_BATCH).forEach(this::enqueue);
+    } catch (RuntimeException e) {
+      log.warn("Invoice inbox: sweep failed: {}", e.getClass().getSimpleName());
+    } finally {
+      rollbackQuietly();
+      clearContext();
+    }
+  }
+
+  /** The worker side of one row: never throws, always leaves the session closed and the context clean. */
+  void runOne(String id) {
+    try {
+      OBContext.setOBContext(SYSTEM_USER, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID);
+      Claimed claimed = store.claim(id, LEASE_MINUTES, MAX_ATTEMPTS);
+      if (claimed != null) {
+        processClaimed(id, claimed);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } catch (Exception e) {
+      handleUnexpected(id, e);
+    } finally {
+      rollbackQuietly();
+      clearContext();
+      inFlight.remove(id);
+    }
+  }
+
+  private void handleUnexpected(String id, Exception e) {
+    log.warn("Invoice inbox: processing {} failed: {}", id, e.getClass().getSimpleName());
+    rollbackQuietly();
+    try {
+      OBContext.setOBContext(SYSTEM_USER, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID);
+      store.failOrRelease(id, MAX_ATTEMPTS);
+    } catch (RuntimeException inner) {
+      log.warn("Invoice inbox: could not close {}: {}", id, inner.getClass().getSimpleName());
+    }
+  }
+
+  private void processClaimed(String id, Claimed claimed)
+      throws IOException, JSONException, InterruptedException {
+    String spec = SPEC_BY_TARGET.get(claimed.targetType());
+    Optional<OcrDocType> type = spec == null ? Optional.empty() : OcrConfig.get().forSpec(spec);
+    String roleId = store.roleFor(claimed.userId(), claimed.clientId());
+    if (type.isEmpty() || roleId == null) {
+      log.warn("Invoice inbox: {} cannot be processed (no document type or no usable role)", id);
+      store.fail(id, ERR_SERVICE);
+      return;
+    }
+    OBContext.setOBContext(claimed.userId(), roleId, claimed.clientId(), claimed.orgId());
+    // Admin mode, as on every NEO and MCP request: it only skips the role's entity-access check, which
+    // the Schema Forge configuration tables (spec, entity, field) read by the selector lookups fail
+    // for a business role. The DAL still filters every query by the role's readable clients and
+    // organizations (OBQuery/OBCriteria apply them in admin mode too), so no other tenant's data
+    // is reachable.
+    inAdminMode(() -> {
+      JSONObject extraction = extractionOf(id, claimed, type.get());
+      if (extraction != null) {
+        matchAndStore(id, extraction, type.get(), claimed.orgId());
+      }
+      return null;
+    });
+  }
+
+  /** The body of a step that runs in admin mode. */
+  private interface AdminStep<T> {
+    T run() throws IOException, JSONException, InterruptedException;
+  }
+
+  /** Runs a step in admin mode and restores the mode after it, whatever happens. */
+  private static <T> T inAdminMode(AdminStep<T> step)
+      throws IOException, JSONException, InterruptedException {
+    OBContext.setAdminMode(true);
+    try {
+      return step.run();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The stored extraction, or a fresh one (stored write-once); {@code null} when the row was ended. */
+  private JSONObject extractionOf(String id, Claimed claimed, OcrDocType type)
+      throws IOException, JSONException, InterruptedException {
+    if (claimed.extractedData() != null) {
+      return new JSONObject(claimed.extractedData());
+    }
+    File file = NeoAttachmentsHelper.copyMainAttachmentToTemp(IncomingDocument.TABLE_NAME, id);
+    OBDal.getInstance().rollbackAndClose();
+    if (file == null) {
+      store.fail(id, ERR_UNREADABLE);
+      return null;
+    }
+    try {
+      JSONObject payload = readWithRetries(file, type);
+      if (payload == null) {
+        store.fail(id, ERR_UNREADABLE);
+        return null;
+      }
+      payload.put("_meta", new JSONObject().put("docType", type.getSpec())
+          .put("extractedAt", new Date().getTime()));
+      store.storeExtracted(id, payload.toString());
+      return payload;
+    } catch (OcrUnavailableException e) {
+      log.warn("Invoice inbox: the extraction service failed for {} (retryable: {})", id,
+          e.isRetryable());
+      store.fail(id, ERR_SERVICE);
+      return null;
+    } finally {
+      NeoAttachmentsHelper.cleanupTempFile(file);
+    }
+  }
+
+  /** Reads the document, retrying only failures that may pass; outside any transaction. */
+  private JSONObject readWithRetries(File file, OcrDocType type) throws OcrUnavailableException,
+      JSONException, InterruptedException {
+    OcrExtractionService service = new OcrExtractionService(client);
+    OcrUnavailableException last = null;
+    for (int attempt = 0; attempt < RETRIES; attempt++) {
+      sleeper.sleep(BACKOFF_SECONDS[attempt]);
+      try {
+        return service.extract(file, type);
+      } catch (OcrUnavailableException e) {
+        if (!e.isRetryable()) {
+          throw e;
+        }
+        last = e;
+      }
+    }
+    throw last;
+  }
+
+  private void matchAndStore(String id, JSONObject extraction, OcrDocType type,
+      String orgId)
+      throws JSONException {
+    Optional<OcrLookups> lookups = OcrLookupsRegistry.forResolver(type.getResolver());
+    if (lookups.isEmpty()) {
+      store.fail(id, ERR_SERVICE);
+      return;
+    }
+    JSONObject document = new InboxMatcher(lookups.get(), orgId).build(extraction);
+    OBDal.getInstance().rollbackAndClose();
+    persist(id, document);
+  }
+
+  /** The final write: one transaction, only while the row is still {@code PROCESSING}. */
+  private void persist(String id, JSONObject document) throws JSONException {
+    if (!store.lockIfProcessing(id)) {
+      OBDal.getInstance().rollbackAndClose();
+      return;
+    }
+    IncomingDocument row = OBDal.getInstance().get(IncomingDocument.class, id);
+    InvoiceInboxDuplicates.addInboxDuplicates(row, document);
+    InvoiceInboxValidator.Result verdict = InvoiceInboxLiveChecks.verdict(document, row);
+    document.put(K_VALIDATION, verdict.toJson());
+    row.setCurrentData(document.toString());
+    InvoiceInboxSummary.syncFrom(document, row);
+    row.setStatus(InvoiceInboxStatusPolicy.PENDING_REVIEW);
+    row.setErrorCode(null);
+    InvoiceInboxStatusPolicy.apply(row, verdict);
+    row.setProcessingLease(null);
+    row.setProcessedAt(new Date());
+    OBDal.getInstance().save(row);
+    OBDal.getInstance().commitAndClose();
+  }
+
+  private static void clearContext() {
+    try {
+      OBContext.setOBContext((OBContext) null);
+    } catch (RuntimeException e) {
+      log.debug("Invoice inbox: could not clear the worker context: {}",
+          e.getClass().getSimpleName());
+    }
+  }
+
+  private static void rollbackQuietly() {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } catch (RuntimeException e) {
+      log.debug("Invoice inbox: nothing to roll back: {}", e.getMessage());
+    }
+  }
+
+  private static ExecutorService buildExecutor() {
+    AtomicInteger counter = new AtomicInteger();
+    return new ThreadPoolExecutor(THREADS, THREADS, 60L, TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
+          Thread thread = new Thread(runnable, "invoice-inbox-" + counter.incrementAndGet());
+          thread.setDaemon(true);
+          return thread;
+        }, new ThreadPoolExecutor.AbortPolicy());
+  }
+}

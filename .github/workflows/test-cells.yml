@@ -1,0 +1,29 @@
+name: Test Cells
+
+# Every JUnit test class under src-test/src must be in exactly one cell file (src-test/cells/).
+# The per-cell report and the Datadog board read those files: a test of no cell reaches no team
+# when it fails (ETP-6153). Same rules as `./gradlew goCellCheck`; the logic lives in
+# scripts/check-test-cells.py so it can be unit-tested and run without the Etendo project.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src-test/**'
+      - 'scripts/check-test-cells.py'
+      - 'scripts/test_check_test_cells.py'
+      - '.github/workflows/test-cells.yml'
+
+jobs:
+  test-cells:
+    name: Every test class has a cell
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Unit-test the cell check
+        run: python3 -m unittest scripts/test_check_test_cells.py
+
+      - name: Check src-test/cells
+        run: python3 scripts/check-test-cells.py

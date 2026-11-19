@@ -60,19 +60,97 @@ public final class UsageEventTypes {
   public static final String AI_TOOL_EXECUTE = "ai.tool.execute";
 
   /**
+   * One Decisions API request sent through the LLM gateway ({@code com.etendoerp.go.llm.LlmDecider}),
+   * with its input tokens and the cost the gateway reported. {@code target} is the feature that
+   * asked; failed requests are recorded too, with outcome {@code error}.
+   */
+  public static final String AI_DECISION_EXECUTE = "ai.decision.execute";
+
+  /**
    * One successful entry into an environment, recorded by the backend once the environment's
    * credential is issued ({@link SessionLoginUsage}). {@code action} tells the two paths apart.
    */
   public static final String SESSION_LOGIN = "session.login";
+
+  /**
+   * ETP-6057 — the requests one public API key made in one minute, aggregated by
+   * {@link PublicApiUsageCounter}: one row per tenant, key, spec, entity, HTTP method and status,
+   * with the number of requests in {@code properties.count}. Never one row per request.
+   */
+  public static final String PUBLIC_API_REQUEST = "publicapi.request";
+
+  /**
+   * ETP-5993 — one effective PDF of a document (a comprobante), never a preview: downloaded,
+   * printed or emailed from the app (source {@code ui}), or rendered and stored by the server
+   * (source {@code mcp}). {@code target} is the document type, {@code action} the channel and
+   * {@code properties.variant} the template it was printed with; nothing of the document itself.
+   * The shape is enforced by {@code com.etendoerp.go.schemaforge.DocumentPdfUsage}.
+   */
+  public static final String DOCUMENT_PDF_GENERATE = "document.pdf.generate";
+
+  /**
+   * ETP-6209 — a customer portal link left with a document email. {@code sessionKey} is the link's
+   * root ({@code etgo_portal_link.root_link_id}): one send.
+   */
+  public static final String PORTAL_LINK_SENT = "portal.link.sent";
+
+  /** ETP-6209 — a still-valid portal link opened the portal (once per page load). */
+  public static final String PORTAL_LINK_OPENED = "portal.link.opened";
+
+  /**
+   * ETP-6209 — an expired portal link asked for a new one: {@code ok} when the renewal email left,
+   * {@code error} with the refusal reason in {@code errorCode} otherwise.
+   */
+  public static final String PORTAL_LINK_RENEWED = "portal.link.renewed";
+
+  /** ETP-6209 — a document PDF was downloaded through the customer portal. */
+  public static final String PORTAL_DOCUMENT_DOWNLOADED = "portal.document.downloaded";
 
   /** Every accepted event type. Keep in sync with the constants above. */
   private static final Set<String> KNOWN = Set.of(
       AI_AGENT_MESSAGE,
       AI_SUPPORT_MESSAGE,
       AI_TOOL_EXECUTE,
-      SESSION_LOGIN);
+      AI_DECISION_EXECUTE,
+      SESSION_LOGIN,
+      PUBLIC_API_REQUEST,
+      DOCUMENT_PDF_GENERATE,
+      PORTAL_LINK_SENT,
+      PORTAL_LINK_OPENED,
+      PORTAL_LINK_RENEWED,
+      PORTAL_DOCUMENT_DOWNLOADED);
+
+  /**
+   * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
+   * ({@code NeoUsageEventEndpoint}, {@code POST /sws/neo/usage}) drops them, because a row of one of
+   * these types is read as a fact about the tenant: a login, public API requests that are billed,
+   * or an AI turn or decision whose cost counts in the tenant's AI spend. Each must also be in
+   * {@link #KNOWN}.
+   */
+  private static final Set<String> SERVER_ONLY = Set.of(
+      AI_SUPPORT_MESSAGE,
+      AI_TOOL_EXECUTE,
+      AI_DECISION_EXECUTE,
+      SESSION_LOGIN,
+      PUBLIC_API_REQUEST,
+      // ETP-6209: the portal KPIs are facts about what a tenant's customers did; a browser must not
+      // be able to forge an open or a send.
+      PORTAL_LINK_SENT,
+      PORTAL_LINK_OPENED,
+      PORTAL_LINK_RENEWED,
+      PORTAL_DOCUMENT_DOWNLOADED);
 
   private UsageEventTypes() {
+  }
+
+  /**
+   * Tell whether only the backend may record an event type, so a client-facing endpoint must drop it.
+   *
+   * @param eventType candidate event type, possibly null
+   * @return true when {@code eventType} is a server-only type
+   */
+  public static boolean isServerOnly(String eventType) {
+    return eventType != null && SERVER_ONLY.contains(eventType);
   }
 
   /**

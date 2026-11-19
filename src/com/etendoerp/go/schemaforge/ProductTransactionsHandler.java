@@ -17,12 +17,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -67,21 +68,37 @@ import org.openbravo.dal.service.OBDal;
  *       the product, in the order movement date, processing time, id, so it does not depend on the
  *       filters, the sort or the page of the list. M_Transaction has no such column, and a field
  *       injected here cannot be filtered or sorted, which is why the tab does not offer to.</li>
- *   <li>{@code response.etgoTotalRows} &mdash; the exact number of movements of the product, only when
- *       the request has no criteria. NEO's own {@code totalRows} is a lower bound on a partial page
- *       (the rows returned plus one), so the tab counter cannot read it.</li>
+ *   <li>{@code etgoProcessTime} &mdash; the time of day of the movement: {@code M_Transaction.TrxProcessDate}
+ *       as the wall clock the database stores, with no time-zone conversion, as an ISO local date-time
+ *       ({@code yyyy-MM-ddTHH:mm:ss}, fractions dropped). It is read by the same statement as the stock
+ *       and is display only: it changes neither the order nor any other field. A row with no process date
+ *       carries none.</li>
  * </ul>
+ *
+ * <p>The tab can also sort by the visible Type label: {@link #orderedPage} ranks the whole filtered set
+ * by the bucket order the client sends ({@link ProductMovementTypeOrder}), since the label is translated
+ * by the client and no column holds its order.
  *
  * <p>All of that is behind {@link ProductMovementsPolicy} (the {@code product-movements-tab} flag,
  * evaluated per account): off, the handler adds the document fields only, exactly as before ETP-5889.
  *
- * <p>Both only count what the user can read: the native queries filter by the readable
+ * <p>The tab's "Total del periodo" row is the whole filtered set, not the loaded page: with
+ * {@code etgoTotals=true} the list response also carries {@code response.totals}
+ * ({@link ProductMovementTotals}), computed last by one aggregate query over the list's own filters.
+ *
+ * <p>The stock only counts what the user can read: the native query filters by the readable
  * organizations of the session, which a native query would otherwise bypass.
  *
  * <p>The stock is resolved apart from the document: if it fails, the rows keep their document
- * fields and simply carry no {@code etgoStockAfter} (the tab shows a dash, never a zero).
+ * fields and simply carry no {@code etgoStockAfter} (the tab shows a dash, never a zero), nor
+ * {@code etgoProcessTime}.
+ *
+ * <p><b>Binding (ETP-5908).</b> This class holds the behaviour and carries no binding of its own.
+ * {@link WarehouseProductTransactionsHandler} binds it to {@code warehouse/productTransactions} and
+ * {@link ProductMovementsTabHandler} to {@code product/transactions}; they are two classes only
+ * because {@link NeoExtension} is not repeatable. No {@code @Named}: a second bean carrying the
+ * old name would be ambiguous.
  */
-@Named("productTransactionsHandler")
 public class ProductTransactionsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ProductTransactionsHandler.class);
@@ -119,11 +136,14 @@ public class ProductTransactionsHandler implements NeoHandler {
   // products in the page up to the newest movement date of the page (a movement after every row of the
   // page cannot change their running sum), then only the page rows are kept. The order key ends
   // in the transaction id, so two movements never tie and the sum is deterministic.
+  private static final String PROCESS_TIME_PATTERN = "yyyy-MM-dd'T'HH:mm:ss";
+
+  // The same statement also returns the transaction's process timestamp (column 3): no extra round trip.
   private static final String STOCK_AFTER_SQL =
       "SELECT s.m_transaction_id AS tx_id, s.stock_after AS stock_after, "
-      + "  s.stock_after_warehouse AS stock_after_warehouse "
+      + "  s.stock_after_warehouse AS stock_after_warehouse, s.trxprocessdate AS process_time "
       + "FROM ( "
-      + "  SELECT t.m_transaction_id, "
+      + "  SELECT t.m_transaction_id, t.trxprocessdate, "
       + "    SUM(t.movementqty) OVER (PARTITION BY t.m_product_id "
       + "      ORDER BY t.movementdate, t.trxprocessdate, t.m_transaction_id) AS stock_after, "
       + "    SUM(t.movementqty) OVER (PARTITION BY t.m_product_id, t.em_etgo_warehouse_id "
@@ -135,10 +155,6 @@ public class ProductTransactionsHandler implements NeoHandler {
       + ") s "
       + "WHERE s.m_transaction_id IN (:ids)";
 
-  // Every movement of a product the session can read; the exact total the list cannot report.
-  private static final String TOTAL_ROWS_SQL =
-      "SELECT COUNT(*) FROM m_transaction t WHERE t.m_product_id = :productId AND t.ad_org_id IN (:orgs)";
-
   @Override
   public NeoResponse handle(NeoContext context) {
     return null;
@@ -146,39 +162,85 @@ public class ProductTransactionsHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ProductMovementsPolicy.isEnabled() is evaluated once here and once in orderedPage: a flag flipped
+    // between the two calls could yield a request that is ordered but not enriched (accepted, cosmetic).
+    NeoResponse previousResult = context.getPreviousResult();
+    if (previousResult == null) {
+      return null;
+    }
+    boolean enriched;
     try {
-      NeoResponse previousResult = context.getPreviousResult();
-      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
-      if (dataArr == null || previousResult == null) {
-        return null;
-      }
-      List<String> txIds = NeoHandlerUtils.collectIds(dataArr);
-      if (txIds.isEmpty()) {
-        return null;
-      }
-      Map<String, String[]> targets = resolveDocumentTargets(txIds);
-      // The extra work of the Product "Movements" tab (ETP-5889) runs only for the Product window and
-      // only for an account the flag is on for: the Warehouse window shares this handler and has no use
-      // for it, and an account that is off must not pay for it on the requests the side panel makes.
-      boolean movementsTab = isMovementsTab(context);
-      // The tab also asks for a single row only to read etgoTotalRows; that row needs no running sum.
-      Map<String, BigDecimal> stockAfter = movementsTab && !isCountOnly(context)
-          ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
-      for (int i = 0; i < dataArr.length(); i++) {
-        enrichRow(dataArr.getJSONObject(i), targets, stockAfter);
-      }
-      if (movementsTab) {
-        addTotalRows(context, previousResult.getBody());
-      }
-      return NeoResponse.ok(previousResult.getBody());
+      enriched = enrichPage(context);
     } catch (Exception e) {
       log.error("Error enriching product transactions with document targets", e);
-      return context.getPreviousResult();
+      return previousResult;
+    }
+    // Last: a failed aggregate aborts the PG transaction, so nothing may query after it. It also runs
+    // for an empty page (whole-set total 0 / count 0), which enrichPage leaves untouched.
+    boolean totals = isMovementsTab(context) && ProductMovementTotals.injectInto(context, previousResult.getBody());
+    return enriched || totals ? NeoResponse.ok(previousResult.getBody()) : null;
+  }
+
+  /** Adds the document fields (and, on the Movements tab, stock and time) to the rows; false when none. */
+  private boolean enrichPage(NeoContext context) throws Exception {
+    JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+    if (dataArr == null) {
+      return false;
+    }
+    List<String> txIds = NeoHandlerUtils.collectIds(dataArr);
+    if (txIds.isEmpty()) {
+      return false;
+    }
+    Map<String, String[]> targets = resolveDocumentTargets(txIds);
+    // The extra work of the Product "Movements" tab (ETP-5889) runs only for the Product window and
+    // only for an account the flag is on for: the Warehouse window shares this handler and has no use
+    // for it, and an account that is off must not pay for it on the requests the side panel makes.
+    boolean movementsTab = isMovementsTab(context);
+    Map<String, MovementPoint> points = movementsTab
+        ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
+    for (int i = 0; i < dataArr.length(); i++) {
+      enrichRow(dataArr.getJSONObject(i), targets, points);
+    }
+    return true;
+  }
+
+  /**
+   * The Movements list sorted by the visible Type label (the client sends the order of the labels
+   * it shows, {@link ProductMovementTypeOrder#PARAM_TYPE_ORDER}). Only for the Product window and an
+   * account the flag is on for; absent, unreadable or for any other sort, the default order stands.
+   */
+  @Override
+  public NeoOrderedPage orderedPage(NeoContext context, NeoListAggregateQuery filteredSet, int startRow,
+      int pageSize) {
+    // ProductMovementsPolicy.isEnabled() is evaluated once here and once in afterHandle: a flag flipped
+    // between the two calls could yield a request that is ordered but not enriched (accepted, cosmetic).
+    if (!isMovementsTab(context) || context.getQueryParams() == null) {
+      return null;
+    }
+    Map<String, String> params = context.getQueryParams();
+    String orderBy = ProductMovementTypeOrder.buildOrderBy(params.get("_sortBy"),
+        params.get(ProductMovementTypeOrder.PARAM_TYPE_ORDER));
+    if (orderBy == null) {
+      return null;
+    }
+    // Not in admin mode: the filtered set must keep the readable client/organization restrictions
+    // the default list applies, or the page would name rows the default fetch then refuses.
+    return new NeoOrderedPage(filteredSet.orderedIds(orderBy, startRow, pageSize), filteredSet.count());
+  }
+
+  /** What the Movements tab needs of one transaction besides its document: stock after it and its time. */
+  private static final class MovementPoint {
+    private final BigDecimal stockAfter;
+    private final String processTime;
+
+    private MovementPoint(BigDecimal stockAfter, String processTime) {
+      this.stockAfter = stockAfter;
+      this.processTime = processTime;
     }
   }
 
-  /** Adds the source document and, when resolved, the stock after the movement to one list row. */
-  private static void enrichRow(JSONObject rec, Map<String, String[]> targets, Map<String, BigDecimal> stockAfter)
+  /** Adds the source document and, when resolved, the stock after and the time of the movement to one list row. */
+  private static void enrichRow(JSONObject rec, Map<String, String[]> targets, Map<String, MovementPoint> points)
       throws JSONException {
     String id = rec.optString("id", null);
     String[] target = targets.get(id);
@@ -189,9 +251,15 @@ public class ProductTransactionsHandler implements NeoHandler {
         rec.put("etgoDocLabel", target[2]);
       }
     }
-    BigDecimal stock = stockAfter.get(id);
-    if (stock != null) {
-      rec.put("etgoStockAfter", stock);
+    MovementPoint point = points.get(id);
+    if (point == null) {
+      return;
+    }
+    if (point.stockAfter != null) {
+      rec.put("etgoStockAfter", point.stockAfter);
+    }
+    if (point.processTime != null) {
+      rec.put("etgoProcessTime", point.processTime);
     }
   }
 
@@ -205,10 +273,10 @@ public class ProductTransactionsHandler implements NeoHandler {
    * @param txIds the M_Transaction ids visible in the current page
    * @param perWarehouse {@code true} when the list is filtered by warehouse: the stock of that
    *     warehouse after each movement instead of the stock of the product as a whole
-   * @return a map of transaction id to the stock after that movement
+   * @return a map of transaction id to the stock after that movement and its process time
    */
-  private Map<String, BigDecimal> resolveStockAfter(List<String> txIds, boolean perWarehouse) {
-    Map<String, BigDecimal> result = new HashMap<>();
+  private Map<String, MovementPoint> resolveStockAfter(List<String> txIds, boolean perWarehouse) {
+    Map<String, MovementPoint> result = new HashMap<>();
     try {
       OBContext.setAdminMode(true);
       try {
@@ -218,8 +286,9 @@ public class ProductTransactionsHandler implements NeoHandler {
         query.setParameterList("orgs", readableOrganizations());
         for (Object[] row : query.list()) {
           BigDecimal stock = toStock(perWarehouse ? row[2] : row[1]);
-          if (stock != null) {
-            result.put((String) row[0], stock);
+          String processTime = row.length > 3 ? toProcessTime(row[3]) : null;
+          if (stock != null || processTime != null) {
+            result.put((String) row[0], new MovementPoint(stock, processTime));
           }
         }
       } finally {
@@ -267,52 +336,24 @@ public class ProductTransactionsHandler implements NeoHandler {
     return false;
   }
 
-  /**
-   * Whether the request is the tab's counter probe: one row ({@code _endRow=0}), asked only to read
-   * {@code etgoTotalRows}. A page of the list is never this small.
-   */
-  private static boolean isCountOnly(NeoContext context) {
-    Map<String, String> params = context.getQueryParams();
-    return params != null && "0".equals(params.get("_endRow"));
-  }
-
-  /**
-   * Adds {@code etgoTotalRows} to the response of a Product-window request that has no criteria and
-   * names its product, so the tab can show how many movements the product has. Never throws: without
-   * it the tab simply shows no counter.
-   */
-  private void addTotalRows(NeoContext context, JSONObject body) {
-    try {
-      Map<String, String> params = context.getQueryParams();
-      if (params == null || StringUtils.isNotBlank(params.get("criteria"))) {
-        return;
-      }
-      String productId = params.get("parentId");
-      JSONObject response = body == null ? null : body.optJSONObject("response");
-      if (StringUtils.isBlank(productId) || response == null) {
-        return;
-      }
-      OBContext.setAdminMode(true);
-      try {
-        @SuppressWarnings("unchecked")
-        NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(TOTAL_ROWS_SQL);
-        query.setParameter("productId", productId);
-        query.setParameterList("orgs", readableOrganizations());
-        Object total = query.uniqueResult();
-        if (total instanceof Number) {
-          response.put("etgoTotalRows", ((Number) total).longValue());
-        }
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error counting the movements of the product", e);
-    }
-  }
-
   /** Organizations the session can read: a native query does not apply the DAL read restrictions. */
   private static List<String> readableOrganizations() {
     return Arrays.asList(OBContext.getOBContext().getReadableOrganizations());
+  }
+
+  /**
+   * The process timestamp as the wall clock the database stores, {@code yyyy-MM-ddTHH:mm:ss}, with no
+   * time-zone conversion ({@code toLocalDateTime} reads the fields the driver built from the stored
+   * wall clock). Null for a missing or unreadable value.
+   */
+  private static String toProcessTime(Object value) {
+    LocalDateTime wallClock = null;
+    if (value instanceof Timestamp) {
+      wallClock = ((Timestamp) value).toLocalDateTime();
+    } else if (value instanceof LocalDateTime) {
+      wallClock = (LocalDateTime) value;
+    }
+    return wallClock == null ? null : wallClock.format(DateTimeFormatter.ofPattern(PROCESS_TIME_PATTERN));
   }
 
   /** Null for a missing or unreadable value: unlike {@code ProductHandlerUtils.toBigDecimal}, never 0. */

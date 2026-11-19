@@ -194,7 +194,8 @@ public class InvoiceInboxIntakeIntegrationTest extends WeldBaseTest {
   private void assertRowIsProcessing(String id, String fileName) {
     NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
         "SELECT status, source, target_type, adjusted, reviewed, createdby, file_name, "
-            + "ad_client_id, ad_org_id FROM etgo_incoming_document "
+            + "ad_client_id, ad_org_id, processing_attempts, processing_lease, processed_at "
+            + "FROM etgo_incoming_document "
             + "WHERE etgo_incoming_document_id = :id");
     query.setParameter("id", id);
     Object[] row = (Object[]) query.uniqueResult();
@@ -210,6 +211,10 @@ public class InvoiceInboxIntakeIntegrationTest extends WeldBaseTest {
     assertEquals(fileName, String.valueOf(row[6]));
     assertEquals(CLIENT_ID, String.valueOf(row[7]));
     assertEquals(ORG_ID, String.valueOf(row[8]));
+    // ETP-6048: waiting for the worker: no pass yet, no lease, not processed.
+    assertEquals("no pass has run", 0L, ((Number) row[9]).longValue());
+    assertEquals("nobody holds the row", null, row[10]);
+    assertEquals("it has not been processed", null, row[11]);
   }
 
   private static String tableId() {

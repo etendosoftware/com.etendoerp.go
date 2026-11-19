@@ -50,10 +50,18 @@ final class EmailVerificationDalHelper {
    * password-reset token, so a database dump does not let anyone verify someone else's address.
    * Issuing a new token replaces any token still pending, which is what makes "resend" safe: the
    * previous link stops working.
+   *
+   * <p>ETP-6081: the same token is also stored as the account's one-time login link, and the link
+   * that goes out is the login link. An account registered without a password has no other way in
+   * from another browser, and following it confirms the address too
+   * ({@link SignupAccountDalHelper#consumeLoginLink}). The verification columns are still written
+   * because they are what gates creating an environment ({@link #isEmailVerificationPending}).
    */
   static void storeEmailVerifyToken(Account account, String verifyTokenHash, Date expiresAt) {
     account.set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, verifyTokenHash);
     account.set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES, expiresAt);
+    account.set(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_HASH, verifyTokenHash);
+    account.set(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_EXPIRES, expiresAt);
     OBDal.getInstance().save(account);
     flushAndCommit();
   }
@@ -72,7 +80,9 @@ final class EmailVerificationDalHelper {
     }
     return new EmailVerifyTokenState(
         (String) account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH),
-        (Date) account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES));
+        (Date) account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES),
+        (String) account.get(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_HASH),
+        (Date) account.get(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_EXPIRES));
   }
 
   /**
@@ -84,9 +94,16 @@ final class EmailVerificationDalHelper {
     if (account == null) {
       return;
     }
-    storeEmailVerifyToken(account,
-        tokenState == null ? null : tokenState.verifyTokenHash,
+    account.set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH,
+        tokenState == null ? null : tokenState.verifyTokenHash);
+    account.set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES,
         tokenState == null ? null : tokenState.verifyTokenExpires);
+    account.set(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_HASH,
+        tokenState == null ? null : tokenState.loginLinkHash);
+    account.set(SignupAccountDalHelper.PROPERTY_LOGIN_LINK_EXPIRES,
+        tokenState == null ? null : tokenState.loginLinkExpires);
+    OBDal.getInstance().save(account);
+    flushAndCommit();
   }
 
   static Account findAccountByVerifyTokenHash(String verifyTokenHash, Date now) {
@@ -146,14 +163,22 @@ final class EmailVerificationDalHelper {
     OBDal.getInstance().commitAndClose();
   }
 
-  /** Immutable snapshot of the verification token columns, for the capture/restore pair above. */
+  /**
+   * Immutable snapshot of the verification token and login link columns, for the capture/restore
+   * pair above.
+   */
   static final class EmailVerifyTokenState {
     private final String verifyTokenHash;
     private final Date verifyTokenExpires;
+    private final String loginLinkHash;
+    private final Date loginLinkExpires;
 
-    private EmailVerifyTokenState(String verifyTokenHash, Date verifyTokenExpires) {
+    private EmailVerifyTokenState(String verifyTokenHash, Date verifyTokenExpires,
+        String loginLinkHash, Date loginLinkExpires) {
       this.verifyTokenHash = verifyTokenHash;
       this.verifyTokenExpires = verifyTokenExpires;
+      this.loginLinkHash = loginLinkHash;
+      this.loginLinkExpires = loginLinkExpires;
     }
 
     /** True when a confirmation was already pending before the re-issue that is being undone. */

@@ -63,6 +63,8 @@ import com.etendoerp.go.hubspot.HubSpotOutboxStore.SubscriptionEnvironment;
 public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
 
   private static final String MARKER = "hubspot-outbox-it-";
+  /** Prefix of the {@code AD_REF_DATA_LOADED.GENERIC_ID} a fixture adds (32 chars at most). */
+  private static final String LOADED_MARKER = "F6082";
   private static final String ZERO = "0";
 
   private final DalHubSpotOutboxStore store = new DalHubSpotOutboxStore();
@@ -77,6 +79,7 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
       execute("delete from etgo_go_session where etgo_account_id in " + accounts);
       execute("delete from etgo_checkout_request where etgo_account_id in " + accounts);
       execute("delete from etgo_account where email like '" + MARKER + "%'");
+      execute("delete from ad_ref_data_loaded where generic_id like '" + LOADED_MARKER + "%'");
       OBDal.getInstance().commitAndClose();
     } finally {
       OBDal.getInstance().rollbackAndClose();
@@ -156,7 +159,7 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
   }
 
   @Test
-  public void aDemoStaysOpenUntilItIsPaidOrExpired() {
+  public void aDemoStaysOpenUntilItIsPaid() {
     String account = createAccount("Dora", null);
     store.enqueue(account, HubSpotOutboxStore.DEMO_READY, TEST_CLIENT_ID, null);
     store.commit();
@@ -172,8 +175,87 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
     assertTrue("an entry already detected is reported as such", openDemoOf(account).get().entered());
 
     store.enqueue(account, HubSpotOutboxStore.DEMO_EXPIRED, TEST_CLIENT_ID, null);
+    store.enqueueKeyed(account, HubSpotOutboxStore.MILESTONE,
+        HubSpotOutboxStore.MILESTONE_PRODUCT, TEST_CLIENT_ID, null);
     store.commit();
-    assertFalse("a closed deal is no longer inspected", openDemoOf(account).isPresent());
+    // ETP-6082: an owner who pays after the trial ended still moves the deal to the card stage.
+    OpenDemo expired = openDemoOf(account).orElseThrow();
+    assertTrue("its expiry is not reported again", expired.expired());
+    assertEquals(1, expired.milestones());
+
+    store.enqueue(account, HubSpotOutboxStore.PAID, TEST_CLIENT_ID, null);
+    store.commit();
+    assertFalse("a paid demo is no longer inspected", openDemoOf(account).isPresent());
+  }
+
+  @Test
+  public void aMilestoneIsRecordedOncePerMilestone() {
+    String account = createAccount("Mila", null);
+
+    assertTrue(store.enqueueKeyed(account, HubSpotOutboxStore.MILESTONE,
+        HubSpotOutboxStore.MILESTONE_ORDER, TEST_CLIENT_ID, null));
+    assertFalse(store.enqueueKeyed(account, HubSpotOutboxStore.MILESTONE,
+        HubSpotOutboxStore.MILESTONE_ORDER, TEST_CLIENT_ID, null));
+    assertTrue(store.enqueueKeyed(account, HubSpotOutboxStore.MILESTONE,
+        HubSpotOutboxStore.MILESTONE_INVOICE, TEST_CLIENT_ID, null));
+    store.commit();
+  }
+
+  @Test
+  public void anEnvironmentWithNothingOfItsOwnerReachedNoMilestone() {
+    String nobodysEnvironment = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+
+    assertTrue(store.findMilestones(nobodysEnvironment, Instant.now()).isEmpty());
+  }
+
+  @Test
+  public void rowsTheSampleDataLoadedDoNotQualifyADemo() {
+    // ETP-6082: the sample data's partners, products and documents are the onboarding's, not the
+    // owner's. Like any dataset import, it maps each row it inserts in AD_REF_DATA_LOADED.
+    Instant longAgo = Instant.parse("2000-01-01T00:00:00Z");
+    assertTrue("the test client has partners of its own", store.findMilestones(TEST_CLIENT_ID,
+        longAgo).containsKey(HubSpotOutboxStore.MILESTONE_BUSINESS_PARTNER));
+
+    execute("insert into ad_ref_data_loaded (ad_ref_data_loaded_id, ad_client_id, ad_org_id,"
+        + " isactive, created, createdby, updated, updatedby, generic_id, specific_id,"
+        + " ad_table_id) select get_uuid(), b.ad_client_id, b.ad_org_id, 'Y', now(), '0', now(),"
+        + " '0', '" + LOADED_MARKER + "' || substr(get_uuid(), 6), b.c_bpartner_id, '291'"
+        + " from c_bpartner b where b.ad_client_id = '" + TEST_CLIENT_ID + "'");
+    store.commit();
+
+    assertFalse("every partner came with the sample data", store.findMilestones(TEST_CLIENT_ID,
+        longAgo).containsKey(HubSpotOutboxStore.MILESTONE_BUSINESS_PARTNER));
+  }
+
+  @Test
+  public void rowsOlderThanTheDemoDoNotQualifyIt() {
+    assertTrue(store.findMilestones(TEST_CLIENT_ID, Instant.now().plus(1, ChronoUnit.DAYS))
+        .isEmpty());
+  }
+
+  @Test
+  public void aPurchaseThatCreatedAnEnvironmentIsAProductive() {
+    String account = createAccount("Pablo", null);
+    String demo = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+    assertFalse(store.hasProductiveEnvironment(account, demo));
+
+    execute("insert into etgo_checkout_request (etgo_checkout_request_id, ad_client_id, ad_org_id,"
+        + " created, createdby, updated, updatedby, request_id, etgo_account_id, account_email,"
+        + " client_name, checkout_status, provisioning_attempts, creating_at,"
+        + " demo_selection_recorded, transfer_products, transfer_contacts, created_client_id)"
+        + " select get_uuid(), '0', '0', now(), '0', now(), '0', '" + MARKER + "'||get_uuid(), '"
+        + account + "', email, 'X', 'PROVISIONED', 0, now(), 'N', 'N', 'N', '" + TEST_CLIENT_ID
+        + "' from etgo_account where etgo_account_id = '" + account + "'");
+    store.commit();
+
+    assertTrue(store.hasProductiveEnvironment(account, demo));
+  }
+
+  @Test
+  public void thePlansBillingIntervalIsTheDealsPeriodicity() {
+    assertEquals("monthly", DalHubSpotOutboxStore.hubSpotInterval("month"));
+    assertEquals("annual", DalHubSpotOutboxStore.hubSpotInterval("year"));
+    assertNull(DalHubSpotOutboxStore.hubSpotInterval(null));
   }
 
   @Test
@@ -248,6 +330,7 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
     JSONObject payload = new JSONObject(event.payload());
     assertEquals("Empresa SL", payload.getString(HubSpotOutbox.FIELD_COMPANY_NAME));
     assertEquals("Spain", payload.getString(HubSpotOutbox.FIELD_COUNTRY));
+    assertEquals("ES", payload.getString(HubSpotOutbox.FIELD_COUNTRY_CODE));
   }
 
   @Test
@@ -263,6 +346,28 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
     OBDal.getInstance().commitAndClose();
 
     assertNull(store.findStatus(account, HubSpotOutboxStore.DEMO_READY));
+  }
+
+  @Test
+  public void aSignupApiAccountOfABookedDemoIsReportedOnItsDeal() throws Exception {
+    // ETP-6082: marketing names the booking's deal when it creates the account.
+    String email = MARKER + "demo-" + UUID.randomUUID() + "@example.test";
+    String account = createAccount("Jana", email);
+    execute("update etgo_account set signup_channel = 'web' where etgo_account_id = '"
+        + account + "'");
+    store.commit();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    HubSpotOutbox.demoDeal(account, "555");
+    OBDal.getInstance().commitAndClose();
+
+    HubSpotOutbox.demoReady(email, "C9", "Empresa SL", "ES");
+    OBDal.getInstance().commitAndClose();
+
+    assertEquals(HubSpotOutboxStore.STATUS_SENT,
+        store.findStatus(account, HubSpotOutboxStore.DEMO_DEAL));
+    PendingEvent event = pendingOf(account).get(0);
+    assertEquals(HubSpotOutboxStore.DEMO_READY, event.eventType());
+    assertEquals("555", new JSONObject(event.payload()).getString(HubSpotOutbox.FIELD_DEMO_DEAL));
   }
 
   @Test
@@ -375,6 +480,30 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
     assertFalse(store.hasNewerBillingEvent(account, "P1", paidAt.plusSeconds(60)));
     assertFalse("another environment's events are its own",
         store.hasNewerBillingEvent(account, "P2", paidAt.minusSeconds(60)));
+  }
+
+  @Test
+  public void aPaymentAfterASentCancellationIsAReactivation() {
+    String account = createAccount("Olga", null);
+    Instant canceledAt = Instant.parse("2026-10-20T10:00:00Z");
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    HubSpotOutbox.write("a cancellation", connection -> HubSpotOutbox.enqueue(connection, account,
+        HubSpotOutboxStore.CANCELED, "sub_1", null, null, canceledAt));
+    OBDal.getInstance().commitAndClose();
+    PendingEvent cancellation = pendingOf(account).get(0);
+    store.assignEnvironment(cancellation.id(), "P1");
+    store.commit();
+    assertFalse("a pending cancellation is not reported yet",
+        store.wasCanceledBefore(account, "P1", canceledAt.plusSeconds(60)));
+
+    store.markSent(cancellation.id(), "deal-1");
+    store.commit();
+
+    assertTrue(store.wasCanceledBefore(account, "P1", canceledAt.plusSeconds(60)));
+    assertFalse("a payment before the cancellation is no reactivation",
+        store.wasCanceledBefore(account, "P1", canceledAt.minusSeconds(60)));
+    assertFalse("another environment's cancellation is its own",
+        store.wasCanceledBefore(account, "P2", canceledAt.plusSeconds(60)));
   }
 
   private String createPurchase(String account) {

@@ -71,6 +71,7 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * construction itself.
  *
  * @covers com.etendoerp.go.schemaforge.ProductDefaultsHandler
+ * @covers com.etendoerp.go.schemaforge.ProductTypeRules
  */
 public class ProductDefaultsHandlerTest {
 
@@ -431,10 +432,9 @@ public class ProductDefaultsHandlerTest {
   @Test
   public void testHandleLeavesStockedAndReturnableUntouchedWhenPatchDoesNotTouchType()
       throws Exception {
-    // A PATCH that edits something unrelated (e.g. weight) and never mentions productType at
-    // all must not force these flags off just because the record might already be a Service —
-    // resolving the persisted type would need a DB lookup, out of scope for this ticket's
-    // reported cases (all of which change productType in the same request).
+    // No record id, so the persisted type cannot be read: with neither the body nor the record
+    // saying the product is non-stockable, the flags are left alone (a persisted Service is
+    // covered by the ETP-5680 update tests below).
     JSONObject body = new JSONObject().put("weight", 5);
 
     new ProductDefaultsHandler().handle(patchCtx(body));
@@ -1646,6 +1646,36 @@ public class ProductDefaultsHandlerTest {
     assertEquals(false, body.has("returnable"));
   }
 
+  // ── ETP-5680: governedCreateFields (opt-out of the superseded-defaults report) ────────────
+
+  private static Set<String> governed(JSONObject body) {
+    NeoContext ctx = NeoContext.builder().specName("product").entityName("product")
+        .httpMethod("POST").requestBody(body).build();
+    return new ProductDefaultsHandler().governedCreateFields(ctx);
+  }
+
+  @Test
+  public void testGovernedCreateFieldsForAStockableTypeIsOnlyTheTaxCategory() throws Exception {
+    assertEquals(Set.of("taxCategory"), governed(new JSONObject().put("productType", "I")));
+  }
+
+  @Test
+  public void testGovernedCreateFieldsForANonStockableTypeAddsTheStockFlags() throws Exception {
+    Set<String> expected = Set.of("taxCategory", "stocked", "returnable");
+    assertEquals(expected, governed(new JSONObject().put("productType", "S")));
+    assertEquals(expected, governed(new JSONObject().put("productType", "E")));
+    assertEquals(expected, governed(new JSONObject().put("productType", "R")));
+  }
+
+  @Test
+  public void testGovernedCreateFieldsIsEmptyWithoutAValidProductType() throws Exception {
+    assertTrue(governed(new JSONObject()).isEmpty());
+    assertTrue(governed(new JSONObject().put("productType", "X")).isEmpty());
+    assertTrue(new ProductDefaultsHandler().governedCreateFields(null).isEmpty());
+    assertTrue(new ProductDefaultsHandler()
+        .governedCreateFields(NeoContext.builder().specName("product").build()).isEmpty());
+  }
+
   // ── ETP-5009: readPredicates ─────────────────────────────────────────────────────────────
 
   @Test
@@ -1840,7 +1870,7 @@ public class ProductDefaultsHandlerTest {
   }
 
   @Test
-  public void testPatchNeverRecalculatesTaxCategory() throws Exception {
+  public void testPatchWithoutAKnownPersistedTypeNeverTouchesTaxCategory() throws Exception {
     ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
 
     JSONObject body = new JSONObject().put("productType", "S");
@@ -1850,6 +1880,125 @@ public class ProductDefaultsHandlerTest {
         .requestBody(body).obContext(obContextWithClient(CLIENT1)).build();
     handler.handle(ctx);
     assertFalse(body.has("taxCategory"));
+  }
+
+  // ── ETP-5680: update (PATCH/PUT) follows the product type ────────────────────────────────
+
+  private static NeoContext updateCtx(String method, String recordId, JSONObject body) {
+    return NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod(method).recordId(recordId).endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).obContext(obContextWithClient(CLIENT1)).build();
+  }
+
+  private static ProductDefaultsHandler handlerWithPersistedType(String persistedType) {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+    handler.persistedTypeReader = id -> "rec-1".equals(id) ? persistedType : null;
+    return handler;
+  }
+
+  @Test
+  public void testPutWithServiceTypeForcesBothFlagsFalse() throws Exception {
+    JSONObject body = new JSONObject().put("productType", "S");
+
+    handlerWithPersistedType("I").handle(updateCtx("PUT", "rec-1", body));
+
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testPatchAndPutWithOnlyWeightOnAPersistedServiceForceBothFlagsFalse()
+      throws Exception {
+    for (String method : new String[] {"PATCH", "PUT"}) {
+      JSONObject body = new JSONObject().put("weight", 5);
+
+      handlerWithPersistedType("S").handle(updateCtx(method, "rec-1", body));
+
+      assertEquals(method, false, body.getBoolean("stocked"));
+      assertEquals(method, false, body.getBoolean("returnable"));
+      assertFalse(method, body.has("taxCategory"));
+    }
+  }
+
+  @Test
+  public void testPatchWithoutTypeOnAPersistedItemLeavesFlagsAlone() throws Exception {
+    JSONObject body = new JSONObject().put("weight", 5);
+
+    handlerWithPersistedType("I").handle(updateCtx("PATCH", "rec-1", body));
+
+    assertFalse(body.has("stocked"));
+    assertFalse(body.has("returnable"));
+  }
+
+  @Test
+  public void testRealTypeChangeWithoutTaxCategorySetsTheTypesCategory() throws Exception {
+    JSONObject toService = new JSONObject().put("productType", "S");
+    handlerWithPersistedType("I").handle(updateCtx("PUT", "rec-1", toService));
+    assertEquals("tax-services", toService.getString("taxCategory"));
+
+    JSONObject toItem = new JSONObject().put("productType", "I");
+    handlerWithPersistedType("S").handle(updateCtx("PATCH", "rec-1", toItem));
+    assertEquals("tax-goods", toItem.getString("taxCategory"));
+  }
+
+  @Test
+  public void testExplicitTaxCategoryWinsOnARealTypeChange() throws Exception {
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "exento-id");
+
+    handlerWithPersistedType("I").handle(updateCtx("PUT", "rec-1", body));
+
+    assertEquals("exento-id", body.getString("taxCategory"));
+  }
+
+  @Test
+  public void testUnchangedTypeNeverTouchesTaxCategory() throws Exception {
+    JSONObject body = new JSONObject().put("productType", "S");
+
+    handlerWithPersistedType("S").handle(updateCtx("PUT", "rec-1", body));
+
+    assertFalse(body.has("taxCategory"));
+    assertEquals(false, body.getBoolean("stocked"));
+  }
+
+  @Test
+  public void testUnresolvableTypeCategoryLeavesTheBodyUntouched() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+    handler.persistedTypeReader = id -> "I";
+    JSONObject body = new JSONObject().put("productType", "S");
+
+    handler.handle(updateCtx("PATCH", "rec-1", body));
+
+    assertFalse(body.has("taxCategory"));
+  }
+
+  @Test
+  public void testPersistedLookupFailureLeavesTheBodyUnchanged() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+    JSONObject body = new JSONObject().put("weight", 5);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
+      assertNull(handler.handle(updateCtx("PATCH", "rec-1", body)));
+    }
+
+    assertEquals(1, body.length());
+    assertNull(ProductTypeRules.readPersistedType(null));
+  }
+
+  @Test
+  public void testPersistedProductTypeReadsTheRecordThroughOBDal() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Product product = mock(Product.class);
+      when(product.getProductType()).thenReturn("S");
+      when(dal.get(Product.class, "rec-1")).thenReturn(product);
+
+      assertEquals("S", ProductTypeRules.readPersistedType("rec-1"));
+      assertNull(ProductTypeRules.readPersistedType("missing"));
+    }
   }
 
   @Test

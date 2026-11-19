@@ -186,20 +186,27 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
 | `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
 | `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
+| `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
+| `sepa-remittances` | `etendo.go.flags.sepa-remittances` | `ETGO_FLAG_SEPA_REMITTANCES` | absent ⇒ **`false`** (no SEPA remittances: settings and the `remittance` spec refused, mandate keys dropped; per account on a hosted arm only; TTL 2027-03-31, provisional) — see its section below |
+| `psd2-statement-import-settings` | `etendo.go.flags.psd2-statement-import-settings` | `ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS` | absent ⇒ **`false`** (PSD2 import settings, `maxFetchInterval` on `accounts` and deleting statements of connected accounts all as before ETP-6151; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
+| `mcp-routines` | `etendo.go.flags.mcp-routines` | `ETGO_FLAG_MCP_ROUTINES` | absent ⇒ **`false`** (`etendo_routine` neither listed nor routed: the MCP as before ETP-6236; per account on a hosted arm only; placeholder TTL 2027-03-31) — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
-`bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
-Business Partner self-service portal. It is **targeted per sending account** and false for everyone
+`bp-portal-link` (ETP-5267, extended in ETP-6209) decides whether a sales document email —
+`sales-quotation-send`, `sales-order-send`, `goods-shipment-send` or `sales-invoice-send` (credit
+notes included) — carries a link to the customer portal. It is **targeted per sending account** and false for everyone
 until a targeting rule on the hosted control plane (Datadog, or ConfigCat while it remains a
 fallback) names that account's email, so day-to-day enablement happens in that dashboard and takes
 effect without a restart. Where no hosted arm is selected the flag degrades to the local
 per-environment boolean above, which has no per-account notion — so a shared environment needs a
 hosted arm set up before the link is switched on for anyone. It is
 **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
-browser reads it, and none must be added. It gates the link only: the portal route, the three
-`/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
-unconditionally, and revocation in particular must work whatever the flag says, since it is the only
-kill switch for a link already out.
+browser reads it, and none must be added. It gates the link only: the portal route, the
+`/sws/portal/*` endpoints and the `etgo_portal_link` table ship unconditionally. Since ETP-6209 each
+link lives 48 hours from its send and there is no manual revoke action any more; an expired link is
+renewed by email to the original recipients (`POST /sws/portal/renew`), and that renewal is **not**
+gated — it only replaces a link the flag already let out. Turning the flag off stops new links; a
+link already out stops working at the end of its own 48 hours. The portal itself: `customer-portal.md`.
 
 `structured-address-for-sepa` (ETP-5806, TTL 2026-11-15) decides whether the structured SEPA
 address fields (Street/Number/Building Name) are exposed and enforced, backend-only — the frontend
@@ -218,10 +225,12 @@ Product window. One evaluator only, the backend: `ProductMovementsPolicy` evalua
 publishes the answer as `capabilities.productMovements`, and the tab reads that capability. The
 browser never evaluates the flag, so a rule on email, tenant or percentage cannot make the two ends
 disagree; a change reaches a user when the access map is next loaded. `ProductTransactionsHandler`
-asks the same policy before adding `etgoStockAfter` and `etgoTotalRows`. A request with no account is
+asks the same policy before adding `etgoStockAfter` and `etgoProcessTime`. A request with no account is
 evaluated account-less and gets the default (off). Only behaviour is gated: the stored computed
 columns of `M_Transaction`, their triggers and the `ETGO_SF_*` configuration ship unconditionally, so
-run `update.database` and check `ad_scd_check` = 0 before targeting any account. The flag is not access control: with it off the `/transactions` rows (and the new `etgoWarehouse`, `etgoDocKind` and `etgoDocHeaderId` fields) stay readable under the role's entity and organization access; it only withholds `etgoStockAfter` and `etgoTotalRows` and hides the tab.
+run `update.database` and check `ad_scd_check` = 0 before targeting any account. The flag is not access control: with it off the `/transactions` rows (and the new `etgoWarehouse`, `etgoDocKind` and `etgoDocHeaderId` fields) stay readable under the role's entity and organization access; it only withholds `etgoStockAfter` and `etgoProcessTime` and hides the tab.
+
+`etgoProcessTime` is the time of day under each movement's date: `M_TRANSACTION.TRXPROCESSDATE` (timestamp without time zone, the server wall clock) as an ISO local date-time string `yyyy-MM-ddTHH:mm:ss`, fractions dropped and no time-zone conversion. It comes from the same statement as `etgoStockAfter` (no extra query), is display only (it changes neither ordering nor any other field), and is absent from a row with no process date.
 
 The email reaches each call site in one of two ways, and the split is the point — resolving it
 implicitly inside the shared evaluator would be wrong for the second group:
@@ -699,8 +708,9 @@ and `NeoFiscalModelsCatalogService` its only caller:
   `saveActiveModels` throws `IllegalStateException` ("…could not be read; nothing was saved");
   `NeoBuiltInEndpointHandler` does not turn it into a 400 and `NeoServlet` answers **HTTP 500**.
   Nothing is written or flushed. A stored value that is blank or not valid JSON holds nothing to
-  keep and counts as `{}` (that save goes through). The SPA does not surface the 500 yet: its catalog
-  `PUT` is fire-and-forget (open item `refused-save-silent-in-spa` on the registry entry).
+  keep and counts as `{}` (that save goes through). Since ETP-5831 the SPA undoes the change and shows
+  an error on any failed catalog `PUT`; the generic 500 is open item `refused-save-generic-500` on
+  the registry entry.
 - **Errors fail hidden:** if the GET answer cannot be built, it is `{"_unavailable": ["390"]}`
   (`FiscalModel390Flag.failHiddenAnswer()`), never a bare `{}`.
 
@@ -776,8 +786,18 @@ off, **before** the multipart is read and before any row or OCR work is created.
 `ETGO_INCOMING_DOCUMENT` table and the `Invoice Inbox` window ship unconditionally: the flag gates
 behaviour, not schema.
 
-**The toggle point.** `InvoiceInboxUploadEndpoint` is the one class that calls
-`InvoiceInboxFlag.isEnabled()`, at request entry.
+Everything of the inbox is contained in the flag, not only the upload: the **read** of the
+`invoice-inbox` spec (REST list/by id and MCP `etendo_list`/`etendo_get`) answers the same `403
+feature_disabled` when it is off (ETP-6049).
+
+**The toggle points.** All call `InvoiceInboxFlag.isEnabled()` / `isEnabledFor()`, never the key:
+- `InvoiceInboxUploadEndpoint` (upload), at request entry.
+- `InvoiceInboxHeaderHandler`, an `@NeoExtension(spec = "invoice-inbox", entity = "header")` pre-hook
+  that refuses every request on the spec when off (REST single/batch and MCP read, same dispatcher).
+  It also serves the `discard` action (`POST .../header/{id}/action/discard`, ETP-6049): the flag
+  is judged first in the same `handle`, so the action sits behind the same gate, with no second
+  evaluation point.
+- `SFWindowAccessMap`, which publishes `capabilities.invoiceInbox` for the UI.
 
 **The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
 `GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
@@ -787,6 +807,8 @@ identity in it.
   (`GoAccountResolver.currentAccountEmail()`) and the current tenant (`clientId`).
 - `InvoiceInboxFlag.isEnabled(accountEmail, clientId)` is the explicit overload for callers that do
   not run as the account owner.
+- `InvoiceInboxFlag.isEnabledFor(accountEmail)` takes an already-resolved account and the current
+  tenant; `SFWindowAccessMap` uses it (ETP-6049).
 
 **Evaluate at request entry, never in the OCR worker.** The asynchronous OCR worker has no
 `OBContext` user, so `currentAccountEmail()` returns `null` there and a targeted user would look
@@ -800,7 +822,10 @@ key, `Email` and lowercase `email`) and `clientId`. Write Datadog rules on the l
 attribute only, against lowercase values (never on the identifier, a percentage or a tenant
 attribute: the web client and the backend use different targeting keys). With no resolvable account
 the context carries `clientId` only, so an email rule does not match and the default stays off. The
-web client has no key for this flag yet; story ETP-6049 adds it when the inbox gets a UI.
+browser still has no flag key of its own (ETP-6049): `SFWindowAccessMap` publishes the answer as
+`capabilities.invoiceInbox` (per account, outside the admin branch, `false` on any error), exactly like
+`productMovements`, and the Invoice Inbox menu entry and window read that capability. There is still
+one evaluator, `InvoiceInboxFlag`; a change reaches a user when the access map is next loaded.
 
 **Turning it on locally:** `etendo.go.flags.invoice-inbox=true` in `Openbravo.properties` (or
 `-Detendo.go.flags.invoice-inbox=true`, or `ETGO_FLAG_INVOICE_INBOX=true` in Tomcat's environment),
@@ -812,10 +837,264 @@ add rules on the lowercase `email` attribute. The local property is inert while 
 selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
 
 **Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
-everyone. Unwrap the toggle point (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`), delete
+everyone. Unwrap the toggle points (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`, remove
+the flag gate from `InvoiceInboxHeaderHandler` (the handler stays: it serves `discard`), the
+`SFWindowAccessMap` capability), delete
 `InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
 section and the configuration-table row, and delete the hosted setting. Keep the registry feature
 entry in `etendo_schema_forge`.
+
+### `sepa-remittances` (ETP-6148) — backend-only, per account, off by default
+
+Gates the **behaviour** of SEPA remittances (epic ETP-3504), never their schema. Positive polarity:
+`true` = remittances are enabled. Default and every failure = `false`.
+
+**What it gates:**
+- the remittance provisioning of a new **Bank** financial account: on, a Bank account created
+  through `financial-account` (REST, batch, MCP — `FinancialAccountHandler` with
+  `FinancialAccountRemittanceSupport`), the bank-connection `createAndLink`, or the onboarding sample
+  data (`OnboardingRemittanceSetupService`, flag read for the receiving account) gets the two
+  remittance payment methods, running the lazy per-client provisioning
+  (`RemittanceSepaProvisioning.ensureClient`) on first use; off, the account is created as before.
+  There is no per-account switch and no backfill: accounts created before, or with the flag off,
+  never get the methods, and the remittance window does not offer them
+  (`ETGO_RemittanceAccountNotAllowed`). Cash and Card accounts never get them;
+- the default SEPA mandate of a customer (`EM_OBSEPAD_Mandate_Identifier` / `_Date`, owned by
+  `org.openbravo.sepa.iso20022.coredirectdebit.customertobank`), applied by `BusinessPartnerHandler`
+  through `ContactSepaMandateDefaults` on a contacts `businessPartner` create or update: on, a
+  customer created with a blank mandate stores its tax ID as mandate ID and today as signature
+  date, any later save of a customer fills each mandate field empty in the database and not sent
+  (so existing contacts get it when next saved; an explicit clear holds only for that save; a
+  stored value is never overwritten), a value the caller sends wins, and the DEFAULTS of a new contact prefill the date (`neo-headless.md`
+  §4.6c); **off, the two keys are dropped from the
+  write body** (never persisted, never refused — the `structured-address-for-sepa` contract, not a
+  403, because the MCP schema still advertises the two fields while the flag is off);
+- the `remittance` spec (`RemittanceHeaderHandler`, `RemittanceLinesHandler`), its `sepaFileData`
+  read action included, refused with `403 feature_disabled` when off;
+- `SFWindowAccessMap`, which publishes `capabilities.sepaRemittances` for the UI (menu entry, page
+  guard, contact mandate section).
+
+**Not gated:** the messages, the DAL observer `RemittanceMethodLinkObserver` (a remittance
+payment method can only be linked to a Bank account, on every channel including Classic), and the
+refusal to change a Bank account with open remittances to another type
+(`ETGO_RemittanceAccountTypeChangeBlocked`: the remittances exist whatever the flag says now) and
+the deactivation of its remittance-method links when it leaves Bank with none open. An
+observer cannot read a per-account flag, and remittance methods only exist where the flag was on.
+The module adds no column for remittances.
+The remittance status is not this module's: `REM_REMITTANCE.REMITTANCE_STATUS` (list
+`REM_RemittanceStatus`: `PE` pending, `PR` processed, `CT`/`PT` collected/paid, `CP`/`PP`
+partially, `AN` voided) is the remittance module's `REMITTANCE_STATUS` (added by ETP-6148), owned
+by `org.openbravo.module.remittance` and set by its own processes at every transition. It is not
+backfilled: a remittance that existed before the column keeps the default `'PE'` until one of
+REM's transitions (process, reactivate, settle, return or their undo) refreshes it.
+
+**Classic data, no marker columns.** Everything else reuses Classic's remittance model. The
+provisioned remittance types carry the type parameter `ETGO_SEPA_SCHEME` = `CORE` / `SCT`; a payment
+method is a remittance method when such a type points at it — that is how provisioning finds its own
+rows again (never by name), how the observer recognises a remittance link, and how the remittance
+selectors filter. The CORE type also gets the OBSEPAD parameter `Creditor_Business_Code` = `000`, so
+the SEPA XML (another team) can build the creditor identifier from the organization's tax ID with
+`SepaCreditorId` — the identifier is not stored anywhere. The remittance header's `sepaFileData`
+action computes it the same way, reading that parameter (`000` when missing or blank).
+
+**The one gate.** `SepaRemittancesFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
+`GoFeatureFlags.FLAG_SEPA_REMITTANCES`. Same API as `InvoiceInboxFlag`: `isEnabled()` (request user's
+account and tenant), `isEnabled(accountEmail, clientId)` and `isEnabledFor(accountEmail)` (used by
+`SFWindowAccessMap`). Evaluate at request entry.
+
+**Targeting.** Per account on the hosted arms, exactly as `invoice-inbox`: the context carries the
+account email (targeting key, `Email` and lowercase `email`) and `clientId`; write Datadog rules on
+the lowercase `email` attribute only. The browser has no flag key: it reads
+`capabilities.sepaRemittances`.
+
+**Turning it on locally:** `etendo.go.flags.sepa-remittances=true` in `Openbravo.properties` (or
+`-Detendo.go.flags.sepa-remittances=true`, or `ETGO_FLAG_SEPA_REMITTANCES=true`), with no
+Datadog/ConfigCat arm selected, then restart Tomcat.
+
+**Rollout prerequisite:** create the `sepa-remittances` **boolean** setting in Datadog
+Experimental/Production with default `false` before targeting anyone; an undefined key resolves to
+`false`, so a missing setting looks exactly like "off".
+
+**Module dependency (decision).** `com.etendoerp.go` depends on `org.openbravo.module.remittance`,
+`org.openbravo.sepa.iso20022` and `org.openbravo.sepa.iso20022.coredirectdebit.customertobank` in
+`build.gradle` only, with no `AD_MODULE_DEPENDENCY` row (the same as its PSD2, SII and Verifactu
+extensions). The floor (5.1.1) does not yet guarantee the remittance module's `REMITTANCE_STATUS`
+(added by ETP-6148), which `com.etendoerp.go` reads and filters by: when the remittance module is
+published with that column, raise the range to that version. The status is set by REM's own processes; code outside REM
+that writes settlement or return rows directly must call `RemittanceStatusUtil.refresh` itself.
+
+**Retirement (TTL 2027-03-31, provisional until confirmed with product):** remittances then ship to
+everyone. Unwrap every call to `SepaRemittancesFlag`, delete it and its test, delete
+`FLAG_SEPA_REMITTANCES` from `GoFeatureFlags` and the `SEPA_REMITTANCES` capability from
+`SFWindowAccessMap`, remove this section and the configuration-table row, and delete the hosted
+setting. Keep the registry feature entry in `etendo_schema_forge`. Retiring the flag does not link
+the Bank accounts created before (or with the flag off): they still answer
+`ETGO_RemittanceAccountNotAllowed` in the remittance window. Whether they get a data-fix then is a
+product decision; none exists today.
+
+### `mcp-routines` (ETP-6236) — backend-only, per account, off by default
+
+> Registry entry `mcp-routines` in `etendo_schema_forge` `flags-registry.json`. The only evaluator is
+> `McpRoutinesFlag` (`GoFeatureFlags.FLAG_MCP_ROUTINES`), evaluated per request for the
+> `ETGO_ACCOUNT` email of the request user; no account reads off.
+
+Gates the MCP tool `etendo_routine` (several tool calls in one call, and personal, versioned saved
+routines — `docs/neo-headless.md` §4.12.44). Toggle points:
+
+- `ToolRegistry.generateTools` — the tool is listed in `tools/list` only while the flag is on.
+- `McpToolRouter` — a call to it while off answers `tool_disabled` (405) naming the plain
+  alternative, one tool call per step, exactly like the withdrawn `etendo_batch`.
+
+**Not gated:** the tables `ETGO_MCP_ROUTINE`, `ETGO_MCP_ROUTINE_VERSION` and `ETGO_MCP_ROUTINE_EXEC`
+and their rows. Turning the flag off hides the tool; a user's saved routines are back, unchanged,
+when it is turned on again.
+
+**Turning it on locally:** `etendo.go.flags.mcp-routines=true` in `Openbravo.properties` (or
+`ETGO_FLAG_MCP_ROUTINES=true`) and restart Tomcat. On a shared environment, create the
+`mcp-routines` **boolean** setting in Datadog (ConfigCat while it is the fallback) and target the
+accounts that should see the tool. The mcp-tests harness needs it on for a target with
+`routines = true`: without the tool the run is refused before anything is measured.
+
+### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
+
+> **Status: implemented — backend (com.etendoerp.go) and SPA (`etendo_schema_forge`, which ships
+> with it and never evaluates the flag).** Registered on day one (registry
+> entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
+> is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
+> `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
+> `ReconciliationHandler.applySuggestions` (`bouncePair` groups, and the KPI events through the
+> detection it hands to `BankBounceKpiTelemetry.ModalDecisions`),
+> `BankBouncePairService.discardPair`, `restorePair` and `dismissPair` (KPI-only, writes nothing),
+> every caller of `StatementLineFilter`
+> (whether discarded lines are honoured at all) and `BankStatementsHandler.loadStatements`.
+> Contract: `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
+
+Gates the automatic **bounce-pair suggestions** in the bank reconciliation of PSD2-synced financial
+accounts. A bounce is an outgoing bank-statement line plus the line that reverses it: same amount,
+opposite sign. Positive polarity: `true` = suggestions on. Default and every failure = `false`.
+
+**What it gates.**
+
+- The backend auto-match detects candidate bounce pairs and returns them in its answer.
+- The SPA shows those pairs in the "Posibles rebotes" section of the auto-match modal, and the pairs
+  can be reviewed in the reconciliation panel.
+- Accepting a pair logically discards **both** statement lines (`EM_PSD2_IS_DISCARDED`, a column of
+  the PSD2 module) and links them as a pair. Discard and restore always act on the pair, never on a
+  single line; both answer 403 `BOUNCE_SUGGESTIONS_OFF` with the flag off.
+- Honouring discarded lines at all. With the flag off a discarded line (discarded in Classic, or
+  here while the flag was on) is a plain pending line: listed, counted under *Pendientes*, proposed
+  by auto-match and reconcilable, with no `counts.discarded`, no `status=discarded`, no
+  `discarded` marker on the statement lines and no `discardedCount` in the statements list — the
+  behaviour from before ETP-5581. With it on, only an UNMATCHED discarded line counts as discarded;
+  a reconciled one counts as reconciled.
+
+**What it does not gate: the stored counters.** The account's *Por conciliar* counter
+(`EM_ETGO_Pending_Count`, function `ETGO_ACCOUNT_PENDING_COUNT`) and the statement's
+`EM_ETGO_Discarded_Count` / `EM_ETGO_Status` are computed in SQL or in persistence events, which
+cannot see a per-account flag, so they leave discarded lines out whatever the flag says. Known
+limitation: turning the flag off for an account that already discarded pairs leaves its counter
+lower than its reconciliation panel (e.g. 47 against 49) until the flag is turned back on. Killing
+the feature must revert the `ETGO_ACCOUNT_PENDING_COUNT` change (see the retirement note below).
+
+**Backend-only.** No key in the web client's `flag-keys.js`, and none must be added. The SPA renders
+only what the auto-match answer carries, so a browser key would be a second evaluator. **Evaluated
+once per action** and handed down (`StatementLineFilter` and the guards take the boolean).
+
+**Declared exception: the MCP surface.** The MCP's declared actions are static, so
+`etendo_schema` / `etendo_discover` list `discardPair`, `restorePair` and `pendingLines`'
+`status=discarded` option even with the flag off; they answer 403 / are ignored exactly as on REST.
+User decision: declared (`docs/neo-headless.md` §4.12.9), not filtered per request.
+
+**Targeting.** Per account: `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email>)`, the email resolved
+the way `PortalLinkPolicy#currentAccountEmail` does (`GoAccountResolver.currentAccountEmail()`), the
+same shape as `bp-portal-link`. No account, no email or a failed lookup means **off**, never on.
+Write Datadog rules on the lowercase `email` attribute against lowercase values. Evaluate per request
+and never cache the answer in a `static final`.
+
+**Turning it on locally:** `etendo.go.flags.bank-bounce-suggestions=true` in `Openbravo.properties`
+(or `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS=true` in Tomcat's environment), with no Datadog/ConfigCat arm
+selected, then restart Tomcat.
+
+**Rollout prerequisite:** the hosted setting does not exist yet. Before targeting anyone on a
+shared environment, create the `bank-bounce-suggestions` **boolean** setting in Datadog (ConfigCat
+as the fallback) with default `false`, in each environment, then add rules on the lowercase `email`
+attribute. Until then nobody can be targeted and no pilot can start: an undefined key resolves to
+`false`, and the local property is inert while a hosted arm is selected.
+
+**TTL 2026-12-31 — placeholder, not a commitment.** It is the end of the current quarter (Q4 2026).
+Revisit it once the first account is targeted. Retiring the flag means the suggestions ship to
+everyone: unwrap the toggle points, delete the flag constant, this section and its
+configuration-table row, and delete the hosted setting. Keep the registry feature entry. **Killing
+it instead** removes the owned code and every toggle point AND reverts the ETP-5581 change to
+`ETGO_ACCOUNT_PENDING_COUNT` (count every unmatched line again, drop the `EM_PSD2_Is_Discarded`
+watched column), then `ad_scd_rebuild` of the counter: that, not a data-fix, restores the old
+*Por conciliar*.
+
+### `psd2-statement-import-settings` (ETP-6151) — backend and SPA, per account, off by default
+
+> **Status: implemented — backend (com.etendoerp.go); the SPA evaluates the SAME key.** Registered on
+> day one (registry entry `psd2-statement-import-settings` in `etendo_schema_forge`
+> `flags-registry.json`). The only backend evaluator is `Psd2ImportSettingsFlag`
+> (`GoFeatureFlags.FLAG_PSD2_STATEMENT_IMPORT_SETTINGS`); each action evaluates it once.
+
+**Evaluation scope: per account.** `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email>)`, the email
+resolved as `PortalLinkPolicy#currentAccountEmail` does (`GoAccountResolver.currentAccountEmail()`:
+admin mode, `null` on any failure ⇒ **off**). Never `environment()` or `forAccount(null)`, and never
+cached in a static. The SPA must send the same identity as targeting key (see *Targeting key* above),
+otherwise the browser shows the new fields while the backend refuses to honour them, or the reverse.
+
+**What it gates** (off ⇒ every answer exactly as before ETP-6151):
+
+| Surface | Flag on | Flag off |
+|---|---|---|
+| `financial-account-bank-connection` `link` / `createAndLink` | `importFromDate` and `statementGrouping` required, validated, stored with the link; a stale import-to is cleared; fetch-interval advisory on the answer | the two keys are ignored (not read, not validated, not stored); no stale-date clearing; no advisory |
+| `import-settings` | import-from date and a valid grouping required on the resulting configuration; a malformed date is a coded `400` | nothing required, no grouping validation; a malformed date fails as before (`500`) |
+| `PUT`/`PATCH` `financial-account/account` | PSD2 import keys validated (`BankImportSettingsRules#validateImportSettingsUpdate`) | not validated, the body is persisted untouched |
+| `GET accounts` | answers `maxFetchInterval`; one Salt Edge call (`include_ais_fields=true`) serves logo and limit | no `maxFetchInterval`; the logo through the single plain `providers/{code}` call, as before |
+| `bank-statements` `?action=delete` / MCP `deleteStatement` | a processed statement of a connected account is reactivated and deleted; posted and matched-lines statements refused (`400`) | only drafts; a statement of a connected account answers `409 Statements from a bank-connected account cannot be deleted.`; a processed one answers the not-draft `400` |
+
+The MCP `deleteStatement` description is **static** (declared actions do not see the account), so it
+states both rules; this is a declared exception of the same kind as
+`neo-headless.md` §4.12.9 ("REST and MCP on the bounce-pair surface…").
+
+**Does the SPA need a backend-exposed value?** No: the SPA already evaluates flags with the account
+email as targeting key (`tools/app-shell/src/lib/flags`) and evaluates this key itself.
+
+**Turning it on locally:** `etendo.go.flags.psd2-statement-import-settings=true` in
+`Openbravo.properties` (or `ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS=true` in Tomcat's environment),
+with no Datadog/ConfigCat arm selected, then restart Tomcat.
+
+**Rollout prerequisite:** create the `psd2-statement-import-settings` **boolean** setting in Datadog
+(ConfigCat as the fallback) with default `false`, in each environment, then add rules on the
+lowercase `email` attribute, on both the backend and the SPA evaluation. Until then nobody can be
+targeted: an undefined key resolves to `false`.
+
+**Mismatch between the two ends, and the rollout rule (ETP-6151).** The SPA and the backend evaluate the
+same key independently, each with the account email as targeting key, so they can disagree (control-plane
+rules differing, or one end not yet reloaded). Nothing reconciles them:
+
+- **SPA ON, backend OFF.** `link` / `createAndLink` succeed and show the success toast, but
+  `importFromDate` / `statementGrouping` are **not persisted**: the backend ignores the keys when OFF and
+  rejects nothing, so the first sync imports everything the bank serves. Delete shows the trash and the
+  re-import notice, but the backend answers the old `409` (`Statements from a bank-connected account cannot
+  be deleted.`, translated by the SPA).
+- **SPA OFF, backend ON.** The connect flow and the legacy edit panel send no import keys (or empty ones),
+  so `link` / `createAndLink` answer `400` (`The import from date is required` and the like). The SPA
+  translates the message only with its flag ON, so the English text shows raw in the toast. The trash of
+  processed statements of a connected account is not shown.
+- **ON to OFF for an account.** The stored import-from date and grouping stay on the account and the PSD2
+  sync keeps filtering and grouping by them. With the flag OFF nothing is validated again, so any grouping
+  (or none) can be saved over them.
+- **Rollout rule.** Create the control-plane flag and its per-account targeting rules on the lowercase
+  `email` attribute for **both ends at the same time** (same key, same rules). Enable it for a test email
+  first, verify on the SPA and on the backend (connect a bank account, check the stored values, delete a
+  processed statement of a connected account), and only then widen.
+
+**TTL 2026-12-31 — placeholder, not a commitment.** Retiring the flag means shipping it: unwrap the
+toggle points (`Psd2ImportSettingsFlag.isEnabled()` in the four handlers), delete the legacy branch
+(`BankStatementDeletion#prepareLegacy`, `MSG_STATEMENT_BANK_CONNECTED`,
+`FinancialAccountBankConnectionSupport#fetchProviderLogo`), the flag constant, this section and its
+table row, and the hosted setting. Keep the registry feature entry.
 
 ### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
 

@@ -36,6 +36,27 @@ Current constants:
 - `backend_write_operation_completed`
 - `backend_contact_created` (ETP-5791)
 - `backend_contact_type_changed` (ETP-5791)
+- `backend_goods_shipment_completed` (ETP-5908)
+- `backend_bank_bounce_pair_decided` (ETP-5581)
+- `backend_bank_bounce_pair_restored` (ETP-5581)
+- `backend_bank_bounce_suggestions_applied` (ETP-5581)
+- `backend_portal_document_sent` (ETP-6209)
+- `backend_portal_document_downloaded` (ETP-6209)
+- `backend_quotation_decided` (ETP-6209)
+
+### Added to every event by the Mixpanel sink (ETP-5581)
+
+`MixpanelNeoTelemetrySink` adds two properties to **every** backend event it submits, after the
+caller's properties (neither key is on the allowlist, so a caller can never set or spoof them):
+
+| Property | Value |
+|---|---|
+| `environment` | the deployment: `etendo.go.mixpanel.environment` / `ETGO_MIXPANEL_ENVIRONMENT` when set, else the deployment's `DD_ENV` (Datadog agent property `dd.env`; the ECS tasks already declare `production`, `experimental`, `staging`), else `unknown`. Lower-cased, with Datadog's aliases folded (`prod` → `production`, `stage` → `staging`), so a KPI collector can filter `environment = production` |
+| `$insert_id` | a random 32-hex id per emission (`NeoTelemetryEvent.getInsertId()`), which Mixpanel uses to drop a duplicate submission of the same event. It identifies the emission, never a record |
+
+The log sink does not print them. Platform's agreement of 2026-11-02 (`etgo_account_id`,
+`tenant_type`, `ad_user_id`, `ad_client_id` on every event) is **not** implemented in the backend
+yet: backend events still name the tenant as `account_id` only.
 
 `backend_write_operation_completed` is emitted by NEO CRUD for write methods
 only: `POST`, `PUT`, `PATCH`, and `DELETE`. `GET` requests are not emitted to
@@ -53,6 +74,10 @@ Allowed low-cardinality keys:
 - `change_origin`
 - `change_trigger`
 - `channel`
+- `confidence` (ETP-5581)
+- `decision` (ETP-5581)
+- `detection_signal` (ETP-5581)
+- `internal` (ETP-6230) — boolean: the tenant owner's e-mail domain is internal (see *Accounting Calendar KPIs*)
 - `entity`
 - `entityType`
 - `flow`
@@ -62,16 +87,22 @@ Allowed low-cardinality keys:
 - `source`
 - `specName`
 - `status`
+- `surface` (ETP-5581)
 - `type`
 - `types_source`
 
 Allowed boolean keys (a non-boolean value is dropped):
 
+- `adjacent` (ETP-5581)
+- `ambiguous` (ETP-5581)
+- `chosen_among_alternatives` (ETP-5581)
 - `critical`
 - `flag_enabled`
 - `is_customer`
 - `is_vendor`
 - `previous_is_customer`
+- `preselected` (ETP-5581)
+- `preselection_changed` (ETP-5581)
 - `previous_is_vendor`
 - `supportRequested`
 
@@ -82,10 +113,13 @@ Allowed numeric keys:
 - `count`
 - `correctCount`
 - `days_since_created` (0–36500)
+- `days_since_decided` (0–36500, ETP-5581)
 - `durationMs`
 - `httpStatus`
+- `pairs_shown`, `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` (0–1000000, ETP-5581)
 - `position`
 - `score`
+- `signals_count` (0–3, ETP-5581)
 - `step`
 - `total`
 - `value`
@@ -157,8 +191,9 @@ only after the batch / row commits, so a failed import row sends nothing. A reje
 reaches the post-hook. Sending runs on one bounded background thread (`contact-kpi-telemetry`,
 queue 1000, drop when full) so a save never waits on Mixpanel.
 
-**No retries, no de-duplication.** `NeoTelemetryService` sends each event once, has no event id
-(`$insert_id`) and swallows sink failures; none is added here.
+**No retries.** `NeoTelemetryService` sends each event once and swallows sink failures. Since
+ETP-5581 the Mixpanel sink adds a random `$insert_id` to every event (see *Added to every event by
+the Mixpanel sink*), so a duplicate submission is dropped by Mixpanel; there is still no retry.
 
 `backend_contact_created` — a contact create was committed.
 
@@ -191,6 +226,294 @@ included, not distinguishable from each other), `mcp_batch` (`etendo_batch`, syn
 UI from document vs OCR apart would need a client-sent marker; none exists today.
 
 Contacts created outside NEO CRUD (demo-data transfer, onboarding sample data) emit nothing.
+
+## Accounting Calendar KPIs (ETP-6230)
+
+`AccountingKpiTelemetry` (`schemaforge/telemetry`) emits four events for the accounting-calendar
+KPIs (ETP-5577). All carry `account_id` (tenant `AD_Client_ID`) and `internal`; nothing else
+identifies anybody.
+
+| Event | Emitted | Once? | Properties |
+|---|---|---|---|
+| `backend_productive_environment_created` | right after the onboarding commit (`EtendoGoJwtServlet`), only when `preparation.paidUpgrade` | by construction (a paid upgrade is a new tenant) | - |
+| `backend_calendar_review_completed` | Primeros pasos confirm / regenerate (after its commit) and a successful manual **open** in `PeriodOpenCloseHandler` | once per tenant **per kind** | `type` (`confirm`, `modify` for regenerate), `source` (`first_steps`, `calendar_window` REST, `mcp`, `batch`) |
+| `backend_first_document_processed` | outcome probe after a successful write | once per tenant | `operation` (`post` when the request's action was `post`, else `complete`), `source`, `entity`, `specName` |
+| `backend_period_refused` | every refusal keyed `PeriodNotAvailable` / `PeriodNotValid` | no | `operation`, `source`, `errorCode`, `entity`, `specName` |
+
+`source` for the last two: `spa` (any REST call that is not a batch), `mcp`, `batch` (REST batch,
+MCP `etendo_batch`, MCP `etendo_action_batch`, async batch rows). One rule for every batch. The
+manual-open review derives its `source` from the write channel instead; see Limitations.
+
+**Population.** Review, first-document and signup events only for tenants carrying
+`ETGO_CalendarReviewRequired` (productive tenants onboarded after ETP-5577; permanent marker; the
+signup event is emitted for every paid onboarding). `backend_period_refused` goes out for every
+tenant. Follow-up: `tenant_type` when ETP-6072 lands; `ad_client_id` when ETP-6228 lands.
+
+**Threading.** The hooks only *enqueue* `{clientId, source, entity, operation hint}` (REST:
+`NeoServlet` / `NeoPseudoSpecDispatcher`; MCP: `McpAccountingKpiObserver`, called from
+`McpServlet.recordToolCall` *before* the `McpUsageLogger.isEnabled()` early return, so the KPI does
+not depend on the usage-log switch; async batch: the `BatchJobService` worker). One daemon sender
+(`accounting-kpi-telemetry`, queue 1000, drop when full) then does gate, probe, emit and marker on
+its **own** connection from `ExternalConnectionPool` (like `McpUsageLogger`): zero SQL on the
+business connection, nothing a failure can propagate to the request. Errors are logged at debug
+and forgotten.
+
+**Probe cost control.** The probe scans seven tables, six of which have no `ad_client_id`-leading index, so it is
+bounded: at most **one probe per tenant per 60 s** (writes inside the window are coalesced and
+the next probe after it sees them), and a tenant found *not* review-required is skipped for 10
+minutes (a TTL, not permanent, because the marker can be set later). The probe also runs about
+**5 s after** the write is queued, not at once: the request's transaction is committed by
+`DalRequestFilter` after the hook returns, and the probe runs on its own connection, so it can only
+see committed rows. If the commit takes longer than the delay, that document is found by the
+tenant's next probe (see Limitations). Refusal and review emits are immediate.
+*Open check:* run `EXPLAIN (ANALYZE)` of the probe query on the production read replica for the
+largest tenants before relying on the 60 s interval.
+
+**Markers** are client preferences, written by the sender after the event is emitted:
+`ETGO_KpiReviewFirstStepsSent`, `ETGO_KpiReviewManualOpenSent`, `ETGO_KpiFirstDocSent` (no AD
+change). A lost marker can only cost a duplicate event; reports count distinct `account_id`.
+Tenants whose first document was reported are also kept in a positive-only in-memory set.
+
+**First-document probe.** Is any document of the tenant `Processed='Y' OR Posted='Y'` in
+`C_Invoice`, `M_InOut`, `FIN_Payment`, `GL_Journal`, `M_Movement`, `M_Inventory`,
+`FIN_BankStatement` (all have both columns)? The list is the KPI's definition of "document" and
+lives in the telemetry class; no hook branches on the entity a request touched. Orders are
+excluded: `C_Order_Post` has no period check.
+
+**`internal`.** `true` when the owner's e-mail domain is in the comma-separated list from system
+property `etendo.go.kpi.internal.email.domains` / env `ETGO_KPI_INTERNAL_EMAIL_DOMAINS` (default
+`etendo.software,etendo.ai,smfconsulting.es`). The owner is the earliest-created active `AD_User`
+of the tenant with an e-mail. The sender reads it, reduces it to a boolean and caches it per tenant (`true` for good, `false` for 1 hour, since a tenant with no e-mail user may get one);
+the address is never sent. Reports filter `internal != true`. Interim until the platform's
+test-account mark exists.
+
+**Refusal detection.** REST: `NeoServlet.writeResponse`, status >= 400, `messageKeys` flat, under
+`error`, or under `error.detail.error` (batch envelope). MCP: the tool answer's JSON text (or, on a
+prose error, `recognizeMessageKeys`), one event per failed item for `etendo_action_batch`;
+`etendo_job_status` / `etendo_job_cancel` are skipped (they re-render old rows on every poll).
+Async batch rows are observed in the worker as each row finishes.
+
+**Limitations.**
+- *Late detection:* a document completed or posted outside a request (async batch worker, Etendo
+  Classic, background posting) is only seen on the tenant's next NEO write, and carries that
+  write's `source`/`operation`. The probe is also asynchronous, so it can lag the commit by one
+  write.
+- `operation` is derived from the request's *action* name (`post`, else `complete`; a plain CRUD
+  write with no action is `complete`), not from which flag the data shows. For
+  `backend_period_refused` it is the action name, else the HTTP method or MCP verb.
+- *Probe lag:* the probe is delayed ~5 s and throttled to one per tenant per 60 s, so the first
+  document can be reported up to a minute (or, if the tenant stops writing, one write) late, and a
+  commit slower than the delay is seen on the next probe.
+- `manual_open` reviews are queued with `NeoBatchScope.runAfterCommit`: inside a batch scope (REST
+  `/sws/neo/batch`, MCP `etendo_batch`, sync or async) they are sent after the batch commits and
+  dropped on rollback, so a rolled-back open leaves neither an event nor the permanent marker.
+  Outside a batch scope `runAfterCommit` runs at once, i.e. before `DalRequestFilter` commits the
+  request, so a commit that then fails costs one stray event. The review markers are shared across
+  channels (REST and MCP).
+- *`source` of a manual open* is taken from the write channel, not from the tool: a channel ending
+  in `_batch` (`rest_batch`, `mcp_batch`) gives `batch`, a channel starting with `mcp` gives `mcp`,
+  anything else gives `calendar_window`. `etendo_action_batch` opens **no** `NeoBatchScope`, so a
+  manual open made through it runs on the plain `mcp` channel and reports `mcp`, not `batch`. This
+  differs from `backend_first_document_processed` / `backend_period_refused`, which the MCP observer
+  labels `batch` for `etendo_action_batch` and `etendo_batch` alike (by tool name).
+- Not counted: opens by document category (process 168), anything done in Etendo Classic, a
+  refusal that only exists as prose in an HTTP >= 500 answer (not recognised, as in the REST
+  refusal identification).
+- Tenants that were productive before this deploy and already have documents emit one stray
+  first-document event on their next write but have no signup event, so they fall outside every KPI.
+- A completion marked by `documentStatus` written raw on create (ETP-6240) is not `Processed`, so
+  it is not detected, which is the right answer.
+
+## Goods Shipment Completion KPI (ETP-5908)
+
+`GoodsShipmentTelemetry` (`schemaforge/handlers`), called by `GoodsShipmentHeaderHandler`, emits
+`backend_goods_shipment_completed` when a **sales** goods shipment is completed through the NEO
+`documentAction` (REST single, REST batch or MCP). It feeds the *active client* definition of the
+Movements-tab KPIs: a client with at least 5 completed sales shipments in the Monday-Sunday week.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `flag_enabled` | `product-movements-tab` as evaluated for the request's account (`ProductMovementsPolicy.isEnabled()`); `false` when the evaluation fails |
+
+**Fires** once for a request that moves the shipment from any status other than `CO` to `CO`, for
+a shipment with `IsSOTrx='Y'` whose document type is not a return (`C_DocType.IsReturn='N'`, the
+same rule as the `goods-shipment` bucket of `ProductTransactionsHandler`). A cloned shipment
+(`CloneShipmentHook`) is created as a draft and fires when it is completed through the same action.
+
+**Does not fire** for a draft, a void, a failed or rejected completion (HTTP error, or the stored
+status is not `CO`), a re-run of the action on an already completed document, a customer return
+(`IsReturn='Y'`), a purchase receipt (`IsSOTrx='N'`), nor for a completion done outside the NEO
+action (SQL data-fixes, Classic window). Reactivating a completed shipment and completing it again
+is a new completion and fires again.
+
+**Only after commit, no retries.** Same mechanism as the Contact Type KPIs: the post-hook hands the
+event to `NeoBatchScope.runAfterCommit` (queued until the batch commits inside `/sws/neo/batch` and
+`etendo_batch`), sending runs on one bounded background thread (`goods-shipment-kpi-telemetry`,
+queue 1000, drop when full), each event is sent once, and the Mixpanel sink adds `$insert_id` and
+`environment`. The status reads run under a JDBC savepoint, rolled back on failure, so a failing read cannot
+abort the PostgreSQL transaction of the completion; a failure in the background send is caught and
+only logged. Cost on the request thread: two single-row reads per completion plus the
+`product-movements-tab` evaluation (account lookup and flag resolution), which is memoized per
+tenant for the duration of a batch (`NeoBatchScope.memoize`; the flag cannot change inside one
+batch) and evaluated once per completion outside a batch. No record identifier,
+document number or user data is sent.
+
+**Not implemented:** the common properties agreed on 2026-11-02 (`tenant_type`, `ad_user_id`,
+`ad_client_id`, `etgo_account_id`) are not sent by this event; they are blocked on ETP-6228.
+
+## Customer Portal KPIs (ETP-6209)
+
+`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the three events behind the PO's customer
+portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*). Every event carries only
+allowlisted keys; no new key was added to the allowlist.
+
+| Event | Properties | Fires |
+|---|---|---|
+| `backend_portal_document_sent` | `account_id`, `type` | once per document: the first time a portal link of an email **send** (`LINK_ORIGIN = SEND`) is confirmed delivered and no other sent `SEND` link of the same record exists. Renewals, decision links and re-sends of the same document never fire |
+| `backend_portal_document_downloaded` | `account_id`, `type` | once per document: the first successful portal `/pdf` stream of a document that was sent with a portal link. "First" is the atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link — only the request whose `UPDATE … WHERE first_downloaded IS NULL` set it emits, so concurrent downloads emit once. A document never sent with a link emits nothing: it is outside the KPI's denominator |
+| `backend_quotation_decided` | `account_id`, `decision` (`accepted`, `rejected`), `source` (`portal`, `app`) | `portal`: a portal decision applied by its confirmation (`appliedNow`). `app`: a rejection (`RejectQuotationHandler#reject`, so also MCP and `DocAction = RJ`), or a conversion into an order (`Convertquotation`) or an invoice (`createDraftInvoice` on a quotation) — **not** when the quotation was `ETGO_AC`, i.e. already accepted from the portal and counted then |
+
+`type` is the portal document kind in lower case: `invoice`, `quotation`, `order`, `shipment`. A
+credit note is an `invoice`: the portal kinds do not tell them apart, and the PO's invoice metric
+counts every document of the invoice kind. App downloads are out of scope.
+
+**Only after commit, once, never in the way.** The portal sites run after their own commit. An
+app decision registers its event on the write's transaction (a Hibernate synchronization: sent on
+`STATUS_COMMITTED`, never on a rollback), or on the batch's commit inside `/sws/neo/batch` and
+`etendo_batch` (`NeoBatchScope.runAfterCommit`). Sending runs on one bounded background thread
+(`portal-kpi-telemetry`, queue 1000, drop when full), once, no retry; the Mixpanel sink adds
+`$insert_id` and `environment`. The download stamp runs after the PDF was streamed, so it never
+delays the file; any failure is logged and swallowed. The usage events `portal.*` (`ETGO_USAGE_EVENT`)
+are unchanged.
+
+**Mixpanel recipes** (filter `environment = production`):
+
+- **Primary — invoices downloaded from the portal:** unique-per-event count of
+  `backend_portal_document_downloaded` where `type = invoice` ÷ count of
+  `backend_portal_document_sent` where `type = invoice`, same period (target ≥ 30 % at 3 months).
+  Monthly absolute: the numerator by month. Both events fire once per document, so plain event
+  counts are document counts.
+- **Secondary — quotations answered from the portal:** count of `backend_quotation_decided` where
+  `source = portal`, broken down by `decision`, ÷ count of `backend_portal_document_sent` where
+  `type = quotation` (target ≥ 20 %). Manual decisions (`source = app`) are excluded from the
+  metric and kept for comparison.
+- Per tenant: break down by `account_id`. The events carry no record id, so a document sent in one
+  month and downloaded or answered in the next falls in different periods; read the ratio over
+  windows long enough (a quarter) for that lag to wash out.
+
+**Not implemented:** the common properties agreed on 2026-11-02 (`tenant_type`, `ad_user_id`,
+`ad_client_id`, `etgo_account_id`), blocked on ETP-6228, as for the other KPI blocks.
+
+## Bank Bounce-Pair KPIs (ETP-5581)
+
+`BankBounceKpiTelemetry` (`schemaforge`) emits the events of the bounce-pair KPI (issue #15: the
+acceptance rate of the bounce suggestions). **Flag-owned**: only reached with
+`bank-bounce-suggestions` on (each action evaluates `BankBounceSuggestionsFlag` once; with it off the
+actions answer 403 or skip the bounce groups and nothing here runs), so every event carries
+`flag_enabled: true`. Best effort: building an event never throws into the action, and sending runs
+on one bounded background thread (`bank-bounce-kpi-telemetry`, queue 1000, drop when full), so a
+telemetry failure can never fail, slow or roll back a discard. A successful decision is handed to
+`NeoBatchScope.runAfterCommit` once the discard is flushed (sent at once outside a batch, after the
+batch commits inside one); a refused action rolls back and emits no `discarded`. `failed` and the
+panel's `unchecked` describe no write and are sent at once.
+
+**Legal rule.** No line id, amount, counterparty or statement text: the only identifier is
+`account_id` (the account's `AD_Client_ID`).
+
+**What was proposed** comes from the action's own detection (`BankBouncePairService.Detection`,
+the same detection `autoMatch` and `pendingLines` run), never from the client: a pair the request
+names is matched to the detected pair whose bounce is one of its lines and whose original, or one
+of whose candidates, is the other.
+
+`backend_bank_bounce_pair_decided` — one decision on one pair.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `detection_signal` | primary signal as detected: `pis_link` > `return_text` > `counterparty` (the chosen candidate's for an ambiguous pair, the preferred candidate's while none is chosen); absent for a pair with none |
+| `signals_count` | how many of the three signals the pair met |
+| `confidence` | `high` / `review` **as proposed** (an ambiguous pair, and any pair detection did not propose, is `review`) |
+| `ambiguous` | detection left the original for the user to choose |
+| `adjacent` | statement adjacency chose the original (or the two candidates) |
+| `preselected` | the pair came checked (proposed `high`) |
+| `decision` | `discarded`, `unchecked`, `sent_to_panel`, `failed` |
+| `surface` | `modal` (`applySuggestions`, also when an agent calls it) / `panel` (`discardPair`, `dismissPair`) |
+| `chosen_among_alternatives` | the user discarded one candidate of an ambiguous pair (`discardPair`, or `dismissPair` naming the candidate) |
+| `channel` | `mcp` for an MCP tool call or MCP batch, else `ui` (the server cannot tell the SPA from another REST client) |
+| `flag_enabled` | always `true` |
+
+When it is emitted:
+
+- **`applySuggestions` (surface `modal`)**, once the call succeeded: one per `bouncePair` group —
+  `discarded`, or `failed` when its discard was refused with a 409 (a line already reconciled,
+  discarded or taken by an earlier group of the call...; a malformed group emits nothing) — then
+  one per entry of the optional body key `bounceDecisions: [{groupKey, decision}]`
+  (`unchecked` / `sent_to_panel`): the SPA's report of the pairs it SHOWED and did not apply.
+  `groupKey` is the `autoMatch` group's; it is resolved through the call's detection, read before
+  the transaction groups take their lines. An unknown key, an unknown decision, a repeated key or
+  the key of a pair applied in the same call is ignored, never an error. An agent (MCP) cannot
+  send `bounceDecisions` (it is not in the agent contract). Instead, **when its call applied at
+  least one `bouncePair` group**, every detected **preselected** pair (`high`, never ambiguous) it
+  left out — not among its groups, and with no line taken by any group of the same call, transaction
+  groups included — is an `unchecked` decision (surface `modal`, channel `mcp`), counted in the
+  summary (`pairs_shown`, `pairs_unchecked`, `preselection_changed`). An MCP call that applied no
+  bounce-pair group did not look at the bounces and sends no bounce event at all. The SPA path does
+  not infer anything: it reports what it showed in `bounceDecisions`.
+- **`discardPair` (surface `panel`, UI or MCP)**: `discarded` after the discard; `failed` on a 409.
+- **One rule for `failed`, modal and panel:** every 409 refusal of a pair is `failed`; it carries
+  the proposal properties (`detection_signal` … `chosen_among_alternatives`) when the action's
+  detection sees the pair, and only `account_id`, `channel`, `flag_enabled`, `decision`, `surface`
+  when it does not (e.g. a line reconciled meanwhile). A malformed request (400 / 404) emits
+  nothing. `failed` never counts in the KPI.
+- **`dismissPair` (surface `panel`, UI only)**: `unchecked` — the panel's *No es un rebote*. Nothing
+  is written, so the pair is proposed again next time and each dismissal counts.
+
+A pair discarded that detection did not propose (sent through the API or the MCP) still emits
+`discarded`, with the signals of its two lines, `review`, `preselected: false` and
+`ambiguous: false`: every discard that `restorePair` can undo has its decision.
+
+`backend_bank_bounce_pair_restored` — `restorePair` restored a **linked pair** (a line whose
+`EM_ETGO_Bounce_Pair_Line_ID` points to a counterpart that points back). A line restored alone
+(discarded on its own in Classic, or a one-sided link) emits nothing.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `detection_signal` | stored `EM_ETGO_Bounce_Signal` (absent when null) |
+| `confidence` | stored `EM_ETGO_Bounce_Confidence` (`high` only for a pair detection proposed exactly as high) |
+| `preselected` | `confidence == "high"`: the pair came preselected, so the KPI can subtract it from the preselected discards |
+| `days_since_decided` | **UTC calendar days** between `EM_ETGO_Bounce_Discarded` and the restore (a discard at 23:59 UTC restored at 00:01 UTC is 1), computed in the backend; the collector subtracts it from the restore's UTC day to get the decision's UTC day. Never negative |
+| `channel`, `flag_enabled` | as above |
+
+`backend_bank_bounce_suggestions_applied` — once per `applySuggestions` that decided at least one
+bounce pair (applied or reported in `bounceDecisions`).
+
+| Property | Value |
+|---|---|
+| `pairs_shown` | pairs decided in the call (every decision event above, `failed` included) |
+| `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` | per decision (`failed` = shown − the three) |
+| `preselection_changed` | a preselected pair was unchecked or sent to the panel, or a non-preselected pair was applied |
+| `account_id`, `channel`, `flag_enabled` | as above |
+
+**Known gap — a discard saved before a later failure of the same call.** `applySuggestions`
+discards its bounce pairs first, then matches the transaction groups; Core's matching services
+commit mid-flow. If the final `processReconciliation` then fails, the call answers an error and
+`finish` is never reached, so the bounce discards already committed get **no** `decided` event
+(and no summary). Rare; a later `restorePair` of such a pair then sends a `restored` with no
+matching decision, which can only lower the KPI's `P_discarded − P_restored` for that day.
+
+Example (`backend_bank_bounce_pair_decided` as submitted to Mixpanel):
+
+```json
+{"event": "backend_bank_bounce_pair_decided", "properties": {
+  "token": "…", "distinct_id": "neo-backend", "time": 1793700000,
+  "account_id": "4028E6C72959682B01295A070852010D", "channel": "ui", "flag_enabled": true,
+  "detection_signal": "pis_link", "signals_count": 2, "confidence": "high", "ambiguous": false,
+  "adjacent": false, "preselected": true, "chosen_among_alternatives": false,
+  "decision": "discarded", "surface": "modal",
+  "environment": "production", "$insert_id": "3f0c2b9e8d7a4c1b9e6f5a4d3c2b1a09"}}
+```
 
 ## Adding Authoritative Backend KPIs
 

@@ -9,5 +9,27 @@
         <default><![CDATA[0]]></default>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_BOUNCE_PAIR_LINE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_BOUNCE_DISCARDED" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_BOUNCE_SIGNAL" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_BOUNCE_CONFIDENCE" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="FIN_BANKSTATEMENTLINE" name="EM_ETGO_BSL_BOUNCE_PAIR_FK" onDelete="setnull">
+        <reference local="EM_ETGO_BOUNCE_PAIR_LINE_ID" foreign="FIN_BANKSTATEMENTLINE_ID"/>
+      </foreign-key>
+      <index name="EM_ETGO_BSL_BOUNCE_PAIR_IDX" unique="false">
+        <index-column name="EM_ETGO_BOUNCE_PAIR_LINE_ID"/>
+      </index>
     </table>
   </database>

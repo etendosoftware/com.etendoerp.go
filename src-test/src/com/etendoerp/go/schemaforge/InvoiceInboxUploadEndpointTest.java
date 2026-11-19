@@ -18,8 +18,11 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -72,6 +75,8 @@ class InvoiceInboxUploadEndpointTest {
   private MockedStatic<OBContext> obContext;
   private MockedStatic<InvoiceInboxIntake> intake;
   private MockedStatic<OBMessageUtils> messages;
+  /** The background worker: never started for real from a unit test. */
+  private MockedStatic<InvoiceInboxProcessor> processor;
 
   @BeforeEach
   void openStaticMocks() {
@@ -81,10 +86,12 @@ class InvoiceInboxUploadEndpointTest {
     intake = mockStatic(InvoiceInboxIntake.class);
     // Unstubbed messageBD answers null: every text falls back to its English default.
     messages = mockStatic(OBMessageUtils.class);
+    processor = mockStatic(InvoiceInboxProcessor.class);
   }
 
   @AfterEach
   void closeStaticMocks() {
+    processor.close();
     messages.close();
     intake.close();
     obContext.close();
@@ -107,6 +114,29 @@ class InvoiceInboxUploadEndpointTest {
     access.verifyNoInteractions();
     obContext.verifyNoInteractions();
     intake.verifyNoInteractions();
+  }
+
+  @Test
+  void featureDisabledIsTheVeryEnvelopeOfTheFlagOffRefusal() throws Exception {
+    flag.when(InvoiceInboxFlag::isEnabled).thenReturn(false);
+
+    NeoResponse helper = InvoiceInboxUploadEndpoint.featureDisabled();
+    NeoResponse refused = InvoiceInboxUploadEndpoint.handle(request(MULTIPART, 100L));
+
+    assertRefusal(helper, 403, "feature_disabled");
+    assertEquals(helper.getBody().toString(), refused.getBody().toString());
+    assertEquals("The invoice inbox is not enabled for this user.",
+        helper.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  void isWritableOrganizationRefusesTheStarOrgAndAcceptsOnlyWritableOnes() {
+    contextOf(ORG_ID, Set.of(ORG_ID, "0"));
+    OBContext context = OBContext.getOBContext();
+
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "0"));
+    assertTrue(InvoiceInboxUploadEndpoint.isWritableOrganization(context, ORG_ID));
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "OTHER-ORG"));
   }
 
   @Test
@@ -409,5 +439,90 @@ class InvoiceInboxUploadEndpointTest {
     JSONObject error = response.getBody().getJSONObject("error");
     assertEquals(code, error.getString("code"));
     assertNotNull(error.optString("message", null));
+  }
+
+  // ---------------------------------------------------------------- hand-off to the worker (ETP-6048)
+
+  @Test
+  void onlyTheAcceptedRowsAreSubmittedToTheWorkerAndOnlyOnce() throws Exception {
+    allowed();
+    contextOf(ORG_ID, Set.of(ORG_ID));
+    HttpServletRequest request = request(MULTIPART, 100L);
+    List<Part> files = List.of(part("files", "a.pdf"), part("files", "b.exe"),
+        part("files", "c.png"));
+    when(request.getParts()).thenReturn(files);
+    intake.when(() -> InvoiceInboxIntake.ingest(any(), any(), any(), any()))
+        .thenAnswer(invocation -> {
+          String name = invocation.getArgument(1);
+          return name.endsWith(".exe")
+              ? InvoiceInboxIntake.Result.rejected(name, "unsupported_type", "not supported")
+              : InvoiceInboxIntake.Result.accepted(name, "ID-" + name);
+        });
+
+    InvoiceInboxUploadEndpoint.handle(request);
+
+    processor.verify(() -> InvoiceInboxProcessor.submit("ID-a.pdf"), times(1));
+    processor.verify(() -> InvoiceInboxProcessor.submit("ID-c.png"), times(1));
+    processor.verify(() -> InvoiceInboxProcessor.submit(anyString()), times(2));
+  }
+
+  @Test
+  void nothingIsSubmittedWhenEveryFileIsRejectedOrTheRequestIsRefused() throws Exception {
+    allowed();
+    contextOf(ORG_ID, Set.of(ORG_ID));
+    HttpServletRequest request = request(MULTIPART, 100L);
+    List<Part> rejectedFile = List.of(part("files", "b.exe"));
+    when(request.getParts()).thenReturn(rejectedFile);
+    intake.when(() -> InvoiceInboxIntake.ingest(any(), any(), any(), any())).thenReturn(
+        InvoiceInboxIntake.Result.rejected("b.exe", "unsupported_type", "not supported"));
+    InvoiceInboxUploadEndpoint.handle(request);
+
+    HttpServletRequest tooMany = request(MULTIPART, 100L);
+    List<Part> twentyOne = parts(21);
+    when(tooMany.getParts()).thenReturn(twentyOne);
+    InvoiceInboxUploadEndpoint.handle(tooMany);
+
+    processor.verifyNoInteractions();
+  }
+
+  @Test
+  void aWorkerThatFailsToQueueDoesNotChangeTheAnswerOfACommittedUpload() throws Exception {
+    allowed();
+    contextOf(ORG_ID, Set.of(ORG_ID));
+    HttpServletRequest request = request(MULTIPART, 100L);
+    List<Part> files = List.of(part("files", "a.pdf"), part("files", "b.pdf"));
+    when(request.getParts()).thenReturn(files);
+    ingestAcceptsEverything();
+    processor.when(() -> InvoiceInboxProcessor.submit("ID-a.pdf"))
+        .thenThrow(new IllegalStateException("executor gone"));
+    processor.when(() -> InvoiceInboxProcessor.submit("ID-b.pdf"))
+        .thenThrow(new NoClassDefFoundError("worker could not initialize"));
+
+    NeoResponse response = InvoiceInboxUploadEndpoint.handle(request);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(2, response.getBody().getInt("accepted"));
+    assertEquals(0, response.getBody().getInt("rejected"));
+    assertEquals("ID-a.pdf", response.getBody().getJSONArray("results").getJSONObject(0)
+        .getString("incomingDocumentId"));
+    processor.verify(() -> InvoiceInboxProcessor.submit(anyString()), times(2));
+  }
+
+  /**
+   * The route decision lives here, not in the generic built-in dispatcher: exactly
+   * {@code POST /invoice-inbox/upload}, nothing else of the spec and nothing null.
+   */
+  @Test
+  void servesOnlyPostOnTheInvoiceInboxUploadPath() {
+    assertTrue(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "POST"));
+
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "GET"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "post"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "header", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("sales-order", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("image", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves(null, "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", null, "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", null));
   }
 }

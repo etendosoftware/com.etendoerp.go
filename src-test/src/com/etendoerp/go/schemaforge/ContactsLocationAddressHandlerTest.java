@@ -53,6 +53,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -100,6 +103,7 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * just as ambiguous as one carrying the published spelling.
  *
  * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
+ * @covers com.etendoerp.go.schemaforge.ContactAddressName
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -280,6 +284,57 @@ class ContactsLocationAddressHandlerTest {
   }
 
   /**
+   * The ship-to and invoice-to flags a create writes on the new C_BPartner_Location. A body that
+   * omits them (the contacts CSV import sends neither) gets an address marked for both shipping
+   * and invoicing; an explicit {@code false} is stored as sent. Each flag reads its own key: the
+   * mixed row would fail if one were read from the other's. An empty cell is an omitted key.
+   */
+  @ParameterizedTest(name = "shipToAddress={0}, invoiceToAddress={1} -> ship={2}, invoice={3}")
+  @CsvSource({
+      ",      ,      true,  true",
+      "false, false, false, false",
+      "false, ,      false, true",
+  })
+  void testHandleCreateDefaultsShipToAndInvoiceToWhenOmitted(Boolean sentShipTo,
+      Boolean sentInvoiceTo, boolean expectedShipTo, boolean expectedInvoiceTo) throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    stubCountry("ES");
+
+    JSONObject body = createBodyWithCountry("ES");
+    body.put("name", "Test Address");
+    if (sentShipTo != null) {
+      body.put("shipToAddress", sentShipTo.booleanValue());
+    }
+    if (sentInvoiceTo != null) {
+      body.put("invoiceToAddress", sentInvoiceTo.booleanValue());
+    }
+
+    NeoResponse response = handler.handle(buildContext("POST", null, body, params));
+
+    assertEquals(201, response.getHttpStatus());
+    verify(bpLoc).setShipToAddress(expectedShipTo);
+    verify(bpLoc).setInvoiceToAddress(expectedInvoiceTo);
+  }
+
+  /**
    * ETP-5806 — Mode B (building a new C_Location from raw fields) requires streetName,
    * buildingNumber and cityName alongside the pre-existing country check. A body missing them
    * is a clean 400, not a downstream NOT NULL violation at flush.
@@ -330,6 +385,172 @@ class ContactsLocationAddressHandlerTest {
       assertEquals(400, response.getHttpStatus());
       verify(obDal, never()).save(any());
       verify(obDal, never()).flush();
+    }
+  }
+
+  // ── ETP-5806: readAlias trims streetName/buildingNumber/buildingName ───────
+
+  /**
+   * A whitespace-padded value is validated and persisted trimmed, not the raw padded string —
+   * covers {@code readAlias}, used by {@code applyGeoLocFields} and the mandatory/max-length
+   * checks alike.
+   */
+  @Test
+  void testHandleCreateTrimsPaddedStructuredFieldsBeforeValidatingAndPersisting() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-trim-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "  Gran Via  ");
+    body.put("buildingNumber", " 45 ");
+    body.put("buildingName", " Torre A ");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+    }
+  }
+
+  /**
+   * A {@code streetName} made of only whitespace is visually empty and must be treated as
+   * missing: 400, never persisted — not "" that slips past a {@code nullIfEmpty}-only check.
+   */
+  @Test
+  void testHandleCreateWhitespaceOnlyStreetNameIsTreatedAsMissingReturns400() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "   ");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  // ── ETP-5806 follow-up (QA finding): buildingNumber omitted from the body ──
+
+  /**
+   * A create whose body never carries the {@code buildingNumber} key at all (not {@code ""} —
+   * the key itself is absent) must NOT be rejected as missing a mandatory field: it falls back to
+   * {@code "s/n"} and is persisted. Before the fix, an MCP or direct-API caller that simply never
+   * sent the key got a 400 even though the frontend convention is to accept the omission.
+   */
+  @Test
+  void testHandleCreateOmittedBuildingNumberKeyFallsBackToSlashN() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+    // buildingNumber key intentionally never put on the body at all.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPABuildingNumber("s/n");
+      verify(geoLoc).setAddressLine1("Gran Via, s/n");
+    }
+  }
+
+  /**
+   * Same omission, but {@code streetName} is ALSO absent: streetName remains strictly mandatory,
+   * so this is still a clean 400 — the fallback never masks the real missing-field error.
+   */
+  @Test
+  void testHandleCreateOmittedBuildingNumberWithStreetNameAlsoMissingStillReturns400()
+      throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+    // streetName and buildingNumber both intentionally never put on the body.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  /** The same omission on update: no 400, and the persisted value is {@code "s/n"}. */
+  @Test
+  void testHandleUpdateOmittedBuildingNumberKeyFallsBackToSlashN() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bpl-id");
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Mayor");
+    body.put("cityName", "Toledo");
+    body.put("country", "ES");
+    // buildingNumber key intentionally never put on the body at all.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setOBSEPABuildingNumber("s/n");
+      verify(geoLoc).setAddressLine1("Calle Mayor, s/n");
     }
   }
 
@@ -484,6 +705,63 @@ class ContactsLocationAddressHandlerTest {
     return bpLoc;
   }
 
+  /**
+   * ETP-6206: an edit that sends "city, long address line" as the name used to fail at flush,
+   * because {@code C_BPartner_Location.Name} is 60 characters. The update path now caps it like the
+   * create path does.
+   */
+  @Test
+  void anUpdateNameOver60IsCappedAt60() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", "Madrid, Calle de la Ribera del Manzanares y Paseo de la Virgen del P");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Madrid, Calle de la Ribera del Manzanares y Paseo de la Virg");
+    }
+  }
+
+  /** ETP-6206: an update name that fits is stored as sent. */
+  @Test
+  void anUpdateNameThatFitsIsStoredUnchanged() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", "Madrid, Calle Mayor, 7");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Madrid, Calle Mayor, 7");
+    }
+  }
+
+  /**
+   * ETP-6206: the update path now runs the sent name through {@code ContactAddressName.capped},
+   * which cannot take a missing name. An empty name, or the literal "null" a cleared field is sent
+   * as, is no name: the stored one is kept and the rest of the edit is still saved.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = { "", "null" })
+  void aBlankUpdateNameKeepsTheStoredName(String sentName) throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("name", sentName);
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(bpLoc, never()).setName(any());
+      verify(geoLoc).setPostalCode("28002");
+    }
+  }
+
   /** A PATCH changes the field it sends and keeps every address field it omits. */
   @Test
   void patchKeepsTheStoredAddressFieldsItOmits() throws Exception {
@@ -556,6 +834,100 @@ class ContactsLocationAddressHandlerTest {
       handler.handle(buildContext("PUT", "bpl-id", body, null));
 
       verify(geoLoc).setCityName(null);
+    }
+  }
+
+  /**
+   * ETP-5806 CP-12b (QA finding) — MCP's {@code etendo_update} always maps to HTTP PUT
+   * ({@code McpToolRouter#handleUpdate}), so a single-field edit (e.g. only {@code buildingName})
+   * used to reach {@code validateUpdateMandatoryFields} with streetName/buildingNumber/cityName/
+   * country genuinely absent from the body — a clean 400 — even though the stored record already
+   * had them. A PUT whose body alone cannot satisfy the mandatory fields is now merged into just
+   * like a PATCH, so the edit succeeds and the fields it did not mention are preserved.
+   */
+  @Test
+  void putMissingMandatoryStructuredFieldsMergesStoredAddressBeforeValidating() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject body = new JSONObject();
+    body.put("buildingName", "Edificio Central");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse response = handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Edificio Central");
+    }
+  }
+
+  /**
+   * A genuine full-replace PUT that already carries every mandatory structured field is
+   * untouched by the CP-12b fix: the merge check is false, so nothing not mentioned is merged in
+   * (a non-mandatory field like postalCode is still cleared when omitted).
+   */
+  @Test
+  void putCarryingEveryMandatoryFieldStillReplacesNonMandatoryOnesItOmits() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "106");
+    // postalCode intentionally omitted
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse response = handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setPostalCode(null);
+    }
+  }
+
+  /**
+   * ETP-5806 CP-12c (QA finding) — the UI pop-up always computes and sends a fresh {@code name}
+   * on save; an MCP caller that edits only the structured address fields never sends {@code name}
+   * at all, so it went stale relative to the address it just changed while addressLine1/
+   * addressLine2 updated correctly. {@code name} is now recomputed unconditionally from the
+   * post-write record when the caller does not send one.
+   */
+  @Test
+  void putWithoutNameRecomputesTheDisplayNameFromTheNewAddress() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    when(geoLoc.getCityName()).thenReturn("Valencia");
+    when(geoLoc.getAddressLine1()).thenReturn("Gran Via, 45");
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Valencia");
+    body.put("country", "106");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Valencia, Gran Via, 45");
+    }
+  }
+
+  /** With the flag off, the legacy behaviour is unchanged: an omitted name is never recomputed. */
+  @Test
+  void putWithoutNameFlagOffNeverRecomputesTheDisplayName() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      verify(bpLoc, never()).setName(any());
     }
   }
 
@@ -1142,6 +1514,7 @@ class ContactsLocationAddressHandlerTest {
     // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("United States");
     when(country.getIdentifier()).thenReturn("Estados Unidos");
+    when(country.getISOCountryCode()).thenReturn("US");
     when(geoLoc.getCountry()).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -1173,8 +1546,31 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("62704", enriched.getString("postalCode"));
     assertEquals("US", enriched.getString("country"));
     assertEquals("Estados Unidos", enriched.getString("country$_identifier"));
+    // ETP-6090: the public API's country_code.
+    assertEquals("US", enriched.getString("countryCode"));
     assertEquals("IL", enriched.getString("region"));
     assertEquals("Illinois", enriched.getString("region$_identifier"));
+  }
+
+  /** ETP-6090: no country, or a country without an ISO code, reads as a null countryCode. */
+  @Test
+  void testAfterHandleGetByIdReturnsNullCountryCodeWhenUnknown() throws Exception {
+    Location noCountry = mock(Location.class);
+    Location noIsoCode = mock(Location.class);
+    when(noIsoCode.getCountry()).thenReturn(mock(Country.class));
+    when(obDal.get(Location.class, "no-country")).thenReturn(noCountry);
+    when(obDal.get(Location.class, "no-iso")).thenReturn(noIsoCode);
+
+    for (String geoLocId : new String[] { "no-country", "no-iso" }) {
+      JSONObject jsonRecord = new JSONObject();
+      jsonRecord.put("id", "bpl-id");
+      jsonRecord.put("locationAddress", geoLocId);
+      NeoContext ctx = buildContextWithPrevious("GET", "bpl-id", buildPreviousResult(jsonRecord));
+
+      JSONObject enriched = handler.afterHandle(ctx).getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(enriched.isNull("countryCode"), geoLocId);
+    }
   }
 
   /**

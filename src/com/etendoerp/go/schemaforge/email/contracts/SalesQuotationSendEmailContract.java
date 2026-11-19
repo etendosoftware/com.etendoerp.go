@@ -17,10 +17,12 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.portal.PortalDocumentKind;
 import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Contract for sending sales quotation document notifications.
@@ -50,5 +52,11 @@ public final class SalesQuotationSendEmailContract extends DefaultDocumentSendEm
   @Override
   protected String unsendableStatusMessageKey() {
     return MSG_NOT_FOR_DRAFT;
+  }
+
+  /** Carries a customer portal link (ETP-6209); the shared contract mints and confirms it. */
+  @Override
+  protected Optional<PortalDocumentKind> portalDocumentKind() {
+    return Optional.of(PortalDocumentKind.QUOTATION);
   }
 }

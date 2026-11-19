@@ -333,6 +333,11 @@ class InvoiceInboxIntakeTest {
     verify(row).setStatus("PROCESSING");
     verify(row).setAdjusted(false);
     verify(row).setReviewed(false);
+    // ETP-6048: a new row is waiting for the worker, never claimed (no lease) and not processed yet.
+    verify(row).setProcessingAttempts(0L);
+    verify(row, never()).setProcessingLease(any());
+    verify(row, never()).setProcessedAt(any());
+    verify(row, never()).setErrorCode(any());
     verify(row, never()).setCreatedBy(any());
     verify(row, never()).setUpdatedBy(any());
     verify(dal).save(row);

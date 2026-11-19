@@ -63,8 +63,7 @@ final class OrderDocumentAvailability {
 
   /** Why Reactivate is ruled out: same rule as the SPA's {@code hasLinkedDocuments} flag. */
   static final String REASON_LINKED_DOCUMENTS = "This order has linked shipments, receipts or "
-      + "invoices, so it cannot be reactivated: the app hides Reactivate in that case. The other "
-      + "documentAction values still apply.";
+      + "invoices, so it cannot be reactivated: the app hides Reactivate in that case.";
 
   /**
    * The keys the order header adds to every GET record and no spec field backs, declared as the
@@ -73,6 +72,21 @@ final class OrderDocumentAvailability {
    */
   static final Set<String> RESPONSE_ENRICHED_FIELDS =
       Set.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc");
+
+  /**
+   * The fixed parts of {@link #draftCoversInvoiceReason}; the app locates the draft numbers between
+   * them (etendo_schema_forge {@code backendErrors.js}), so keep both in step.
+   */
+  static final String DRAFT_COVERS_INVOICE_PREFIX = "A draft invoice (";
+  static final String DRAFT_COVERS_INVOICE_SUFFIX = ") already covers what is left to invoice; "
+      + "complete or delete it instead of creating another one.";
+
+  /**
+   * {@link #draftCoversInvoiceReason} when none of the covering drafts is readable by the role
+   * (another organization): the same sentence without the numbers, never an empty "()".
+   */
+  static final String DRAFT_COVERS_INVOICE_UNNAMED = "A draft invoice already covers what is left "
+      + "to invoice; complete or delete it instead of creating another one.";
 
   /**
    * Draft invoices that cover an order: through their lines
@@ -100,9 +114,13 @@ final class OrderDocumentAvailability {
    * @param invoiceAction          the action that creates the invoice from the order
    * @param skipTotalDiscountLine  whether the invoice action leaves the total-discount line out of
    *                               what it invoices
+   * @param invoiceNetOfDrafts     whether the invoice action invoices what is pending NET of the
+   *                               draft invoices ({@link OrderInvoicePending}, ETP-5828), so a
+   *                               draft only rules it out when it covers everything left; when
+   *                               {@code false}, any draft invoice rules it out (ETP-5714)
    */
   record Flow(boolean sales, String receiveAction, String invoiceAction,
-      boolean skipTotalDiscountLine) { }
+      boolean skipTotalDiscountLine, boolean invoiceNetOfDrafts) { }
 
   private OrderDocumentAvailability() {
   }
@@ -163,7 +181,11 @@ final class OrderDocumentAvailability {
         + "; complete or delete it instead of creating another one.";
   }
 
-  /** Why the invoice action does not apply, or {@code null} when it does. */
+  /**
+   * Why the invoice action does not apply, or {@code null} when it does. With
+   * {@link Flow#invoiceNetOfDrafts()} the draft invoices only rule it out when, net of what they
+   * hold, nothing is left (the {@code receiveReason} model); otherwise any draft does.
+   */
   private static String invoiceReason(Order order, Flow flow) {
     if (!hasPendingInvoiceLine(order, flow.skipTotalDiscountLine())) {
       return "Nothing is left to invoice: every line of this order is already invoiced.";
@@ -172,8 +194,29 @@ final class OrderDocumentAvailability {
     if (drafts.isEmpty()) {
       return null;
     }
+    if (flow.invoiceNetOfDrafts()) {
+      return OrderInvoicePending.netOfDrafts(order, flow.sales()).isEmpty()
+          ? draftCoversInvoiceReason(drafts)
+          : null;
+    }
     return "A draft invoice (" + String.join(", ", drafts) + ") already exists for this order; "
         + "complete or delete it instead of creating another one.";
+  }
+
+  /**
+   * Why an order's invoice action has nothing to do when its draft invoices already hold what is
+   * left (ETP-5828): the advice of {@link #invoiceReason} and the refusal of the action itself, one
+   * sentence so the app translates both alike.
+   *
+   * @param drafts the order's draft invoice numbers the role can read; empty gives the sentence
+   *               without numbers ({@link #DRAFT_COVERS_INVOICE_UNNAMED})
+   * @return the reason
+   */
+  static String draftCoversInvoiceReason(List<String> drafts) {
+    if (drafts == null || drafts.isEmpty()) {
+      return DRAFT_COVERS_INVOICE_UNNAMED;
+    }
+    return DRAFT_COVERS_INVOICE_PREFIX + String.join(", ", drafts) + DRAFT_COVERS_INVOICE_SUFFIX;
   }
 
   /**

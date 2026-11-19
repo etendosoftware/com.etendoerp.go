@@ -74,6 +74,20 @@ public final class InvoiceInboxFlag {
             .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId));
   }
 
+  /**
+   * Whether the invoice inbox is enabled for an account the caller has already resolved, on the
+   * current request's tenant. Used by {@code SFWindowAccessMap}, which resolves the account once for
+   * every capability it publishes and republishes this answer as {@code capabilities.invoiceInbox},
+   * so the browser never evaluates the flag itself.
+   *
+   * @param accountEmail the {@code ETGO_ACCOUNT} email the flag is targeted on; blank means no
+   *     account, which no per-account rule matches
+   * @return {@code true} only when the flag resolves to on; {@code false} otherwise
+   */
+  public static boolean isEnabledFor(String accountEmail) {
+    return isEnabled(accountEmail, currentClientId());
+  }
+
   /** The tenant of the current {@link OBContext}, or {@code null} when there is none. */
   private static String currentClientId() {
     try {

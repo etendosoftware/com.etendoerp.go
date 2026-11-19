@@ -1892,12 +1892,21 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
-  /** Flag on (for comparison): the same incomplete block is rejected with a clean 400. */
+  /**
+   * Flag on (for comparison): a street with no city is still rejected with a clean 400 — but
+   * NOT for a missing Building Number any more (ETP-5806 follow-up): a blank Building Number
+   * with a present Street Name falls back to "s/n" via {@link
+   * StructuredAddressComposer#effectiveBuildingNumber}, the same rule already applied by the 3
+   * NEO handlers, so it must no longer appear in the "missing" list.
+   */
   @Test
   public void validateStructuredAddressBlockStillRejectsAnIncompleteBlockWhenTheFlagIsOn()
       throws Exception {
     Object data = newOnboardingRequestData();
     setOnboardingField(data, "streetName", "Gran Via");
+    setOnboardingField(data, "countryCode", "ES");
+    // buildingNumber and city intentionally left unset (null): buildingNumber now falls back to
+    // "s/n" (not reported missing), city stays mandatory.
 
     Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
         "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class,
@@ -1910,8 +1919,39 @@ public class EtendoGoJwtServletCoverageTest {
 
       assertFalse(result);
       assertEquals(400, resp.status);
-      assertTrue(resp.body(), resp.body().contains("buildingNumber"));
+      assertFalse(resp.body(), resp.body().contains("buildingNumber"));
       assertTrue(resp.body(), resp.body().contains("city"));
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up — a Building Number genuinely ABSENT from the payload (not blank, not
+   * "s/n": the field is simply never set) is not mandatory when Street Name and City are both
+   * present. {@link StructuredAddressComposer#effectiveBuildingNumber} fills the gap with "s/n"
+   * before {@code missingMandatoryFields} ever sees it, so the block passes validation — the same
+   * contract already covered for persistence in {@code OnboardingOrgInfoServiceTest}, exercised
+   * here at the servlet validation layer.
+   */
+  @Test
+  public void validateStructuredAddressBlockAcceptsAnAbsentBuildingNumber() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+    setOnboardingField(data, "city", "Madrid");
+    setOnboardingField(data, "countryCode", "ES");
+    // buildingNumber intentionally left unset (null): absent from the payload entirely.
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class,
+        String.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response, ACCOUNT_EMAIL_FOR_FLAG);
+
+      assertTrue("an absent buildingNumber falls back to s/n and does not block the request",
+          result);
+      verify(resp.response, never()).setStatus(anyInt());
     }
   }
 
@@ -2153,9 +2193,12 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   /**
-   * ETP-5806 — the structured address block (streetName/buildingNumber/city) is optional on the
-   * minimalist onboarding step, but once the user starts filling it in, all three become
-   * mandatory together — same rule as the Contacts/Warehouse address popups.
+   * ETP-5806 — the structured address block (streetName/city) is optional on the minimalist
+   * onboarding step, but once the user starts filling it in, Street Name and City become
+   * mandatory together — same rule as the Contacts/Warehouse address popups. Building Number is
+   * NOT part of that mandatory pair any more (ETP-5806 follow-up): a blank value with a present
+   * Street Name falls back to "s/n" ({@link StructuredAddressComposer#effectiveBuildingNumber}),
+   * so it must not appear in the "missing" list.
    */
   @Test
   public void onboardingPartiallyStartedAddressBlockReturnsBadRequest() throws Exception {
@@ -2174,7 +2217,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     String body = new JSONObject(resp.body()).toString();
-    assertTrue(body, body.contains("buildingNumber"));
+    assertFalse(body, body.contains("buildingNumber"));
     assertTrue(body, body.contains("city"));
   }
 
@@ -3788,6 +3831,9 @@ public class EtendoGoJwtServletCoverageTest {
         mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     doAnswer(invocation -> steps.add("activateSchedule"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -4816,6 +4862,9 @@ public class EtendoGoJwtServletCoverageTest {
     // writes an AD_Preference; a mock keeps the staged run DB-free.
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     return new PaidOnboardingStage(response, request, store);
   }
 
@@ -4886,6 +4935,9 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
     servlet.onboardingInitialPeriodStateService =
         mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
+    // ETP-6148: the remittance setup reads a flag a developer may have on locally; keep it inert.
+    servlet.onboardingRemittanceSetupService =
+        mock(com.etendoerp.go.onboarding.OnboardingRemittanceSetupService.class);
     if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");

@@ -19,15 +19,19 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Collection;
+import java.util.Collections;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * The discount a new order line's price implies, one of the line rules of
- * {@link OrderLineDiscountSupport#applyLineRules} (ETP-5852), kept apart so that class stays
- * within Sonar's method budget.
+ * The discount of a new order line created over MCP, two of the line rules of
+ * {@link OrderLineDiscountSupport#applyLineRules}, kept apart so that class stays within Sonar's
+ * method budget: the discount a sent price implies ({@link #derive}, ETP-5852), and the discount
+ * the defaults cascade left on a line sent with only its list price
+ * ({@link #resetCascadeDiscount}, ETP-5528).
  */
 final class OrderLineCreateDiscount {
 
@@ -37,7 +41,125 @@ final class OrderLineCreateDiscount {
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
   private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
+  /** Context attribute {@link #resetCascadeDiscount} sets when it reset the discount. */
+  static final String ATTR_CASCADE_DISCOUNT_RESET = "orderLine.cascadeDiscountReset";
+
   private OrderLineCreateDiscount() {
+  }
+
+  /**
+   * The "lone listPrice" create (ETP-5528, live pre-QA): an {@code etendo_create} that sends
+   * {@code listPrice} and neither {@code discount} nor a price of its own gets {@code discount 0},
+   * the form's value for a "Precio" typed with no discount, so
+   * {@link LinePriceListSupport#applyClientListPrice} then prices it at
+   * {@code listPrice × (1 − 0 / 100)} and {@link OrderLineDiscountSupport#deriveAmountsOnCreate}
+   * derives the amounts from that price.
+   *
+   * <p><b>Why the body's discount is not the caller's.</b> On {@code etendo_create} the defaults
+   * cascade runs before the pre-hook. {@code SL_Order_Product} publishes the product selector's
+   * price — 0, the selector has no price-list context — as {@code unitPrice};
+   * {@code McpLinePriceInjector} leaves it, as the agent chose a list price; and
+   * {@code SL_Order_Amt} then derives {@code discount = (listPrice − 0) / listPrice × 100 = 100}
+   * from it. {@code discount} is not a key the agent sent, so the cascade may write it, and the list
+   * price was then applied at 100 %: {@code listPrice 100, orderedQuantity 2} persisted discount
+   * 100, unit price 0 and amounts 0 — a free line, with no warning. A discount derived from a price
+   * of 0 is not a choice.
+   *
+   * <p><b>MCP {@code etendo_create} only</b> — see {@link #qualifiesForCascadeDiscountReset} for
+   * the exact condition. On success the context is marked ({@link #cascadeDiscountWasReset}), so the
+   * customization can declare {@code discount} governed and the cascade's 100 is not reported to the
+   * agent as a {@code supersededDefaults} value to send back. Total: never throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void resetCascadeDiscount(NeoContext ctx) {
+    if (!qualifiesForCascadeDiscountReset(ctx)) {
+      return;
+    }
+    try {
+      ctx.getRequestBody().put(OrderLineDiscountSupport.FIELD_DISCOUNT, BigDecimal.ZERO);
+      ctx.setAttribute(ATTR_CASCADE_DISCOUNT_RESET, Boolean.TRUE);
+    } catch (Exception e) {
+      log.warn("[ORDER-LINE-PRICE] Could not reset the cascade discount of a new line on {} {}: {}",
+          ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
+    }
+  }
+
+  /**
+   * Whether {@link #resetCascadeDiscount} applies to this pre-hook context: an MCP CRUD create that
+   * carries {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — set only by {@code etendo_create}, the
+   * one channel that fills defaults before the pre-hook; without it the body is what the caller
+   * sent (REST single and batch, {@code etendo_batch}, and so the form, which always sends
+   * {@code unitPrice} with {@code listPrice} anyway) — whose agent sent {@code listPrice} and none
+   * of {@code discount} (an explicit 100 % stays 100), {@code unitPrice} or {@code grossUnitPrice}
+   * (a negotiated price keeps deriving its discount in {@link #derive}), and whose body has a
+   * non-zero list price and no price yet ({@code unitPrice} absent or 0, the cascade's 0).
+   *
+   * <p>Read on the body BEFORE the line is priced: once priced, {@code unitPrice} is the list
+   * price, so the governed-field question after the pre-hook asks
+   * {@link #cascadeDiscountWasReset} instead of re-evaluating this.
+   */
+  static boolean qualifiesForCascadeDiscountReset(NeoContext ctx) {
+    JSONObject body = ctx == null ? null : ctx.getRequestBody();
+    if (body == null) {
+      return false;
+    }
+    return sentOnlyListPrice(agentSentKeys(ctx))
+        && !LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_LIST_PRICE))
+        && LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+  }
+
+  /**
+   * @return {@code true} when {@link #resetCascadeDiscount} reset this request's discount
+   */
+  static boolean cascadeDiscountWasReset(NeoContext ctx) {
+    return ctx != null && Boolean.TRUE.equals(ctx.getAttribute(ATTR_CASCADE_DISCOUNT_RESET));
+  }
+
+  /**
+   * Whether this customization decides the {@code discount} of an {@code etendo_create}, so the
+   * create cascade's proposal for it is not a {@code supersededDefaults} entry — the answer
+   * {@code OrderLineCustomization#governedCreateFields} gives after the pre-hook. True when:
+   * <ul>
+   *   <li>the agent sent {@code discount}: the line rules price the line from it, and the cascade's
+   *       proposal is {@code SL_Order_Amt} run on the protected list price against the selector's
+   *       {@code unitPrice} 0 — never a meaningful value. Live pre-QA (build 6f93aad2e) reported
+   *       {@code {sent:10, callout:100}}, {@code {sent:20, callout:100}} and
+   *       {@code {sent:100, callout:67}}, and the hint told the agent to send the callout value
+   *       instead, which would have applied 100 % or 67 %;</li>
+   *   <li>or {@link #resetCascadeDiscount} reset the cascade's discount.</li>
+   * </ul>
+   * MCP {@code etendo_create} only (it is the one that sets
+   * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}); {@code listPrice} is never governed here.
+   */
+  static boolean governsDiscountOnCreate(NeoContext ctx) {
+    if (cascadeDiscountWasReset(ctx)) {
+      return true;
+    }
+    return agentSentKeys(ctx).contains(OrderLineDiscountSupport.FIELD_DISCOUNT);
+  }
+
+  /**
+   * The keys the agent itself sent on an MCP CRUD create
+   * ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, set only by {@code etendo_create}), or the
+   * empty set on any other request — where the body is what the caller sent (REST single and
+   * batch, {@code etendo_batch}, and so the form).
+   */
+  private static Collection<?> agentSentKeys(NeoContext ctx) {
+    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+      return Collections.emptySet();
+    }
+    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    return provided instanceof Collection ? (Collection<?>) provided : Collections.emptySet();
+  }
+
+  /** The agent priced the line by its list price alone: no discount, net or gross price sent. */
+  private static boolean sentOnlyListPrice(Collection<?> sent) {
+    return sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_DISCOUNT)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE);
   }
 
   /**
@@ -64,7 +186,7 @@ final class OrderLineCreateDiscount {
     // A zero discount is what the defaults pass and the AD column default put there, so it is not a
     // choice; the form never sends 0 with a price off the list (it sends list × (1 − discount)).
     if (body == null || !LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_DISCOUNT))
-        || OrderLineDiscountSupport.sentExplicitGrossPrice(body)) {
+        || OrderLineBodyRules.sentExplicitGrossPrice(body)) {
       return;
     }
     BigDecimal listPrice =

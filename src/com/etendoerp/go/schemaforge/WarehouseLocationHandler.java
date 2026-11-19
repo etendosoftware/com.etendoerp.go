@@ -21,6 +21,7 @@ import java.util.List;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -209,10 +210,13 @@ public class WarehouseLocationHandler implements NeoHandler {
   // ------------------------------------------------------------------ validation
 
   /**
-   * ETP-5806 — Street, Number, City and Country are mandatory for the Warehouse location, the
-   * same product decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than
-   * Classic, where the 3 SEPA fields are optional). This entity is tab-less and has no "reuse an
-   * existing C_Location" mode, so the check applies unconditionally on both create and update.
+   * ETP-5806 — Street, City and Country are mandatory for the Warehouse location, the same product
+   * decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than Classic, where
+   * the 3 SEPA fields are optional). Building Number is not independently mandatory — a
+   * blank/omitted value falls back to {@code "s/n"} when Street Name is present (ETP-5806
+   * follow-up); see {@link StructuredAddressComposer#effectiveBuildingNumber}. This entity is
+   * tab-less and has no "reuse an existing C_Location" mode, so the check applies unconditionally
+   * on both create and update.
    */
   private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId,
       boolean structuredAddressEnabled) {
@@ -222,9 +226,18 @@ public class WarehouseLocationHandler implements NeoHandler {
       return countryId == null
           ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
     }
+    // trimToNull, not nullIfEmpty: a streetName/buildingNumber of "   " is visually empty to
+    // whoever typed it, and nullIfEmpty only rejects "". Left untrimmed a value like " Main St"
+    // would pass both the mandatory and max-length checks below with a leading space baked in.
+    String streetName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_STREET_NAME, null)));
+    // ETP-5806 follow-up (QA finding) — a blank/omitted Building Number with a present Street Name
+    // is not missing, it falls back to "s/n", matching the frontend convention. See
+    // StructuredAddressComposer#effectiveBuildingNumber.
+    String buildingNumber = StructuredAddressComposer.effectiveBuildingNumber(streetName,
+        StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null))));
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        streetName,
+        buildingNumber,
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         countryId);
     if (!missing.isEmpty()) {
@@ -234,9 +247,9 @@ public class WarehouseLocationHandler implements NeoHandler {
     // a value longer than the DB column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) reached OBDal.flush() as
     // a raw data-truncation SQL exception, surfaced as an opaque 500 on both create and update.
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+        streetName,
+        buildingNumber,
+        StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null))));
     if (!tooLong.isEmpty()) {
       return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
     }
@@ -250,12 +263,18 @@ public class WarehouseLocationHandler implements NeoHandler {
     // ETP-5806 — see ContactsLocationAddressHandler#applyGeoLocFields for why the 3 fields are
     // ignored entirely (not read, not written) while `structured-address-for-sepa` is off for the
     // requesting account (resolved once in handle(), threaded here).
+    // trimToNull, not nullIfEmpty: see rejectIncompleteAddressPayload above for why these 3
+    // fields are trimmed before being validated and persisted.
     String streetName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
+        ? StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_STREET_NAME, null))) : null;
+    // ETP-5806 follow-up — same "s/n" fallback applied during validation; persisting the raw
+    // (possibly blank) buildingNumber here would silently disagree with what was just validated.
     String buildingNumber = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) : null;
+        ? StructuredAddressComposer.effectiveBuildingNumber(streetName,
+            StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null))))
+        : null;
     String buildingName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) : null;
+        ? StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null))) : null;
     if (structuredAddressEnabled) {
       geoLoc.setOBSEPAStreetName(streetName);
       geoLoc.setOBSEPABuildingNumber(buildingNumber);

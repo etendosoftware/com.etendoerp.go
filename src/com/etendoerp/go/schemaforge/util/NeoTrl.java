@@ -88,18 +88,36 @@ public final class NeoTrl {
    */
   public static Map<String, String> translatedNames(String baseEntityName, Collection<String> ids,
       String langCode) {
-    if (StringUtils.isBlank(baseEntityName) || ids == null || ids.isEmpty()
-        || StringUtils.isBlank(langCode)) {
+    return translatedNames(baseEntityName, baseEntityName + "Trl", ids, langCode);
+  }
+
+  /**
+   * As {@link #translatedNames(String, Collection, String)} for a base entity whose translation
+   * entity does not follow the {@code <Base>Trl} convention (e.g. {@code FinancialMgmtTaxRate} is
+   * translated by {@code FinancialMgmtTaxTrl}, the entity of {@code C_Tax_Trl}).
+   *
+   * @param baseEntityName the model name of the base entity
+   * @param trlEntityName  the model name of its translation entity
+   * @param ids            the base-record ids whose translations are wanted
+   * @param langCode       the target Etendo language code (e.g. {@code es_ES})
+   * @return a map {@code recordId -> translated name}; empty when nothing is translatable
+   */
+  public static Map<String, String> translatedNames(String baseEntityName, String trlEntityName,
+      Collection<String> ids, String langCode) {
+    if (StringUtils.isBlank(baseEntityName) || StringUtils.isBlank(trlEntityName)
+        || ids == null || ids.isEmpty() || StringUtils.isBlank(langCode)) {
       return Collections.emptyMap();
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
 
       ModelProvider model = ModelProvider.getInstance();
       Entity base = model.getEntity(baseEntityName, false);
-      Entity trl = base != null ? model.getEntity(baseEntityName + "Trl", false) : null;
+      Entity trl = base != null ? model.getEntity(trlEntityName, false) : null;
       if (base == null || trl == null) {
         return Collections.emptyMap();
       }
@@ -233,8 +251,10 @@ public final class NeoTrl {
       String langCode) {
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
 
       OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(meta.trlEntityName,
           "as t where lower(t." + meta.nameProperty + ") = :name and t.language.language = :lang");

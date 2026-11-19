@@ -87,6 +87,13 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
+   * The append-only log of the attempts against the AEAT (ETP-5716), shared by the models that
+   * call it. A field rather than an accessor (this class is at its method budget); package-private
+   * and not final so tests can put a mock in its place.
+   */
+  FiscalAeatAttemptLog attemptLog = new FiscalAeatAttemptLog();
+
+  /**
    * Thrown by {@link #guardNotAlreadySubmitted} — every {@code dispatch()} override that calls it
    * must catch this specifically (before its own generic {@code catch (Exception e)}) and turn it
    * into a clean {@code 409} instead of letting it bubble up wrapped as a generic {@code 500}. See

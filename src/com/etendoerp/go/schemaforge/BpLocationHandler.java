@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -382,12 +383,22 @@ public class BpLocationHandler implements NeoHandler {
    * @return the error response when validation fails; {@code null} when the request may proceed
    */
   private NeoResponse prepareStructuredAddress(List<JSONObject> sections, Location existing) {
-    String streetName = effective(sections, KEYS_STREET_NAME,
-        existing != null ? existing.getOBSEPAStreetName() : null);
-    String buildingNumber = effective(sections, KEYS_BUILDING_NUMBER,
-        existing != null ? existing.getOBSEPABuildingNumber() : null);
-    String buildingName = effective(sections, KEYS_BUILDING_NAME,
-        existing != null ? existing.getOBSEPABuildingName() : null);
+    // trimToNull, not relying on effective()/nullIfEmpty alone: a streetName/buildingNumber/
+    // buildingName of "   " is visually empty to whoever typed it, and nullIfEmpty only rejects
+    // "". Left untrimmed, a value like " Main St" would pass both the mandatory and max-length
+    // checks below with a leading space baked in and reach the DB unchanged. Scoped to these 3
+    // fields only — effective() is shared with cityName/countryId below, where a trim is not
+    // part of this fix.
+    String streetName = StringUtils.trimToNull(effective(sections, KEYS_STREET_NAME,
+        existing != null ? existing.getOBSEPAStreetName() : null));
+    // ETP-5806 follow-up (QA finding) — a blank/omitted Building Number with a present Street Name
+    // is not missing, it falls back to "s/n", so validation and persistence never see it as absent.
+    // See StructuredAddressComposer#effectiveBuildingNumber.
+    String buildingNumber = StructuredAddressComposer.effectiveBuildingNumber(streetName,
+        StringUtils.trimToNull(effective(sections, KEYS_BUILDING_NUMBER,
+            existing != null ? existing.getOBSEPABuildingNumber() : null)));
+    String buildingName = StringUtils.trimToNull(effective(sections, KEYS_BUILDING_NAME,
+        existing != null ? existing.getOBSEPABuildingName() : null));
     String cityName = effective(sections, KEYS_CITY_NAME,
         existing != null ? existing.getCityName() : null);
     String countryId = effective(sections, KEYS_COUNTRY,
@@ -420,8 +431,10 @@ public class BpLocationHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5806 — same product decision as Contacts/Warehouse: Street, Number, City and Country
-   * are mandatory together in Etendo Go (stricter than Classic's optional SEPA fields).
+   * ETP-5806 — same product decision as Contacts/Warehouse: Street, City and Country are mandatory
+   * in Etendo Go (stricter than Classic's optional SEPA fields). Building Number is not
+   * independently mandatory — a blank/omitted value falls back to {@code "s/n"} when Street Name
+   * is present (ETP-5806 follow-up); see {@link StructuredAddressComposer#effectiveBuildingNumber}.
    */
   private static NeoResponse validateStructuredAddress(String streetName, String buildingNumber,
       String buildingName, String cityName, String countryId) {

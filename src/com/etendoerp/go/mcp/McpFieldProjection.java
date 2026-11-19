@@ -53,6 +53,13 @@ final class McpFieldProjection {
   static final String PARAM_FIELDS = "fields";
   static final String PARAM_VIEW = "view";
   static final String VIEW_SUMMARY = "summary";
+  /** ETP-5848: every field of the row, instead of a list's default columns. */
+  static final String VIEW_FULL = "full";
+  static final String KEY_OTHER_FIELDS = "otherFields";
+  static final String KEY_FIELDS_NOTE = "fieldsNote";
+  static final String FIELDS_NOTE = "Rows carry the default list columns. The fields in "
+      + "otherFields were left out: name the ones you need in fields:[...], or pass "
+      + "view:\"full\" for every field.";
 
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
@@ -62,6 +69,40 @@ final class McpFieldProjection {
   /** @return {@code true} if {@code view} requests the curated summary projection. */
   static boolean isSummaryView(String view) {
     return VIEW_SUMMARY.equalsIgnoreCase(view);
+  }
+
+  /** @return {@code true} if {@code view} asks a list for every field (ETP-5848). */
+  static boolean isFullView(String view) {
+    return VIEW_FULL.equalsIgnoreCase(view);
+  }
+
+  /**
+   * ETP-5848: before a list is cut to its default columns, name the fields the rows carry that
+   * the cut leaves out, so the agent can ask for them by name instead of asking for everything.
+   * Nothing is reported when {@code kept} is empty, because then nothing is cut.
+   */
+  static void reportOmittedFields(JSONObject responseJson, Set<String> kept) throws JSONException {
+    JSONObject response = responseJson == null ? null : responseJson.optJSONObject(KEY_RESPONSE);
+    JSONArray data = response == null ? null : response.optJSONArray(KEY_DATA);
+    if (data == null || kept == null || kept.isEmpty()) {
+      return;
+    }
+    Set<String> omitted = new java.util.LinkedHashSet<>();
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject row = data.optJSONObject(i);
+      Iterator<?> keys = row == null ? java.util.Collections.emptyIterator() : row.keys();
+      while (keys.hasNext()) {
+        String base = McpDefaultsView.baseProperty(String.valueOf(keys.next()));
+        if (!KEY_ID.equals(base) && !kept.contains(base)) {
+          omitted.add(base);
+        }
+      }
+    }
+    if (omitted.isEmpty()) {
+      return;
+    }
+    response.put(KEY_FIELDS_NOTE, FIELDS_NOTE);
+    response.put(KEY_OTHER_FIELDS, new JSONArray(new java.util.ArrayList<>(omitted)));
   }
 
   /** Parse a {@code fields} JSON array argument into a set of property names (never {@code null}). */

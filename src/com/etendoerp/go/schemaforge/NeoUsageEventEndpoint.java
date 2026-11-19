@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BinaryOperator;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
@@ -65,7 +66,13 @@ import com.etendoerp.go.usageevents.UsageEventTypes;
  * property drops that property, and an unexpected failure after parsing answers {@code 202} with the
  * rest counted as dropped — never a {@code 500}, so an older or newer UI degrades to "not recorded".
  * An unknown {@code eventType} is still forwarded to the recorder, which drops it and logs it at
- * ERROR (D4); it is counted as dropped here and not logged a second time.</p>
+ * ERROR (D4); it is counted as dropped here and not logged a second time. A server-only type
+ * ({@link UsageEventTypes#isServerOnly}, ETP-6057) is dropped and counted here without reaching the
+ * recorder or the rate limiters.</p>
+ *
+ * <p><b>Generated document PDFs (ETP-5993).</b> A {@code document.pdf.generate} event is rebuilt by
+ * {@link DocumentPdfUsage#fromClient} before it is recorded: only the document type, the channel and
+ * the template are kept, and one naming no known type or channel (a preview) is dropped.</p>
  */
 class NeoUsageEventEndpoint {
 
@@ -117,18 +124,27 @@ class NeoUsageEventEndpoint {
   private final RateLimiter sessionRateLimiter;
   private final RateLimiter userRateLimiter;
   private final AtomicLong lastFailureLogAt = new AtomicLong();
+  private final BinaryOperator<String> savedVariant;
 
   NeoUsageEventEndpoint() {
     this(UsageEventRecorder::submit, System::currentTimeMillis);
   }
 
+  NeoUsageEventEndpoint(Consumer<UsageEvent> sink, LongSupplier clock) {
+    this(sink, clock, DocumentPdfUsage::storedVariant);
+  }
+
   /**
    * @param sink  where built events go; {@link UsageEventRecorder#submit} in production
    * @param clock epoch-millis source for clamping and rate limiting; a test seam
+   * @param savedVariant (orgId, docType) → the organization's saved template variant, for a
+   *                     generated-PDF event that names none; a test seam
    */
-  NeoUsageEventEndpoint(Consumer<UsageEvent> sink, LongSupplier clock) {
+  NeoUsageEventEndpoint(Consumer<UsageEvent> sink, LongSupplier clock,
+      BinaryOperator<String> savedVariant) {
     this.sink = sink;
     this.clock = clock;
+    this.savedVariant = savedVariant;
     this.sessionRateLimiter = new RateLimiter(RATE_LIMIT_EVENTS, RATE_WINDOW_MS,
         RATE_LIMIT_MAX_KEYS, clock);
     this.userRateLimiter = new RateLimiter(USER_RATE_LIMIT_EVENTS, RATE_WINDOW_MS,
@@ -192,6 +208,17 @@ class NeoUsageEventEndpoint {
     }
     JSONObject json = (JSONObject) candidate;
     UsageEvent event = toEvent(json, now);
+    if (UsageEventTypes.isServerOnly(event.eventType())) {
+      // ETP-6057: a type only the backend records (a login, billed public API requests) is never
+      // taken from a client; dropped and counted, like any other refused event, never a 4xx.
+      return false;
+    }
+    if (UsageEventTypes.DOCUMENT_PDF_GENERATE.equals(event.eventType())) {
+      event = DocumentPdfUsage.fromClient(event, savedVariant);
+      if (event == null) {
+        return false;
+      }
+    }
     if (!withinRateLimits(event)) {
       return false;
     }

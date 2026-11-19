@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -95,7 +96,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *
  * <p>The heart of the suite is the "no write before a rejected request" invariant: a returned
  * {@code NeoResponse.error(...)} COMMITS, so every failing scenario asserts BOTH the status and
- * {@code never()} on {@code createTransactionForRule} / {@code reconcileGroup}.
+ * {@code never()} on {@code createTransactionForRule} / {@code reconcileGroup}. Since ETP-5581
+ * that includes a line a {@code BankStatementLineFilterHook} excludes (409 {@code LINE_DISCARDED}).
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationDifferenceSupport
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationDifferenceSupportTest {
@@ -276,12 +281,12 @@ public class ReconciliationDifferenceSupportTest {
         .when(handler).loadMatchGroupLines(statement, GROUP_ID);
     doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
     doReturn(NeoResponse.createdWithData(new JSONObject().put("reconciliationId", "rec-1")))
-        .when(handler).reconcileGroup(any());
+        .when(handler).reconcileGroup(any(), anyBoolean());
   }
 
   private void assertNoWrite() throws Exception {
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
   }
 
   private static String errorMessage(NeoResponse response) throws Exception {
@@ -680,7 +685,7 @@ public class ReconciliationDifferenceSupportTest {
     assertTrue("the message must spell out the configured percentage", message.contains("5%"));
     assertTrue("the message must spell out the resulting limit", message.contains("0.68"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
   }
 
   /**
@@ -752,7 +757,89 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED, errorMessage(response));
     assertEquals(REM_ID, response.getBody().getString("remainderLineId"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
+  }
+
+  /**
+   * ETP-5581: a remainder that a {@code BankStatementLineFilterHook} excludes (PSD2's discarded
+   * lines) is refused with the 409 {@code LINE_DISCARDED}, in the read-only preflight — no
+   * adjustment movement is created and nothing is reconciled. The fixture is the happy path's
+   * with only the discard added, so without the guard this request would answer 201.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testDiscardedLineReturns409LineDiscardedAndWritesNothing() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    FIN_BankStatementLine remainder = handler.loadLine(REM_ID);
+
+    NeoResponse response;
+    try (MockedStatic<StatementLineFilter> filter =
+        mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      filter.when(() -> StatementLineFilter.isExcluded(true, remainder,
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
+              .MATCH_STATEMENT_GRID)).thenReturn(true);
+      msgMock.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn("Discarded line");
+      response = runAction(body(ACC_ID, REM_ID));
+    }
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, response.getBody().getString("code"));
+    assertEquals("Discarded line", errorMessage(response));
+    assertNoWrite();
+  }
+
+  /**
+   * ETP-5581, flag off: with {@code bank-bounce-suggestions} off a discarded remainder is a plain
+   * pending line. A real hook is deployed and the database would answer "excluded", yet the
+   * difference is reconciled (201): the flag is read ONCE for the whole action (the preflight and
+   * the delegated {@code reconcileGroup} share it), no hook is asked, no line query runs and the
+   * write is reached.
+   * Same fixture as {@link #testDiscardedLineReturns409LineDiscardedAndWritesNothing}.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testDiscardedLineIsReconciledWithTheBounceFlagOff() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    List<String> hookAsked = new ArrayList<>();
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, ctx, params) -> {
+          hookAsked.add(alias);
+          return alias + ".etgoTestDiscarded = false";
+        };
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> excludedQuery =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    when(excludedQuery.count()).thenReturn(1);
+
+    NeoResponse response;
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      OBDal[] dalSeen = new OBDal[1];
+      response = runActionReachingTheWrite(body(ACC_ID, REM_ID), dal -> {
+        dalSeen[0] = dal;
+        when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString()))
+            .thenReturn(excludedQuery);
+      });
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, Mockito.times(1));
+      verify(dalSeen[0], never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertTrue("with the flag off no hook is asked", hookAsked.isEmpty());
+    verify(handler).createTransactionForRule(eq(account), any(), any());
+    verify(handler).reconcileGroup(any(), eq(false));
   }
 
   /**
@@ -932,7 +1019,7 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(201, response.getHttpStatus());
 
     ArgumentCaptor<JSONObject> captor = ArgumentCaptor.forClass(JSONObject.class);
-    verify(handler).reconcileGroup(captor.capture());
+    verify(handler).reconcileGroup(captor.capture(), anyBoolean());
     JSONObject sent = captor.getValue();
     assertEquals(ACC_ID, sent.getString("financialAccountId"));
     assertEquals(REM_ID, sent.getString("statementLineId"));
@@ -982,7 +1069,7 @@ public class ReconciliationDifferenceSupportTest {
   public void testDelegatedErrorRollsBackAndPropagates() throws Exception {
     stubPartialGroup("12.00", null, "0.50", null);
     doReturn(NeoResponse.error(400, "amounts do not match"))
-        .when(handler).reconcileGroup(any());
+        .when(handler).reconcileGroup(any(), anyBoolean());
 
     NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 
@@ -999,7 +1086,7 @@ public class ReconciliationDifferenceSupportTest {
   @Test
   public void testNullDelegatedResponseRollsBackAndReturns500() throws Exception {
     stubPartialGroup("12.00", null, "0.50", null);
-    doReturn(null).when(handler).reconcileGroup(any());
+    doReturn(null).when(handler).reconcileGroup(any(), anyBoolean());
 
     NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 

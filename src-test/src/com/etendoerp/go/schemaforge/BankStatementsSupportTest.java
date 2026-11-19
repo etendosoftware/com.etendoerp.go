@@ -47,6 +47,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * from {@link BankStatementsHandler}. Pure helpers need no mocks; the
  * {@code buildLineTxns} tests drive a mocked {@link ResultSet} row and the
  * {@code isBankConnected} tests a mocked financial account.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementsSupport
  */
 public class BankStatementsSupportTest {
 
@@ -84,6 +86,87 @@ public class BankStatementsSupportTest {
     assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(true, 10, 0));
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 10, 4));
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 10, 10));
+  }
+
+  // ── deriveStatementStatus with discarded lines (a discarded line is resolved) ──
+
+  /** Derive statement status is reconciled when matched plus discarded cover every line. */
+  @Test
+  public void deriveStatementStatusIsReconciledWhenMatchedPlusDiscardedCoverEveryLine() {
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(3, 1, 2));
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 3, 1, 2));
+  }
+
+  /** Derive statement status is reconciled when every line is discarded. */
+  @Test
+  public void deriveStatementStatusIsReconciledWhenEveryLineIsDiscarded() {
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(2, 0, 2));
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 2, 0, 2));
+  }
+
+  /** Derive statement status is partial while some lines are still pending. */
+  @Test
+  public void deriveStatementStatusIsPartialWhileSomeLinesAreStillPending() {
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(4, 1, 1));
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 4, 1, 1));
+  }
+
+  /** Derive statement status is partial when only a discarded line is resolved. */
+  @Test
+  public void deriveStatementStatusIsPartialWhenOnlyADiscardedLineIsResolved() {
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(4, 0, 1));
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 4, 0, 1));
+  }
+
+  /** Derive statement status is pending when nothing is resolved. */
+  @Test
+  public void deriveStatementStatusIsPendingWhenNothingIsResolved() {
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(0, 0, 0));
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(3, 0, 0));
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(true, 0, 0, 0));
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(true, 3, 0, 0));
+  }
+
+  /** Derive statement status reads a negative discarded count as zero. */
+  @Test
+  public void deriveStatementStatusReadsANegativeDiscardedCountAsZero() {
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(3, 0, -2));
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(3, 1, -5));
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(3, 3, -1));
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 3, 2, -1));
+  }
+
+  /** Derive statement status is draft when unprocessed whatever the counts. */
+  @Test
+  public void deriveStatementStatusIsDraftWhenUnprocessedWhateverTheCounts() {
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 3, 1, 2));
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 2, 0, 2));
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 4, 1, 1));
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 0, 0, 0));
+  }
+
+  /**
+   * The overloads without a discarded count keep the status they derived before discarded lines
+   * existed: they are the new overloads with {@code discardedCount = 0}.
+   */
+  @Test
+  public void deriveStatementStatusOverloadsWithoutDiscardedCountKeepTheirResults() {
+    int[][] counts = {{0, 0}, {10, 0}, {10, 4}, {10, 10}, {3, 5}, {1, 1}};
+    String[] expected = {"PENDING", "PENDING", "PARTIAL", "RECONCILED", "RECONCILED",
+        "RECONCILED"};
+    for (int i = 0; i < counts.length; i++) {
+      int lines = counts[i][0];
+      int matched = counts[i][1];
+      String label = lines + "/" + matched;
+      assertEquals(label, expected[i], BankStatementsSupport.deriveStatementStatus(lines, matched));
+      assertEquals(label, expected[i],
+          BankStatementsSupport.deriveStatementStatus(lines, matched, 0));
+      assertEquals(label, expected[i],
+          BankStatementsSupport.deriveStatementStatus(true, lines, matched));
+      assertEquals(label, expected[i],
+          BankStatementsSupport.deriveStatementStatus(true, lines, matched, 0));
+      assertEquals(label, "DRAFT", BankStatementsSupport.deriveStatementStatus(false, lines, matched));
+    }
   }
 
   // ── nullSafeBigDecimal ───────────────────────────────────────────────────

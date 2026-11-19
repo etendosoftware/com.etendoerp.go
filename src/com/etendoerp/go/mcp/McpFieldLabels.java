@@ -24,6 +24,8 @@ import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -31,6 +33,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.FieldTrl;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.ElementTrl;
 
 /**
  * Versioned field labels and descriptions for agents, in the user's language (ETP-5840, QA CP-12c).
@@ -164,8 +167,10 @@ final class McpFieldLabels {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       OBCriteria<FieldTrl> crit = OBDal.getInstance().createCriteria(FieldTrl.class);
       crit.add(Restrictions.in(FieldTrl.PROPERTY_FIELD + ".id", fieldIds));
       crit.add(Restrictions.eq(FieldTrl.PROPERTY_LANGUAGE + ".language", langCode));
@@ -182,5 +187,73 @@ final class McpFieldLabels {
       }
     }
     return byId;
+  }
+
+  /**
+   * ETP-5806 / CP-10b correction — the {@code AD_ELEMENT_TRL} name of one {@code AD_Element} in
+   * {@code langCode}. {@code Element.getName()} resolves its translation through Hibernate's
+   * ambient {@code OBContext} session language, not through the language this specific request
+   * actually wants, which is exactly the problem {@link #loadFieldTranslations} already avoids for
+   * {@code AD_Field} by querying {@code FieldTrl} directly. Same pattern here: admin mode
+   * ({@code ElementTrl} is not readable under a restricted NEO role) and total — never throws, and
+   * an absent translation row answers {@code null} so the caller falls back to the base-language
+   * {@code AD_Element.Name}.
+   *
+   * @param elementId the {@code AD_Element.AD_Element_ID}
+   * @param langCode  the target language, e.g. {@code es_ES}; blank answers {@code null}
+   * @return the translated name, or {@code null} when no row matches
+   */
+  static String elementTranslation(String elementId, String langCode) {
+    if (StringUtils.isAnyBlank(elementId, langCode)) {
+      return null;
+    }
+    boolean adminMode = false;
+    try {
+      adminMode = true;
+      OBContext.setAdminMode(true);
+      OBCriteria<ElementTrl> crit = OBDal.getInstance().createCriteria(ElementTrl.class);
+      crit.add(Restrictions.eq(ElementTrl.PROPERTY_APPLICATIONELEMENT + ".id", elementId));
+      crit.add(Restrictions.eq(ElementTrl.PROPERTY_LANGUAGE + ".language", langCode));
+      crit.setMaxResults(1);
+      ElementTrl trl = (ElementTrl) crit.uniqueResult();
+      return trl != null ? StringUtils.trimToNull(trl.getName()) : null;
+    } catch (Exception e) {
+      // Translation table not readable / language missing → fall back to the base-language name.
+      return null;
+    } finally {
+      if (adminMode) {
+        OBContext.restorePreviousMode();
+      }
+    }
+  }
+
+  /**
+   * Overlay a single field's curated label/description (helper for
+   * {@code McpSchemaFieldBuilder#applyCuratedLabels}). Returns early — leaving the field untouched — when the field, its {@code column}, or a matching
+   * curated entry is absent, or when the curated value is blank.
+   *
+   * @param field          one schema field descriptor, may be {@code null}
+   * @param labelsByColumn the curated label and description by upper-case column name
+   * @throws JSONException if a value cannot be written
+   */
+  static void overlayCurated(JSONObject field, Map<String, String[]> labelsByColumn)
+      throws JSONException {
+    if (field == null) {
+      return;
+    }
+    String column = field.optString("column", null);
+    if (column == null) {
+      return;
+    }
+    String[] labelDesc = labelsByColumn.get(column.toUpperCase());
+    if (labelDesc == null) {
+      return;
+    }
+    if (StringUtils.isNotBlank(labelDesc[0])) {
+      field.put(McpConstants.KEY_LABEL, labelDesc[0]);
+    }
+    if (StringUtils.isNotBlank(labelDesc[1])) {
+      field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
+    }
   }
 }

@@ -82,9 +82,9 @@ final class McpReportActionsSchema {
     if (target == null || contracts.isEmpty()) {
       return null;
     }
-    return McpToolRouter.wrapAsTextContent(
+    return McpToolRouter.wrapAsTextContent(McpActionsCompact.shape(
         McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts,
-            McpActionsSection.forEntity(target)));
+            McpActionsSection.forEntity(target)), McpActionsCompact.requestedAction(args)));
   }
 
   /**

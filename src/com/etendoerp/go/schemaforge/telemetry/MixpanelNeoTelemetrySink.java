@@ -36,20 +36,40 @@ import org.apache.logging.log4j.Logger;
 final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
 
   private static final Logger log = LogManager.getLogger(MixpanelNeoTelemetrySink.class);
+  /** Deployment environment, added to every event by this sink (ETP-5581). */
+  static final String PROP_ENVIRONMENT = "environment";
+  /** Mixpanel's de-duplication key, added to every event by this sink (ETP-5581). */
+  static final String PROP_INSERT_ID = "$insert_id";
 
   private final MixpanelNeoTelemetryConfig config;
   private final ConnectionFactory connectionFactory;
 
+  /**
+   * A sink that opens real HTTP connections.
+   *
+   * @param config the Mixpanel configuration
+   */
   MixpanelNeoTelemetrySink(MixpanelNeoTelemetryConfig config) {
     this(config, url -> (HttpURLConnection) url.openConnection());
   }
 
+  /**
+   * A sink with a custom connection factory (tests).
+   *
+   * @param config            the Mixpanel configuration
+   * @param connectionFactory opens the connection to the track endpoint
+   */
   MixpanelNeoTelemetrySink(
       MixpanelNeoTelemetryConfig config, ConnectionFactory connectionFactory) {
     this.config = config;
     this.connectionFactory = connectionFactory;
   }
 
+  /**
+   * Submits the event to Mixpanel when configured; a failure is thrown for the service to log.
+   *
+   * @param event the sanitized event
+   */
   @Override
   public void emit(NeoTelemetryEvent event) {
     if (event == null || config == null || !config.isConfigured()) {
@@ -62,6 +82,12 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
     }
   }
 
+  /**
+   * POSTs the event to the track endpoint and checks the answer.
+   *
+   * @param event the event
+   * @throws Exception when the request fails or Mixpanel answers an error
+   */
   private void send(NeoTelemetryEvent event) throws Exception {
     byte[] body = buildRequestBody(event).getBytes(StandardCharsets.UTF_8);
     HttpURLConnection connection = connectionFactory.open(new URL(trackUrl()));
@@ -83,6 +109,14 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
         event.getName(), status, responseBody);
   }
 
+  /**
+   * The form body of the track request: the event, its properties, and on every event the
+   * deployment {@code environment} and the emission's {@code $insert_id} (ETP-5581).
+   *
+   * @param event the event
+   * @return the URL-encoded {@code data=} body
+   * @throws Exception when the JSON cannot be built
+   */
   String buildRequestBody(NeoTelemetryEvent event) throws Exception {
     JSONObject properties = new JSONObject();
     properties.put("token", config.getToken());
@@ -91,6 +125,11 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
     for (Map.Entry<String, Object> entry : event.getProperties().entrySet()) {
       properties.put(entry.getKey(), entry.getValue());
     }
+    // ETP-5581: on EVERY backend event, after the caller's properties so none can replace them
+    // (neither key is on the allowlist anyway). environment separates production from the test
+    // deployments; $insert_id lets Mixpanel drop a duplicate submission of the same emission.
+    properties.put(PROP_ENVIRONMENT, config.getEnvironment());
+    properties.put(PROP_INSERT_ID, event.getInsertId());
 
     JSONObject payload = new JSONObject();
     payload.put("event", event.getName());
@@ -98,10 +137,22 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
     return "data=" + URLEncoder.encode("[" + payload + "]", StandardCharsets.UTF_8.name());
   }
 
+  /**
+   * The track endpoint, without IP geolocation.
+   *
+   * @return the URL
+   */
   private String trackUrl() {
     return config.getApiHost() + "/track/?verbose=1&ip=0";
   }
 
+  /**
+   * The answer's body for the log, never throwing.
+   *
+   * @param connection the connection
+   * @param status     the HTTP status
+   * @return the body, or a marker when it cannot be read
+   */
   private static String readResponseBody(HttpURLConnection connection, int status) {
     InputStream stream = null;
     try {

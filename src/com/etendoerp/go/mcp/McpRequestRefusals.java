@@ -96,6 +96,24 @@ final class McpRequestRefusals {
   }
 
   /**
+   * An {@code orderBy} on a field the caller may not read (ETP-6087): accounting data for a role
+   * without {@code showAccountingFields}. Worded like the filter refusal, "not available", so it
+   * neither confirms nor denies that the column exists.
+   *
+   * @param field      the sort field as sent
+   * @param entityName the entity
+   * @param available  the fields this entity does expose to the caller
+   * @return the exception to throw
+   */
+  static McpRoutingException sortFieldNotAvailable(String field, String entityName,
+      List<String> available) {
+    return McpRoutingException.unprocessable(
+        "Field '" + field + "' is not available for sorting on entity '" + entityName
+            + "'. Nothing was read.",
+        "orderBy", available, "Sort by another field, or drop orderBy.");
+  }
+
+  /**
    * {@code allParents:true} sent together with {@code parentId} (ETP-5852).
    *
    * @return the exception to throw

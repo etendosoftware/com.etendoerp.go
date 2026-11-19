@@ -729,4 +729,28 @@ public class InOutLineFromOrderFactoryTest {
           org.mockito.ArgumentMatchers.eq(Object[].class));
     }
   }
+
+  /**
+   * ETP-6099: {@code draftDocumentNos} names, per order line, the draft documents holding it in
+   * the order the query returns them, each once, leaving out the excluded (target) document; with
+   * no exclusion it names every draft, and with no order line it reads nothing.
+   */
+  @Test
+  public void draftDocumentNos_namesTheOtherDraftsPerOrderLine_onceEach_inQueryOrder() {
+    List<Object[]> rows = java.util.Arrays.asList(
+        new Object[] { "ol1", "io1", "D1" }, new Object[] { "ol1", "target", "T" },
+        new Object[] { "ol2", "io2", "D2" }, new Object[] { "ol1", "io3", "D3" },
+        new Object[] { "ol1", "io1", "D1" });
+
+    java.util.Map<String, Set<String>> others = withDraftRows(rows, () ->
+        InOutLineFromOrderFactory.draftDocumentNos(List.of("ol1", "ol2"), true, "target"));
+    java.util.Map<String, Set<String>> every = withDraftRows(rows, () ->
+        InOutLineFromOrderFactory.draftDocumentNos(List.of("ol1", "ol2"), true, null));
+
+    assertEquals(List.of("D1", "D3"), new java.util.ArrayList<>(others.get("ol1")));
+    assertEquals(List.of("D2"), new java.util.ArrayList<>(others.get("ol2")));
+    assertEquals(List.of("D1", "T", "D3"), new java.util.ArrayList<>(every.get("ol1")));
+    org.junit.Assert.assertTrue("no order line, no query",
+        InOutLineFromOrderFactory.draftDocumentNos(List.of(), true, "target").isEmpty());
+  }
 }

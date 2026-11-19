@@ -17,9 +17,6 @@
 
 package com.etendoerp.go.schemaforge.ocr;
 
-import java.util.Locale;
-import java.util.Set;
-
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -90,50 +87,17 @@ public final class ReceiverTaxIdCheck {
     }
   }
 
-  /** Leading two-letter prefixes that are real VAT country prefixes. GR is an alias of EL. */
-  private static final Set<String> VAT_PREFIXES = Set.of("AT", "BE", "BG", "CY", "CZ", "DE", "DK",
-      "EE", "EL", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL",
-      "PT", "RO", "SE", "SI", "SK", "XI", "GB");
-
   private ReceiverTaxIdCheck() {
   }
 
-  /**
-   * Uppercase, keeping only letters A-Z and digits; blank and placeholder values become empty.
-   *
-   * @param value the id as written
-   * @return the cleaned id
-   */
+  /** See {@link TaxIdNormalizer#clean}. */
   static String clean(String value) {
-    return value == null ? "" : value.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
+    return TaxIdNormalizer.clean(value);
   }
 
-  /**
-   * The id without a known VAT country prefix, only when something remains after it.
-   *
-   * @param clean an id already cleaned
-   * @return the id without its prefix
-   */
-  static String stripVatPrefix(String clean) {
-    String head = clean.length() >= 2 ? clean.substring(0, 2) : clean;
-    String prefix = "GR".equals(head) ? "EL" : head;
-    return clean.length() > 2 && VAT_PREFIXES.contains(prefix) ? clean.substring(2) : clean;
-  }
-
-  /**
-   * Whether two ids are the same once cleaned, with or without a country prefix.
-   *
-   * @param a first id as written
-   * @param b second id as written
-   * @return {@code true} when they match
-   */
+  /** See {@link TaxIdNormalizer#idsMatch}. */
   static boolean idsMatch(String a, String b) {
-    String ca = clean(a);
-    String cb = clean(b);
-    if (ca.isEmpty() || cb.isEmpty()) {
-      return false;
-    }
-    return ca.equals(cb) || stripVatPrefix(ca).equals(stripVatPrefix(cb));
+    return TaxIdNormalizer.idsMatch(a, b);
   }
 
   /**

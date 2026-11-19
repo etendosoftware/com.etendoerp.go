@@ -17,10 +17,12 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.portal.PortalDocumentKind;
 import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Contract for sending goods shipment (sales delivery) document notifications.
@@ -38,4 +40,9 @@ public final class GoodsShipmentSendEmailContract extends DefaultDocumentSendEma
     super(NAME, "Goods Shipment", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
+  /** Carries a customer portal link (ETP-6209); the shared contract mints and confirms it. */
+  @Override
+  protected Optional<PortalDocumentKind> portalDocumentKind() {
+    return Optional.of(PortalDocumentKind.SHIPMENT);
+  }
 }

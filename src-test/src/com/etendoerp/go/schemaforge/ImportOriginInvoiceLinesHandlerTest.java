@@ -71,6 +71,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.ImportOriginInvoiceLinesHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
+ * @covers com.etendoerp.go.schemaforge.ImportListing
  */
 public class ImportOriginInvoiceLinesHandlerTest {
 
@@ -130,6 +131,19 @@ public class ImportOriginInvoiceLinesHandlerTest {
     protected List<Invoice> findCandidateInvoices(String partnerId, boolean sales,
         String currencyId, String targetId) {
       return candidates;
+    }
+
+    /** The offset and scan of the last paged candidate read (ETP-6099). */
+    Integer lastOffset;
+    Integer lastScan;
+
+    @Override
+    protected List<Invoice> findCandidateInvoices(String partnerId, boolean sales,
+        String currencyId, String targetId, int offset, int scan) {
+      lastOffset = offset;
+      lastScan = scan;
+      int from = Math.min(offset, candidates.size());
+      return new ArrayList<>(candidates.subList(from, Math.min(candidates.size(), from + scan)));
     }
 
     @Override
@@ -759,7 +773,168 @@ public class ImportOriginInvoiceLinesHandlerTest {
     String hql = ImportOriginInvoiceLinesHandler.candidateInvoicesHql(true);
     assertTrue(hql, hql.contains("i.documentStatus = 'CO'") && hql.contains("i.active = true")
         && hql.contains("i.client.id = :client") && hql.contains("i.organization.id in (:orgs)")
-        && hql.contains("i.id <> :target") && hql.contains("i.currency.id = :cur"));
+        && hql.contains("i.id <> :target") && hql.contains("i.currency.id = :cur")
+        && hql.endsWith("order by i.invoiceDate desc, i.documentNo desc, i.id desc"));
     assertFalse(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(false).contains(":cur"));
+  }
+
+  // ── listing parameters of the import popup (ETP-6099) ─────────────────────
+
+  private static JSONObject page(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("response");
+  }
+
+  /** The target holds a copy of {@code sourceLine}, as a previous import left it. */
+  private static void holdCopyOf(Invoice target, InvoiceLine sourceLine) {
+    InvoiceLine copy = mock(InvoiceLine.class);
+    when(copy.isActive()).thenReturn(true);
+    when(copy.getETGOSourceInvoiceLine()).thenReturn(sourceLine);
+    target.getInvoiceLineList().add(copy);
+  }
+
+  /** includeCovered: an invoice wholly imported here is listed at 0; a rectificative never is. */
+  @Test
+  public void availableOriginInvoices_includeCovered_listsAnInvoiceWhollyImportedHere_atZero()
+      throws Exception {
+    Probe probe = purchase();
+    Invoice source = probe.invoices.get("src");
+    for (InvoiceLine line : source.getInvoiceLineList()) {
+      holdCopyOf(probe.target, line);
+    }
+    Invoice rectificative = completed("rect1", false,
+        sourceLine("rl1", 10, product("p1", "Agua", true), "-1", "2.50"));
+    probe.rectificatives.add("rect1");
+    probe.candidates = List.of(source, rectificative);
+
+    assertEquals(0, page(probe.run("availableOriginInvoices", null)).getJSONArray("data")
+        .length());
+    JSONArray rows = page(probe.run("availableOriginInvoices", "{\"includeCovered\":true}"))
+        .getJSONArray("data");
+
+    assertEquals(List.of("src"), ids(rows));
+    JSONObject row = rows.getJSONObject(0);
+    assertEquals(0, row.getInt("pendingLines"));
+    assertFalse("amount and creationDate are detail keys",
+        row.has("amount") || row.has("creationDate"));
+  }
+
+  /**
+   * detail: creationDate (UTC, whole seconds) and the popup's total, unitPrice x |quantity| over
+   * EVERY listed line (the one imported here included), unsigned, at the source currency's
+   * precision (2 when unknown).
+   */
+  @Test
+  public void availableOriginInvoices_detail_addsCreationDateAndTheUnsignedTotalOfEveryLine()
+      throws Exception {
+    // Each case holds the standard precision of the source currency (null when unknown) and the
+    // expected amount. The precision is always stubbed: an unstubbed Long getter of a Mockito
+    // mock answers 0, not null, and would silently turn the "unknown" case into scale 0.
+    Object[][] cases = { { null, "31.50" }, { 0L, "32" }, { 3L, "31.500" } };
+    for (Object[] c : cases) {
+      Probe probe = purchase();
+      Invoice source = probe.invoices.get("src");
+      InvoiceLine credit = sourceLine("sl3", 30, product("p3", "Vale", false), "-3", "0.50");
+      source.getInvoiceLineList().add(credit);
+      holdCopyOf(probe.target, source.getInvoiceLineList().get(0));
+      org.openbravo.model.common.currency.Currency sourceCurrency = currency("eur");
+      when(sourceCurrency.getStandardPrecision()).thenReturn((Long) c[0]);
+      doReturn(sourceCurrency).when(source).getCurrency();
+      Date created = Date.from(java.time.Instant.parse("2026-11-05T09:12:33.789Z"));
+      when(source.getCreationDate()).thenReturn(created);
+      probe.candidates = List.of(source);
+
+      JSONObject row = page(probe.run("availableOriginInvoices", "{\"detail\":true}"))
+          .getJSONArray("data").getJSONObject(0);
+
+      assertEquals("10 x 2.50 + 4 x 1.25 + |-3| x 0.50", c[1], row.get("amount").toString());
+      assertEquals("sl1 is imported here, so not counted as pending", 2,
+          row.getInt("pendingLines"));
+      assertEquals("2026-11-05T09:12:33Z", row.getString("creationDate"));
+    }
+  }
+
+  /** includeCovered on lines: a line imported here comes back at pendingQuantity 0. */
+  @Test
+  public void availableOriginInvoiceLines_includeCovered_keepsTheLinesImportedHereAtZero()
+      throws Exception {
+    Probe probe = purchase();
+    holdCopyOf(probe.target, probe.invoices.get("src").getInvoiceLineList().get(0));
+
+    assertEquals(List.of("sl2"), ids(page(probe.run("availableOriginInvoiceLines",
+        "{\"invoiceId\":\"src\"}")).getJSONArray("data")));
+    JSONArray rows = page(probe.run("availableOriginInvoiceLines",
+        "{\"invoiceId\":\"src\",\"includeCovered\":true}")).getJSONArray("data");
+
+    assertEquals(List.of("sl1", "sl2"), ids(rows));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingQuantity"));
+    assertEquals(4, rows.getJSONObject(1).getInt("pendingQuantity"));
+    assertFalse("importedHere is a detail key", rows.getJSONObject(0).has("importedHere"));
+  }
+
+  /** detail on a line: what the popup shows and copies, the quantity kept signed. */
+  @Test
+  public void availableOriginInvoiceLines_detail_carriesWhatThePopupShowsAndCopies()
+      throws Exception {
+    Probe probe = purchase();
+    InvoiceLine credit = sourceLine("nl1", 10, product("p1", "Agua", true), "-6", "2.50");
+    when(credit.getLineNetAmount()).thenReturn(bd("-15.00"));
+    when(credit.getEtgoDiscount()).thenReturn(bd("10.0000"));
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn("t1");
+    when(credit.getTax()).thenReturn(tax);
+    Invoice neg = completed("neg", false, credit);
+    probe.invoices.put("neg", neg);
+    holdCopyOf(probe.target, credit);
+    org.openbravo.model.common.currency.Currency targetCurrency = probe.target.getCurrency();
+    when(targetCurrency.getStandardPrecision()).thenReturn(2L);
+
+    JSONObject row = page(probe.run("availableOriginInvoiceLines",
+        "{\"invoiceId\":\"neg\",\"includeCovered\":true,\"detail\":true}"))
+        .getJSONArray("data").getJSONObject(0);
+
+    assertEquals(0, bd("-6").compareTo(new BigDecimal(row.getString("invoicedQuantity"))));
+    assertEquals(0, bd("2.50").compareTo(new BigDecimal(row.getString("unitPrice"))));
+    assertEquals("2.50 x |-6| at the target's precision", "15.00", row.get("amount").toString());
+    assertEquals(0, bd("-15.00").compareTo(new BigDecimal(row.getString("lineNetAmount"))));
+    assertEquals(0, bd("2.50").compareTo(new BigDecimal(row.getString("listPrice"))));
+    assertTrue(row.isNull("grossUnitPrice"));
+    assertEquals("10", row.get("discount").toString());
+    assertEquals("t1", row.getString("tax"));
+    assertTrue(row.getBoolean("importedHere"));
+    assertEquals(0, row.getInt("pendingQuantity"));
+
+    JSONArray fresh = page(purchase().run("availableOriginInvoiceLines",
+        "{\"invoiceId\":\"src\",\"detail\":true}")).getJSONArray("data");
+    assertFalse(fresh.getJSONObject(0).getBoolean("importedHere"));
+    assertEquals("no discount reads 0", "0", fresh.getJSONObject(1).get("discount").toString());
+  }
+
+  /** offset reads the candidates through the paged query and the page reports its position. */
+  @Test
+  public void availableOriginInvoices_pagesFromTheOffset() throws Exception {
+    Probe probe = purchase();
+    Invoice second = completed("src2", false,
+        sourceLine("s2l1", 10, product("p1", "Agua", true), "1", "2.50"));
+    probe.candidates = List.of(probe.invoices.get("src"), second);
+
+    JSONObject result = page(probe.run("availableOriginInvoices", "{\"offset\":1}"));
+
+    assertEquals(List.of("src2"), ids(result.getJSONArray("data")));
+    assertEquals(Integer.valueOf(1), probe.lastOffset);
+    assertEquals(Integer.valueOf(200), probe.lastScan);
+    assertEquals(1, result.getInt("offset"));
+    assertTrue(result.isNull("nextOffset"));
+  }
+
+  @Test
+  public void contracts_declareTheListingParameters() throws Exception {
+    for (boolean sales : new boolean[] { true, false }) {
+      Map<String, NeoActionContract> contracts = ImportOriginInvoiceLinesHandler.contracts(sales);
+      assertNull(NeoActionContract.validate(contracts, "availableOriginInvoices", new JSONObject(
+          "{\"limit\":10,\"offset\":0,\"includeCovered\":true,\"detail\":true}")));
+      assertNull(NeoActionContract.validate(contracts, "availableOriginInvoiceLines",
+          new JSONObject().put("invoiceId", "src").put("includeCovered", true)
+              .put("detail", true)));
+    }
   }
 }

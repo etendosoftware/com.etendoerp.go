@@ -91,6 +91,8 @@ public class NeoTelemetryService {
    * already sends; no record id of any kind (contact, category, organization) is ever allowed.
    */
   private static final String PROP_ACCOUNT_ID = "account_id";
+  /** ETP-6230: tenant owner is on an internal e-mail domain (a boolean, never the address). */
+  private static final String PROP_INTERNAL = "internal";
   private static final String PROP_IS_CUSTOMER = "is_customer";
   private static final String PROP_IS_VENDOR = "is_vendor";
   private static final String PROP_PREVIOUS_IS_CUSTOMER = "previous_is_customer";
@@ -100,6 +102,31 @@ public class NeoTelemetryService {
   private static final String PROP_CHANGE_TRIGGER = "change_trigger";
   private static final String PROP_CHANGE_ORIGIN = "change_origin";
   private static final String PROP_DAYS_SINCE_CREATED = "days_since_created";
+
+  /**
+   * Bounce-pair KPI property keys (ETP-5581, {@code BankBounceKpiTelemetry}). Shape only: which
+   * signal detected the pair, how sure it was, what the user decided and where — never a line id,
+   * an amount, a counterparty or a statement text. The tenant travels as {@code account_id}, as in
+   * the contact KPI events above.
+   */
+  private static final String PROP_DETECTION_SIGNAL = "detection_signal";
+  private static final String PROP_SIGNALS_COUNT = "signals_count";
+  private static final String PROP_CONFIDENCE = "confidence";
+  private static final String PROP_AMBIGUOUS = "ambiguous";
+  private static final String PROP_ADJACENT = "adjacent";
+  private static final String PROP_PRESELECTED = "preselected";
+  private static final String PROP_DECISION = "decision";
+  private static final String PROP_SURFACE = "surface";
+  private static final String PROP_CHOSEN_AMONG_ALTERNATIVES = "chosen_among_alternatives";
+  private static final String PROP_DAYS_SINCE_DECIDED = "days_since_decided";
+  private static final String PROP_PAIRS_SHOWN = "pairs_shown";
+  private static final String PROP_PAIRS_DISCARDED = "pairs_discarded";
+  private static final String PROP_PAIRS_UNCHECKED = "pairs_unchecked";
+  private static final String PROP_PAIRS_SENT_TO_PANEL = "pairs_sent_to_panel";
+  private static final String PROP_PRESELECTION_CHANGED = "preselection_changed";
+  private static final String PROP_ADJUSTED = "adjusted";
+  /** Upper bound of the per-call bounce-pair counters: far above any real statement. */
+  private static final double MAX_PAIRS = 1000000;
 
   private static final Set<String> SAFE_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       "accuracy",
@@ -113,6 +140,7 @@ public class NeoTelemetryService {
       PROP_TOOL,
       PROP_VERB,
       PROP_ACCOUNT_ID,
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -122,6 +150,22 @@ public class NeoTelemetryService {
       PROP_CHANGE_TRIGGER,
       PROP_CHANGE_ORIGIN,
       PROP_DAYS_SINCE_CREATED,
+      PROP_DETECTION_SIGNAL,
+      PROP_SIGNALS_COUNT,
+      PROP_CONFIDENCE,
+      PROP_AMBIGUOUS,
+      PROP_ADJACENT,
+      PROP_PRESELECTED,
+      PROP_DECISION,
+      PROP_SURFACE,
+      PROP_CHOSEN_AMONG_ALTERNATIVES,
+      PROP_DAYS_SINCE_DECIDED,
+      PROP_PAIRS_SHOWN,
+      PROP_PAIRS_DISCARDED,
+      PROP_PAIRS_UNCHECKED,
+      PROP_PAIRS_SENT_TO_PANEL,
+      PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED,
       "category",
       "channel",
       "count",
@@ -149,11 +193,18 @@ public class NeoTelemetryService {
   private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       PROP_CRITICAL,
       "supportRequested",
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
       PROP_PREVIOUS_IS_VENDOR,
-      PROP_FLAG_ENABLED));
+      PROP_FLAG_ENABLED,
+      PROP_AMBIGUOUS,
+      PROP_ADJACENT,
+      PROP_PRESELECTED,
+      PROP_CHOSEN_AMONG_ALTERNATIVES,
+      PROP_PRESELECTION_CHANGED,
+      PROP_ADJUSTED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();
@@ -382,6 +433,13 @@ public class NeoTelemetryService {
     bounds.put(PROP_DURATION_MS, new NumericBounds(0, 86400000));
     // Whole days; 100 years is far beyond any real contact and rejects a corrupt clock.
     bounds.put(PROP_DAYS_SINCE_CREATED, new NumericBounds(0, 36500));
+    // ETP-5581: a pair has at most the three detection signals; whole days, as above.
+    bounds.put(PROP_SIGNALS_COUNT, new NumericBounds(0, 3));
+    bounds.put(PROP_DAYS_SINCE_DECIDED, new NumericBounds(0, 36500));
+    bounds.put(PROP_PAIRS_SHOWN, new NumericBounds(0, MAX_PAIRS));
+    bounds.put(PROP_PAIRS_DISCARDED, new NumericBounds(0, MAX_PAIRS));
+    bounds.put(PROP_PAIRS_UNCHECKED, new NumericBounds(0, MAX_PAIRS));
+    bounds.put(PROP_PAIRS_SENT_TO_PANEL, new NumericBounds(0, MAX_PAIRS));
     bounds.put(PROP_HTTP_STATUS, new NumericBounds(100, 599));
     bounds.put("position", new NumericBounds(0, 1000000));
     bounds.put(PROP_REQ_BYTES, new NumericBounds(0, 1000000000));

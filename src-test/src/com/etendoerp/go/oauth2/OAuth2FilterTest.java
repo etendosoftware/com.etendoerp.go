@@ -69,6 +69,8 @@ import com.etendoerp.go.session.GoSessionSecurity;
  * token-not-found (JWT fallback), revoked/expired/inactive-client tokens,
  * valid token attribute propagation, {@code validateToken()} static method,
  * {@code TokenInfo} constructors, and {@code escapeJson()} edge cases.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2Filter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -722,6 +724,350 @@ class OAuth2FilterTest {
       String body = responseBody.toString();
       assertTrue(body.contains("\"error\":\"invalid_token\""));
       assertTrue(body.contains("\"error_description\":\"Token has been revoked\""));
+    }
+  }
+
+
+  // ── ETP-6057: public API key attribution of the token lookup ──────────────
+
+  /** Mocks the token lookup to answer one row with the given columns; no refusal unless set. */
+  private void mockRow(String clientScopes, String tokenScopes, String isRevoked,
+      String clientActive, String clientIdentifier, String roleClientId, String orgClientId) {
+    when(session.doReturningWork(any())).thenAnswer(invocation -> {
+      org.hibernate.jdbc.ReturningWork<OAuth2Filter.TokenInfo> work = invocation.getArgument(0);
+      Connection connection = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(connection.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString("is_revoked")).thenReturn(isRevoked);
+      when(rs.getTimestamp("expires_at")).thenReturn(null);
+      oAuth2UtilsMock.when(() -> OAuth2Utils.isTokenExpired(any())).thenReturn(false);
+      when(rs.getString("client_active")).thenReturn(clientActive);
+      when(rs.getString("token_scopes")).thenReturn(tokenScopes);
+      when(rs.getString("client_scopes")).thenReturn(clientScopes);
+      when(rs.getString("ad_user_id")).thenReturn("u1");
+      when(rs.getString("ad_role_id")).thenReturn("r1");
+      when(rs.getString("etendo_client_id")).thenReturn(orgClientId);
+      when(rs.getString("etendo_org_id")).thenReturn("ORG1");
+      when(rs.getString("client_identifier")).thenReturn(clientIdentifier);
+      when(rs.getString("role_client_id")).thenReturn(roleClientId);
+      return work.execute(connection);
+    });
+  }
+
+  @Nested
+  @DisplayName("public API key attribution")
+  class PublicApiAttributionTests {
+
+    @BeforeEach
+    void hash() {
+      oAuth2UtilsMock.when(() -> OAuth2Utils.hashToken("tok")).thenReturn("hashed-tok");
+    }
+
+    @Test
+    @DisplayName("the marker is read from the KEY scopes, not the token's")
+    void publicKeyIsDecidedFromTheKeyRowScopes() {
+      mockRow("neo:public-api-key neo:read", "neo:read", "N", "Y", "key-public", "ROLECLI",
+          "ORGCLI");
+
+      Map<String, String> identity = OAuth2Filter.validateToken("tok");
+
+      assertEquals("true", identity.get(OAuth2Filter.ATTR_PUBLIC_API_KEY));
+      assertEquals("key-public", identity.get(OAuth2Filter.ATTR_KEY_ID));
+      assertEquals("ROLECLI", identity.get(OAuth2Filter.ATTR_ROLE_CLIENT_ID));
+      assertEquals("neo:read", identity.get(OAuth2Filter.ATTR_SCOPES));
+    }
+
+    @Test
+    @DisplayName("a token whose own scopes carry the marker but whose key does not is not public")
+    void markerOnlyOnTheTokenDoesNotMakeItPublic() {
+      mockRow("neo:read", "neo:public-api-key", "N", "Y", "key-x", "ROLECLI", "ORGCLI");
+
+      assertEquals("false", OAuth2Filter.validateToken("tok").get(OAuth2Filter.ATTR_PUBLIC_API_KEY));
+    }
+
+    @Test
+    @DisplayName("a key row without scopes is not public")
+    void noScopesIsNotPublic() {
+      mockRow(null, null, "N", "Y", "key-x", "ROLECLI", "ORGCLI");
+
+      assertEquals("false", OAuth2Filter.validateToken("tok").get(OAuth2Filter.ATTR_PUBLIC_API_KEY));
+    }
+
+    @Test
+    @DisplayName("a revoked public key token is still refused but its owner is reported")
+    void refusedIdentityOfARevokedToken() {
+      mockRow("neo:public-api-key", null, "Y", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      assertNull(OAuth2Filter.validateToken("tok"));
+      Map<String, String> owner = OAuth2Filter.checkToken("tok").refusedIdentity();
+
+      assertNotNull(owner);
+      assertEquals("true", owner.get(OAuth2Filter.ATTR_PUBLIC_API_KEY));
+      assertEquals("key-public", owner.get(OAuth2Filter.ATTR_KEY_ID));
+      assertEquals("ORG1", owner.get(OAuth2Filter.ATTR_ORG_ID));
+      assertEquals("u1", owner.get(OAuth2Filter.ATTR_USER_ID));
+    }
+
+    @Test
+    @DisplayName("an inactive key's token reports its owner")
+    void refusedIdentityOfAnInactiveKey() {
+      mockRow("neo:public-api-key", null, "N", "N", "key-public", "ROLECLI", "ORGCLI");
+
+      assertNotNull(OAuth2Filter.checkToken("tok").refusedIdentity());
+    }
+
+    @Test
+    @DisplayName("an expired token reports its owner")
+    void refusedIdentityOfAnExpiredToken() {
+      when(session.doReturningWork(any())).thenAnswer(invocation -> {
+        org.hibernate.jdbc.ReturningWork<OAuth2Filter.TokenInfo> work = invocation.getArgument(0);
+        Connection connection = mock(Connection.class);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(connection.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("is_revoked")).thenReturn("N");
+        when(rs.getTimestamp("expires_at")).thenReturn(new Timestamp(1L));
+        oAuth2UtilsMock.when(() -> OAuth2Utils.isTokenExpired(any(Timestamp.class)))
+            .thenReturn(true);
+        when(rs.getString("client_scopes")).thenReturn("neo:public-api-key");
+        when(rs.getString("client_identifier")).thenReturn("key-public");
+        return work.execute(connection);
+      });
+
+      Map<String, String> owner = OAuth2Filter.checkToken("tok").refusedIdentity();
+
+      assertNotNull(owner);
+      assertEquals("key-public", owner.get(OAuth2Filter.ATTR_KEY_ID));
+    }
+
+    @Test
+    @DisplayName("a usable token has no refused identity")
+    void aUsableTokenHasNoRefusedIdentity() {
+      mockRow("neo:public-api-key", null, "N", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      assertNull(OAuth2Filter.checkToken("tok").refusedIdentity());
+    }
+
+    @Test
+    @DisplayName("an unknown, null or empty token has no refused identity")
+    void unknownNullAndEmptyTokensHaveNone() {
+      mockLookupReturningNull();
+
+      assertNull(OAuth2Filter.checkToken("tok").refusedIdentity());
+      assertNull(OAuth2Filter.checkToken(null).refusedIdentity());
+      assertNull(OAuth2Filter.checkToken("").refusedIdentity());
+    }
+
+    @Test
+    @DisplayName("a lookup failure on the refusal path is swallowed")
+    void aLookupFailureYieldsNull() {
+      when(session.doReturningWork(any())).thenThrow(new RuntimeException("DB down"));
+
+      assertNull(OAuth2Filter.checkToken("tok").refusedIdentity());
+    }
+
+    @Test
+    @DisplayName("the lookup SQL selects the key identifier and the role's client")
+    void lookupSqlSelectsTheAttributionColumns() throws Exception {
+      java.lang.reflect.Field f = OAuth2Filter.class.getDeclaredField("TOKEN_LOOKUP_SQL");
+      f.setAccessible(true);
+      String sql = (String) f.get(null);
+      String flat = sql.replaceAll("\\s+", " ");
+      assertTrue(flat.contains("t.ad_org_id AS etendo_org_id, c.client_identifier, "
+          + "r.ad_client_id AS role_client_id FROM etgo_oauth2_token t"), flat);
+      assertTrue(flat.contains("JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = "
+          + "c.etgo_oauth2_client_id"), flat);
+      assertTrue(flat.contains("LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
+          + "LEFT JOIN ad_role r ON c.ad_role_id = r.ad_role_id WHERE t.access_token_hash = ?"),
+          flat);
+    }
+  }
+
+  @Nested
+  @DisplayName("checkToken: one lookup answers identity and refusal")
+  class CheckTokenContract {
+
+    @BeforeEach
+    void hash() {
+      oAuth2UtilsMock.when(() -> OAuth2Utils.hashToken("tok")).thenReturn("hashed-tok");
+    }
+
+    private void assertOneLookup() {
+      verify(session, org.mockito.Mockito.times(1)).doReturningWork(any());
+    }
+
+    @Test
+    void aUsableTokenHasAnIdentityAndNoRefusedIdentity() {
+      mockRow("neo:public-api-key", null, "N", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNotNull(check.identity());
+      assertNull(check.refusedIdentity());
+      assertOneLookup();
+    }
+
+    @Test
+    void aRevokedTokenHasNoIdentityButItsOwner() {
+      mockRow("neo:public-api-key", null, "Y", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNull(check.identity());
+      assertEquals("key-public", check.refusedIdentity().get(OAuth2Filter.ATTR_KEY_ID));
+      assertOneLookup();
+    }
+
+    @Test
+    void anInactiveKeysTokenHasNoIdentityButItsOwner() {
+      mockRow("neo:public-api-key", null, "N", "N", "key-public", "ROLECLI", "ORGCLI");
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNull(check.identity());
+      assertNotNull(check.refusedIdentity());
+      assertOneLookup();
+    }
+
+    @Test
+    void anExpiredTokenHasNoIdentityButItsOwner() {
+      mockLookupReturningError("Token expired");
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNull(check.identity());
+      assertNotNull(check.refusedIdentity());
+      assertOneLookup();
+    }
+
+    @Test
+    void anUnknownTokenHasNeither() {
+      mockLookupReturningNull();
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNull(check.identity());
+      assertNull(check.refusedIdentity());
+      assertOneLookup();
+    }
+
+    @Test
+    void aThrowingLookupHasNeitherAndIsNotRetried() {
+      when(session.doReturningWork(any())).thenThrow(new RuntimeException("DB down"));
+
+      OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken("tok");
+
+      assertNull(check.identity());
+      assertNull(check.refusedIdentity());
+      assertOneLookup();
+    }
+
+    @Test
+    void aNullOrEmptyTokenHasNeitherAndNeverLooksAnythingUp() {
+      assertNull(OAuth2Filter.checkToken(null).identity());
+      assertNull(OAuth2Filter.checkToken("").identity());
+      assertNull(OAuth2Filter.checkToken(null).refusedIdentity());
+      assertNull(OAuth2Filter.checkToken("").refusedIdentity());
+      verify(session, never()).doReturningWork(any());
+    }
+
+    @Test
+    void validateTokenIsTheIdentityOfTheCheck() {
+      mockRow("neo:public-api-key", null, "N", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      assertEquals("key-public", OAuth2Filter.validateToken("tok").get(OAuth2Filter.ATTR_KEY_ID));
+      assertOneLookup();
+    }
+  }
+
+  @Nested
+  @DisplayName("doFilter and public API keys (ETP-6057)")
+  class DoFilterPublicKey {
+
+    @BeforeEach
+    void bearer() {
+      when(httpRequest.getMethod()).thenReturn("POST");
+      when(httpRequest.getHeader("Authorization")).thenReturn("Bearer tok");
+      oAuth2UtilsMock.when(() -> OAuth2Utils.hashToken("tok")).thenReturn("hashed-tok");
+    }
+
+    @Test
+    void aValidPublicKeyTokenIsA403InsufficientScopeWithNoChallengeAndNoChain() throws Exception {
+      mockRow("neo:public-api-key etendo:read", null, "N", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      filter.doFilter(httpRequest, httpResponse, filterChain);
+
+      verify(httpResponse).setStatus(HttpServletResponse.SC_FORBIDDEN);
+      verify(httpResponse, never()).setHeader(eq("WWW-Authenticate"), anyString());
+      verify(filterChain, never()).doFilter(any(), any());
+      printWriter.flush();
+      String body = responseBody.toString();
+      assertTrue(body.contains("\"error\":\"insufficient_scope\""), body);
+      assertTrue(body.contains(OAuth2Filter.MSG_PUBLIC_KEY_NOT_FOR_MCP), body);
+    }
+
+    @Test
+    void aValidNonPublicTokenPassesToTheChain() throws Exception {
+      mockRow("etendo:read", null, "N", "Y", "key-x", "ROLECLI", "ORGCLI");
+
+      filter.doFilter(httpRequest, httpResponse, filterChain);
+
+      verify(filterChain).doFilter(httpRequest, httpResponse);
+      verify(httpResponse, never()).setStatus(HttpServletResponse.SC_FORBIDDEN);
+    }
+
+    @Test
+    void aRevokedPublicKeyTokenIsStillA401InvalidToken() throws Exception {
+      mockRow("neo:public-api-key", null, "Y", "Y", "key-public", "ROLECLI", "ORGCLI");
+
+      filter.doFilter(httpRequest, httpResponse, filterChain);
+
+      verify(httpResponse).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      verify(httpResponse, never()).setStatus(HttpServletResponse.SC_FORBIDDEN);
+      verify(filterChain, never()).doFilter(any(), any());
+      printWriter.flush();
+      assertTrue(responseBody.toString().contains("\"error\":\"invalid_token\""));
+    }
+
+    @Test
+    void anInactivePublicKeyTokenIsStillA401InvalidToken() throws Exception {
+      mockRow("neo:public-api-key", null, "N", "N", "key-public", "ROLECLI", "ORGCLI");
+
+      filter.doFilter(httpRequest, httpResponse, filterChain);
+
+      verify(httpResponse).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      verify(filterChain, never()).doFilter(any(), any());
+    }
+
+    @Test
+    void anExpiredPublicKeyTokenIsStillA401InvalidToken() throws Exception {
+      when(session.doReturningWork(any())).thenAnswer(invocation -> {
+        org.hibernate.jdbc.ReturningWork<OAuth2Filter.TokenInfo> work = invocation.getArgument(0);
+        Connection connection = mock(Connection.class);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(connection.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("is_revoked")).thenReturn("N");
+        when(rs.getTimestamp("expires_at")).thenReturn(new Timestamp(1L));
+        oAuth2UtilsMock.when(() -> OAuth2Utils.isTokenExpired(any(Timestamp.class)))
+            .thenReturn(true);
+        when(rs.getString("client_scopes")).thenReturn("neo:public-api-key");
+        return work.execute(connection);
+      });
+
+      filter.doFilter(httpRequest, httpResponse, filterChain);
+
+      verify(httpResponse).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      verify(filterChain, never()).doFilter(any(), any());
+      printWriter.flush();
+      assertTrue(responseBody.toString().contains("\"error\":\"invalid_token\""));
     }
   }
 

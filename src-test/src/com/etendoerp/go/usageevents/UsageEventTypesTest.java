@@ -39,6 +39,8 @@ import org.junit.jupiter.params.provider.ValueSource;
  * {@code String} constants by reflection, so a new constant added without its {@code KNOWN} entry,
  * or with a shape the {@code EVENT_TYPE VARCHAR(60)} column cannot hold, fails here and not in
  * production.
+ *
+ * @covers com.etendoerp.go.usageevents.UsageEventTypes
  */
 class UsageEventTypesTest {
 
@@ -100,5 +102,43 @@ class UsageEventTypesTest {
     assertTrue(UsageEventTypes.PATTERN.matcher(sixty).matches());
     assertFalse(UsageEventTypes.PATTERN.matcher(sixty + "c").matches());
     assertTrue(UsageEventTypes.PATTERN.matcher("ab").matches());
+  }
+
+  @Test
+  void publicApiRequestIsKnown() {
+    assertEquals("publicapi.request", UsageEventTypes.PUBLIC_API_REQUEST);
+    assertTrue(UsageEventTypes.isKnown("publicapi.request"));
+  }
+
+  // The four portal types are facts about what a tenant's customers did (ETP-6209): only the
+  // backend records them. Being server-only also makes them KNOWN (everyServerOnlyTypeIsKnown).
+  @ParameterizedTest
+  @ValueSource(strings = { "session.login", "publicapi.request", "ai.decision.execute",
+      "portal.link.sent", "portal.link.opened", "portal.link.renewed",
+      "portal.document.downloaded", "ai.tool.execute", "ai.support.message" })
+  void serverOnlyTypesAreFlagged(String type) {
+    assertTrue(UsageEventTypes.isServerOnly(type));
+    assertTrue(UsageEventTypes.isKnown(type));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "ai.agent.message",
+      "nope.unknown", "", "PUBLICAPI.REQUEST" })
+  void otherKnownAndUnknownTypesAreNotServerOnly(String type) {
+    assertFalse(UsageEventTypes.isServerOnly(type));
+  }
+
+  @Test
+  void nullIsNotServerOnly() {
+    assertFalse(UsageEventTypes.isServerOnly(null));
+  }
+
+  @Test
+  void everyServerOnlyTypeIsKnown() throws IllegalAccessException {
+    for (String type : declaredTypeConstants()) {
+      if (UsageEventTypes.isServerOnly(type)) {
+        assertTrue(UsageEventTypes.isKnown(type), "server-only but not KNOWN: " + type);
+      }
+    }
   }
 }

@@ -49,6 +49,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
@@ -761,6 +762,15 @@ class AgingReportHandlerTest {
 
         assertEquals("SCHEMA-FALLBACK", getAcctSchemaResultField(result, "accSchemaId"));
         assertEquals(currency, getAcctSchemaResultField(result, "currency"));
+
+        // ETP-5794: OBQuery hands a bare `this` to PostgreSQL untranslated; the root must
+        // carry an explicit alias or the fallback fails and the request answers 422.
+        ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+        verify(dal).createQuery(eq(AcctSchema.class), hql.capture());
+        assertTrue(hql.getValue().startsWith("as s where "), hql.getValue());
+        assertTrue(hql.getValue().contains("oas.accountingSchema = s "), hql.getValue());
+        assertTrue(hql.getValue().endsWith("and s.active = true order by s.id"), hql.getValue());
+        assertFalse(hql.getValue().matches("(?s).*\\bthis\\b.*"), hql.getValue());
       }
     }
 

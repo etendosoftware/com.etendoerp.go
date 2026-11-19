@@ -103,6 +103,11 @@ public class ToolRegistry {
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
       tools.add(buildFeedbackTool());
+      // ETP-6236: offered to every session that can read, behind its flag; each step asks its own
+      // scope.
+      if (McpRoutinesFlag.isEnabled()) {
+        tools.add(McpRoutineTool.definition());
+      }
     }
 
     // Query all active specs
@@ -343,7 +348,8 @@ public class ToolRegistry {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
         || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
-        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)
+        || McpConstants.TOOL_NEO_ROUTINE.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -767,6 +773,7 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.extract(List.of()); break;
       // etendo-ai#53: only includePermissions; anything else is refused.
       case McpConstants.TOOL_NEO_WHOAMI: definition = McpWhoamiToolDefinition.definition(); break;
+      case McpConstants.TOOL_NEO_ROUTINE: definition = McpRoutineTool.definition(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -819,11 +826,13 @@ public class ToolRegistry {
             + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
             + "label is included automatically. Names this entity cannot return come back in "
             + "\"unknownFields\" alongside \"data\" — check it if a field you expected is missing, "
-            + "including when \"data\" is empty. Omit to return every column."));
+            + "including when \"data\" is empty. Omitted, rows carry the window's list columns and "
+            + "\"otherFields\" names the rest."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
-        "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
-            + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
-            + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
+        "Optional view, ignored when `fields` is given. \"summary\" returns only the spec's "
+            + "business-critical fields. \"full\" returns every field of every row (large: prefer "
+            + "naming them in `fields`). Omit for the window's list columns.",
+        List.of(McpFieldProjection.VIEW_SUMMARY, McpFieldProjection.VIEW_FULL)));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_LIST,
@@ -903,16 +912,18 @@ public class ToolRegistry {
             + "`data` ({\"data\": {…}}), like etendo_get. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
-            + "Recommended: call etendo_defaults first to get the initial/base set of field values "
-            + "for this record type, then build the fields object by overriding only the values "
-            + "the user actually wants to change on top of that base — instead of asking the "
-            + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.). Send back only what the user chose or what "
-            + "you need on the record: a value you send is deliberate, and it is protected from "
-            + "the callouts that would otherwise derive it from this record's real context — a "
-            + "generic default echoed back can pin the wrong one (etendo_defaults resolves before "
-            + "there is a business partner). Any field where that happened comes back in "
-            + "\"supersededDefaults\" with the value the callout had resolved. "
+            + "A field that points to another record takes that record's name as well as its id "
+            + "(e.g. businessPartner: \"Acme Corp\", taxCategory: \"IVA 21%\"): the server looks "
+            + "it up, answers with the candidates when several match and says so when none does, "
+            + "so there is no need to look ids up first. Send only what the user asked for and the "
+            + "fields the entity requires: the server fills every other value that has a default "
+            + "(document number, dates, prices, etc.), so etendo_defaults is optional — call it "
+            + "only to show the user the values a record would start with. A value you send is "
+            + "deliberate, and it is protected from the callouts that would otherwise derive it "
+            + "from this record's real context — a generic default echoed back can pin the wrong "
+            + "one (etendo_defaults resolves before there is a business partner). Any field where "
+            + "that happened comes back in \"supersededDefaults\" with the value the callout had "
+            + "resolved. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
             + unknownFieldsNote
@@ -1241,11 +1252,12 @@ public class ToolRegistry {
         "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
             + "etendo_create/etendo_update, split into required/optional. This is the one you want "
             + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
-            + "\"actions\": only the buttons/processes ({name, label, action, processName, "
-            + "processId, ...}) — use it when you need to know what can be triggered on this "
-            + "entity, not every column. Fire only the ones carrying invokeVia:\"etendo_action\"; the "
-            + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
-            + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
+            + "\"actions\": an index of the actions you can run on this entity — per action its "
+            + "name, a one-line summary and when it applies — and under notOffered the ones you "
+            + "cannot, with the reason or what to use instead. Then pass action:\"<name>\" for that "
+            + "action's parameters and values (etendo_discover lists the names, so you can go "
+            + "straight there). "
+            + "\"full\": every field, including "
             + "read-only and system ones — ~40 kB on sales-order/header and more on "
             + "compliance-heavy windows, where it may not fit your context. Ask for it when you "
             + "are reading, filtering or projecting, not when you are about to write.",
@@ -1258,6 +1270,10 @@ public class ToolRegistry {
             + "(availableValuesNow). Without it you get each action's static availableWhen / "
             + "valuesByStatus only. Advice only: it never blocks a call. Ask for it before "
             + "offering the user an action on a document."));
+    props.put(McpActionsCompact.PARAM_ACTION, stringProp(
+        "Optional, only for view:\"actions\": the name of ONE action (e.g. \"registerPayment\"). "
+            + "Returns that action in full — its parameters, values and description — which the "
+            + "index leaves out. A name that does not exist is refused with the names that do."));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "

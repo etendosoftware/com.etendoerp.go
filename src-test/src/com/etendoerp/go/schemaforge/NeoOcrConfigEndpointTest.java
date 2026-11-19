@@ -93,4 +93,19 @@ class NeoOcrConfigEndpointTest {
       assertEquals(500, response.getHttpStatus());
     }
   }
+
+  @Test
+  @DisplayName("ETP-6050: the served schema carries the two line discount keys, nullable and required")
+  void theServedSchemaCarriesTheLineDiscountKeys() throws Exception {
+    JSONObject body = new NeoOcrConfigEndpoint().handle(request("purchase-invoice")).getBody();
+
+    JSONObject item = body.getJSONObject("schema").getJSONObject("properties")
+        .getJSONObject("line_items").getJSONObject("items");
+    for (String key : new String[] { "discount_percent", "discount_amount" }) {
+      assertEquals("[\"number\",\"null\"]",
+          item.getJSONObject("properties").getJSONObject(key).getJSONArray("type").toString());
+      assertTrue(item.getJSONArray("required").toString().contains("\"" + key + "\""));
+    }
+    assertEquals(false, item.getBoolean("additionalProperties"));
+  }
 }

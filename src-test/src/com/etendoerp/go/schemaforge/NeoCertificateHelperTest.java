@@ -32,7 +32,9 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Method;
 import java.security.cert.X509Certificate;
 import java.util.Collections;
+import java.time.Instant;
 import java.util.Date;
+import java.util.TimeZone;
 
 import javax.security.auth.x500.X500Principal;
 import javax.servlet.http.HttpServletRequest;
@@ -62,7 +64,7 @@ import org.openbravo.model.common.enterprise.Organization;
  *   - handleCertificateUpload (multipart validation, content-type guard)
  *   - resolveFileName (private, via reflection)
  *   - getOrgNif (private, via reflection)
- *   - buildCertDetails (private, via reflection)
+ *   - buildCertDetails (private, via reflection; date day pinned per server timezone)
  *   - extractCertDetails (private, via reflection)
  *   - validateNifOrGetPendingResponse (private, via reflection)
  *
@@ -262,7 +264,9 @@ public class NeoCertificateHelperTest {
     Session session = mock(Session.class);
     NativeQuery nativeQuery = mock(NativeQuery.class);
 
-    Date expirationDate = new Date();
+    // 1 July on purpose: as dd/MM/yyyy it read back month-first as 7 January in the browser, so
+    // only the exact ISO string proves the machine contract (ETP-6053).
+    Date expirationDate = java.sql.Date.valueOf("2027-07-01");
 
     when(obDal.getSession()).thenReturn(session);
     when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
@@ -275,7 +279,7 @@ public class NeoCertificateHelperTest {
       NeoResponse resp = NeoCertificateHelper.handleCertificateGet(request);
       assertEquals(200, resp.getHttpStatus());
       assertTrue(resp.getBody().getBoolean("exists"));
-      assertNotNull(resp.getBody().getString("validTo"));
+      assertEquals("2027-07-01", resp.getBody().getString("validTo"));
     }
   }
 
@@ -554,8 +558,8 @@ public class NeoCertificateHelperTest {
 
     when(cert.getSubjectX500Principal()).thenReturn(subjectPrincipal);
     when(cert.getIssuerX500Principal()).thenReturn(issuerPrincipal);
-    when(cert.getNotBefore()).thenReturn(new Date());
-    when(cert.getNotAfter()).thenReturn(new Date());
+    when(cert.getNotBefore()).thenReturn(java.sql.Date.valueOf("2025-07-01"));
+    when(cert.getNotAfter()).thenReturn(java.sql.Date.valueOf("2027-07-01"));
     when(cert.getSigAlgName()).thenReturn("SHA256withRSA");
 
     Method m = NeoCertificateHelper.class.getDeclaredMethod("buildCertDetails", X509Certificate.class);
@@ -564,8 +568,8 @@ public class NeoCertificateHelperTest {
 
     assertNotNull(details.getString("subject"));
     assertNotNull(details.getString("issuer"));
-    assertNotNull(details.getString("validFrom"));
-    assertNotNull(details.getString("validTo"));
+    assertEquals("2025-07-01", details.getString("validFrom"));
+    assertEquals("2027-07-01", details.getString("validTo"));
     assertEquals("SHA256withRSA", details.getString("algorithm"));
   }
 
@@ -579,6 +583,77 @@ public class NeoCertificateHelperTest {
     JSONObject details = (JSONObject) m.invoke(null, cert);
 
     assertEquals(0, details.length());
+  }
+
+  /** 30 June 2027 23:30 UTC: the calendar day differs between UTC and any zone east of it. */
+  private static final Date NOT_AFTER_NEAR_UTC_MIDNIGHT =
+      Date.from(Instant.parse("2027-06-30T23:30:00Z"));
+
+  /**
+   * Formats a certificate whose notAfter is {@link #NOT_AFTER_NEAR_UTC_MIDNIGHT} with the JVM
+   * default timezone pinned to {@code zoneId}, restoring the previous default afterwards.
+   */
+  private static JSONObject certDetailsWithDefaultZone(String zoneId) throws Exception {
+    X509Certificate cert = mock(X509Certificate.class);
+    when(cert.getSubjectX500Principal()).thenReturn(new X500Principal("CN=Subject, C=ES"));
+    when(cert.getIssuerX500Principal()).thenReturn(new X500Principal("CN=Issuer, C=ES"));
+    when(cert.getNotBefore()).thenReturn(Date.from(Instant.parse("2025-06-30T23:30:00Z")));
+    when(cert.getNotAfter()).thenReturn(NOT_AFTER_NEAR_UTC_MIDNIGHT);
+    when(cert.getSigAlgName()).thenReturn("SHA256withRSA");
+
+    Method m = NeoCertificateHelper.class.getDeclaredMethod("buildCertDetails", X509Certificate.class);
+    m.setAccessible(true);
+    TimeZone previous = TimeZone.getDefault();
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone(zoneId));
+      return (JSONObject) m.invoke(null, cert);
+    } finally {
+      TimeZone.setDefault(previous);
+    }
+  }
+
+  /*
+   * Current behavior (ETP-6053): the ISO date is the calendar day of the instant in the SERVER's
+   * default timezone (SimpleDateFormat without an explicit zone), not the UTC day the X.509
+   * validity is expressed in. The output is deterministic for a given server zone, and two
+   * servers in different zones can report different days for the same certificate.
+   */
+
+  @Test
+  public void buildCertDetailsFormatsNotAfterAsTheUtcDayWhenServerZoneIsUtc() throws Exception {
+    JSONObject details = certDetailsWithDefaultZone("UTC");
+
+    assertEquals("2027-06-30", details.getString("validTo"));
+    assertEquals("2025-06-30", details.getString("validFrom"));
+  }
+
+  @Test
+  public void buildCertDetailsFormatsNotAfterAsTheNextDayWhenServerZoneIsMadrid() throws Exception {
+    // Europe/Madrid is UTC+2 in summer: 23:30Z is 01:30 on 1 July locally.
+    JSONObject details = certDetailsWithDefaultZone("Europe/Madrid");
+
+    assertEquals("2027-07-01", details.getString("validTo"));
+    assertEquals("2025-07-01", details.getString("validFrom"));
+  }
+
+  @Test
+  public void buildCertDetailsFormatsNotAfterAsTheUtcDayWhenServerZoneIsBuenosAires()
+      throws Exception {
+    // UTC-3: 23:30Z is 20:30 on 30 June locally, the same calendar day as UTC.
+    JSONObject details = certDetailsWithDefaultZone("America/Argentina/Buenos_Aires");
+
+    assertEquals("2027-06-30", details.getString("validTo"));
+  }
+
+  @Test
+  public void buildCertDetailsRestoresTheDefaultZoneAndIsRepeatablePerZone() throws Exception {
+    TimeZone before = TimeZone.getDefault();
+
+    String first = certDetailsWithDefaultZone("Europe/Madrid").getString("validTo");
+    String second = certDetailsWithDefaultZone("Europe/Madrid").getString("validTo");
+
+    assertEquals(first, second);
+    assertEquals(before, TimeZone.getDefault());
   }
 
   // ── extractCertDetails (private) ──────────────────────────────────────────

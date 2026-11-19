@@ -47,6 +47,14 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  * <p>The recompute saves the parent statement (a different entity), so it never
  * re-triggers this observer.
  *
+ * <p>Every UPDATE recomputes, whatever column changed, so discarding or restoring
+ * a line ({@code EM_PSD2_Is_Discarded}, by PSD2's Classic button or by Etendo's
+ * {@code discardPair} / {@code restorePair}) refreshes the discarded count and the
+ * status of its statement (ETP-5581). A pair discard or restore updates two lines:
+ * each fires its own event and its own statement is recomputed — see
+ * {@link BankStatementAggregates#recomputeWithDelta}. Those paths do not suppress
+ * this observer.
+ *
  * <p>During our own bulk flows (import / manual create / update / delete) the
  * observer is suppressed via {@link #suppress()} so a statement with N lines
  * recomputes once at the end instead of N times; those flows call

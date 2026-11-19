@@ -29,8 +29,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.regex.Pattern;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -43,6 +41,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -50,21 +49,22 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
  *
+ * <p>On POST/PATCH/PUT, {@code handle()} enforces the person/company identity shape (ETP-6175,
+ * see {@link ContactIdentityRules}): a person ({@code etgoIsperson = Y}) needs both
+ * {@code etgoFirstname} and {@code etgoLastname}, may not be sent a name of its own, and gets
+ * {@code name} derived from them; a company needs {@code name} and may not be sent a first or last
+ * name. An update is only judged when it touches one of those keys, against the persisted values
+ * for the keys it does not carry. (Before ETP-6175 the name was derived through
+ * {@link AbstractPersonNameHandler#deriveName}, on update only when the stored name was blank; that
+ * call is gone from this class, and {@link ContactNameSyncHandler} still re-derives on a DAL
+ * update of a person's name parts.)
+ *
  * <p>On POST (new record):
  * <ul>
- *   <li>{@code handle()} derives {@code name} from {@code etgoFirstname} + {@code etgoLastname}
- *       when {@code name} is blank and at least one of the name parts is present (person mode).</li>
- *   <li>{@code handle()} then injects {@code searchKey = name} as a temporary placeholder so the
+ *   <li>{@code handle()} injects {@code searchKey = name} as a temporary placeholder so the
  *       mandatory field passes validation before the record is saved.</li>
  *   <li>{@code afterHandle()} overwrites {@code searchKey} with the auto-generated
  *       {@code em_etgo_identifier} value once Etendo has assigned it during save.</li>
- * </ul>
- *
- * <p>On PATCH/PUT (update):
- * <ul>
- *   <li>{@code handle()} derives {@code name} from the incoming firstname/lastname values
- *       (merging with the persisted values for whichever part is absent from the body)
- *       only when the record's current {@code name} is blank in the database.</li>
  * </ul>
  *
  * <p>On POST/PATCH/PUT, {@code handle()} also rejects a malformed {@code TaxID} (ETP-5031)
@@ -76,8 +76,11 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * unvalidated. Unlike the Organization window, this is deliberately NOT gated on country: a
  * Business Partner carries no country of its own (only its addresses do), and
  * {@code oBTIKTaxIDKey} is already the semantic discriminator for the foreign case (value
- * {@code "4"}). To keep dirty legacy data editable, the check only runs on create or when the
- * incoming {@code TaxID} differs from what is already persisted — see
+ * {@code "4"}). A create that omits the key is validated as NIF, the column's AD default it will
+ * be saved with (ETP-6175: the defaults pass runs after this hook, so the check used to be
+ * skipped and an invalid NIF got in through the API). To keep dirty legacy data editable, the
+ * check only runs on create or when the incoming {@code TaxID} differs from what is already
+ * persisted — see
  * {@link #validateTaxId(NeoContext, JSONObject, String)}.
  *
  * <p>On POST/PATCH/PUT, {@code handle()} also applies the contact-type rules (ETP-5791, see
@@ -116,10 +119,20 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * checks the field name and falls through ({@code null}) for every other selector field this
  * entity exposes, so no other column or window is affected.
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
- * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
+ * <p>On POST/PATCH/PUT, {@code handle()} also applies the customer's SEPA mandate rules (ETP-6148,
+ * see {@link ContactSepaMandateDefaults}): behind the {@code sepa-remittances} flag, a customer
+ * created with a blank mandate stores its tax ID as identifier and today as signature date, and
+ * any later save of a customer fills each mandate field that is empty in the database and not sent;
+ * a value the caller sends always wins and a stored one is never overwritten. With the flag off the
+ * two mandate keys are dropped from the body (never persisted, never rejected). DEFAULTS prefill
+ * the signature date ({@code afterHandle}).
+ *
+ * <p>Bound to the contacts spec's businessPartner entity by {@link NeoExtension} (ETP-6206; it was
+ * {@code JAVA_QUALIFIER = 'businessPartnerHandler'} before). Every hook it answers ({@code handle},
+ * {@code afterHandle}, {@code serverResolvedCreateFields}, {@code createUnsetFields},
+ * {@code resolveServerCreateFields}) is resolved annotation-first on REST single, batch and MCP.
  */
-@Named("businessPartnerHandler")
+@NeoExtension(spec = "contacts", entity = "businessPartner")
 public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
@@ -153,6 +166,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_TAX_ID_KEY = "oBTIKTaxIDKey";
   /** {@code EM_OBTIK_Tax_ID_Key} enum value for "NIF" (see the window's decisions.json). */
   private static final String TAX_ID_KEY_NIF = "1";
+  /**
+   * ETP-6175 — the AD default of {@code C_BPartner.EM_OBTIK_Tax_ID_Key} ({@code '1'}, NIF): what
+   * a create that omits the key is saved with. Keep in sync with the column's {@code DefaultValue}.
+   */
+  private static final String TAX_ID_KEY_DEFAULT = TAX_ID_KEY_NIF;
   /** {@code EM_OBTIK_Tax_ID_Key} enum value for "Pasaporte". */
   private static final String TAX_ID_KEY_PASSPORT = "3";
   /** ICAO Doc 9303 passport number shape: up to 9 letters/digits, no check digit. */
@@ -287,8 +305,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   /**
    * ETP-5852 (M-107): puts the same temporary searchKey {@code handle()} puts, before MCP's
    * mandatory pre-check, which runs ahead of {@code handle()} and refused a create without one.
-   * The name is derived first (person mode), as {@code handle()} does. Never overwrites a value
-   * the caller sent; abstains without a name, so the pre-check still reports it.
+   * The name is derived first for a person body only
+   * ({@link ContactIdentityRules#deriveNameForCreate}, ETP-6175), as {@code handle()} does; a
+   * company body keeps its own name or none, so the pre-check reports a missing one. Never overwrites a value the caller sent; abstains without a
+   * name.
    */
   @Override
   public void resolveServerCreateFields(NeoContext context) {
@@ -297,7 +317,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return;
     }
     try {
-      deriveName(context, body);
+      ContactIdentityRules.deriveNameForCreate(body);
       ContactSearchKey.putPlaceholder(body);
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not resolve the create searchKey", e);
@@ -383,12 +403,20 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       if (formatError != null) {
         return formatError;
       }
+      // ETP-6175: person/company identity. Before the contact-type rules, whose telemetry
+      // snapshot must only see writes that are going to be attempted; it also owns the name
+      // derivation of this entity (the base class's deriveName is no longer called here).
+      NeoResponse identityError = ContactIdentityRules.apply(ctx, body, method);
+      if (identityError != null) {
+        return identityError;
+      }
       NeoResponse contactTypeError = applyContactTypeRules(ctx, body, method);
       if (contactTypeError != null) {
         return contactTypeError;
       }
-
-      deriveName(ctx, body);
+      // After the contact-type rules: a type re-inherited from the category decides whether the
+      // contact is a customer, and so whether its SEPA mandate is defaulted (ETP-6148).
+      ContactSepaMandateDefaults.apply(ctx, body);
 
       if ("POST".equals(method)) {
         stripPreCreateBillingDefaults(ctx, body);
@@ -445,7 +473,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * @return an error {@link NeoResponse} when the value is rejected, {@code null} to continue
    *     with the default CRUD
    */
-  private NeoResponse validateTaxId(NeoContext ctx, JSONObject body, String method) throws Exception {
+  private NeoResponse validateTaxId(NeoContext ctx, JSONObject requestBody, String method)
+      throws Exception {
+    // ETP-6175: judged on the {"data": {...}} envelope when there is one — the object generic
+    // CRUD persists — so an envelope create cannot store a TaxID no rule has looked at.
+    JSONObject body = ContactIdentityRules.persistedSection(requestBody);
     if (!body.has(FIELD_TAX_ID)) {
       // A write that does not touch TaxID must not be re-validated against an already-stored
       // value it is not sending — otherwise a dirty legacy value would block every later edit,
@@ -473,6 +505,12 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     }
 
     String taxIdKey = resolveTaxIdKey(body, persisted);
+    if (taxIdKey == null && "POST".equals(method)) {
+      // ETP-6175: a create that omits the key gets the column's AD default (NIF) from the
+      // mandatory-defaults pass, which runs AFTER this pre-hook. Validate against the value the
+      // record will actually be saved with, or an invalid NIF is stored unchecked on any channel.
+      taxIdKey = TAX_ID_KEY_DEFAULT;
+    }
 
     if (TAX_ID_KEY_NIF.equals(taxIdKey)) {
       switch (SpanishTaxIdValidator.validate(taxId)) {
@@ -688,6 +726,9 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
+    if (ctx.getEndpointType() == NeoEndpointType.DEFAULTS) {
+      return prefillSepaMandateDefaults(ctx);
+    }
     String method = ctx.getHttpMethod();
     if ("GET".equals(method)) {
       // A list GET can ask for its child records (ETP-4997); a single-record GET gets the
@@ -729,6 +770,27 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return modified ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in afterHandle()", e);
+      return null;
+    }
+  }
+
+  /**
+   * ETP-6148 — DEFAULTS of a new contact: prefills the SEPA mandate signature date
+   * ({@link ContactSepaMandateDefaults#applyDefaults}) behind {@code sepa-remittances}. Best effort:
+   * a failure keeps the generic defaults.
+   */
+  private static NeoResponse prefillSepaMandateDefaults(NeoContext ctx) {
+    NeoResponse previous = ctx.getPreviousResult();
+    JSONObject defaults = previous != null && previous.getBody() != null
+        ? previous.getBody().optJSONObject("defaults") : null;
+    if (defaults == null) {
+      return null;
+    }
+    try {
+      return ContactSepaMandateDefaults.applyDefaults(defaults, SepaRemittancesFlag.isEnabled(),
+          java.time.LocalDate.now()) ? NeoResponse.ok(previous.getBody()) : null;
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: could not prefill the SEPA mandate defaults", e);
       return null;
     }
   }
@@ -859,11 +921,30 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    *
    * <p>One statement for the whole page (a window function, not a per-row query): a 5000-row
    * export must not turn into 5000 round trips.
+   *
+   * <p>ETP-6206 — the Contacts import's Calle / Número columns round-trip as two values instead of
+   * re-importing "Calle, Número" as a street. Built from the structured Street / Number
+   * ({@code EM_OBSEPA_StrtNm} / {@code EM_OBSEPA_BldgNb}, added to {@code C_Location} by
+   * {@code org.openbravo.sepa.iso20022}, which this module always brings in transitively — see
+   * {@code NeoAddressHelper}):
+   * <ul>
+   *   <li>{@code street} — the structured street, or the whole {@code address1} for an address never
+   *       broken down (street NULL or blank). Derived, so it is NOT the raw structured field.</li>
+   *   <li>{@code buildingnumber} — the structured number, but only when the structured street is
+   *       present: an address exported with {@code address1} as its street must not carry a number
+   *       too, or a re-import would write it twice.</li>
+   * </ul>
+   * Not gated by {@code structured-address-for-sepa}: where the flag was never on, the structured
+   * columns are NULL and {@code street} is exactly the {@code address1} this export always had.
    */
   static final String PRIMARY_LOCATIONS_SQL =
-      "SELECT c_bpartner_id, address1, city, postal, country, region FROM ("
+      "SELECT c_bpartner_id, address1, street, buildingnumber, city, postal, country, region FROM ("
           + "  SELECT bploc.c_bpartner_id,"
-          + "         loc.address1, loc.city, loc.postal,"
+          + "         loc.address1,"
+          + "         COALESCE(NULLIF(TRIM(loc.em_obsepa_strtnm), ''), loc.address1) AS street,"
+          + "         CASE WHEN NULLIF(TRIM(loc.em_obsepa_strtnm), '') IS NOT NULL"
+          + "              THEN loc.em_obsepa_bldgnb END AS buildingnumber,"
+          + "         loc.city, loc.postal,"
           + "         cty.name AS country, COALESCE(reg.name, loc.regionname) AS region,"
           + "         row_number() OVER ("
           + "           PARTITION BY bploc.c_bpartner_id"
@@ -902,9 +983,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   // renamed for both.
 
   /** Result-set columns {@link #PRIMARY_LOCATIONS_SQL} exposes, positionally paired with {@link #LOCATION_KEYS}. */
-  static final String[] LOCATION_COLUMNS = { "address1", "city", "postal", "country", "region" };
-  /** Response keys the address columns are attached under (see {@code importExportColumns.js}). */
-  static final String[] LOCATION_KEYS = { "address", "city", "postal", "country", "region" };
+  static final String[] LOCATION_COLUMNS = { "address1", "street", "buildingnumber",
+      "city", "postal", "country", "region" };
+  /**
+   * Response keys the address columns are attached under (see {@code importExportColumns.js} and
+   * the Contacts export hints in {@code contactsImportDescriptor.js}). A NULL or blank column
+   * leaves its key out ({@link #queryChildData}), never a {@code "null"} string.
+   */
+  static final String[] LOCATION_KEYS = { "address", "street", "buildingNumber",
+      "city", "postal", "country", "region" };
   /** Result-set columns {@link #PRIMARY_CONTACTS_SQL} exposes, positionally paired with {@link #CONTACT_KEYS}. */
   static final String[] CONTACT_COLUMNS = { "firstname", "lastname", "email", "phone", "title" };
   /** Response keys the contact-person columns are attached under (see {@code importExportColumns.js}). */
@@ -970,6 +1057,13 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * {@code C_BPartner_Location}/{@code C_Location}, which a {@code C_BPartner} row does not
    * carry — the only address-shaped property on it is {@code eTGOLocation}, one concatenated
    * display string that cannot be split back into columns).
+   *
+   * <p>Address keys: {@code address} (composed {@code Address1}), {@code street} (the structured
+   * street, or the whole address line for an address never broken down), {@code buildingNumber}
+   * (only alongside a structured street), {@code city}, {@code postal}, {@code country}, {@code region}. Contact
+   * keys: {@code firstName}, {@code lastName}, {@code email}, {@code phone}, {@code position}. A key
+   * whose column is NULL or blank is absent. Only reached with {@code includeChildData=1}, which
+   * only the list CSV export sends: no UI screen and no MCP tool reads {@code etgoChildData}.
    *
    * <p>Nested rather than flattened onto the row: the export's {@code columns} spec already
    * understands dotted paths ({@code etgoChildData.city}), and a nested object cannot collide

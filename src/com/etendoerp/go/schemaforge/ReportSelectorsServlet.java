@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -58,6 +59,11 @@ import com.etendoerp.go.common.CorsUtils;
  *   selectedAcctSchemaId  — filter account by accounting schema
  *   warehouseIds          — comma-separated warehouse IDs to filter product stock
  *   roleOrgIds            — comma-separated org IDs accessible to the role
+ *   ids                   — comma-separated record IDs (bpartner, product): resolves exactly those
+ *                           rows (same client/role scoping as the list), ignoring q and paging; used
+ *                           to label a selection restored from a link. A blank or invalid list
+ *                           returns no rows, never the whole selector; ids beyond 100 are silently dropped; other
+ *                           selector types answer 400 (ETP-6239)
  *
  * Response:
  *   { "items": [ { "id": "...", "name": "...", "label": "..." } ],
@@ -70,7 +76,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   /** The label of this surface in the commercial-access guard's log line (ETP-5047). */
   static final String ENTRY_POINT = "report-selectors";
   private static final int DEFAULT_LIMIT = 20;
-  private static final int MAX_LIMIT = 100;
+  private static final int MAX_LIMIT = 1000;
   private static final String ORDER_BY_NAME = "ORDER BY name";
   private static final String PARAM_SEARCH = "search";
   private static final String PARAM_CLIENT_ID = "clientId";
@@ -78,6 +84,11 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   private static final String PARAM_SELECTED_ACCT_SCHEMA_ID = "selectedAcctSchemaId";
   private static final String PARAM_WAREHOUSE_IDS = "warehouseIds";
   private static final String PARAM_ROLE_ORG_IDS = "roleOrgIds";
+  private static final String PARAM_IDS = "ids";
+  /** The `ids` lookup is capped: a label lookup, not a bulk read. */
+  private static final int MAX_IDS = 100;
+  /** Selectors that answer `ids`; any other one refuses it rather than ignore it and list everything. */
+  private static final Set<String> IDS_LOOKUP_TYPES = Set.of("bpartner", "product");
   private static final String ACTIVE_CLIENT_NAME_SEARCH = " AND ad_client_id = :"
       + PARAM_CLIENT_ID + " AND name ILIKE :" + PARAM_SEARCH;
 
@@ -95,11 +106,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     final String selectedAcctSchemaId;
     final List<String> warehouseIds;
     final List<String> roleOrgIds;
+    /** True when the request carries `ids` at all: then only those rows may come back, even if none is valid. */
+    final boolean idsRequested;
+    final List<String> ids;
 
     SelectorRequest(HttpServletRequest request, String clientId) {
-      this.q = StringUtils.trimToEmpty(request.getParameter("q"));
-      this.limit = parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
-      this.offset = parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
+      this.idsRequested = request.getParameter(PARAM_IDS) != null;
+      this.ids = parseSafeIdList(request.getParameter(PARAM_IDS)).stream().limit(MAX_IDS)
+          .collect(Collectors.toList());
+      this.q = idsRequested ? "" : StringUtils.trimToEmpty(request.getParameter("q"));
+      // An id lookup is not paged: at most one row per id.
+      this.limit = idsRequested ? Math.max(1, ids.size())
+          : parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
+      this.offset = idsRequested ? 0
+          : parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
       this.clientId = clientId;
       this.selectedOrgId = safeId(request.getParameter(PARAM_SELECTED_ORG_ID));
       this.selectedAcctSchemaId = safeId(request.getParameter(PARAM_SELECTED_ACCT_SCHEMA_ID));
@@ -144,14 +164,24 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
      * if it only appears in orderBy it is bound on the data query only.
      */
     final boolean bindClient;
+    /** JSON keys for the columns after id/name/label, in SELECT order. */
+    final String[] extraKeys;
 
     SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient) {
+      this(select, fromWhere, orderBy, bindClient, NO_EXTRA_KEYS);
+    }
+
+    SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient,
+        String[] extraKeys) {
       this.select = select;
       this.fromWhere = fromWhere;
       this.orderBy = orderBy;
       this.bindClient = bindClient;
+      this.extraKeys = extraKeys;
     }
   }
+
+  private static final String[] NO_EXTRA_KEYS = new String[0];
 
   // ---------------------------------------------------------------------------
   // HTTP entry points
@@ -224,6 +254,10 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   @SuppressWarnings({"unchecked", "rawtypes"})
   private JSONObject executeSelector(String type, SelectorRequest req) throws JSONException {
     SelectorQuery sq = buildQuery(type, req);
+    if (req.idsRequested && req.ids.isEmpty()) {
+      // A blank or invalid `ids` list resolves nothing: it must never fall back to the whole selector.
+      return new JSONObject().put("items", new JSONArray()).put("totalCount", 0).put("hasMore", false);
+    }
 
     String fromWhereStr = sq.fromWhere.toString();
     String countSql = "SELECT COUNT(*) " + fromWhereStr;
@@ -247,6 +281,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         req.warehouseIds);
     bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_ROLE_ORG_IDS,
         req.roleOrgIds);
+    bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_IDS, req.ids);
 
     Number countResult = (Number) countQuery.uniqueResult();
     int totalCount = countResult != null ? countResult.intValue() : 0;
@@ -255,7 +290,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     dataQuery.setFirstResult(req.offset);
     List<Object[]> rows = dataQuery.list();
 
-    JSONArray items = toJsonItems(rows);
+    JSONArray items = toJsonItems(rows, sq.extraKeys);
 
     JSONObject result = new JSONObject();
     result.put("items", items);
@@ -269,8 +304,11 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // ---------------------------------------------------------------------------
 
   private SelectorQuery buildQuery(String type, SelectorRequest req) {
+    if (req.idsRequested && !IDS_LOOKUP_TYPES.contains(type)) {
+      throw new IllegalArgumentException("ids is not supported for selector: " + type);
+    }
     switch (type) {
-      case "bpartner":   return buildBpartnerQuery();
+      case "bpartner":   return buildBpartnerQuery(req);
       case "product":    return buildProductQuery(req);
       case "warehouse":  return buildWarehouseQuery(req);
       case "product-category": return buildProductCategoryQuery();
@@ -287,12 +325,24 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private SelectorQuery buildBpartnerQuery() {
+  private SelectorQuery buildBpartnerQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder("FROM c_bpartner WHERE " + activePredicate(req)
+        + ACTIVE_CLIENT_NAME_SEARCH);
+    appendIdsFilter(fromWhere, "c_bpartner_id", req);
     return new SelectorQuery(
-        "SELECT c_bpartner_id AS id, name, name AS label",
-        new StringBuilder("FROM c_bpartner WHERE isactive='Y'"
-            + ACTIVE_CLIENT_NAME_SEARCH),
-        ORDER_BY_NAME, true);
+        "SELECT c_bpartner_id AS id, name, name AS label", fromWhere, ORDER_BY_NAME, true);
+  }
+
+  /** An `ids` lookup labels a restored selection, so a since-deactivated record must still resolve. */
+  private static String activePredicate(SelectorRequest req) {
+    return req.idsRequested ? "1=1" : "isactive='Y'";
+  }
+
+  /** `ids` narrows the rows the normal scoping already allows (a foreign id never resolves). */
+  private void appendIdsFilter(StringBuilder fromWhere, String pkColumn, SelectorRequest req) {
+    if (req.idsRequested && !req.ids.isEmpty()) {
+      fromWhere.append(" AND ").append(pkColumn).append(" IN (:").append(PARAM_IDS).append(")");
+    }
   }
 
   private SelectorQuery buildProductQuery(SelectorRequest req) {
@@ -301,7 +351,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     // every other product selector in the app, applied directly in SQL since this servlet builds
     // its own queries independently of NeoSelectorService.
     StringBuilder fromWhere = new StringBuilder(
-        "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
+        "FROM m_product WHERE " + activePredicate(req) + " AND ad_client_id = :clientId"
         + " AND (name ILIKE :search OR value ILIKE :search)"
         + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
         + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"
@@ -324,6 +374,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
           + " WHERE sd.m_product_id = m_product.m_product_id"
           + " AND l.ad_org_id IN (:roleOrgIds))");
     }
+    appendIdsFilter(fromWhere, "m_product_id", req);
     return new SelectorQuery(
         "SELECT m_product_id AS id, name, value || ' - ' || name AS label",
         fromWhere, "ORDER BY value, name", true);
@@ -412,20 +463,33 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         ORDER_BY_NAME, true);
   }
 
+  /**
+   * The fiscal years of the client. Each row also carries the year's first and last day
+   * ({@code startDate} / {@code endDate}, {@code yyyy-MM-dd}, from its periods) so the report
+   * view can preload a July-to-June year as 01/07 → today (ETP-6080).
+   *
+   * <p>With {@code selectedOrgId}, only the years of the calendar that org actually uses:
+   * its own, or the one it inherits from its calendar owner ({@code ad_org_getcalendarowner}).
+   * An org with no calendar owner (not ready) gets no years.</p>
+   */
   private SelectorQuery buildYearQuery(SelectorRequest req) {
     StringBuilder fromWhere = new StringBuilder(
         "FROM c_year y JOIN c_calendar c ON c.c_calendar_id = y.c_calendar_id"
         + " WHERE y.isactive='Y' AND y.ad_client_id = :clientId"
         + " AND (y.year || ' (' || c.name || ')') ILIKE :search");
     if (req.selectedOrgId != null) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org o"
-          + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = :selectedOrgId)");
+      fromWhere.append(" AND c.c_calendar_id = (SELECT o.c_calendar_id FROM ad_org o"
+          + " WHERE o.ad_org_id = ad_org_getcalendarowner(:selectedOrgId))");
     }
     return new SelectorQuery(
         "SELECT y.c_year_id AS id,"
         + " y.year || ' (' || c.name || ')' AS name,"
-        + " y.year || ' (' || c.name || ')' AS label",
-        fromWhere, "ORDER BY y.year DESC", true);
+        + " y.year || ' (' || c.name || ')' AS label,"
+        + " (SELECT to_char(MIN(p.startdate), 'YYYY-MM-DD') FROM c_period p"
+        + " WHERE p.c_year_id = y.c_year_id) AS startdate,"
+        + " (SELECT to_char(MAX(p.enddate), 'YYYY-MM-DD') FROM c_period p"
+        + " WHERE p.c_year_id = y.c_year_id) AS enddate",
+        fromWhere, "ORDER BY y.year DESC", true, new String[]{ "startDate", "endDate" });
   }
 
   /**
@@ -561,13 +625,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private JSONArray toJsonItems(List<Object[]> rows) throws JSONException {
+  private JSONArray toJsonItems(List<Object[]> rows, String[] extraKeys) throws JSONException {
     JSONArray items = new JSONArray();
     for (Object[] row : rows) {
       JSONObject item = new JSONObject();
       item.put("id", toText(row[0]));
       item.put("name", toText(row[1]));
       item.put("label", toText(row[2]));
+      for (int i = 0; i < extraKeys.length; i++) {
+        item.put(extraKeys[i], toText(row[3 + i]));
+      }
       items.put(item);
     }
     return items;

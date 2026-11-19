@@ -42,7 +42,7 @@ import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
 class HubSpotSyncProcessTest {
 
   private static final HubSpotConfiguration ENABLED = new HubSpotConfiguration("t",
-      "https://hubspot.test", "p", "t", "a", "w", "l");
+      "https://hubspot.test", "p", "m", "s", "c", "f", "e", "l");
 
   private static OBError run(HubSpotSyncService service) {
     ProcessBundle bundle = mock(ProcessBundle.class, Mockito.CALLS_REAL_METHODS);
@@ -60,7 +60,7 @@ class HubSpotSyncProcessTest {
   @Test
   void aPassWithoutTokenSaysSo() {
     HubSpotSyncService disabled = new HubSpotSyncService(new HubSpotConfiguration(null,
-        "https://hubspot.test", "p", "t", "a", "w", "l"), mock(HubSpotOutboxStore.class),
+        "https://hubspot.test", "p", "m", "s", "c", "f", "e", "l"), mock(HubSpotOutboxStore.class),
         mock(DemoTrials.class), mock(HubSpotEventSender.class));
 
     OBError result = run(disabled);

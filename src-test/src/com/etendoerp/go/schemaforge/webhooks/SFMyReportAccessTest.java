@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -130,6 +131,7 @@ class SFMyReportAccessTest {
     assertNull(responseVars.get(ERROR));
     JSONObject result = new JSONObject(responseVars.get(RESULT).toString());
     assertEquals(0, result.optJSONObject("reportAccess").length());
+    assertGovernedIsTheCatalog(result);
     verify(mockDal, never()).createCriteria(WindowAccess.class);
   }
 
@@ -163,6 +165,16 @@ class SFMyReportAccessTest {
 
     assertNull(responseVars.get(ERROR));
     assertEquals(0, parseResult().getJSONObject("reportAccess").length());
+    assertGovernedIsTheCatalog(parseResult());
+  }
+
+  /** ETP-6080: the report-server refuses a governed report missing from reportAccess. */
+  private static void assertGovernedIsTheCatalog(JSONObject result) throws Exception {
+    JSONArray governed = result.getJSONArray("governed");
+    assertEquals(ReportAccessCatalog.ROWS.size(), governed.length());
+    for (int i = 0; i < governed.length(); i++) {
+      assertEquals(ReportAccessCatalog.ROWS.get(i).id, governed.getString(i));
+    }
   }
 
   @Test

@@ -38,6 +38,7 @@ import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completi
 import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
 import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
 import com.etendoerp.go.usage.quota.QuotaClientCache;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
@@ -122,6 +123,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.OrderInvoiceDuplicateGuard
  * @covers com.etendoerp.go.schemaforge.DuplicateCreationRefusal
+ * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
  */
 public class CreateDraftInvoiceHandlerTest {
 
@@ -715,6 +717,34 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  /**
+   * ETP-6209 KPI — marking a quotation as invoice-created is an app acceptance, unless the customer
+   * had already accepted it from the portal ({@code ETGO_AC}).
+   */
+  @Test
+  public void testMarkQuotationRecordsAnAppAcceptanceUnlessAcceptedFromThePortal() {
+    // Columns: quotation status before, acceptances recorded.
+    Object[][] cases = { { "UE", 1 }, { "ETGO_AC", 0 } };
+    for (Object[] c : cases) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Order quotation = mock(Order.class);
+        when(quotation.getDocumentStatus()).thenReturn((String) c[0]);
+        when(dal.get(eq(Order.class), eq("q-1"))).thenReturn(quotation);
+        kpi.when(() -> PortalKpiTelemetry.appQuotationConverted(any(), any()))
+            .thenCallRealMethod();
+
+        new CreateDraftInvoiceHandler().markQuotationAsInvoiceCreated("q-1");
+
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(true, quotation),
+            Mockito.times((Integer) c[1]));
+        verify(quotation).setDocumentStatus("ETGO_CI");
+      }
+    }
+  }
+
   // ── ensureDocumentNo ──────────────────────────────────────────────────────
 
   @Test
@@ -1179,6 +1209,12 @@ public class CreateDraftInvoiceHandlerTest {
       return parsedShipmentIds;
     }
 
+    /** ETP-5828: the dispatch tests observe the order route at createFromOrder, as before. */
+    @Override
+    protected Invoice createFromSalesOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+      return createFromOrder(orderId, lineOverrides, null);
+    }
+
     @Override
     protected void requireOrderCompleted(String orderId) {
       com.etendoerp.go.schemaforge.util.DocumentStatusGuard.requireCompleted(orderId,
@@ -1225,6 +1261,144 @@ public class CreateDraftInvoiceHandlerTest {
       checkedSpecName = specName;
       return draftsToReturn;
     }
+  }
+
+  /**
+   * ETP-5828: {@link CreateDraftInvoiceHandler#createFromSalesOrder} with its two creations and the
+   * draft quantities as seams, so only its decision runs.
+   */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
+  private static class SalesOrderNetHandler extends CreateDraftInvoiceHandler {
+    final Map<String, BigDecimal> held = new HashMap<>();
+    /** What the no-draft quantity rule answers for the order (shipment-scoped). */
+    final Map<String, BigDecimal> scoped = new HashMap<>();
+    String path;
+    Map<String, BigDecimal> netOverrides;
+    /** The order-line selection the ETP-5709 creation was handed. */
+    JSONArray plainSelection;
+
+    @Override
+    protected Map<String, BigDecimal> draftInvoicedQuantities(java.util.Collection<String> ids) {
+      return held;
+    }
+
+    /** The ETP-5709 native population: completed shipment lines not yet invoiced (drafts ignored). */
+    boolean uninvoicedShipments;
+    /** Whether those shipment lines can still take part of the net pending, drafts counted. */
+    boolean shipmentLeft;
+
+    @Override
+    protected boolean hasUninvoicedShipmentLines(OrderLine orderLine) {
+      return uninvoicedShipments;
+    }
+
+    @Override
+    protected boolean hasShipmentLeftNetOfDrafts(OrderLine orderLine, BigDecimal netPending) {
+      return shipmentLeft;
+    }
+
+    @Override
+    protected Map<String, BigDecimal> shipmentScopedPending(Order order) {
+      return scoped;
+    }
+
+    @Override
+    protected Invoice createFromOrderLines(String orderId, JSONArray selectedLines,
+        String priceListId, String currencyId) {
+      path = "plain";
+      plainSelection = selectedLines;
+      return null;
+    }
+
+    @Override
+    protected Invoice createFromOrderNetOfDrafts(Order order,
+        Map<String, BigDecimal> lineOverrides) {
+      path = "net";
+      netOverrides = lineOverrides;
+      return null;
+    }
+  }
+
+  /**
+   * ETP-5828: the REAL {@link CreateDraftInvoiceHandler#createFromSalesOrder} and
+   * {@link CreateDraftInvoiceHandler#createFromOrderNetOfDrafts} on an order a draft holds 4 of 10
+   * of (so the partial-draft path runs), with the DB seams stubbed and the order import either
+   * stubbed ({@link #importFailure}, {@link #importedQuantities}) or the real seam over
+   * {@link #orderLineImport} ({@link #realImport}). The support keeps its real
+   * {@code applyOrderDiscountToInvoice}; only its DB-bound tail is recorded.
+   */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
+  private static class NetOfDraftsCreationHandler extends CreateDraftInvoiceHandler {
+    final DocumentType docType = mock(DocumentType.class);
+    boolean realImport;
+    RuntimeException importFailure;
+    Map<String, BigDecimal> importedQuantities;
+    Invoice grossAmountsOf;
+    Invoice rateOf;
+
+    @Override
+    protected void requireOrderCompleted(String orderId) {
+      // the order is completed
+    }
+
+    @Override
+    protected Map<String, BigDecimal> draftInvoicedQuantities(java.util.Collection<String> ids) {
+      return Map.of("ol-1", new BigDecimal("4"));
+    }
+
+    @Override
+    protected Map<String, BigDecimal> shipmentScopedPending(Order order) {
+      return Map.of("ol-1", new BigDecimal("6"));
+    }
+
+    @Override
+    protected DocumentType resolveARInvoiceDocType(Order order) {
+      return docType;
+    }
+
+    @Override
+    protected void importNetOfDrafts(Invoice invoice, Order order,
+        Map<String, BigDecimal> lineOverrides) {
+      if (realImport) {
+        super.importNetOfDrafts(invoice, order, lineOverrides);
+        return;
+      }
+      if (importFailure != null) {
+        throw importFailure;
+      }
+      importedQuantities = lineOverrides;
+    }
+
+    @Override
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          grossAmountsOf = invoice;
+        }
+
+        @Override
+        public void propagateOrderRateToInvoice(Order order, Invoice invoice) {
+          rateOf = invoice;
+        }
+      };
+    }
+  }
+
+  /** One active order line {@code ol-1}, ordered 10, nothing invoiced, of {@code order-1}. */
+  private static Order netOfDraftsOrder() {
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-1");
+    OrderLine line = mock(OrderLine.class);
+    when(line.getId()).thenReturn("ol-1");
+    when(line.isActive()).thenReturn(true);
+    when(line.getProduct()).thenReturn(product);
+    when(line.getOrderedQuantity()).thenReturn(new BigDecimal("10"));
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.ZERO);
+    Order order = mock(Order.class);
+    when(order.getId()).thenReturn("order-1");
+    when(order.getOrderLineList()).thenReturn(List.of(line));
+    return order;
   }
 
   /**
@@ -1472,58 +1646,238 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5714: an order that already has a DRAFT invoice is refused with 409 {@code draftInvoiceExists},
-   * naming the draft numbers, and nothing is created; {@code allowDuplicate:true} creates the invoice
-   * and lists the drafts the order had; anything but a JSON boolean is a 422. Same rule as the screen,
-   * which hides the button while a draft exists.
+   * ETP-5828: "Generar factura" on a sales order invoices what is pending NET of the draft
+   * invoices. One order line ordered 10, nothing invoiced; the table varies what drafts hold, the
+   * {@code lines} asked for and the shipment-scoped quantity of the no-draft rule (what the order
+   * import's {@code shipmentScopedPending} answers), and pins which creation runs with which
+   * quantities (the unchanged ETP-5709 one when no draft holds anything, the order import
+   * otherwise) or which 400 answers (nothing created).
    */
   @Test
-  public void handle_orderWithADraftInvoice_isRefusedUnlessAllowDuplicateTrue() throws JSONException {
+  public void createFromSalesOrder_invoicesWhatIsLeftNetOfTheDraftInvoices() throws JSONException {
     Object[][] cases = {
-        // name, allowDuplicate body value (null = absent), expected status
-        { "absent", null, 409 },
-        { "false", Boolean.FALSE, 409 },
-        { "true", Boolean.TRUE, 201 },
-        { "string true", "true", 422 },
-        { "number one", 1, 422 },
+        // name, invoiced, held by drafts, requested (null = all), shipment-scoped (null = none),
+        // expected path or error fragment, quantity handed to the creation (null = n/a),
+        // optional: the line has uninvoiced shipments, and some of them are left net of drafts
+        { "no draft: the ETP-5709 creation", "0", null, null, null, "plain", null },
+        // a draft linked by C_Invoice.C_Order_ID that holds no line of the order (draftsOf names
+        // it, the draft-line quantities have nothing): the full pending, as if there were none
+        { "header-only draft: the ETP-5709 creation, full pending", "0", null, null, null, "plain",
+            "10" },
+        { "no draft, lines on a shipped line: refused as before", "0", null, "4", null,
+            "albaranes sin facturar", null, true, true },
+        { "partial, lines on a line with shipment left: refused", "0", "4", "3", null,
+            "albaranes sin facturar", null, true, true },
+        { "partial, lines on a line whose shipped part drafts hold: honoured", "0", "4", "6", null,
+            "net", "6", true, false },
+        { "a draft holds part, no shipments: the net pending", "0", "4", null, "6", "net", "6" },
+        { "a draft holds part, shipped 3: only the shipped part", "0", "4", null, "3", "net", "3" },
+        { "the drafts hold all that was shipped: the unshipped rest", "0", "4", null, "6", "net",
+            "6" },
+        { "partial with a quantity within the rest", "0", "4", "6", null, "net", "6" },
+        { "partial with a quantity above the rest", "0", "4", "7", null,
+            "lo pendiente de facturar es 6", null },
+        { "the drafts hold everything left", "0", "10", null, null, "DRAFT-1) already covers",
+            null },
+        { "a draft holds more than is left", "6", "5", null, null, "DRAFT-1) already covers", null },
+        { "nothing pending at all", "10", null, null, null,
+            "No hay líneas a facturar en este pedido", null },
     };
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-1");
     for (Object[] c : cases) {
+      OrderLine line = mock(OrderLine.class);
+      when(line.getId()).thenReturn("ol-1");
+      when(line.getLineNo()).thenReturn(10L);
+      when(line.isActive()).thenReturn(true);
+      when(line.getProduct()).thenReturn(product);
+      when(line.getOrderedQuantity()).thenReturn(new BigDecimal("10"));
+      when(line.getInvoicedQuantity()).thenReturn(new BigDecimal((String) c[1]));
+      Order order = mock(Order.class);
+      when(order.getId()).thenReturn("order-1");
+      when(order.getOrderLineList()).thenReturn(List.of(line));
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Order.class, "order-1")).thenReturn(order);
+
+      SalesOrderNetHandler handler = new SalesOrderNetHandler();
+      if (c[2] != null) {
+        handler.held.put("ol-1", new BigDecimal((String) c[2]));
+      }
+      Map<String, BigDecimal> requested = new HashMap<>();
+      if (c[3] != null) {
+        requested.put("ol-1", new BigDecimal((String) c[3]));
+      }
+      if (c[4] != null) {
+        handler.scoped.put("ol-1", new BigDecimal((String) c[4]));
+      }
+      handler.uninvoicedShipments = c.length > 7 && Boolean.TRUE.equals(c[7]);
+      handler.shipmentLeft = c.length > 8 && Boolean.TRUE.equals(c[8]);
       try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-        mockAdminMode(obContextMock);
-        OBDal dal = mock(OBDal.class);
+          MockedStatic<OrderInvoiceDuplicateGuard> guard =
+              Mockito.mockStatic(OrderInvoiceDuplicateGuard.class)) {
         obDalMock.when(OBDal::getInstance).thenReturn(dal);
-        when(dal.getSession()).thenReturn(mock(Session.class));
-        Invoice invoice = mock(Invoice.class);
-        when(invoice.getId()).thenReturn("inv-1");
-        DispatchHandler handler = new DispatchHandler();
-        handler.orderInvoice = invoice;
-        JSONObject body = new JSONObject();
-        if (c[1] != null) {
-          body.put("allowDuplicate", c[1]);
-        }
-
-        try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
-          completion.existingDrafts = List.of("DRAFT-1", "DRAFT-2");
-          mockCompletedInvoice(dal, "inv-1", "INV-001", "CO");
-
-          NeoResponse response = handler.handle(NeoContext.builder()
-              .specName(SPEC_SALES_ORDER).entityName(ENTITY_HEADER).httpMethod("POST")
-              .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
-              .recordId("order-1").requestBody(body).build());
-
-          assertEquals((String) c[0], (int) (Integer) c[2], response.getHttpStatus());
-          if (response.getHttpStatus() == 409) {
-            JSONObject error = response.getBody().getJSONObject("error");
-            assertEquals("draftInvoiceExists", error.getString("code"));
-            assertTrue(error.getString("message").contains("DRAFT-1, DRAFT-2"));
-            assertEquals(2, error.getJSONArray("existingDraftInvoices").length());
-            assertNull("nothing is created", handler.receivedLineOverrides);
-          } else if (response.getHttpStatus() == 201) {
-            JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-            assertEquals("DRAFT-1", data.getJSONArray("existingDraftInvoices").getString(0));
+        guard.when(() -> OrderInvoiceDuplicateGuard.draftsOf("order-1", true))
+            .thenReturn(List.of("DRAFT-1"));
+        String expected = (String) c[5];
+        try {
+          handler.createFromSalesOrder("order-1", requested);
+          assertEquals((String) c[0], expected, handler.path);
+          if ("net".equals(expected)) {
+            assertEquals((String) c[0], Map.of("ol-1", new BigDecimal((String) c[6])),
+                handler.netOverrides);
           }
+          if ("plain".equals(expected) && c[6] != null) {
+            assertEquals((String) c[0], 1, handler.plainSelection.length());
+            JSONObject entry = handler.plainSelection.getJSONObject(0);
+            assertEquals((String) c[0], "ol-1", entry.getString("id"));
+            assertEquals((String) c[0], 0, new BigDecimal((String) c[6])
+                .compareTo(new BigDecimal(entry.getString("orderedQuantity"))));
+          }
+        } catch (OBException e) {
+          assertTrue(c[0] + ": " + e.getMessage(), e.getMessage().contains(expected));
+          assertNull(c[0] + ": nothing is created", handler.path);
         }
+      }
+    }
+  }
+
+  /**
+   * ETP-5828: the invoice of an order partly held by drafts is finished like every invoice built
+   * from an order: the order's global discount ({@code em_etgo_total_discount}, a %) is set on the
+   * new invoice as that same % and materialised by the discount service, and the gross amounts and
+   * the rate run on the invoice reloaded after it. Only the line import is a seam (a no-op here).
+   */
+  @Test
+  public void createFromOrderNetOfDrafts_carriesTheOrdersGlobalDiscountAsTheSamePercent()
+      throws Exception {
+    Order order = netOfDraftsOrder();
+    Invoice header = mock(Invoice.class);
+    when(header.getId()).thenReturn("inv-1");
+    Invoice reloaded = mock(Invoice.class);
+    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+    when(rs.next()).thenReturn(true);
+    when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("12.5"));
+    java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement("SELECT em_etgo_total_discount FROM c_order WHERE c_order_id = ?"))
+        .thenReturn(ps);
+    Session session = mock(Session.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(dal.getSession()).thenReturn(session);
+    when(dal.get(Invoice.class, "inv-1")).thenReturn(reloaded);
+    TotalDiscountService discounts = mock(TotalDiscountService.class);
+    NetOfDraftsCreationHandler handler = new NetOfDraftsCreationHandler();
+    handler.totalDiscountService = discounts;
+    Map<String, BigDecimal> quantities = Map.of("ol-1", new BigDecimal("6"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoCommercialDocumentFactory> factory =
+            Mockito.mockStatic(NeoCommercialDocumentFactory.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      factory.when(() -> NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(order,
+          handler.docType, true)).thenReturn(header);
+
+      Invoice result = handler.createFromOrderNetOfDrafts(order, quantities);
+
+      assertEquals(quantities, handler.importedQuantities);
+      verify(header).setEtgoTotalDiscount(new BigDecimal("12.5"));
+      verify(discounts).recalculate("inv-1", true);
+      assertSame("the invoice reloaded after the discount is the one returned", reloaded, result);
+      assertSame(reloaded, handler.grossAmountsOf);
+      assertSame(reloaded, handler.rateOf);
+      verify(dal, never()).rollbackAndClose();
+    }
+  }
+
+  /** The {@code createDraftInvoice} POST on sales order {@code order-1}. */
+  private static NeoContext createInvoiceOnOrder1() {
+    return NeoContext.builder()
+        .specName(SPEC_SALES_ORDER).entityName(ENTITY_HEADER).httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
+        .recordId("order-1").requestBody(new JSONObject()).build();
+  }
+
+  /**
+   * ETP-5828: when the order import refuses on an order partly held by drafts, the invoice header
+   * already flushed is rolled back (no orphan draft survives the request's commit) and the refusal
+   * is answered as the 400 with its own message.
+   */
+  @Test
+  public void handle_salesOrderPartlyHeldByDrafts_rollsBackAndAnswers400WhenTheImportRefuses()
+      throws JSONException {
+    Order order = netOfDraftsOrder();
+    Invoice header = mock(Invoice.class);
+    Session session = mock(Session.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Order.class, "order-1")).thenReturn(order);
+    when(dal.getSession()).thenReturn(session);
+    NetOfDraftsCreationHandler handler = new NetOfDraftsCreationHandler();
+    String refusal = "La línea 10 (ol-1) ya no tiene cantidad pendiente de facturar";
+    handler.importFailure = new OBException(refusal);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoCommercialDocumentFactory> factory =
+            Mockito.mockStatic(NeoCommercialDocumentFactory.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      mockAdminMode(obContextMock);
+      factory.when(() -> NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(order,
+          handler.docType, true)).thenReturn(header);
+
+      NeoResponse response = handler.handle(createInvoiceOnOrder1());
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals(refusal, response.getBody().getString("message"));
+      verify(dal).rollbackAndClose();
+    }
+  }
+
+  /**
+   * ETP-5828: a DB or JSON failure inside the order import of an order partly held by drafts rolls
+   * the flushed header back and is answered as the generic 500: the failure's own text (SQL, JSON
+   * parser) never reaches the response.
+   */
+  @Test
+  public void handle_salesOrderPartlyHeldByDrafts_rollsBackAndAnswersAGeneric500OnADbFailure()
+      throws Exception {
+    Exception[] failures = {
+        new java.sql.SQLException("ERROR: deadlock detected on relation c_invoiceline"),
+        new JSONException("Unterminated string at character 12"),
+    };
+    for (Exception failure : failures) {
+      Order order = netOfDraftsOrder();
+      Invoice header = mock(Invoice.class);
+      ImportOrderLinesIntoInvoiceHandler importer = mock(ImportOrderLinesIntoInvoiceHandler.class);
+      when(importer.importOrderInto(any(), any(), any())).thenThrow(failure);
+      Session session = mock(Session.class);
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Order.class, "order-1")).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+      NetOfDraftsCreationHandler handler = new NetOfDraftsCreationHandler();
+      handler.realImport = true;
+      handler.orderLineImport = importer;
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<NeoCommercialDocumentFactory> factory =
+              Mockito.mockStatic(NeoCommercialDocumentFactory.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        mockAdminMode(obContextMock);
+        factory.when(() -> NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(order,
+            handler.docType, true)).thenReturn(header);
+
+        NeoResponse response = handler.handle(createInvoiceOnOrder1());
+
+        String name = failure.getClass().getSimpleName();
+        assertEquals(name, 500, response.getHttpStatus());
+        String body = response.getBody().toString();
+        assertTrue(name + ": " + body,
+            body.contains("An internal error occurred while creating the invoice"));
+        assertFalse(name + ": " + body, body.contains(failure.getMessage()));
+        verify(importer).importOrderInto(header, order, Map.of("ol-1", new BigDecimal("6")));
+        verify(dal).rollbackAndClose();
       }
     }
   }
@@ -2286,6 +2640,8 @@ public class CreateDraftInvoiceHandlerTest {
   @Test
   @SuppressWarnings("unchecked")
   public void testHandleListMergesDeduplicatesAndFormatsRows() throws Exception {
+    // The rectificative flag column is probed with SQL, so this test decides by doc category
+    RectificativeSupport.setColumnPresentForTests(false);
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       mockAdminMode(obContextMock);
@@ -2310,6 +2666,9 @@ public class CreateDraftInvoiceHandlerTest {
       Currency euro = mock(Currency.class);
       when(euro.getISOCode()).thenReturn("EUR");
       when(invoiceFromLines.getCurrency()).thenReturn(euro);
+      DocumentType rectificativeType = mock(DocumentType.class);
+      when(rectificativeType.getDocumentCategory()).thenReturn("ARC");
+      when(invoiceFromLines.getTransactionDocument()).thenReturn(rectificativeType);
 
       Invoice directOnlyInvoice = mock(Invoice.class);
       when(directOnlyInvoice.getId()).thenReturn("inv-2");
@@ -2348,6 +2707,12 @@ public class CreateDraftInvoiceHandlerTest {
       assertFalse(data.getJSONObject(1).has("invoiceDate"));
       assertTrue(data.getJSONObject(1).has("currency$_identifier"));
       assertTrue(data.getJSONObject(1).isNull("currency$_identifier"));
+      // ETP-6002: each sales row says whether it is a rectificative, so the order's and the
+      // quotation's related documents can leave it out (the rows themselves are unchanged).
+      assertTrue(data.getJSONObject(0).getBoolean("isRectificative"));
+      assertFalse(data.getJSONObject(1).getBoolean("isRectificative"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
     }
   }
 
@@ -3486,6 +3851,68 @@ public class CreateDraftInvoiceHandlerTest {
       DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-9");
 
       assertSame(systemCandidate, result);
+    }
+  }
+
+  /**
+   * ETP-6179 repro: an ordinary invoice was generated with a return or rectificative document
+   * type whenever one ranked first (the org's own default "Factura rectificativa", say), and was
+   * then sent to SII/TicketBAI/VERI*FACTU as a correction of nothing.
+   */
+  @Test
+  public void testFindArInvoiceDocTypeNeverPicksAReturnOrRectificativeType() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType rectificative = mockCandidate("dt-rectif", "org-1", true, "SEQ-R");
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mockCandidate("dt-return", "org-1", false, "SEQ-RM");
+      when(returnType.isReturn()).thenReturn(true);
+      DocumentType ordinary = mockCandidate("dt-ordinary", "0", false, "SEQ-1");
+      mockDocumentTypeCriteria(dal, Arrays.asList(rectificative, returnType, ordinary));
+
+      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-1");
+
+      assertSame(ordinary, result);
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * ETP-6179 review W2 repro: several shipments are invoiced through a header that carries NO
+   * order (createInvoiceHeaderFromShipment links it for a single shipment only), so the sifDefaults
+   * preview must not read the order either — otherwise a caller sending no sifFields gets the
+   * order's SII description/operation date in the preview and today's/the org's on the invoice.
+   */
+  @Test
+  public void testShipmentSifTargetCarriesTheOrderOnlyForASingleShipment() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      Order order = mock(Order.class);
+      DocumentType orderDocType = mock(DocumentType.class);
+      DocumentType invoiceDocType = mock(DocumentType.class);
+      when(invoiceDocType.getDocumentSequence()).thenReturn(mock(Sequence.class));
+      when(orderDocType.getDocumentTypeForInvoice()).thenReturn(invoiceDocType);
+      when(order.getTransactionDocument()).thenReturn(orderDocType);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getOrganization()).thenReturn(org);
+      when(first.getSalesOrder()).thenReturn(order);
+      when(dal.get(ShipmentInOut.class, "sh-1")).thenReturn(first);
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler();
+
+      InvoiceSifPreset.Target several = handler.shipmentSifTarget(
+          new JSONObject().put("shipmentIds", new JSONArray().put("sh-1").put("sh-2")), "sh-1");
+      InvoiceSifPreset.Target single = handler.shipmentSifTarget(new JSONObject(), "sh-1");
+
+      assertNull("several shipments: the header carries no order", several.order());
+      assertSame(invoiceDocType, several.docType());
+      assertSame("one shipment: the header carries the order", order, single.order());
     }
   }
 
@@ -4962,11 +5389,12 @@ public class CreateDraftInvoiceHandlerTest {
 
   /**
    * ETP-5709: the quotation status guard mirrors where the SPA offers the action
-   * (QuotationTopbarActions opens QuotationConfirmModal for CO or UE): both are accepted; draft,
+   * (QuotationTopbarActions opens QuotationConfirmModal for CO or UE): both are accepted, and so is
+   * a quotation the customer accepted from the portal (ETGO_AC, ETP-6209); draft,
    * rejected, order-converted, already-invoiced and voided quotations are refused.
    */
   @Test
-  public void requireQuotationInvoiceable_realCheck_acceptsUeAndCoRefusesTheRest() {
+  public void requireQuotationInvoiceable_realCheck_acceptsUeCoAndAcceptedRefusesTheRest() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -4974,7 +5402,8 @@ public class CreateDraftInvoiceHandlerTest {
       when(quotation.getDocumentNo()).thenReturn("QT-9");
       when(dal.get(Order.class, "q-1")).thenReturn(quotation);
 
-      for (String ok : new String[] {"UE", "CO"}) {
+      // ETGO_AC: accepted by the customer from the portal, still invoiceable (ETP-6209).
+      for (String ok : new String[] {"UE", "CO", "ETGO_AC"}) {
         when(quotation.getDocumentStatus()).thenReturn(ok);
         new TestableHandler().requireQuotationInvoiceable("q-1");
       }

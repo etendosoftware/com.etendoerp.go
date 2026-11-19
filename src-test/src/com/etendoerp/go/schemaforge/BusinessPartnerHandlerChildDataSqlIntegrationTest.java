@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -28,8 +30,11 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
@@ -78,9 +83,9 @@ import org.openbravo.test.base.OBBaseTest;
  *
  * <p>Assertions about which contact or address is "primary" are NOT made here: those are ordering
  * decisions, not schema facts, and asserting them would require seeding rows this test
- * deliberately does not create (it only reads). This class answers one question — "do these two
- * statements still match the database?" — which is the question the silent failure mode needs
- * answered.
+ * deliberately does not create. The schema checks only read; the one exception is the derivation
+ * of {@code street} / {@code buildingNumber}, which lives in the SQL and is checked by overwriting
+ * an existing partner's addresses inside the test transaction and rolling it back.
  *
  * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  */
@@ -122,6 +127,98 @@ public class BusinessPartnerHandlerChildDataSqlIntegrationTest extends OBBaseTes
         BusinessPartnerHandler.LOCATION_COLUMNS.length == BusinessPartnerHandler.LOCATION_KEYS.length);
     assertTrue("CONTACT_COLUMNS/CONTACT_KEYS must have the same length",
         BusinessPartnerHandler.CONTACT_COLUMNS.length == BusinessPartnerHandler.CONTACT_KEYS.length);
+  }
+
+  /**
+   * The {@code street} / {@code buildingNumber} keys are derived in SQL from the structured
+   * {@code EM_OBSEPA_StrtNm} / {@code EM_OBSEPA_BldgNb} columns, so only a real execution can tell
+   * whether the {@code COALESCE(NULLIF(TRIM(...)))} / {@code CASE} expressions do what the export
+   * needs. Driven end to end through {@code afterHandle()} — the real statement plus the real
+   * {@code queryChildData()} mapping — so "a NULL or blank value leaves the key out" is asserted on
+   * what the export actually receives.
+   *
+   * <p>Each case overwrites every active address of one existing partner (so whichever one ranks
+   * first carries the case's values) inside the test transaction, which {@link #rollbackChanges}
+   * discards. Nothing is committed.
+   */
+  @Test
+  public void testStreetAndBuildingNumberAreDerivedFromTheStructuredAddress() throws Exception {
+    // label, address1, em_obsepa_strtnm, em_obsepa_bldgnb, expected street,
+    // expected buildingNumber (null = the key must be absent)
+    String[][] cases = {
+        { "structured address", "Calle Mayor, 12", "Calle Mayor", "12", "Calle Mayor", "12" },
+        { "legacy address", "Av. Industria 45", null, null, "Av. Industria 45", null },
+        { "empty street with a number", "Av. Industria 45", "", "7", "Av. Industria 45", null },
+        { "whitespace street with a number", "Av. Industria 45", "   ", "7", "Av. Industria 45", null },
+        { "street without a number", "Calle Mayor", "Calle Mayor", null, "Calle Mayor", null },
+        { "street with a blank number", "Calle Mayor", "Calle Mayor", "  ", "Calle Mayor", null },
+    };
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      String bpId = partnerWithAnAddress(conn);
+      for (String[] c : cases) {
+        String label = c[0];
+        overwritePartnerAddresses(conn, bpId, c[1], c[2], c[3]);
+
+        JSONObject child = childDataFor(bpId, label);
+
+        assertEquals(label + ": address", c[1], child.optString("address", null));
+        assertEquals(label + ": street", c[4], child.optString("street", null));
+        if (c[5] == null) {
+          assertFalse(label + ": buildingNumber must be absent, was '"
+              + child.opt("buildingNumber") + "'", child.has("buildingNumber"));
+        } else {
+          assertEquals(label + ": buildingNumber", c[5], child.optString("buildingNumber", null));
+        }
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Any partner with an active address; the test fails loudly when the environment has none. */
+  private static String partnerWithAnAddress(Connection conn) throws SQLException {
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT c_bpartner_id FROM c_bpartner_location WHERE isactive = 'Y' LIMIT 1");
+        ResultSet rs = ps.executeQuery()) {
+      assertTrue("no active C_BPartner_Location to derive a street from", rs.next());
+      return rs.getString(1);
+    }
+  }
+
+  /** Sets the three address columns on every active address of {@code bpId} (uncommitted). */
+  private static void overwritePartnerAddresses(Connection conn, String bpId, String address1,
+      String street, String buildingNumber) throws SQLException {
+    try (PreparedStatement ps = conn.prepareStatement(
+        "UPDATE c_location SET address1 = ?, em_obsepa_strtnm = ?, em_obsepa_bldgnb = ?"
+            + " WHERE c_location_id IN (SELECT c_location_id FROM c_bpartner_location"
+            + "  WHERE c_bpartner_id = ? AND isactive = 'Y')")) {
+      ps.setString(1, address1);
+      ps.setString(2, street);
+      ps.setString(3, buildingNumber);
+      ps.setString(4, bpId);
+      assertTrue("no address of " + bpId + " was updated", ps.executeUpdate() > 0);
+    }
+  }
+
+  /** Runs the list-GET enrichment for one partner and returns its {@code etgoChildData}. */
+  private static JSONObject childDataFor(String bpId, String label) throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", bpId))));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .queryParams(Map.of("includeChildData", "1"))
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    NeoResponse result = new BusinessPartnerHandler().afterHandle(ctx);
+
+    // attachChildData() swallows a failing statement and declines; surface that as the failure.
+    assertNotNull(label + ": etgoChildData was not attached — the enrichment failed", result);
+    return result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getJSONObject("etgoChildData");
   }
 
   /**

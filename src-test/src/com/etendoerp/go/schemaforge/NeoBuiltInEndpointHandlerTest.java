@@ -1854,6 +1854,9 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
         mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      // The route decision lives in the endpoint class (`serves`); only `handle` is faked.
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.serves(any(), any(), any()))
+          .thenCallRealMethod();
       endpoint.when(() -> InvoiceInboxUploadEndpoint.handle(request)).thenReturn(answer);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
@@ -1876,12 +1879,15 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
         mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.serves(any(), any(), any()))
+          .thenCallRealMethod();
+
       assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
           "GET", request, response));
       assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "header", null),
           "POST", request, response));
 
-      endpoint.verifyNoInteractions();
+      endpoint.verify(() -> InvoiceInboxUploadEndpoint.handle(any()), never());
       verify(servlet, never()).writeResponse(any(), any());
     }
   }

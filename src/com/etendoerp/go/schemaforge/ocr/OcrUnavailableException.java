@@ -26,6 +26,8 @@ public class OcrUnavailableException extends Exception {
 
   private static final long serialVersionUID = 1L;
 
+  private final boolean retryable;
+
   /**
    * Builds the exception.
    *
@@ -33,6 +35,29 @@ public class OcrUnavailableException extends Exception {
    * @param cause   the underlying failure, may be {@code null}
    */
   public OcrUnavailableException(String message, Throwable cause) {
+    this(message, cause, true);
+  }
+
+  /**
+   * Builds the exception saying whether trying again can help.
+   *
+   * @param message   a fixed description of what failed
+   * @param cause     the underlying failure, may be {@code null}
+   * @param retryable {@code false} when the service answered with a client error (4xx): the same
+   *                  request will fail the same way
+   */
+  public OcrUnavailableException(String message, Throwable cause, boolean retryable) {
     super(message, cause);
+    this.retryable = retryable;
+  }
+
+  /**
+   * Whether a later attempt may succeed: a server error, a timeout or a connection failure are
+   * transient; a client error (4xx) is not. Callers that do not retry (the MCP tool) ignore it.
+   *
+   * @return {@code true} when trying again is worthwhile
+   */
+  public boolean isRetryable() {
+    return retryable;
   }
 }

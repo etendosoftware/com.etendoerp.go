@@ -66,7 +66,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * surface of {@code bank-reconciliation} — and the regression guarantees around it:
  *
  * <ul>
- *   <li>CA1/CA7: the nine declared contracts (names, order, mutating flag, required lists);</li>
+ *   <li>CA1/CA7: the eleven declared contracts (names, order, mutating flag, required lists);</li>
  *   <li>CA2–CA6: every action re-enters the SAME {@code ReconciliationHandlerSupport.handle*}
  *       wrapper the SPA route uses, with {@code id} mapped to {@code financialAccountId} (writes)
  *       or {@code accountId} (reads) and the parameters passed through untouched;</li>
@@ -83,6 +83,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * hand the business method an identical body.</p>
  *
  * @covers com.etendoerp.go.schemaforge.ReconciliationAgentActions
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("ReconciliationAgentActions (ETP-5468)")
@@ -267,11 +268,12 @@ class ReconciliationAgentActionsTest {
   class Contracts {
 
     @Test
-    @DisplayName("nine actions, reads first then writes, in presentation order")
+    @DisplayName("eleven actions, reads first then writes, the bounce-pair pair last")
     void nineActionsInOrder() {
       assertEquals(List.of("pendingLines", "candidates", "autoMatch", "reconcileGroup",
           "reconcileDifference", "undoReconciliation", "removeOperation", "reactivateSelected",
-          "applySuggestions"), new ArrayList<>(ReconciliationAgentActions.CONTRACTS.keySet()));
+          "applySuggestions", "discardPair", "restorePair"),
+          new ArrayList<>(ReconciliationAgentActions.CONTRACTS.keySet()));
     }
 
     @Test
@@ -295,6 +297,10 @@ class ReconciliationAgentActionsTest {
       expected.put("removeOperation", List.of("statementLineId", "transactionIds"));
       expected.put("reactivateSelected", List.of("statementLineId", "transactionIds"));
       expected.put("applySuggestions", List.of("groups"));
+      expected.put("discardPair", List.of("statementLineId", "counterpartLineId"));
+      expected.put("restorePair", List.of("lineId"));
+      assertEquals(expected.keySet(), ReconciliationAgentActions.CONTRACTS.keySet(),
+          "every declared action has an expected required list");
       for (Map.Entry<String, NeoActionContract> e : ReconciliationAgentActions.CONTRACTS
           .entrySet()) {
         JSONObject schema = e.getValue().toJson().getJSONObject("parameters");
@@ -611,6 +617,50 @@ class ReconciliationAgentActionsTest {
       assertNoRouteCalled();
     }
 
+    /**
+     * ETP-5581: the panel's "No es un rebote" ({@code dismissPair}) is UI-only, so an agent naming
+     * it gets the contract's 422 unknown action, which does not list it, and nothing runs — not
+     * even the {@code runPostAction} envelope the SPA route goes through.
+     *
+     * @throws Exception when the answer cannot be read
+     */
+    @Test
+    @DisplayName("dismissPair is not an agent action → 422 unknown action, nothing runs")
+    void dismissPairIsRefusedToAgents() throws Exception {
+      NeoResponse response = handler.handle(actionContext("dismissPair", ACC_ID,
+          new JSONObject().put("statementLineId", LINE_ID)));
+
+      assertEquals(422, response.getHttpStatus());
+      JSONObject error = response.getBody().getJSONObject("error");
+      assertTrue(error.getString("message").contains("Unknown action 'dismissPair'"),
+          error.toString());
+      assertFalse(strings(error.getJSONArray("availableActions")).contains("dismissPair"));
+      assertNoRouteCalled();
+      support.verify(() -> ReconciliationHandlerSupport.runPostAction(any(), any(), anyString()),
+          never());
+    }
+
+    /**
+     * ETP-5581: {@code bounceDecisions} (the modal's report of the pairs it showed and did not
+     * apply) is not in the agent contract of {@code applySuggestions}: an agent sending it gets the
+     * 422 for an undeclared key, naming it, and the groups are not applied.
+     *
+     * @throws Exception when the answer cannot be read
+     */
+    @Test
+    @DisplayName("applySuggestions with bounceDecisions → 422 undeclared key, nothing applied")
+    void bounceDecisionsKeyIsRefusedToAgents() throws Exception {
+      JSONObject params = paramsFor("applySuggestions").put("bounceDecisions", new JSONArray()
+          .put(new JSONObject().put("groupKey", "bounce-L1-L2").put("decision", "unchecked")));
+
+      NeoResponse response = handler.handle(actionContext("applySuggestions", ACC_ID, params));
+
+      assertEquals(422, response.getHttpStatus());
+      assertEquals(List.of("bounceDecisions"), strings(response.getBody()
+          .getJSONObject("error").getJSONArray("unknownParameters")));
+      assertNoRouteCalled();
+    }
+
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = { "reconcileGroup", "reconcileDifference", "undoReconciliation",
         "removeOperation", "reactivateSelected", "applySuggestions" })
@@ -694,6 +744,38 @@ class ReconciliationAgentActionsTest {
     void agentNameOnSpaRouteFallsThrough() {
       assertNull(handler.handle(spaContext("POST", "undoReconciliation", new JSONObject(), null)));
       assertNoRouteCalled();
+    }
+
+    /**
+     * ETP-5581: the SPA's {@code POST ?action=dismissPair} is routed to the bounce-pair service and
+     * runs inside the same {@code runPostAction} envelope as every other SPA write (admin mode and
+     * the rollback of a refusal), with the very same context and the action name.
+     *
+     * @throws Exception when the body cannot be written
+     */
+    @Test
+    @DisplayName("POST ?action=dismissPair runs through runPostAction with the same context")
+    void spaDismissPairRunsThroughRunPostAction() throws Exception {
+      NeoResponse sentinel = NeoResponse.error(299, "dismissPair");
+      List<Object[]> received = new ArrayList<>();
+      support.when(() -> ReconciliationHandlerSupport.runPostAction(any(), any(), anyString()))
+          .thenAnswer(inv -> {
+            received.add(new Object[] { inv.getArgument(0), inv.getArgument(1),
+                inv.getArgument(2) });
+            return sentinel;
+          });
+      NeoContext ctx = spaContext("POST", "dismissPair",
+          new JSONObject().put("financialAccountId", ACC_ID).put("statementLineId", LINE_ID),
+          null);
+
+      assertSame(sentinel, handler.handle(ctx));
+
+      assertEquals(1, received.size());
+      assertSame(handler, received.get(0)[0]);
+      assertSame(ctx, received.get(0)[1]);
+      assertEquals("dismissPair", received.get(0)[2]);
+      assertNoRouteCalled();
+      access.verifyNoInteractions();
     }
 
     @Test

@@ -60,6 +60,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * runs for real.</p>
  *
  * @covers com.etendoerp.go.mcp.McpToolRouterSupport
+ * @covers com.etendoerp.go.mcp.McpReportActionsSchema
  */
 @DisplayName("etendo_schema on an action report spec (ETP-5468)")
 class McpSchemaReportActionsTest {
@@ -159,8 +160,9 @@ class McpSchemaReportActionsTest {
     JSONObject body = body(result);
     assertEquals(SPEC, body.getString("spec"));
     assertEquals(entityName, body.getString("entity"));
-    assertEquals(9, body.getInt("actionCount"));
-    assertEquals(9, body.getJSONArray("actions").length());
+    // The eleven bank-reconciliation actions (discardPair and restorePair since ETP-5581).
+    assertEquals(11, body.getInt("actionCount"));
+    assertEquals(11, body.getJSONArray("actions").length());
   }
 
   @Test

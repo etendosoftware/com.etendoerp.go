@@ -32,6 +32,15 @@ final class ContactAddressName {
   private static final String FIELD_NAME = "name";
   private static final String AD_DEFAULT = ".";
   private static final String FALLBACK = "Location";
+  /**
+   * Length of {@code C_BPartner_Location.Name} (NVARCHAR(60) in
+   * {@code src-db/database/model/tables/C_BPARTNER_LOCATION.xml}). A constant rather than a
+   * {@code ModelProvider} lookup so this class stays a pure function a unit test can call without
+   * booting the DAL model; keep it in step with the column.
+   */
+  static final int NAME_MAX_LENGTH = 60;
+  /** What a cut may leave dangling at the end: the ", " between city and address, or spaces. */
+  private static final String TRAILING_SEPARATORS = " ,";
 
   private ContactAddressName() {
   }
@@ -48,9 +57,18 @@ final class ContactAddressName {
    * @param body        the create body
    * @param geoLoc      the address's location, may be {@code null}
    * @param displayName the location's display name, {@code null} when it has none
-   * @return the name to store, never {@code null}
+   * <p>ETP-6206: whatever the source, the result is capped at {@link #NAME_MAX_LENGTH}. The app's
+   * editor and the Contacts import send "city, address line", which a long street pushes past the
+   * column, and the over-long name then failed the save at flush.
+   *
+   * @return the name to store, never {@code null}, at most {@link #NAME_MAX_LENGTH} characters
    */
   static String of(NeoContext ctx, JSONObject body, Location geoLoc,
+      Function<Location, String> displayName) {
+    return capped(uncapped(ctx, body, geoLoc, displayName));
+  }
+
+  private static String uncapped(NeoContext ctx, JSONObject body, Location geoLoc,
       Function<Location, String> displayName) {
     String sentName = nonBlank(body.optString(FIELD_NAME, null));
     if (ctx == null || !ctx.isMcpOrigin() || geoLoc == null) {
@@ -64,6 +82,56 @@ final class ContactAddressName {
       name = displayName.apply(geoLoc);
     }
     return name != null ? name : FALLBACK;
+  }
+
+  /**
+   * The name to store on an update, or {@code null} to leave the stored name unchanged
+   * (ETP-5806 CP-12c, QA finding).
+   *
+   * <p>An explicit {@code sentName} always wins, capped the same as {@link #of}. Otherwise — the
+   * MCP {@code etendo_update} shape, which edits only the structured address fields and never
+   * sends {@code name} at all — the display name is recomputed from the post-write {@code geoLoc}
+   * rather than left stale, the same default the create path falls back to for MCP. Gated behind
+   * {@code structuredAddressEnabled} so the legacy behaviour (name only changes when explicitly
+   * sent) is unchanged while the flag is off for the caller's account: the UI pop-up that is the
+   * only other caller always sends a freshly computed {@code name} on save regardless, so it never
+   * depends on this fallback.
+   *
+   * @param sentName                 the caller's own {@code name}, already resolved to {@code null}
+   *                                 for blank/absent by the handler (its {@code nullIfEmpty})
+   * @param structuredAddressEnabled whether to recompute automatically when {@code sentName} is
+   *                                 {@code null}
+   * @param geoLoc                  the address's own (already updated) location
+   * @param displayName              the location's display name, {@code null} when it has none
+   * @return the name to store, capped at {@link #NAME_MAX_LENGTH}; {@code null} to leave the
+   *     stored name untouched
+   */
+  static String forUpdate(String sentName, boolean structuredAddressEnabled, Location geoLoc,
+      Function<Location, String> displayName) {
+    if (sentName != null) {
+      return capped(sentName);
+    }
+    if (!structuredAddressEnabled) {
+      return null;
+    }
+    String computed = displayName.apply(geoLoc);
+    return computed != null ? capped(computed) : null;
+  }
+
+  /**
+   * {@code name} cut to {@link #NAME_MAX_LENGTH}, without the separators or spaces a cut can leave
+   * at its end. A name that fits is returned unchanged.
+   */
+  static String capped(String name) {
+    if (name.length() <= NAME_MAX_LENGTH) {
+      return name;
+    }
+    String cut = name.substring(0, NAME_MAX_LENGTH);
+    int end = cut.length();
+    while (end > 0 && TRAILING_SEPARATORS.indexOf(cut.charAt(end - 1)) >= 0) {
+      end--;
+    }
+    return end > 0 ? cut.substring(0, end) : FALLBACK;
   }
 
   /** As the handler's {@code nullIfEmpty}: empty and the literal "null" are no value. */

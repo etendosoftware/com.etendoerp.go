@@ -40,6 +40,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
@@ -56,6 +57,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  * {@link BankStatementAggregates#recomputeWithDelta} — including the suppression
  * and null-parent guards. {@link BankStatementAggregates} is mocked statically so
  * the dispatch is verified without touching a DB.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementLineAggregateHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -161,6 +164,30 @@ class BankStatementLineAggregateHandlerTest {
       handler.onDelete(event);
       agg.verify(() -> BankStatementAggregates.recomputeWithDelta(
           eq(parent), eq(line), eq(BankStatementAggregates.Op.DELETE), eq(event)));
+    }
+  }
+
+  /**
+   * Discarding or restoring a line changes only {@code EM_PSD2_Is_Discarded}: no amount and no
+   * transaction moves, yet the statement must be recomputed so its discarded count and status
+   * follow. The in-flight event is what {@code recomputeWithDelta} reads the new flag from.
+   */
+  @Test
+  void onUpdateRecomputesWhenOnlyTheDiscardFlagChanges() {
+    Property discardFlag = mock(Property.class);
+    when(lineEntity.getPropertyByColumnName(StatementLineDiscard.COL_IS_DISCARDED, false))
+        .thenReturn(discardFlag);
+    FIN_BankStatement parent = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = lineWithParent(parent);
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, line);
+    when(event.getPreviousState(discardFlag)).thenReturn(Boolean.FALSE);
+    when(event.getCurrentState(discardFlag)).thenReturn(Boolean.TRUE);
+
+    try (MockedStatic<BankStatementAggregates> agg = mockStatic(BankStatementAggregates.class)) {
+      handler.onUpdate(event);
+      agg.verify(() -> BankStatementAggregates.recomputeWithDelta(
+          eq(parent), eq(line), eq(BankStatementAggregates.Op.UPDATE), eq(event)));
     }
   }
 

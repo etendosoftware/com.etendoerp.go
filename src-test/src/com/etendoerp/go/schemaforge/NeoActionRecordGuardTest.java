@@ -324,6 +324,56 @@ class NeoActionRecordGuardTest {
     assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
   }
 
+  // ── ETP-5806: a tab-less entity's write is never guarded here (bug repro) ──
+
+  /** An entity with no AD_Tab at all — e.g. {@code warehouse/location} (ETP-5806). */
+  private static SFEntity tablessEntity() {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("location");
+    when(entity.getADTab()).thenReturn(null);
+    return entity;
+  }
+
+  @Test
+  @DisplayName("ETP-5806 repro: a tab-less entity's PUT/PATCH/DELETE is never refused here — "
+      + "ownership is left to the entity's own customization")
+  void crudOnTablessEntityPassesWithoutAnOwnershipLookup() {
+    SFEntity tabless = tablessEntity();
+
+    assertNull(NeoActionRecordGuard.writeRefusalFor(tabless, RECORD));
+
+    // Before the fix, writeRefusalFor fell through to resolveRecord() -> null ->
+    // TenantOwnership.isWritableByCurrentTenant(null), which is unconditionally false, refusing
+    // every write on a tab-less entity before its own customization (e.g.
+    // WarehouseLocationHandler, which runs its own TenantOwnership.loadOwned check) ever ran.
+    verify(dal, never()).get(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("ETP-5806: a tab whose table is null is tab-less too, and is also let through")
+  void crudOnTabWithNoTablePassesWithoutAnOwnershipLookup() {
+    SFEntity tableless = mock(SFEntity.class);
+    Tab tabWithNoTable = mock(Tab.class);
+    when(tableless.getADTab()).thenReturn(tabWithNoTable);
+
+    assertNull(NeoActionRecordGuard.writeRefusalFor(tableless, RECORD));
+    verify(dal, never()).get(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("ETP-5806 non-regression: an entity WITH an AD_Tab keeps the strict CRUD guard")
+  void crudOnATabbedEntityStillEnforcesOwnership() throws Exception {
+    // Same fixture as crudRefusesForeignAndMissingTargetsIdentically / crudAllowsOwnWritableRow:
+    // the tab-less bypass must not weaken the guard for every normal (tabbed) entity.
+    SFEntity tabbed = paymentEntity();
+    payment(OTHER_CLIENT, OWN_ORG);
+
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(tabbed, RECORD));
+
+    payment(OWN_CLIENT, OWN_ORG);
+    assertNull(NeoActionRecordGuard.writeRefusalFor(tabbed, RECORD));
+  }
+
 
   // ── ETP-6062: updateRefusalFor — an update consumed into tenant-owned storage ──
 

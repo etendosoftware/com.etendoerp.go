@@ -27,6 +27,8 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
@@ -140,7 +142,7 @@ public final class SelectorOrgFilter {
    * Append a full-text search predicate across all searchable properties of a custom-HQL selector.
    * Standard rich selectors use {@link #appendRichSearchFilter} instead.
    *
-   * <p>Emits an OR clause: {@code (lower(COALESCE(cast(<expr> as string), '')) LIKE :search)}.
+   * <p>Emits an OR clause: {@code ((upper(x) LIKE :searchLoose AND lower(x) LIKE :search))} with {@code x = COALESCE(cast(<expr> as string), '')}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
    *
    * <p>Each fragment is resolved via {@link #resolveSearchableExpression(String, String)}:
@@ -151,11 +153,22 @@ public final class SelectorOrgFilter {
    */
   static void appendCustomSearchFilter(StringBuilder hql,
       List<String> searchableProps, String alias, String search, boolean hasWhere) {
+    appendCustomSearchFilter(hql, searchableProps, alias, search, hasWhere, null);
+  }
+
+  /**
+   * Same as above; with the queried {@code entityName}, a fragment that is a plain string property
+   * of that entity is searched as {@code upper(col)} (usable by a trigram index on
+   * {@code upper(col)}) instead of through a cast.
+   */
+  static void appendCustomSearchFilter(StringBuilder hql,
+      List<String> searchableProps, String alias, String search, boolean hasWhere,
+      String entityName) {
     List<String> expressions = new ArrayList<>();
     for (String fragment : searchableProps) {
       expressions.add(resolveSearchableExpression(alias, fragment));
     }
-    appendSearchPredicate(hql, expressions, search, hasWhere);
+    appendSearchPredicate(hql, expressions, search, hasWhere, entityName, alias);
   }
 
   /**
@@ -168,15 +181,64 @@ public final class SelectorOrgFilter {
    */
   static void appendRichSearchFilter(StringBuilder hql,
       List<SearchableFragment> searchableProps, String alias, String search, boolean hasWhere) {
+    appendRichSearchFilter(hql, searchableProps, alias, search, hasWhere, null);
+  }
+
+  /** Same as above, typing the fragments against {@code entityName} (see appendCustomSearchFilter). */
+  static void appendRichSearchFilter(StringBuilder hql,
+      List<SearchableFragment> searchableProps, String alias, String search, boolean hasWhere,
+      String entityName) {
     List<String> expressions = new ArrayList<>();
     for (SearchableFragment fragment : searchableProps) {
       expressions.add(resolveRichSearchableExpression(alias, fragment));
     }
-    appendSearchPredicate(hql, expressions, search, hasWhere);
+    appendSearchPredicate(hql, expressions, search, hasWhere, entityName, alias);
   }
 
+  /**
+   * The two-part search predicate (ETP-6103): {@code upper(x) LIKE :searchLoose} is the prefilter a
+   * trigram index on {@code upper(x)} can serve; {@code lower(x) LIKE :search} keeps the exact
+   * pre-ETP-6103 results, because on a C-collation database upper()/lower() only fold ASCII, so a
+   * plain {@code upper(x) LIKE upper(:search)} would miss accented text. The caller binds both
+   * params (see {@link #searchPattern} / {@link #searchLoosePattern}).
+   */
+  static String searchLike(String expression) {
+    return "(upper(" + expression + ") LIKE :searchLoose AND lower(" + expression + ") LIKE :search)";
+  }
+
+  /** The {@code :search} value: the term lowercased in Java, exactly as before ETP-6103. */
+  static String searchPattern(String search) {
+    return "%" + search.toLowerCase() + "%";
+  }
+
+  /**
+   * The {@code :searchLoose} value, built from {@link #searchPattern}: ASCII letters upper-cased,
+   * every other code point (one per character, surrogate pairs included) a {@code _} wildcard. It
+   * matches whenever the lower() predicate does, whatever the database locale (on a C-collation
+   * database upper()/lower() only fold ASCII), and it can drive a trigram index on {@code upper(col)}.
+   */
+  static String searchLoosePattern(String search) {
+    StringBuilder out = new StringBuilder();
+    searchPattern(search).codePoints().forEach(cp -> {
+      // A backslash is LIKE's escape: "\ú" would become "\_" (a literal "_") and reject rows.
+      if (cp < 128 && cp != '\\') {
+        out.append((char) Character.toUpperCase(cp));
+      } else {
+        out.append('_');
+      }
+    });
+    return out.toString();
+  }
+
+  /**
+   * One OR-ed {@link #searchLike} per expression. A string column stays a
+   * bare {@code upper(col)} that a trigram index on {@code upper(col)} can serve (the lower() half
+   * keeps the exact pre-ETP-6103 results on a C-collation database). Other types (and fragments
+   * whose type is unknown) keep the cast.
+   * A NULL column never matches (before it was '' and matched only a term of wildcards).
+   */
   private static void appendSearchPredicate(StringBuilder hql, List<String> expressions,
-      String search, boolean hasWhere) {
+      String search, boolean hasWhere, String entityName, String alias) {
     if (StringUtils.isBlank(search) || expressions.isEmpty()) {
       return;
     }
@@ -185,9 +247,34 @@ public final class SelectorOrgFilter {
       if (i > 0) {
         hql.append(" OR ");
       }
-      hql.append("lower(COALESCE(cast(").append(expressions.get(i)).append(" as string), '')) LIKE :search");
+      String expression = expressions.get(i);
+      if (isStringProperty(entityName, alias, expression)) {
+        hql.append(searchLike(expression));
+      } else {
+        hql.append(searchLike(
+            "COALESCE(cast(" + expression + " as string), '')"));
+      }
     }
     hql.append(")");
+  }
+
+  /**
+   * Whether {@code expression} is {@code alias.<path>} resolving, on {@code entityName}, to a plain
+   * String property. False when unknown (another alias, an HQL function, no entity given).
+   */
+  static boolean isStringProperty(String entityName, String alias, String expression) {
+    if (entityName == null || alias == null || expression == null
+        || !expression.startsWith(alias + ".")) {
+      return false;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntity(entityName);
+      Property property = DalUtil.getPropertyFromPath(entity, expression.substring(alias.length() + 1));
+      return property != null && property.isPrimitive() && !property.isOneToMany()
+          && String.class.equals(property.getPrimitiveObjectType());
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 
   /**

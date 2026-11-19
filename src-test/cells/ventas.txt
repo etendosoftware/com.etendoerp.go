@@ -6,10 +6,24 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (31)
+# --- con mocks (54)
+com.etendoerp.go.portal.PortalDecisionEntryTest
+com.etendoerp.go.portal.PortalDecisionServiceTest
+com.etendoerp.go.portal.PortalDocumentLinksTest
+com.etendoerp.go.portal.PortalDocumentQueryTest
+com.etendoerp.go.portal.PortalDocumentsEndpointTest
+com.etendoerp.go.portal.PortalKpiTelemetryTest
+com.etendoerp.go.portal.PortalLinkDalTest
+com.etendoerp.go.portal.PortalLinkServiceTest
+com.etendoerp.go.portal.PortalPrintableTest
+com.etendoerp.go.portal.PortalRateLimiterTest
+com.etendoerp.go.portal.PortalServletTest
+com.etendoerp.go.portal.PortalUsageEventsTest
 com.etendoerp.go.schemaforge.AgingReportHandlerTest
+com.etendoerp.go.schemaforge.BpLocationHandlerTest
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerTest
 com.etendoerp.go.schemaforge.CloneShipmentHookTest
+com.etendoerp.go.schemaforge.ContactIdentityRulesTest
 com.etendoerp.go.schemaforge.ContactNameSyncHandlerTest
 com.etendoerp.go.schemaforge.ContactsBpStatsHandlerTest
 com.etendoerp.go.schemaforge.ContactsBpTrendHandlerTest
@@ -21,6 +35,7 @@ com.etendoerp.go.schemaforge.CreateShipmentHandlerTest
 com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandlerTest
 com.etendoerp.go.schemaforge.GoodsShipmentLineHandlerTest
 com.etendoerp.go.schemaforge.NeoReturnReceiptServiceTest
+com.etendoerp.go.schemaforge.QuotationDecisionsTest
 com.etendoerp.go.schemaforge.RejectQuotationHandlerTest
 com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerPostingTest
 com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerTest
@@ -31,14 +46,22 @@ com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandlerTest
 com.etendoerp.go.schemaforge.SalesLineCustomizationHandlersTest
 com.etendoerp.go.schemaforge.SalesOrderHeaderHandlerTest
 com.etendoerp.go.schemaforge.SalesQuotationHeaderHandlerTest
+com.etendoerp.go.schemaforge.email.contracts.PortalDecisionEmailContractsTest
+com.etendoerp.go.schemaforge.email.contracts.PortalLinkRenewalEmailContractTest
 com.etendoerp.go.schemaforge.email.contracts.SalesDocumentEmailContractsTest
 com.etendoerp.go.schemaforge.handlers.BusinessPartnerCategoryAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.ContactHandlerTest
+com.etendoerp.go.schemaforge.handlers.ContactRoleListScopeTest
+com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaultsTest
+com.etendoerp.go.schemaforge.handlers.ContactTypeRulesTest
+com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetryTest
 com.etendoerp.go.schemaforge.handlers.CustomerAccountingHandlerTest
+com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetryTest
 com.etendoerp.go.schemaforge.handlers.VendorAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
+com.etendoerp.go.schemaforge.util.StructuredAddressComposerTest
 
-# --- integración (BD) (1)
+# --- integración (BD) (2)
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerChildDataSqlIntegrationTest
-
+com.etendoerp.go.schemaforge.ContactSepaMandateIntegrationTest

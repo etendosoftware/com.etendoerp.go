@@ -1,0 +1,241 @@
+name: Etendo GO environment
+description: >-
+  ETP-6149: the environment the Jenkins full pipeline builds, for a job that already checked out
+  etendo_core at etendo_core and this module at etendo_core/modules/com.etendoerp.go. Clones the
+  extra modules, schema_forge on the paired branch and etendo-localenv, then `local-env up` builds
+  it: its own PostgreSQL, install, the GOClient seeds of schema_forge's local-env plugin and
+  smartbuild, with Tomcat left stopped.
+
+inputs:
+  etendobot_token:
+    description: Reads etendo_core, schema_forge, etendo-localenv and the GitHub modules.
+    required: true
+  # Only written to gradle.properties: etendo_core uses them to publish SNAPSHOT versions and the
+  # Etendo Gradle plugin for artifacts that live only in Etendo's Nexus. Building the environment
+  # does not need them (ETP-6367): schema_forge's full pipeline builds it without them.
+  nexus_user:
+    description: Nexus user, written to gradle.properties. Empty when the caller has none.
+    required: false
+    default: ''
+  nexus_password:
+    description: Nexus password, written to gradle.properties. Empty when the caller has none.
+    required: false
+    default: ''
+  bitbucket_ssh_key:
+    description: Read key for the Bitbucket modules listed in jenkinsExtraModules.txt.
+    required: true
+  core_branch:
+    description: etendo_core branch, also the fallback branch of the extra modules.
+    required: true
+  module_branch:
+    description: This module's branch (the PR's head or the pushed branch).
+    required: true
+  base_ref:
+    description: The PR's target branch, empty on a push.
+    required: false
+    default: ''
+  localenv_s3_key:
+    description: >-
+      Access key of the shared snapshot cache (the etendo-localenv-cache bucket Jenkins uses).
+      Empty: no shared cache, the run installs from scratch.
+    required: false
+    default: ''
+  localenv_s3_secret:
+    description: Secret key of the shared snapshot cache.
+    required: false
+    default: ''
+  localenv_push:
+    description: "'1' uploads a new snapshot to the shared cache (needs the read-write keys), '0' only reads."
+    required: false
+    default: '0'
+
+outputs:
+  schema_forge_branch:
+    description: The schema_forge branch checked out.
+    value: ${{ steps.sf.outputs.branch }}
+
+runs:
+  using: composite
+  steps:
+    # Same branch choice as the mini pipeline (moduleBranchUtils.groovy): the PR's branch when
+    # the module has it (never for develop, main, hotfix/* or mergeblock/*), otherwise the core's.
+    - name: Clone the extra modules
+      shell: bash
+      env:
+        BITBUCKET_SSH_KEY: ${{ inputs.bitbucket_ssh_key }}
+        ETENDOBOT_TOKEN: ${{ inputs.etendobot_token }}
+        CORE_BRANCH: ${{ inputs.core_branch }}
+        MODULE_BRANCH: ${{ inputs.module_branch }}
+      run: |
+        if [ -z "$BITBUCKET_SSH_KEY" ]; then
+          echo "::error::BITBUCKET_SSH_KEY is not set: the modules on bitbucket.org/koodu_software cannot be cloned."
+          exit 1
+        fi
+        mkdir -p ~/.ssh
+        printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/bitbucket
+        chmod 600 ~/.ssh/bitbucket
+        export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/bitbucket -o StrictHostKeyChecking=no"
+        case "$MODULE_BRANCH" in
+          develop|main|hotfix/*|mergeblock/*) try_branch="" ;;
+          *) try_branch="$MODULE_BRANCH" ;;
+        esac
+        cd etendo_core/modules
+        for url in $(tr ',' ' ' < com.etendoerp.go/jenkinsExtraModules.txt); do
+          name="$(basename "$url" .git)"
+          case "$url" in
+            git@github.com:*) url="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/${url#git@github.com:}" ;;
+          esac
+          if [ -n "$try_branch" ] && git clone -q --depth 1 --branch "$try_branch" "$url" "$name" 2>/dev/null; then
+            echo "$name: $try_branch"
+          else
+            git clone -q --depth 1 --branch "$CORE_BRANCH" "$url" "$name"
+            echo "$name: $CORE_BRANCH"
+          fi
+        done
+
+    # Same order as cloneModules.groovy for a sibling repo: this branch when schema_forge has it,
+    # otherwise main for a PR into main (or a hotfix), develop for anything else. The Jira epic
+    # step Jenkins adds for feature branches is left out: a cut into main never needs it.
+    - name: Pick the schema_forge branch
+      id: sf
+      shell: bash
+      env:
+        ETENDOBOT_TOKEN: ${{ inputs.etendobot_token }}
+        MODULE_BRANCH: ${{ inputs.module_branch }}
+        BASE_REF: ${{ inputs.base_ref }}
+      run: |
+        repo="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/etendosoftware/etendo_schema_forge.git"
+        case "$BASE_REF:$MODULE_BRANCH" in
+          main:*|*:main|*:hotfix/*) fallback=main ;;
+          *) fallback=develop ;;
+        esac
+        branch="$fallback"
+        if git ls-remote --exit-code --heads "$repo" "$MODULE_BRANCH" >/dev/null 2>&1; then
+          branch="$MODULE_BRANCH"
+        fi
+        echo "schema_forge: $branch"
+        echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+    # local-env loads the GO sample client through schema_forge's plugin
+    # (local-env.d/plugins/etendo-go), which it finds at etendo_core/schema_forge.
+    - name: Checkout etendo_schema_forge
+      uses: actions/checkout@v4
+      with:
+        repository: etendosoftware/etendo_schema_forge
+        token: ${{ inputs.etendobot_token }}
+        ref: ${{ steps.sf.outputs.branch }}
+        path: etendo_core/schema_forge
+
+    - name: Checkout etendo-localenv
+      uses: actions/checkout@v4
+      with:
+        repository: etendosoftware/etendo-localenv
+        token: ${{ inputs.etendobot_token }}
+        ref: main
+        path: etendo-localenv
+
+    # After the checkouts: the Gradle cache keys on the build files of the core and the modules.
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+        cache: gradle
+
+    # The same properties as the Jenkins Building Environment stage. local-env points bbdd.* at
+    # its own PostgreSQL (backing this file up). The email provider goes to the sink the
+    # integration specs start (E2E_EMAIL_SINK=1); its key is the fixed e2e value Jenkins uses.
+    - name: Configure gradle.properties
+      shell: bash
+      working-directory: etendo_core
+      env:
+        NEXUS_USER: ${{ inputs.nexus_user }}
+        NEXUS_PASSWORD: ${{ inputs.nexus_password }}
+        ETENDOBOT_TOKEN: ${{ inputs.etendobot_token }}
+      run: |
+        cat > gradle.properties <<EOF
+        context.name=etendo
+        bbdd.sid=etendo
+        bbdd.port=5432
+        bbdd.systemUser=postgres
+        bbdd.systemPassword=syspass
+        bbdd.user=tad
+        bbdd.password=tad
+        nexusUser=${NEXUS_USER}
+        nexusPassword=${NEXUS_PASSWORD}
+        githubUser=etendobot
+        githubToken=${ETENDOBOT_TOKEN}
+        ETENDO_HOST=http://localhost:8080/etendo
+        docker_com.etendoerp.go=true
+        JSREPORT_PORT=5488
+        SCHEMA_FORGE_DIR=${GITHUB_WORKSPACE}/etendo_core/schema_forge
+        etendo.go.email.provider.enabled=true
+        etendo.go.email.provider.baseUrl=http://127.0.0.1:8025/send
+        etendo.go.email.provider.apiKey=e2e-only-secret
+        etendo.go.app.baseUrl=http://localhost:4173
+        etendo.go.runtime.environment=local
+        allow.root=true
+        org.gradle.daemon=false
+        org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+        EOF
+
+    # `up` brings PostgreSQL (zonky binaries) and Tomcat 9 itself, restores the DB from the
+    # snapshot cache when one matches the sources (installs it otherwise), runs the plugin seeds
+    # (GOClient sample data, onboarding sampledata) and smartbuild. ETENDO_GO_SPA=0: no dev SPA,
+    # the specs serve their own bundle.
+    # ETP-6319: the shared cache is the bucket Jenkins uses (etendo-go/go/Jenkinsfile in
+    # com.etendoerp.jenkins.pipelines), signed with curl --aws-sigv4. Same fallbacks: no keys, or a
+    # curl older than 8.5 (which signs S3 requests wrongly), builds without it instead of failing.
+    # With LOCALENV_PUSH=1 `up` uploads the new snapshot in a detached background sync that the
+    # job's end would cut, so `cache sync` waits for it (it says "sync already running" until the
+    # lock is free).
+    - name: Build the environment
+      shell: bash
+      working-directory: etendo_core
+      env:
+        LE: ${{ github.workspace }}/etendo-localenv/bin/local-env.sh
+        LOCALENV_CACHE: ${{ runner.temp }}/localenv-cache
+        LOCALENV_UPDATE_CHECK_SECS: '0'
+        LOCALENV_NEAREST_FALLBACK: install
+        LOCALENV_PUSH: ${{ inputs.localenv_push }}
+        LOCALENV_REMOTE: https://etendo-localenv-cache.ams3.digitaloceanspaces.com/etendo-localenv
+        LOCALENV_S3_REGION: ams3
+        LOCALENV_S3_KEY: ${{ inputs.localenv_s3_key }}
+        LOCALENV_S3_SECRET: ${{ inputs.localenv_s3_secret }}
+        ETENDO_GO_SPA: '0'
+      run: |
+        if [ -z "$LOCALENV_S3_KEY" ] || [ -z "$LOCALENV_S3_SECRET" ]; then
+          echo "::warning::No snapshot cache keys: building without the shared cache."
+          unset LOCALENV_REMOTE
+        else
+          v="$(curl --version | sed -n '1s/^curl \([0-9.]*\).*/\1/p')"
+          if [ "$(printf '%s\n' 8.5 "$v" | sort -V | head -1)" = 8.5 ]; then
+            export LOCALENV_REMOTE_CURL_ARGS="--user $LOCALENV_S3_KEY:$LOCALENV_S3_SECRET --aws-sigv4 aws:amz:$LOCALENV_S3_REGION:s3"
+          else
+            echo "::warning::curl $v cannot sign S3 requests (needs 8.5+): building without the shared cache."
+            unset LOCALENV_REMOTE
+          fi
+        fi
+        unset LOCALENV_S3_KEY LOCALENV_S3_SECRET
+        [ -n "${LOCALENV_REMOTE:-}" ] || export LOCALENV_PUSH=0
+        start=$(date +%s)
+        ./gradlew prepareConfig
+        "$LE" up --fresh --no-tomcat
+        echo "Environment built in $(( ($(date +%s) - start) / 60 )) min (shared cache: $([ -n "${LOCALENV_REMOTE:-}" ] && echo on || echo off), push: $LOCALENV_PUSH)." | tee -a "$GITHUB_STEP_SUMMARY"
+        if [ "$LOCALENV_PUSH" = 1 ]; then
+          while :; do
+            out="$("$LE" cache sync 2>&1)"; echo "$out"
+            case "$out" in *"sync already running"*) sleep 5 ;; *) break ;; esac
+          done
+        fi
+        df -h / | tee -a "$RUNNER_TEMP/disk.txt"
+
+    # Jenkins copies these into the deployed webapp too: onboarding reads them from the classpath.
+    - name: Copy the onboarding sampledata into the webapp
+      shell: bash
+      working-directory: etendo_core
+      run: |
+        dest=build/local-env/catalina/webapps/etendo/WEB-INF/classes/com/etendoerp/go/onboarding
+        mkdir -p "$dest"
+        cp -r WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata "$dest/"
+        test -f "$dest/sampledata/index.txt"
+        echo "sampledata: $(wc -l < "$dest/sampledata/index.txt") entries"

@@ -31,7 +31,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -58,12 +57,30 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  *   <li>{@code createPurchaseReturn} → {@link CreatePurchaseReturnHandler}</li>
+ *   <li>{@code availableInvoices} / {@code availableInvoiceLines} →
+ *       {@link ImportInvoiceLinesIntoInOutHandler} (ETP-6099)</li>
  * </ul>
+ *
+ * <p><b>Binding (ETP-6099).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code goodsReceiptHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("goodsReceiptHeaderHandler")
+@NeoExtension(spec = "goods-receipt", entity = "goodsReceipt")
 public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsReceiptHeaderHandler.class);
+  /**
+   * The invoices this receipt's "Import from invoice" popup offers (ETP-6099): the ones whose grand
+   * total is not negative, as the popup always filtered them. Pending keeps the popup's rule (ETP-6099
+   * product decision): a linked line 0, any other its quantity minus what OTHER draft receipts hold
+   * of its order line; the delivered quantity is NOT deducted. Its popup asks for
+   * {@code pendingBasis: "classic"} (ETP-6099 follow-up), offered here only: a linked line 0, any
+   * other its invoiced quantity, no draft deducted, exactly as before ETP-6099.
+   */
+  static final ImportInvoiceLinesIntoInOutHandler.SourcePolicy INVOICE_IMPORT_POLICY =
+      new ImportInvoiceLinesIntoInOutHandler.SourcePolicy(
+          invoice -> invoice.getGrandTotalAmount() == null
+              || invoice.getGrandTotalAmount().signum() >= 0, false, false, true);
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
@@ -96,6 +113,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   @Inject
   private ImportOrderLinesIntoInOutHandler importOrderLinesHandler;
 
+  /** {@code availableInvoices} / {@code availableInvoiceLines} (ETP-6099). */
+  @Inject
+  private ImportInvoiceLinesIntoInOutHandler importInvoiceLinesHandler;
+
   @Inject
   private DocumentPostingService postingService;
 
@@ -113,8 +134,12 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
     contracts.putAll(ImportOrderLinesIntoInOutHandler.contracts(false));
+    contracts.putAll(ImportInvoiceLinesIntoInOutHandler.contracts(false));
     contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(),
         CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT.getName(),
+        CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT);
     contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
         CreatePurchaseReturnHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
@@ -184,9 +209,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
       return null; // let NEO native process handle completion
     }
+    context.setAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE, INVOICE_IMPORT_POLICY);
     return NeoHeaderActionRouter.dispatch(context,
-        cloneRecordHandler, importOrderLinesHandler, createPurchaseInvoiceHandler,
-        createPurchaseReturnHandler);
+        cloneRecordHandler, importOrderLinesHandler, importInvoiceLinesHandler,
+        createPurchaseInvoiceHandler, createPurchaseReturnHandler);
   }
 
   /**

@@ -66,6 +66,8 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * with it: text is clipped to the real column width, an id is either whole or NULL (a clipped id
  * would be a dangling FK), and a negative or oversized duration never reaches
  * {@code NUMERIC(10,0)}. The column indexes below follow {@link UsageEventWriter#INSERT_SQL}.</p>
+ *
+ * @covers com.etendoerp.go.usageevents.UsageEventWriter
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes
 class UsageEventWriterJdbcTest {
@@ -452,6 +454,139 @@ class UsageEventWriterJdbcTest {
       assertEquals(0, UsageEventWriter.insertBatch(events(2)));
       verify(ps, never()).executeBatch();
       assertConnectionReturned();
+    }
+  }
+
+  @Nested
+  @DisplayName("insertEach")
+  class InsertEach {
+
+    private MockedStatic<ExternalConnectionPool> poolStatic;
+    private final ExternalConnectionPool pool = mock(ExternalConnectionPool.class);
+    private final Connection connection = mock(Connection.class);
+
+    @BeforeEach
+    void mockPool() throws SQLException {
+      poolStatic = mockStatic(ExternalConnectionPool.class);
+      poolStatic.when(ExternalConnectionPool::getInstance).thenReturn(pool);
+      when(pool.getConnection()).thenReturn(connection);
+      // A live connection: a refused row is a row refusal, not an outage.
+      org.mockito.Mockito.lenient().when(connection.isValid(anyInt())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closePool() {
+      poolStatic.close();
+    }
+
+    private List<UsageEvent> events(int n) {
+      return Collections.nCopies(n, fullEvent().build());
+    }
+
+    @Test
+    void noPoolThrowsAndWritesNothing() {
+      poolStatic.when(ExternalConnectionPool::getInstance).thenReturn(null);
+      assertThrows(IllegalStateException.class, () -> UsageEventWriter.insertEach(events(2)));
+    }
+
+    @Test
+    void aGoodBatchReportsEveryRowWrittenWithOneCommit() throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(UsageEventWriter.INSERT_SQL)).thenReturn(ps);
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertTrue(result[0] && result[1] && result[2]);
+      verify(ps, times(3)).addBatch();
+      verify(ps).executeBatch();
+      verify(connection).commit();
+      verify(connection).close();
+    }
+
+    @Test
+    void aFailedBatchRetriesRowByRowAndFlagsOnlyTheRefusedRow() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      PreparedStatement row2 = mock(PreparedStatement.class);
+      PreparedStatement row3 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1, row2, row3);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("fk violation"));
+      when(row2.executeUpdate()).thenThrow(new SQLException("poisoned row"));
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertTrue(result[0]);
+      assertFalse(result[1]);
+      assertTrue(result[2]);
+      verify(connection, times(2)).rollback(); // the failed batch, then the refused row
+      verify(connection).close();
+    }
+
+    @Test
+    void aFailedSingleRowBatchIsReportedAsNotWrittenNotThrown() throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeBatch()).thenThrow(new SQLException("bad row"));
+      when(ps.executeUpdate()).thenThrow(new SQLException("bad row"));
+
+      boolean[] result = UsageEventWriter.insertEach(events(1));
+
+      assertEquals(1, result.length);
+      assertFalse(result[0]);
+    }
+
+    @Test
+    void aRefusedRowThenAnInvalidConnectionIsAnOutageAndThrows() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenReturn(false);
+
+      assertThrows(SQLException.class, () -> UsageEventWriter.insertEach(events(3)));
+      verify(connection).close();
+    }
+
+    @Test
+    void aConnectionCheckThatThrowsIsTreatedAsAnOutage() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenThrow(new SQLException("gone"));
+
+      assertThrows(SQLException.class, () -> UsageEventWriter.insertEach(events(2)));
+    }
+
+    @Test
+    void aFullyRefusedBatchOnAWorkingConnectionReturnsAllFalseWithoutThrowing()
+        throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeBatch()).thenThrow(new SQLException("batch"));
+      when(ps.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenReturn(true);
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertFalse(result[0] || result[1] || result[2]);
+    }
+
+    @Test
+    void insertBatchStillCountsRowsByRowAfterTheRefactor() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      PreparedStatement row2 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1, row2);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("poisoned"));
+
+      assertEquals(1, UsageEventWriter.insertBatch(events(2)));
     }
   }
 }

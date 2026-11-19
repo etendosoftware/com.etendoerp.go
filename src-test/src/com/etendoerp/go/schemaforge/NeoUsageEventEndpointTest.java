@@ -77,6 +77,8 @@ import com.etendoerp.go.usageevents.UsageEventTypes;
  * <p>The contract under test is "drop, don't fail": only a body that is not an object with an
  * {@code events} array is a 400 (and an oversized one a 413); every per-event or per-property
  * problem drops just that event or property and the answer is still {@code 202}.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoUsageEventEndpoint
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes
 class NeoUsageEventEndpointTest {
@@ -742,6 +744,167 @@ class NeoUsageEventEndpointTest {
       }
       postWithRotatingSessionKeys(1, "last-", 0);
       assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+    }
+  }
+
+  // ── server-only types (ETP-6057) ──────────────────────────────────────
+
+  @Nested
+  @DisplayName("server-only types")
+  class ServerOnlyTypes {
+
+    private static final String BILLED = UsageEventTypes.PUBLIC_API_REQUEST;
+
+    @Test
+    void aServerOnlyEventIsDroppedNotAcceptedAndNeverSunk() throws Exception {
+      assertAccepted(postEvents(event(BILLED)), 0, 1);
+      assertAccepted(postEvents(event(UsageEventTypes.SESSION_LOGIN)), 0, 1);
+
+      assertTrue(sunk.isEmpty(), "the recorder must never see a server-only type from a client");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { UsageEventTypes.AI_TOOL_EXECUTE, UsageEventTypes.AI_SUPPORT_MESSAGE })
+    void aCostedAiEventFromTheBrowserIsDroppedWhateverSourceItClaims(String type)
+        throws Exception {
+      for (String source : new String[] { "backend", "ui", "ai-bff", "mcp", "" }) {
+        assertAccepted(postEvents(event(type).put("source", source).put("costUsd", 99.0)), 0, 1);
+      }
+
+      assertTrue(sunk.isEmpty(), "a browser cannot add to the AI spend with " + type);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "backend", "ui", "ai-bff", "mcp", "garbage", "" })
+    void whateverSourceTheBodyClaimsItIsDropped(String source) throws Exception {
+      assertAccepted(postEvents(event(BILLED).put("source", source)), 0, 1);
+
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void aPaddedTypeIsTrimmedBeforeTheCheck() throws Exception {
+      assertAccepted(postEvents(event("  " + BILLED + " ")), 0, 1);
+
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void otherEventsInTheSameBatchAreStillAccepted() throws Exception {
+      JSONArray batch = new JSONArray()
+          .put(known())
+          .put(event(BILLED).put("source", "backend").put("properties",
+              new JSONObject().put("count", 1_000_000)))
+          .put(known())
+          .put(event(UsageEventTypes.SESSION_LOGIN));
+
+      assertAccepted(postEvents(batch), 2, 2);
+
+      assertEquals(2, sunk.size());
+      assertTrue(sunk.stream().allMatch(e -> KNOWN.equals(e.eventType())));
+    }
+
+    @Test
+    void aServerOnlyEventConsumesNoRateLimitBudget() throws Exception {
+      int perRequest = NeoUsageEventEndpoint.MAX_EVENTS_PER_REQUEST;
+      JSONArray flood = new JSONArray();
+      for (int i = 0; i < perRequest; i++) {
+        flood.put(event(BILLED).put("sessionKey", "s1"));
+      }
+      // Well past both limits (600 per session, 1200 per user): all of it is dropped.
+      int requests = 2 * NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS / perRequest;
+      for (int r = 0; r < requests; r++) {
+        assertAccepted(postEvents(flood), 0, perRequest);
+      }
+      assertTrue(sunk.isEmpty());
+
+      // The user's full budget is still there: 600 for one session, 1200 for the user.
+      int sessionBatches = NeoUsageEventEndpoint.RATE_LIMIT_EVENTS / perRequest;
+      JSONArray sameSession = new JSONArray();
+      for (int i = 0; i < perRequest; i++) {
+        sameSession.put(known().put("sessionKey", "s1"));
+      }
+      for (int r = 0; r < sessionBatches; r++) {
+        assertAccepted(postEvents(sameSession), perRequest, 0);
+      }
+      int userBatchesLeft = (NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS
+          - NeoUsageEventEndpoint.RATE_LIMIT_EVENTS) / perRequest;
+      for (int r = 0; r < userBatchesLeft; r++) {
+        JSONArray rotating = new JSONArray();
+        for (int i = 0; i < perRequest; i++) {
+          rotating.put(known().put("sessionKey", "o" + r + "-" + i));
+        }
+        assertAccepted(postEvents(rotating), perRequest, 0);
+      }
+      assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+    }
+  }
+
+  // ── generated document PDFs (ETP-5993) ────────────────────────────────
+
+  @Nested
+  @DisplayName("generated document PDFs")
+  class GeneratedDocumentPdfs {
+
+    private static final String PDF = UsageEventTypes.DOCUMENT_PDF_GENERATE;
+
+    private final List<String> lookups = new ArrayList<>();
+
+    @BeforeEach
+    void savedCompact() {
+      endpoint = new NeoUsageEventEndpoint(sunk::add, clock::get, (org, docType) -> {
+        lookups.add(docType);
+        return "compact";
+      });
+    }
+
+    private JSONObject pdf(String docType, String channel) throws Exception {
+      return event(PDF).put("target", docType).put("action", channel);
+    }
+
+    @Test
+    void aDownloadIsRecordedWithOnlyTypeChannelAndTemplate() throws Exception {
+      UsageEvent recorded = single(pdf("sales-invoice", "download")
+          .put("errorCode", "boom").put("durationMs", 12).put("properties", new JSONObject()
+              .put("variant", "modern").put("documentNo", "FV-0001").put("total", 121.0)));
+
+      assertAll(
+          () -> assertEquals(PDF, recorded.eventType()),
+          () -> assertEquals("sales-invoice", recorded.target()),
+          () -> assertEquals("download", recorded.action()),
+          () -> assertEquals(UsageEvent.OUTCOME_OK, recorded.outcome()),
+          () -> assertNull(recorded.errorCode()),
+          () -> assertNull(recorded.durationMs()),
+          () -> assertEquals("{\"variant\":\"modern\"}", recorded.properties()));
+      assertTrue(lookups.isEmpty(), "a valid variant from the client needs no lookup");
+    }
+
+    @Test
+    void aMissingVariantIsTheOrganizationsSavedOne() throws Exception {
+      UsageEvent recorded = single(pdf("goods-shipment", "print"));
+
+      assertEquals("{\"variant\":\"compact\"}", recorded.properties());
+      assertEquals(List.of("goods-shipment"), lookups);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "preview", "open", "", "server_render" })
+    void aPreviewOrAnyOtherChannelIsDropped(String channel) throws Exception {
+      assertAccepted(postEvents(pdf("sales-invoice", channel)), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "listing", "purchase-invoice", "" })
+    void aTypeThatIsNotADocumentIsDropped(String docType) throws Exception {
+      assertAccepted(postEvents(pdf(docType, "email")), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void aFailedGenerationIsNotCounted() throws Exception {
+      assertAccepted(postEvents(pdf("sales-order", "email").put("outcome", "error")), 0, 1);
+      assertTrue(sunk.isEmpty());
     }
   }
 

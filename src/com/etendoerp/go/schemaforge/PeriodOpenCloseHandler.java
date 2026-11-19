@@ -31,6 +31,7 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.PeriodControlLog;
 import org.openbravo.service.db.CallProcess;
 
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -68,8 +69,11 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
   static final NeoActionContract OPEN_CLOSE = NeoActionContract.write(
       PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
       "Opens or closes this accounting period for every document type at once - the 'Open/Close "
-          + "period' action of the calendar. Posting a document dated in a closed period is "
-          + "refused, so ask the user before closing one. Returns the process message.",
+          + "period' action of the calendar. Opening or closing a period is the user's decision, "
+          + "never a step to get another request through: when a document is refused because its "
+          + "period is not open, ask the user before opening it (ETP-5848). Posting a document dated "
+          + "in a closed period is refused, so ask the user before closing one too. Returns the "
+          + "process message.",
       NeoActionContract.Param.requiredOptions(PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
           "O = open, C = close (can be reopened later), P = close permanently (can never be "
               + "reopened)",
@@ -117,7 +121,28 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
     ProcessInstance pInstance = CallProcess.getInstance().call(process167, logEntry.getId(), null);
     OBDal.getInstance().getSession().refresh(pInstance);
 
-    return PeriodOpenCloseSupport.translateResult(pInstance, process167);
+    NeoResponse result = PeriodOpenCloseSupport.translateResult(pInstance, process167);
+    if (result.getHttpStatus() < 400 && "O".equals(openCloseValue)) {
+      // ETP-6230: a manual open counts as a calendar review (confirm). Queued for after the commit
+      // (dropped when a batch rolls back, so no false event and no permanent marker). shortcut: a
+      // single request commits after this returns, so a failing commit there costs one stray event.
+      String source = manualOpenSource(NeoWriteChannel.current());
+      String clientId = period.getClient().getId();
+      NeoBatchScope.runAfterCommit(() -> AccountingKpiTelemetry.calendarReviewCompleted(clientId,
+          AccountingKpiTelemetry.REVIEW_MANUAL_OPEN, AccountingKpiTelemetry.TYPE_CONFIRM, source));
+    }
+    return result;
+  }
+
+  /** The KPI {@code source} of a manual open: batch rule first, then MCP, else the window. */
+  private static String manualOpenSource(String channel) {
+    if (channel.endsWith("_batch")) {
+      return AccountingKpiTelemetry.SOURCE_BATCH;
+    }
+    if (channel.startsWith(NeoWriteChannel.MCP)) {
+      return AccountingKpiTelemetry.SOURCE_MCP;
+    }
+    return AccountingKpiTelemetry.SOURCE_CALENDAR_WINDOW;
   }
 
   @Override

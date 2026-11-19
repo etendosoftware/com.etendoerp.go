@@ -51,11 +51,15 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Language;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link McpSessionManager}.
+ *
+ * @covers com.etendoerp.go.mcp.McpSessionManager
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -95,6 +99,7 @@ class McpSessionManagerTest {
   void tearDown() {
     // executeInContext binds the effective tenant for telemetry; do not leak it into other tests.
     McpUsageTelemetry.clearCurrentTenant();
+    NeoLanguage.restoreRequestCode(null);
     if (swsMock != null) {
       swsMock.close();
     }
@@ -387,6 +392,65 @@ class McpSessionManagerTest {
       String result = (String) resolveDefaultOrgMethod.invoke(null, ROLE_ID);
 
       assertNull(result);
+    }
+  }
+
+  @Nested
+  @DisplayName("request language (ETP-6158)")
+  class RequestLanguage {
+
+    private void contextLanguage(String code) {
+      Language language = mock(Language.class);
+      when(language.getLanguage()).thenReturn(code);
+      when(previousContext.getLanguage()).thenReturn(language);
+    }
+
+    @Test
+    @DisplayName("the language is captured before the call and survives a change inside it")
+    void capturesTheLanguageBeforeTheCall() throws Exception {
+      contextLanguage("es_ES");
+
+      String seen = McpSessionManager.executeInContext(
+          USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, () -> {
+            contextLanguage("en_US"); // a Classic call switching the OBContext language
+            return NeoLanguage.requestCode();
+          });
+
+      assertEquals("es_ES", seen);
+      // restored: nothing captured is left on the thread, the current language answers again
+      assertEquals("en_US", NeoLanguage.requestCode());
+    }
+
+    @Test
+    @DisplayName("the caller's captured language is restored when the call throws")
+    void restoresTheCallersLanguageWhenTheCallThrows() {
+      contextLanguage("fr_FR");
+      NeoLanguage.captureRequestCode();
+      contextLanguage("es_ES");
+
+      assertThrows(IllegalStateException.class, () -> McpSessionManager.executeInContext(
+          USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, () -> {
+            assertEquals("es_ES", NeoLanguage.requestCode());
+            throw new IllegalStateException("boom");
+          }));
+
+      assertEquals("fr_FR", NeoLanguage.requestCode());
+    }
+
+    @Test
+    @DisplayName("a failure before the capture leaves the caller's captured language alone")
+    void aFailureBeforeTheCaptureLeavesTheCallersLanguage() {
+      contextLanguage("fr_FR");
+      NeoLanguage.captureRequestCode();
+      contextLanguage("es_ES"); // what requestCode would fall back to if the capture were wiped
+      swsMock.when(() -> SecureWebServicesUtils.createContext(
+          anyString(), anyString(), anyString(), any(), anyString()))
+          .thenThrow(new IllegalStateException("no context"));
+
+      assertThrows(IllegalStateException.class, () -> McpSessionManager.executeInContext(
+          USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, () -> "never"));
+
+      assertEquals("fr_FR", NeoLanguage.requestCode());
     }
   }
 }

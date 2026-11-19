@@ -21,9 +21,14 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Sanitized backend observability event.
+ *
+ * <p>Every event gets a random {@link #getInsertId() insert id} when it is built (ETP-5581): the
+ * Mixpanel sink sends it as {@code $insert_id}, which Mixpanel uses to drop a duplicate of the same
+ * emission. It identifies the emission, never a record.</p>
  */
 public final class NeoTelemetryEvent {
 
@@ -31,17 +36,34 @@ public final class NeoTelemetryEvent {
   private final Map<String, Object> properties;
   private final Instant timestamp;
   private final String clientId;
+  private final String insertId;
 
+  /**
+   * An event with no tenant for the server log.
+   *
+   * @param name       backend event name
+   * @param properties sanitized properties
+   * @param timestamp  creation instant
+   */
   NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp) {
     this(name, properties, timestamp, null);
   }
 
+  /**
+   * An event that names its tenant for the server log only.
+   *
+   * @param name       backend event name
+   * @param properties sanitized properties
+   * @param timestamp  creation instant
+   * @param clientId   the {@code AD_Client_ID} for the server log, or {@code null}
+   */
   NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
       String clientId) {
     this.name = name;
     this.properties = Collections.unmodifiableMap(new LinkedHashMap<>(properties));
     this.timestamp = timestamp;
     this.clientId = clientId;
+    this.insertId = UUID.randomUUID().toString().replace("-", "");
   }
 
   /**
@@ -84,5 +106,16 @@ public final class NeoTelemetryEvent {
    */
   public String getClientId() {
     return clientId;
+  }
+
+  /**
+   * The random id of this emission, sent to Mixpanel as {@code $insert_id} so a retried or
+   * duplicated submission of the same event is counted once (ETP-5581). 32 lowercase hex
+   * characters, within Mixpanel's 36-character limit; it identifies the emission, never a record.
+   *
+   * @return the insert id, never {@code null}
+   */
+  public String getInsertId() {
+    return insertId;
   }
 }

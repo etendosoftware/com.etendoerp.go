@@ -29,6 +29,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
@@ -44,7 +45,22 @@ import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.common.WarehouseLookupHelper;
 
+/**
+ * Aligning the default warehouse's address with the organization's fiscal address during
+ * onboarding.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingWarehouseAddressService
+ */
 public class OnboardingWarehouseAddressServiceTest {
+
+  /**
+   * The context-restore tests install a mock OBContext as the "previous" context and assert the
+   * service puts it back; OBContext is a ThreadLocal, so it must not outlive the test (ETP-6069).
+   */
+  @After
+  public void clearContext() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   // ---------------------------------------------------------------------------
   // alignDefaultWarehouseAddress() orchestration — validation, client/org lookup,

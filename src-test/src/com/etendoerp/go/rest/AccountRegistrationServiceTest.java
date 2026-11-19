@@ -39,7 +39,7 @@ import com.etendoerp.go.supportaccess.SupportAccessGuard;
 class AccountRegistrationServiceTest {
 
   private static final String EMAIL = "ana@empresa.es";
-  private static final String VERIFY_LINK = "https://app.example.test/onboarding?verifyToken=t";
+  private static final String VERIFY_LINK = "https://app.example.test/onboarding?loginToken=t";
 
   private final TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
   private final AccountRegistrationService service = new AccountRegistrationService(emailSender);
@@ -54,7 +54,7 @@ class AccountRegistrationServiceTest {
     dal = mockStatic(EtendoGoJwtDalHelper.class);
     verification = mockStatic(EmailVerificationDalHelper.class);
     links = mockStatic(EtendoGoAuthLinkBuilder.class);
-    links.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString())).thenReturn(VERIFY_LINK);
+    links.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString())).thenReturn(VERIFY_LINK);
   }
 
   @AfterEach

@@ -36,6 +36,17 @@ public class SubscriptionLifecycleApplierTest {
   }
 
   @Test
+  public void freeSecondMonthInvoiceKeepsAccessAndAdvancesCalendarPeriod() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("invoice.paid", event(
+        "{\"data\":{\"object\":{\"subscription\":\"sub_gift\",\"amount_paid\":0,"
+            + "\"lines\":{\"data\":[{\"period\":{\"start\":1740700800,\"end\":1743379200}}]}}}}"));
+    assertTrue(outcome.isApplied());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, outcome.status());
+    assertEquals(Instant.ofEpochSecond(1743379200L), outcome.periodEnd());
+    assertEquals(null, outcome.dueAt());
+  }
+
+  @Test
   public void paymentFailedAnchorsOnThePaidPeriodEnd() throws Exception {
     // period_end 2026-11-04T00:00:00Z = 1793750400
     SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",
@@ -43,6 +54,24 @@ public class SubscriptionLifecycleApplierTest {
     assertTrue(outcome.isApplied());
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, outcome.status());
     assertEquals(Instant.ofEpochSecond(1793750400L), outcome.dueAt());
+  }
+
+  /**
+   * ETP-5053 — the unpaid invoice of a plan change is no failed renewal: the change waits for it
+   * as a pending update and the subscription stays current on its plan.
+   */
+  @Test
+  public void aFailedPlanChangeInvoiceIsNotARenewalFailure() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_update\"}}}"));
+    assertTrue(outcome.isIgnored());
+    assertEquals(SubscriptionLifecycleApplier.PLAN_CHANGE_INVOICE, outcome.reason());
+
+    SubscriptionEventOutcome renewal = applier.evaluate("invoice.payment_failed",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\",\"period_end\":1793750400,"
+            + "\"billing_reason\":\"subscription_cycle\"}}}"));
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, renewal.status());
   }
 
   @Test
@@ -101,6 +130,26 @@ public class SubscriptionLifecycleApplierTest {
     assertEquals(CancelAtPeriodEnd.CLEARED, applier.evaluate("customer.subscription.updated",
         event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
             + "\"cancel_at_period_end\":false,\"cancel_at\":null}}}")).cancelAtPeriodEnd());
+  }
+
+  @Test
+  public void aSubscriptionUpdateCarriesTheItemPriceExpandedOrBare() throws Exception {
+    // ETP-5053 — the item price is how an applied plan change shows up; the price may arrive
+    // expanded (an object) or as its bare id.
+    SubscriptionEventOutcome expanded = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":{\"id\":\"price_pro\"}}]}}}}"));
+    SubscriptionEventOutcome bare = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":\"price_core\"}]}}}}"));
+    SubscriptionEventOutcome none = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\"}}}"));
+    assertEquals("price_pro", expanded.providerPriceId());
+    assertEquals("price_core", bare.providerPriceId());
+    assertNull(none.providerPriceId());
+    // A paid invoice names no item price: nothing to compare, nothing rolled over.
+    assertNull(applier.evaluate("invoice.paid",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\"}}}")).providerPriceId());
   }
 
   @Test

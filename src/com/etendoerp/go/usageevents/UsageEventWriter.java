@@ -25,6 +25,7 @@ import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -120,6 +121,9 @@ final class UsageEventWriter {
   static final int OUTCOME_WIDTH = 20;
   static final int ERROR_CODE_WIDTH = 200;
   static final int APP_VERSION_WIDTH = 60;
+
+  /** Timeout of the liveness check that tells a refused row from a lost connection. */
+  static final int CONNECTION_CHECK_SECONDS = 2;
 
   /** Largest value {@code DURATION_MS NUMERIC(10,0)} holds. */
   static final long DURATION_MAX = 9_999_999_999L;
@@ -327,17 +331,99 @@ final class UsageEventWriter {
   private static int insertOneByOne(Connection connection, List<UsageEvent> batch) {
     int written = 0;
     for (UsageEvent event : batch) {
-      try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-        bind(statement, event);
-        statement.executeUpdate();
-        connection.commit();
+      if (insertOne(connection, event)) {
         written++;
-      } catch (SQLException e) {
-        rollbackQuietly(connection);
-        log.debug("Could not write usage event '{}'.", event.eventType(), e);
       }
     }
     return written;
+  }
+
+  /**
+   * ETP-6057 — insert a batch synchronously and report, row by row, what was persisted. For a
+   * caller that keeps what it is writing and must know which rows to keep for a retry
+   * ({@link PublicApiUsageCounter}); {@link #insertBatch(List)} only reports how many.
+   *
+   * <p>Same transaction rules as {@link #insertBatch(List)}: its own pooled connection, one commit
+   * for the whole batch, and on a batch failure a row-by-row retry so one bad row does not cost the
+   * others. Called on the counter's own thread (or on undeploy), never on a request thread.</p>
+   *
+   * <p>Two failures are told apart. <b>Row refusal</b>: the connection works and the database
+   * refused individual rows — the result says which, possibly none. <b>Outage</b>: no pool, no
+   * connection, or the connection stopped working — thrown, because what was committed before it is
+   * not reported row by row and the caller must keep everything (rows committed before the outage
+   * may then be written again on retry; with one commit per batch that needs a failure between two
+   * single-row commits of the fallback).</p>
+   *
+   * @param batch rows to insert; not retained
+   * @return one flag per row, in order: true when that row is committed; a false is a row the
+   *         database refused on a working connection
+   * @throws SQLException          on an outage (see above)
+   * @throws IllegalStateException when there is no connection pool (an outage too)
+   */
+  static boolean[] insertEach(List<UsageEvent> batch) throws SQLException {
+    boolean[] written = new boolean[batch.size()];
+    ExternalConnectionPool pool = ExternalConnectionPool.getInstance();
+    if (pool == null) {
+      throw new IllegalStateException("No external connection pool available.");
+    }
+    Connection connection = pool.getConnection();
+    try {
+      connection.setAutoCommit(false);
+      try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+        for (UsageEvent event : batch) {
+          bind(statement, event);
+          statement.addBatch();
+        }
+        statement.executeBatch();
+      }
+      connection.commit();
+      Arrays.fill(written, true);
+    } catch (SQLException batchFailure) {
+      rollbackQuietly(connection);
+      log.debug("Usage event batch of {} failed; retrying row by row.", batch.size(),
+          batchFailure);
+      insertEachRow(connection, batch, written);
+    } finally {
+      closeQuietly(connection);
+    }
+    return written;
+  }
+
+  /**
+   * The row-by-row retry of {@link #insertEach(List)}. A failed row is a refusal of that row only
+   * while the connection is still usable; once it is not, the failure is an outage and is thrown, so
+   * the caller keeps every row without charging any of them an attempt.
+   */
+  private static void insertEachRow(Connection connection, List<UsageEvent> batch,
+      boolean[] written) throws SQLException {
+    for (int i = 0; i < batch.size(); i++) {
+      written[i] = insertOne(connection, batch.get(i));
+      if (!written[i] && !isUsable(connection)) {
+        throw new SQLException("The usage event connection was lost during the row-by-row retry.");
+      }
+    }
+  }
+
+  private static boolean isUsable(Connection connection) {
+    try {
+      return connection.isValid(CONNECTION_CHECK_SECONDS);
+    } catch (SQLException e) {
+      return false;
+    }
+  }
+
+  /** Insert and commit one row; a failure is rolled back and reported as false, never thrown. */
+  private static boolean insertOne(Connection connection, UsageEvent event) {
+    try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+      bind(statement, event);
+      statement.executeUpdate();
+      connection.commit();
+      return true;
+    } catch (SQLException e) {
+      rollbackQuietly(connection);
+      log.debug("Could not write usage event '{}'.", event.eventType(), e);
+      return false;
+    }
   }
 
   /** Bind one event to {@link #INSERT_SQL}. Package-private so the binding can be tested. */

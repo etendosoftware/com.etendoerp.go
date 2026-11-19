@@ -151,6 +151,35 @@ public interface NeoHandler {
   }
 
   /**
+   * Serves one page of a REST list in an order the DAL {@code _sortBy} cannot express.
+   *
+   * <p><b>Why this exists.</b> {@code _sortBy} accepts property paths only. A customization whose
+   * visible order is not any column's order (for example the alphabetical order of a translated
+   * label the client computed) cannot ask for it through that parameter, and sorting the loaded
+   * page afterwards would reorder 50 rows of an infinite scroll instead of the whole set.</p>
+   *
+   * <p><b>Contract.</b> Called for a REST list {@code GET} that reaches the default list step, with
+   * the filtered set the list itself would read ({@link NeoListAggregateQuery}: same tab, parent,
+   * read predicate and grid criteria, no sort, no paging). Return the ids of the requested page in
+   * the order to serve, plus the size of the whole set, or {@code null} to keep the default order.
+   * The default list step then fetches exactly those rows with its own field filtering and
+   * enrichment and puts them back in the returned order; a response carries the same shape as any
+   * other page. The order-by text handed to {@link NeoListAggregateQuery#orderedIds} must be a
+   * server-side constant: never text derived from the request. A customization that throws fails
+   * the read; one that cannot honour the request must return {@code null}.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @param filteredSet the filtered set of this list
+   * @param startRow zero-based first row of the requested page
+   * @param pageSize number of rows requested
+   * @return the ordered page, or {@code null} for the default order; {@code null} by default
+   */
+  default NeoOrderedPage orderedPage(NeoContext context, NeoListAggregateQuery filteredSet,
+      int startRow, int pageSize) {
+    return null;
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
@@ -224,6 +253,30 @@ public interface NeoHandler {
    * @return protected DAL property names
    */
   default Set<String> protectedCreateCalloutFields(NeoContext context) {
+    return Collections.emptySet();
+  }
+
+  /**
+   * Declares the DAL property names whose value on create this customization decides, so a create
+   * callout that proposes a different value for them is not reported as a superseded default
+   * (ETP-5680).
+   *
+   * <p><b>Why the customization declares it.</b> {@code etendo_create} reports, as
+   * {@code supersededDefaults}, every field where the caller's value stood and a create callout had
+   * derived another. For a field this customization decides (it injects the value, or corrects
+   * the caller's), that callout proposal is generic by construction — the customization's own rule
+   * is what applies — so listing it, and advising the caller to send the callout value, is wrong
+   * advice. Only the customization knows the rule exists, so it is the one that says so; shared
+   * code never names the entity or the field.</p>
+   *
+   * <p>Reader: the MCP create path, once, after this customization's pre-hook ran, so the answer
+   * may depend on the final body ({@link NeoContext#getRequestBody()}). It only silences the
+   * diagnostic; it changes no value. Must never throw: a failure is treated as "none".</p>
+   *
+   * @param context the create context carrying the final request body
+   * @return the property names this customization governs; empty by default
+   */
+  default Set<String> governedCreateFields(NeoContext context) {
     return Collections.emptySet();
   }
 

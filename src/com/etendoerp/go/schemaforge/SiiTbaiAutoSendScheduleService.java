@@ -49,7 +49,7 @@ import org.openbravo.service.db.DalConnectionProvider;
  * Frequency = Hourly, Hourly Interval = 12, Start Time = 11:00:00, "Schedule Process") (ETP-5117).
  *
  * <p><b>GO-only scope (explicit human decision).</b> This service is invoked only from the
- * {@code sii-config-deactivate-handler} / {@code tbai-config-sequence-handler} {@link NeoHandler}
+ * {@code SiiConfigDeactivateHandler} / {@code TbaiConfigSequenceHandler} {@link NeoHandler}
  * {@code afterHandle} hooks — i.e. only when the fiscal configuration is saved through Etendo GO.
  * Classic UI saves of {@code AEATSII_CONFIG}/{@code TBAI_Config} are intentionally NOT covered
  * (no Hibernate-level {@code EntityPersistenceEventObserver}); a config created only in Classic

@@ -46,7 +46,11 @@ import org.openbravo.model.ad.domain.Validation;
 public final class SelectorValidationResolver {
   private static final Logger log = LogManager.getLogger(SelectorValidationResolver.class);
   private static final String UNRESOLVED_MARKER = "__NEO_UNRESOLVED__";
-
+  /**
+   * Session variable names (lower case, without {@code #} or underscores variants) a caller param
+   * can never replace. Must list every non-{@code #} session variable set in
+   * {@link #buildValidationParamMap}.
+   */
   private static final Set<String> RESERVED_SESSION_KEYS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
       "ad_org_id",
       "ad_client_id",
@@ -182,7 +186,7 @@ public final class SelectorValidationResolver {
     }
 
     String code = valRule.getValidationCode().trim();
-    Map<String, String> allParams = buildValidationParamMap(contextParams);
+    Map<String, String> allParams = buildValidationParamMap(code, contextParams);
     List<String> clauses = SqlToHqlTranslator.splitTopLevelAnd(code);
 
     List<String> resolvedClauses = new ArrayList<>();
@@ -225,7 +229,7 @@ public final class SelectorValidationResolver {
     }
 
     String code = valRule.getValidationCode().trim();
-    Map<String, String> allParams = buildValidationParamMap(contextParams);
+    Map<String, String> allParams = buildValidationParamMap(code, contextParams);
     List<String> clauses = SqlToHqlTranslator.splitTopLevelAnd(code);
 
     List<String> resolvedClauses = new ArrayList<>();
@@ -304,61 +308,26 @@ public final class SelectorValidationResolver {
    * <p>Mirrors the session variables Etendo Classic exposes to validation rules so that
    * filters like {@code @#User_Client@}, {@code @Default_AD_Org_ID@} or
    * {@code @Parent_AD_Org@} resolve the same way in FIC and in {@code /defaults}.</p>
+   *
+   * <p>Caller params are accepted only when the validation rule declares them as {@code @Name@}
+   * and they are not session variables: {@code #}-prefixed names and every name set above
+   * (AD_Client_ID, AD_Org_ID, AD_User_ID, AD_Role_ID, ...) keep the session value.</p>
+   *
+   * @param validationCode
+   *     the validation rule code whose {@code @Name@} placeholders caller params may fill
+   * @param contextParams
+   *     caller-provided params; may be null
+   * @return the session variables plus the accepted caller params, with lower and upper case
+   *     variants of every key
    */
-  private static Map<String, String> buildValidationParamMap(Map<String, String> contextParams) {
+  static Map<String, String> buildValidationParamMap(String validationCode,
+      Map<String, String> contextParams) {
     Map<String, String> allParams = new HashMap<>();
     OBContext ctx = OBContext.getOBContext();
     if (ctx != null) {
-      String currentOrgId = ctx.getCurrentOrganization() != null ? ctx.getCurrentOrganization().getId() : null;
-      String currentClientId = ctx.getCurrentClient() != null ? ctx.getCurrentClient().getId() : null;
-      if (currentOrgId != null) {
-        allParams.put("AD_Org_ID", currentOrgId);
-        allParams.put("Default_AD_Org_ID", currentOrgId);
-        allParams.put("Product_Org", currentOrgId);
-      }
-      if (currentClientId != null) {
-        allParams.put("AD_Client_ID", currentClientId);
-        allParams.put("Default_AD_Client_ID", currentClientId);
-      }
-      if (ctx.getUser() != null) {
-        allParams.put("AD_User_ID", ctx.getUser().getId());
-        allParams.put("Default_AD_User_ID", ctx.getUser().getId());
-      }
-      if (ctx.getRole() != null) {
-        allParams.put("AD_Role_ID", ctx.getRole().getId());
-        allParams.put("Default_AD_Role_ID", ctx.getRole().getId());
-      }
-      String readableClients = quotedCsv(ctx.getReadableClients());
-      if (readableClients != null) {
-        allParams.put("#User_Client", readableClients);
-        allParams.put("User_Client", readableClients);
-      }
-      String readableOrgs = quotedCsv(ctx.getReadableOrganizations());
-      if (readableOrgs != null) {
-        allParams.put("#User_Org", readableOrgs);
-        allParams.put("User_Org", readableOrgs);
-      }
-      try {
-        if (currentOrgId != null && ctx.getOrganizationStructureProvider() != null) {
-          String parentOrg = ctx.getOrganizationStructureProvider().getParentOrg(currentOrgId);
-          if (StringUtils.isNotBlank(parentOrg)) {
-            allParams.put("Parent_AD_Org", parentOrg);
-          }
-        }
-      } catch (Exception e) {
-        log.debug("Could not resolve Parent_AD_Org for {}: {}", currentOrgId, e.getMessage());
-      }
+      putSessionParams(allParams, ctx);
     }
-    if (contextParams != null) {
-      for (Map.Entry<String, String> entry : contextParams.entrySet()) {
-        String key = entry.getKey();
-        if (key != null && !isReservedSessionKey(key)) {
-          allParams.put(key, entry.getValue());
-        } else if (key != null && isReservedSessionKey(key)) {
-          log.warn("Ignored attempt to override reserved session key in contextParams: {}", key);
-        }
-      }
-    }
+    putDeclaredCallerParams(allParams, validationCode, contextParams);
     Map<String, String> normalized = new HashMap<>();
     for (Map.Entry<String, String> entry : allParams.entrySet()) {
       if (entry.getKey() == null || entry.getValue() == null) {
@@ -369,6 +338,80 @@ public final class SelectorValidationResolver {
     }
     allParams.putAll(normalized);
     return allParams;
+  }
+
+  private static void putIfNotNull(Map<String, String> params, String value, String... keys) {
+    if (value == null) {
+      return;
+    }
+    for (String key : keys) {
+      params.put(key, value);
+    }
+  }
+
+  private static void putSessionParams(Map<String, String> allParams, OBContext ctx) {
+    String currentOrgId = ctx.getCurrentOrganization() != null ? ctx.getCurrentOrganization().getId() : null;
+    String currentClientId = ctx.getCurrentClient() != null ? ctx.getCurrentClient().getId() : null;
+    putIfNotNull(allParams, currentOrgId, "AD_Org_ID", "Default_AD_Org_ID", "Product_Org");
+    putIfNotNull(allParams, currentClientId, "AD_Client_ID", "Default_AD_Client_ID");
+    if (ctx.getUser() != null) {
+      putIfNotNull(allParams, ctx.getUser().getId(), "AD_User_ID", "Default_AD_User_ID");
+    }
+    if (ctx.getRole() != null) {
+      putIfNotNull(allParams, ctx.getRole().getId(), "AD_Role_ID", "Default_AD_Role_ID");
+    }
+    putIfNotNull(allParams, quotedCsv(ctx.getReadableClients()), "#User_Client", "User_Client");
+    putIfNotNull(allParams, quotedCsv(ctx.getReadableOrganizations()), "#User_Org", "User_Org");
+    putIfNotNull(allParams, resolveParentOrg(ctx, currentOrgId), "Parent_AD_Org");
+  }
+
+  private static String resolveParentOrg(OBContext ctx, String currentOrgId) {
+    try {
+      if (currentOrgId != null && ctx.getOrganizationStructureProvider() != null) {
+        String parentOrg = ctx.getOrganizationStructureProvider().getParentOrg(currentOrgId);
+        return StringUtils.isNotBlank(parentOrg) ? parentOrg : null;
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve Parent_AD_Org for {}: {}", currentOrgId, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Copy into {@code allParams} the caller params the rule declares as {@code @Name@}. Names with
+   * a {@code #} prefix or reserved session variables are never accepted.
+   */
+  private static void putDeclaredCallerParams(Map<String, String> allParams,
+      String validationCode, Map<String, String> contextParams) {
+    if (contextParams == null) {
+      return;
+    }
+    Set<String> declared = declaredParams(validationCode);
+    for (Map.Entry<String, String> entry : contextParams.entrySet()) {
+      String key = entry.getKey();
+      String lower = key == null ? null : key.toLowerCase();
+      if (lower == null || key.startsWith("#") || isReservedSessionKey(key)
+          || !declared.contains(lower)) {
+        log.debug("Ignoring caller param '{}': reserved or not declared by the rule", key);
+        continue;
+      }
+      allParams.put(key, entry.getValue());
+    }
+  }
+
+  /** Lower-cased names of the non-{@code #} {@code @Name@} placeholders used by the rule. */
+  private static Set<String> declaredParams(String validationCode) {
+    Set<String> declared = new HashSet<>();
+    if (validationCode == null) {
+      return declared;
+    }
+    Matcher m = SelectorQueryBuilder.VALIDATION_PARAM.matcher(validationCode);
+    while (m.find()) {
+      if (!m.group().startsWith("@#")) {
+        declared.add(m.group(1).toLowerCase());
+      }
+    }
+    return declared;
   }
 
   /**

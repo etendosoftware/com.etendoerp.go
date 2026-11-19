@@ -66,6 +66,7 @@ public final class EmailSendHistoryRecord {
   private final String downloadLink;
   private final String language;
   private final String idempotencyKey;
+  private final String tenantId;
 
   private EmailSendHistoryRecord(EmailSendContext context, EmailAuditRecord audit,
       String specName) {
@@ -86,6 +87,7 @@ public final class EmailSendHistoryRecord {
     this.downloadLink = optString(data, DATA_DOWNLOAD_LINK);
     this.language = commandLanguage(context);
     this.idempotencyKey = audit.getIdempotencyKey();
+    this.tenantId = audit.getTenantId();
   }
 
   /**
@@ -244,6 +246,16 @@ public final class EmailSendHistoryRecord {
    */
   public String getLanguage() {
     return language;
+  }
+
+  /**
+   * Returns the tenant the send was made for, as the audit row resolved it — the session's client,
+   * or the command's {@code tenantId} for a System-context send (ETP-6209).
+   *
+   * @return tenant id, or {@code null}
+   */
+  public String getTenantId() {
+    return tenantId;
   }
 
   /**

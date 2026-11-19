@@ -361,6 +361,87 @@ class SelectorValidationResolverTest {
           "IsActive='Y' static clause must be preserved: " + result.getHql());
     }
   }
+
+  @Nested
+  @DisplayName("buildValidationParamMap — caller params never override session variables")
+  class CallerParams {
+
+    private Map<String, String> build(String code, Map<String, String> caller) {
+      OBContext obContext = mock(OBContext.class, RETURNS_DEEP_STUBS);
+      when(obContext.getCurrentClient().getId()).thenReturn("SESSION_CLIENT");
+      when(obContext.getCurrentOrganization().getId()).thenReturn("SESSION_ORG");
+      when(obContext.getUser().getId()).thenReturn("SESSION_USER");
+      when(obContext.getRole().getId()).thenReturn("SESSION_ROLE");
+      when(obContext.getReadableClients()).thenReturn(new String[] { "0", "SESSION_CLIENT" });
+      try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        ctx.when(OBContext::getOBContext).thenReturn(obContext);
+        return SelectorValidationResolver.buildValidationParamMap(code, caller);
+      }
+    }
+
+    @Test
+    @DisplayName("session variables win over caller params of the same name")
+    void sessionVariablesAreNotOverridden() {
+      Map<String, String> caller = new HashMap<>();
+      caller.put("AD_Client_ID", "OTHER");
+      caller.put("ad_org_id", "OTHER");
+      caller.put("#User_Client", "'OTHER'");
+      Map<String, String> result = build(
+          "AD_Client_ID IN (@#User_Client@) AND AD_Org_ID=@AD_Org_ID@ AND x=@AD_Client_ID@", caller);
+
+      assertEquals("SESSION_CLIENT", result.get("AD_Client_ID"));
+      assertEquals("SESSION_ORG", result.get("AD_Org_ID"));
+      assertEquals("SESSION_ORG", result.get("ad_org_id"));
+      assertEquals("'0','SESSION_CLIENT'", result.get("#User_Client"));
+    }
+
+    @Test
+    @DisplayName("mixed-case, user, role and parent-org names keep the session value")
+    void otherSessionIdsAreNotOverridden() {
+      Map<String, String> caller = new HashMap<>();
+      caller.put("Ad_Client_Id", "OTHER");
+      caller.put("AD_User_ID", "OTHER");
+      caller.put("AD_Role_ID", "OTHER");
+      caller.put("Parent_AD_Org", "OTHER");
+      Map<String, String> result = build(
+          "x=@Ad_Client_Id@ AND y=@AD_User_ID@ AND z=@AD_Role_ID@ AND w=@Parent_AD_Org@", caller);
+
+      assertEquals("SESSION_CLIENT", result.get("Ad_Client_Id".toLowerCase()));
+      assertEquals("SESSION_CLIENT", result.get("AD_Client_ID"));
+      assertEquals("SESSION_USER", result.get("AD_User_ID"));
+      assertEquals("SESSION_ROLE", result.get("AD_Role_ID"));
+      assertFalse(result.containsKey("Parent_AD_Org"));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = { "  " })
+    @DisplayName("a null or blank rule code accepts no caller params")
+    void blankRuleAcceptsNoCallerParams(String code) {
+      Map<String, String> result = build(code, Collections.singletonMap("IsSOTrx", "Y"));
+
+      assertFalse(result.containsKey("IsSOTrx"));
+    }
+
+    @Test
+    @DisplayName("params declared by the rule are accepted")
+    void declaredParamsAreAccepted() {
+      Map<String, String> result = build("C_Order.IsSOTrx='@IsSOTrx@'",
+          Collections.singletonMap("IsSOTrx", "Y"));
+
+      assertEquals("Y", result.get("IsSOTrx"));
+    }
+
+    @Test
+    @DisplayName("params the rule does not declare are ignored")
+    void undeclaredParamsAreIgnored() {
+      Map<String, String> result = build("C_Order.IsSOTrx='@IsSOTrx@'",
+          Collections.singletonMap("Other", "Y"));
+
+      assertFalse(result.containsKey("Other"));
+    }
+  }
+
   @Nested
   @DisplayName("resolveValidationFilter — the rule is one group in the selector query")
   class RuleGrouping {
@@ -462,7 +543,7 @@ class SelectorValidationResolverTest {
       }
 
       assertEquals("as e where " + filter
-          + " AND (lower(COALESCE(cast(e.name as string), '')) LIKE :search)", where);
+          + " AND ((upper(COALESCE(cast(e.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.name as string), '')) LIKE :search))", where);
       assertFalse(hasTopLevelOr(where.substring("as e where ".length())),
           "An OR outside parentheses would let rows skip the search: " + where);
     }
@@ -537,7 +618,8 @@ class SelectorValidationResolverTest {
 
         @SuppressWarnings("unchecked")
         Map<String, String> paramMap = (Map<String, String>) invokeStatic(
-            "buildValidationParamMap", new Class<?>[]{ Map.class }, contextParams);
+            "buildValidationParamMap", new Class<?>[]{ String.class, Map.class },
+            "x = '@customParam@' AND y = @AD_Org_ID@", contextParams);
 
         assertEquals("trusted_org", paramMap.get("AD_Org_ID"));
         assertEquals("trusted_client", paramMap.get("AD_Client_ID"));

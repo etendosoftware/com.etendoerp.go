@@ -87,4 +87,22 @@ final class McpRouterErrorBodies {
     error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return error;
   }
+
+  /**
+   * The answer of a call to {@code etendo_routine} while its flag is off for the caller's account
+   * (ETP-6236). Names the plain alternative: the same steps, one tool call each.
+   *
+   * @return the error body
+   * @throws JSONException if the body cannot be built
+   */
+  static JSONObject routinesDisabled() throws JSONException {
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_METHOD_NOT_ALLOWED);
+    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_TOOL_DISABLED);
+    error.put(McpConstants.KEY_DETAIL, "etendo_routine is not enabled for this account. Make the "
+        + "same calls one at a time with the tools each step names (etendo_create, etendo_update, "
+        + "etendo_action, etendo_list...), passing the ids each call returns to the next.");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
+  }
 }

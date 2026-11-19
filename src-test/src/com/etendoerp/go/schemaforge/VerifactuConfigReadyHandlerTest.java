@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
@@ -36,13 +37,18 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+
+import com.etendoerp.go.common.FiscalTestModeResolver;
 
 /**
  * Unit tests for {@link VerifactuConfigReadyHandler}.
@@ -54,6 +60,11 @@ import org.openbravo.model.common.invoice.Invoice;
  * untouched, while legacy/partially-migrated records with {@code is_ready='Y'} but a
  * {@code null} adoption date are backfilled), and that any exception raised while applying the
  * auto-fill is swallowed rather than propagated or turned into an error response.
+ *
+ * <p>Also that the Fiscal Configuration write rules ({@link FiscalSifGuard}) run first in
+ * {@code handle}, on this entity's own table.
+ *
+ * @covers com.etendoerp.go.schemaforge.VerifactuConfigReadyHandler
  */
 public class VerifactuConfigReadyHandlerTest {
 
@@ -735,6 +746,67 @@ public class VerifactuConfigReadyHandlerTest {
 
       assertEquals(null, handler.afterHandle(ctx));
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── Fiscal Configuration write rules (FiscalSifGuard) ───────────────────────
+
+  @Test
+  public void handleRefusesAnInactiveCreateThroughTheFiscalGuard() throws Exception {
+    VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("POST")
+          .requestBody(new JSONObject().put("active", false))
+          .build());
+
+      assertEquals(400, refusal.getHttpStatus());
+      assertEquals("ETGO_FiscalSifInactiveCreate", refusal.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void handleRefusesASecondActiveConfigReadingItsOwnTable() throws Exception {
+    VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(obContext.getCurrentClient()).thenReturn(mock(Client.class));
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<FiscalTestModeResolver> testMode = mockStatic(FiscalTestModeResolver.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      NativeQuery nq = mock(NativeQuery.class);
+      when(session.createNativeQuery(Mockito.anyString())).thenReturn(nq);
+      when(nq.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn("EXISTING");
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("POST")
+          .requestBody(new JSONObject())
+          .obContext(obContext)
+          .build());
+
+      assertEquals(409, refusal.getHttpStatus());
+      JSONObject error = refusal.getBody().getJSONObject("error");
+      assertEquals("ETGO_FiscalSifOneActive", error.getJSONArray("messageKeys").getString(0));
+      assertTrue(error.getString("message"), error.getString("message").contains("VERI*FACTU"));
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session).createNativeQuery(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("FROM etvfac_verifactu_config "));
     }
   }
 }

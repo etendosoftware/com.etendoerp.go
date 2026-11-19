@@ -21,7 +21,10 @@ final class PublicApiKeyPolicy {
   static final String CAPABILITY_WRITE = "public-api:write";
   static final String CAPABILITY_PROCESS = "public-api:process";
   static final String PUBLIC_KEY_SCOPE_MARKER = "neo:public-api-key";
-  private static final String OWNER_ORG_SCOPE_PREFIX = "neo:public-api-owner-org:";
+  /** Common prefix of every public API key marker scope. */
+  static final String PUBLIC_API_MARKER_PREFIX = "neo:public-api-";
+  /** Package-visible: {@code OAuth2Servlet} reads the owner organization in SQL with it. */
+  static final String OWNER_ORG_SCOPE_PREFIX = "neo:public-api-owner-org:";
 
   private static final Map<String, String> CAPABILITY_SCOPES;
   static {
@@ -78,6 +81,44 @@ final class PublicApiKeyPolicy {
 
   static String ownerOrganizationMarker(String organizationId) {
     return OWNER_ORG_SCOPE_PREFIX + organizationId;
+  }
+
+  /**
+   * ETP-6057 — whether a scope string is a user-owned public API key's: it carries
+   * {@value #PUBLIC_KEY_SCOPE_MARKER}. Structure only; it names no key, tenant or entity.
+   *
+   * @param scopes a key's or a token's space-separated scopes, possibly null
+   * @return true when the scopes mark a public API key
+   */
+  static boolean isPublicApiKey(String scopes) {
+    if (scopes == null) {
+      return false;
+    }
+    for (String scope : scopes.trim().split("\\s+")) {
+      if (PUBLIC_KEY_SCOPE_MARKER.equals(scope)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * ETP-6057 — whether a scope string carries any public API key marker ({@code neo:public-api-}…:
+   * the key marker or the owner organization marker). The generic client CRUD refuses them.
+   *
+   * @param scopes space-separated scopes, possibly null
+   * @return true when any scope starts with {@value #PUBLIC_API_MARKER_PREFIX}
+   */
+  static boolean carriesPublicApiMarker(String scopes) {
+    if (scopes == null) {
+      return false;
+    }
+    for (String scope : scopes.trim().split("\\s+")) {
+      if (scope.startsWith(PUBLIC_API_MARKER_PREFIX)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   static String ownerOrganizationId(String scopes) {

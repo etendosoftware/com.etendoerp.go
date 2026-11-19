@@ -90,6 +90,101 @@ public final class NeoTelemetryEvents {
   public static final String BACKEND_CONTACT_TYPE_CHANGED = "backend_contact_type_changed";
 
   /**
+   * ETP-5908 — a SALES goods shipment (IsSOTrx=Y, non-return document type) was completed through
+   * the NEO documentAction and the completion was committed. Emitted once per completion by
+   * {@code GoodsShipmentTelemetry}; properties {@code account_id}, {@code flag_enabled}. Never a
+   * record identifier.
+   */
+  public static final String BACKEND_GOODS_SHIPMENT_COMPLETED =
+      "backend_goods_shipment_completed";
+
+  /**
+   * ETP-5581 — one decision on one suggested bounce pair: applied (discarded or failed), left
+   * unchecked or sent to the panel in the {@code applySuggestions} modal, or discarded / dismissed
+   * ("No es un rebote") in the reconciliation panel. Emitted by {@code BankBounceKpiTelemetry},
+   * flag {@code bank-bounce-suggestions} on only. Never a record identifier.
+   */
+  public static final String BACKEND_BANK_BOUNCE_PAIR_DECIDED =
+      "backend_bank_bounce_pair_decided";
+
+  /**
+   * ETP-5581 — a pair discarded as a bounce pair was restored by {@code restorePair}. Emitted by
+   * {@code BankBounceKpiTelemetry}; carries the stored signal and confidence and the whole days
+   * since the discard. Never a record identifier.
+   */
+  public static final String BACKEND_BANK_BOUNCE_PAIR_RESTORED =
+      "backend_bank_bounce_pair_restored";
+
+  /**
+   * ETP-5581 — summary of one {@code applySuggestions} call that included bounce pairs: how many
+   * were shown, discarded, unchecked and sent to the panel, and whether the user changed the
+   * preselection. Emitted by {@code BankBounceKpiTelemetry}.
+   */
+  public static final String BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED =
+      "backend_bank_bounce_suggestions_applied";
+
+  /**
+   * ETP-6209 — the first portal link of a document was emailed (renewals, decision links and
+   * re-sends excluded). Emitted by {@code PortalKpiTelemetry}; properties {@code account_id},
+   * {@code type} (the portal document kind). Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_DOCUMENT_SENT = "backend_portal_document_sent";
+
+  /**
+   * ETP-6209 — the first portal download of a document sent with a portal link. Emitted by
+   * {@code PortalKpiTelemetry}; properties {@code account_id}, {@code type}. Never a record
+   * identifier.
+   */
+  public static final String BACKEND_PORTAL_DOCUMENT_DOWNLOADED =
+      "backend_portal_document_downloaded";
+
+  /**
+   * ETP-6209 — a quotation was accepted or rejected, from the portal or in the app. Emitted by
+   * {@code PortalKpiTelemetry}; properties {@code account_id}, {@code decision}
+   * ({@code accepted|rejected}), {@code source} ({@code portal|app}). Never a record identifier.
+   */
+  public static final String BACKEND_QUOTATION_DECIDED = "backend_quotation_decided";
+
+  /**
+   * ETP-6230 — a productive tenant finished onboarding (emitted after the onboarding commit).
+   * Emitted by {@code AccountingKpiTelemetry}; properties {@code account_id}, {@code internal}.
+   */
+  public static final String BACKEND_PRODUCTIVE_ENVIRONMENT_CREATED =
+      "backend_productive_environment_created";
+
+  /**
+   * ETP-6230 — the owner reviewed the accounting calendar (Primeros pasos or a manual period
+   * open). Once per tenant and kind. Properties {@code type}, {@code source}, {@code account_id},
+   * {@code internal}.
+   */
+  public static final String BACKEND_CALENDAR_REVIEW_COMPLETED =
+      "backend_calendar_review_completed";
+
+  /**
+   * ETP-6230 — the first period-controlled document of a review-required tenant was processed
+   * (outcome probe). Once per tenant. Properties {@code operation}, {@code source},
+   * {@code entity}, {@code specName}, {@code account_id}, {@code internal}.
+   */
+  public static final String BACKEND_FIRST_DOCUMENT_PROCESSED =
+      "backend_first_document_processed";
+
+  /**
+   * ETP-6230 — a write was refused because its period is closed or missing. Every refusal.
+   * Properties {@code entity}, {@code specName}, {@code operation}, {@code source},
+   * {@code errorCode}, {@code account_id}, {@code internal}.
+   */
+  public static final String BACKEND_PERIOD_REFUSED = "backend_period_refused";
+
+  /**
+   * ETP-6051 — an invoice inbox document was confirmed into a completed purchase invoice, once, on
+   * the first transition only (an idempotent or failed confirm sends nothing). Properties
+   * {@code adjusted} (the KPI flag the document carried, never changed by the confirm) and
+   * {@code account_id}. Never a record identifier.
+   */
+  public static final String BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED =
+      "backend_invoice_inbox_document_confirmed";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

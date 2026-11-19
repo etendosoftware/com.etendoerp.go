@@ -168,6 +168,31 @@ class NeoSupersededDefaultsTest {
         .getSupersededDefaults().length());
   }
 
+  /**
+   * ETP-5680: the caller sends {@code stocked:false}, the callout answers {@code "N"} — the same
+   * flag. Reported as {@code {sent:false, callout:"N"}} it sent agents to compare two equal values.
+   */
+  @Test
+  @DisplayName("false vs \"N\" and true vs \"Y\" are the same flag and record nothing")
+  void sameYesNoFlagIsNotADivergence() throws Exception {
+    assertEquals(0, merge(new JSONObject().put("stocked", false), update("stocked", "N"),
+        Set.of("stocked")).getSupersededDefaults().length());
+    assertEquals(0, merge(new JSONObject().put("stocked", true), update("stocked", "Y"),
+        Set.of("stocked")).getSupersededDefaults().length());
+    assertEquals(0, merge(new JSONObject().put("stocked", "true"), update("stocked", "Y"),
+        Set.of("stocked")).getSupersededDefaults().length());
+  }
+
+  @Test
+  @DisplayName("a real Yes/No difference (true vs \"N\") is still recorded")
+  void aRealYesNoDifferenceIsRecorded() throws Exception {
+    JSONObject superseded = merge(new JSONObject().put("stocked", true), update("stocked", "N"),
+        Set.of("stocked")).getSupersededDefaults();
+
+    assertEquals(1, superseded.length());
+    assertEquals("N", superseded.getJSONObject("stocked").getString("callout"));
+  }
+
   @Test
   @DisplayName("a callout proposing null or JSON null records nothing")
   void anEmptyProposalIsNotADivergence() throws Exception {

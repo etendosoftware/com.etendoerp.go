@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -81,6 +82,16 @@ public final class NeoAccountingAccessPolicy {
   /** DB columns (lower case) that store a document's accounting status. */
   private static final Set<String> ACCOUNTING_STATUS_COLUMNS =
       Set.of("posted", "em_etblkp_accountingstatus");
+
+  /**
+   * Every name (lower case) a caller may use for an accounting column in a filter or a sort: the
+   * DAL property of {@link #ACCOUNTING_PROPERTIES} or its DB column, since the MCP filter resolves
+   * either. The status columns plus the bulk-posting button's column.
+   */
+  private static final Set<String> ACCOUNTING_FIELD_NAMES = Stream.concat(
+      Stream.concat(ACCOUNTING_PROPERTIES.stream().map(p -> p.toLowerCase(Locale.ROOT)),
+          ACCOUNTING_STATUS_COLUMNS.stream()),
+      Stream.of("em_etblkp_bulkposting")).collect(Collectors.toUnmodifiableSet());
 
   /** Structural verdict per {@code AD_Tab_ID}; AD metadata does not change without a restart. */
   private static final Map<String, Boolean> ACCOUNTING_TAB_CACHE = new ConcurrentHashMap<>();
@@ -276,6 +287,25 @@ public final class NeoAccountingAccessPolicy {
     String base = key.endsWith(IDENTIFIER_SUFFIX)
         ? key.substring(0, key.length() - IDENTIFIER_SUFFIX.length()) : key;
     return ACCOUNTING_PROPERTIES.contains(base);
+  }
+
+  /**
+   * Whether {@code name}, as a caller spells a field in a filter key or a sort, names accounting
+   * data (ETP-6087): an accounting property or its DB column, in any case, optionally with its
+   * {@code $_identifier} suffix or reached through a reference path ({@code invoice.posted} on an
+   * invoice line sorts by the header's status). Without this, a role that never sees
+   * {@code posted} could still read it by filtering or sorting on it.
+   *
+   * @param name the field name as sent; may be {@code null}
+   * @return {@code true} when the name reaches an accounting column
+   */
+  public static boolean isAccountingFieldName(String name) {
+    if (StringUtils.isBlank(name)) {
+      return false;
+    }
+    String last = StringUtils.substringAfterLast(name.trim(), ".");
+    String base = StringUtils.removeEnd(last.isEmpty() ? name.trim() : last, IDENTIFIER_SUFFIX);
+    return ACCOUNTING_FIELD_NAMES.contains(base.toLowerCase(Locale.ROOT));
   }
 
   /**

@@ -47,6 +47,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
@@ -210,6 +211,8 @@ final class McpWriteRequestSupport {
     // properties, so they would otherwise be reported unknown while being honoured. Resolved only
     // when an unresolved key turns up: it is a customization lookup most writes never need.
     Set<String> directiveNames = null;
+    // ETP-6148: the property-path fields, looked up once per body and only if a key needs them.
+    NeoPropertyPaths[] propertyPaths = new NeoPropertyPaths[1];
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -229,6 +232,9 @@ final class McpWriteRequestSupport {
       }
 
       if (prop == null) {
+        // ETP-6148: a property-path field is advertised by etendo_schema as readOnly:true, so it
+        // gets the read-only refusal every other read-only field gets, not the unknown report.
+        refuseIfPropertyPath(key, sfEntity, dalEntity, propertyPaths);
         // parentId is a declared argument of the write tools, not a stray key - see
         // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
@@ -242,6 +248,28 @@ final class McpWriteRequestSupport {
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * Refuses a write of a property-path field's key (ETP-6148) with the read-only refusal.
+   * Looked up only for a key that is no property of the entity, which a path key never is, and
+   * at most once per body: {@code cache} holds the lookup across the body's keys.
+   *
+   * @param cache a one-slot holder, empty on the body's first key and filled on first need
+   *
+   * @throws McpRoutingException 422 {@code read_only_field} when {@code key} is a path field's
+   */
+  static void refuseIfPropertyPath(String key, SFEntity sfEntity, Entity dalEntity,
+      NeoPropertyPaths[] cache) {
+    if (sfEntity == null || McpConstants.PARAM_PARENT_ID.equals(key)) {
+      return;
+    }
+    if (cache[0] == null) {
+      cache[0] = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+    }
+    if (cache[0].isPathKey(key)) {
+      throw McpRoutingException.readOnlyField(key, sfEntity.getName());
+    }
   }
 
   /**
@@ -422,45 +450,6 @@ final class McpWriteRequestSupport {
       // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
       // carry the warning is still a valid result, and failing the call over it would be a worse
       // outcome than the silence IMP-18 exists to end. Nothing to recover, nothing to report.
-    }
-  }
-
-  /**
-   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
-   *
-   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
-   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
-   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
-   * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
-   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
-   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
-   *
-   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
-   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
-   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
-   * unrecognised names — the write succeeded, and now the caller can see what its own value
-   * displaced.</p>
-   *
-   * @param body       the flattened response body handed to the agent, mutated in place
-   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
-   */
-  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
-    if (body == null || superseded == null || superseded.length() == 0) {
-      return;
-    }
-    try {
-      body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
-          + "\"callout\" is only what a callout would have set from this record's own context. "
-          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
-          + "by another rule. If you copied the value from "
-          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
-          + "default resolved before this record had its context: send the callout value instead, "
-          + "or confirm the one you sent was deliberate.");
-    } catch (JSONException ignored) {
-      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
-      // caller asked; losing a diagnostic must never turn a successful create into a failure.
     }
   }
 

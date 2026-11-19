@@ -32,8 +32,11 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * etendo_list query-shaping helpers extracted from {@link McpToolRouterSupport} (ETP-4254): builds the
@@ -106,6 +109,91 @@ final class McpQuerySupport {
   }
 
   /**
+   * ETP-6087: refuses a filter or a sort on accounting data ({@code posted} and the other columns
+   * of {@link NeoAccountingAccessPolicy#isAccountingFieldName}) for a role without
+   * {@code showAccountingFields}. The projection hides those fields from such a role (ETP-5684),
+   * but {@code filters:{"posted":"Y"}} or {@code orderBy:"posted"} still split the rows by it, so
+   * the status was readable all the same.
+   *
+   * <p>Checked before anything is read, so it also covers a customization that serves the list
+   * itself (the read provider gets the same filters and order). The refusal is the one a field
+   * the spec excludes gets, so the answer neither confirms nor denies that the column exists. The
+   * role flag is read only when an accounting name is present.</p>
+   *
+   * @param filters    the caller's filters, or {@code null}
+   * @param orderBy    the caller's {@code orderBy}, or {@code null}
+   * @param sfEntity   the entity listed
+   * @param entityName the entity name as the caller sent it, for the refusal
+   * @throws McpRoutingException 422 when a filter or sort names accounting data the role may not
+   *     see
+   */
+  static void refuseHiddenAccountingFields(JSONObject filters, String orderBy, SFEntity sfEntity,
+      String entityName) {
+    String filterKey = firstAccountingFilterKey(filters);
+    String sortKey = filterKey == null ? firstAccountingSortField(orderBy) : null;
+    if ((filterKey == null && sortKey == null)
+        || NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {
+      return;
+    }
+    Entity dalEntity = dalEntityOf(sfEntity);
+    java.util.List<String> available = dalEntity == null ? java.util.List.of()
+        : availableFilterNames(sfEntity, dalEntity);
+    String name = sfEntity == null ? entityName : sfEntity.getName();
+    throw filterKey != null ? McpRoutingException.unknownFilterField(filterKey, name, available)
+        : McpRequestRefusals.sortFieldNotAvailable(sortKey, name, available);
+  }
+
+  private static String firstAccountingFilterKey(JSONObject filters) {
+    if (filters == null) {
+      return null;
+    }
+    java.util.Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (NeoAccountingAccessPolicy.isAccountingFieldName(key)) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  private static String firstAccountingSortField(String orderBy) {
+    if (StringUtils.isBlank(orderBy)) {
+      return null;
+    }
+    for (String part : orderBy.split(",")) {
+      String name = StringUtils.substringBefore(StringUtils.removeStart(part.trim(), "-"), " ");
+      if (NeoAccountingAccessPolicy.isAccountingFieldName(name)) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  private static Entity dalEntityOf(SFEntity sfEntity) {
+    Tab tab = sfEntity == null ? null : sfEntity.getADTab();
+    return tab == null || tab.getTable() == null ? null
+        : org.openbravo.base.model.ModelProvider.getInstance()
+            .getEntityByTableName(tab.getTable().getDBTableName());
+  }
+
+  /**
+   * {@link #filterablePropertyNames} as a refusal advertises them to the current role: without
+   * accounting data when the role may not see it (ETP-6087), so the {@code available} list does
+   * not name the very field the refusal hides.
+   */
+  private static java.util.List<String> availableFilterNames(SFEntity sfEntity,
+      Entity dalEntity) {
+    java.util.List<String> names = filterablePropertyNames(sfEntity, dalEntity);
+    if (names.stream().noneMatch(NeoAccountingAccessPolicy::isAccountingFieldName)
+        || NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {
+      return names;
+    }
+    return names.stream().filter(n -> !NeoAccountingAccessPolicy.isAccountingFieldName(n))
+        .collect(java.util.stream.Collectors.toList());
+  }
+
+  /**
    * {@link #buildWhereFromFilters(JSONObject, Tab, SFEntity, org.apache.logging.log4j.Logger)},
    * with the customization's {@code filterAliases} honoured (ETP-5705).
    *
@@ -123,6 +211,19 @@ final class McpQuerySupport {
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
       org.apache.logging.log4j.Logger log) throws JSONException {
+    return buildWhereFromFilters(filters, adTab, sfEntity, aliases, applied, null, log);
+  }
+
+  /**
+   * As above, with the entity's property-path fields already in hand (ETP-6148): the caller's
+   * own field filter has them, so they are not looked up again. {@code null} looks them up on
+   * the first key that is no property of the entity.
+   *
+   * @param knownPaths the entity's property-path fields, or {@code null}
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
+      java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
+      NeoPropertyPaths knownPaths, org.apache.logging.log4j.Logger log) throws JSONException {
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
@@ -140,23 +241,62 @@ final class McpQuerySupport {
     excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
+    PathFieldLookup pathFields = new PathFieldLookup(sfEntity, dalEntity, knownPaths);
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = filters.get(key);
-      if (McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key) && value instanceof String
-          && appendStatusCondition(where, sfEntity, (String) value, log)) {
-        continue;
-      }
-      Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
-      Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
-      if (value instanceof JSONObject) {
-        appendOperatorConditions(where, prop, target, key, (JSONObject) value);
-      } else {
-        appendEqualityCondition(where, key, prop, target, value);
+      boolean statusApplied = McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key)
+          && value instanceof String
+          && appendStatusCondition(where, sfEntity, (String) value, log);
+      NeoPropertyPaths.PathField pathField = statusApplied ? null : pathFields.of(key);
+      if (pathField != null) {
+        McpHqlConditions.appendPathCondition(where, pathField, key, value);
+      } else if (!statusApplied) {
+        Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+        appendPropertyCondition(where, prop, aliasTarget(dalEntity, prop, aliases, excluded,
+            applied), key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * ETP-6148: the property-path field a filter key names, looked up lazily — a property-path
+   * field's API key is never a property of the entity, so the paths are only read (one query) for
+   * the first key that is not one, and never when the caller already has them.
+   */
+  private static final class PathFieldLookup {
+    private final SFEntity sfEntity;
+    private final Entity dalEntity;
+    private NeoPropertyPaths paths;
+
+    PathFieldLookup(SFEntity sfEntity, Entity dalEntity, NeoPropertyPaths knownPaths) {
+      this.sfEntity = sfEntity;
+      this.dalEntity = dalEntity;
+      this.paths = knownPaths;
+    }
+
+    /** @return the path field named {@code key}, or {@code null} for a property of the entity */
+    NeoPropertyPaths.PathField of(String key) {
+      if (dalEntity.getPropertyByColumnName(key, false) != null || dalEntity.hasProperty(key)) {
+        return null;
+      }
+      if (paths == null) {
+        paths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+      }
+      return paths.get(key);
+    }
+  }
+
+  /** The condition of a filter on a property of the entity, evaluated on its alias target. */
+  private static void appendPropertyCondition(StringBuilder where, Property prop, Property target,
+      String key, Object value) throws JSONException {
+    if (value instanceof JSONObject) {
+      appendOperatorConditions(where, prop, target, key, (JSONObject) value);
+    } else {
+      appendEqualityCondition(where, key, prop, target, value);
+    }
   }
 
   /**
@@ -184,7 +324,10 @@ final class McpQuerySupport {
       try {
         resolved = dalEntity.getProperty(key);
       } catch (Exception ignored) {
-        throw unknownFilterField(key, dalEntity, sfEntity);
+        resolved = resolveAddressPublishedNameFilter(dalEntity, key);
+        if (resolved == null) {
+          throw unknownFilterField(key, dalEntity, sfEntity);
+        }
       }
     }
     // IMP-39: resolving against the DAL model is not the same question as "may this be filtered".
@@ -196,6 +339,28 @@ final class McpQuerySupport {
       throw unknownFilterField(key, dalEntity, sfEntity);
     }
     return resolved;
+  }
+
+  /**
+   * The property behind a structured-address published field name (ETP-5806 CP-10b, QA finding).
+   *
+   * <p>{@code etendo_schema} advertises the 3 structured SEPA columns under
+   * {@link AddressVirtualSelectorPolicy#publishedNameOverride}'s names
+   * ({@code streetName}/{@code buildingNumber}/{@code buildingName}), but neither
+   * {@code getPropertyByColumnName} nor {@code getProperty} above ever resolves one of those
+   * names — the DAL property is {@code oBSEPAStreetName} and friends, a different spelling — so a
+   * filter on the exact name the caller was told to use 422'd, and only the undocumented DAL
+   * property name actually worked. Tried only after both resolve attempts above have already
+   * failed, so it costs nothing on the overwhelming majority of keys that are not one of these 3.
+   *
+   * @param dalEntity the DAL entity the filter is aimed at
+   * @param key       the filter key as the caller spelled it
+   * @return the resolved property, or {@code null} when {@code key} is not a published
+   *     structured-address name, or the entity carries no such column
+   */
+  private static Property resolveAddressPublishedNameFilter(Entity dalEntity, String key) {
+    String rawColumn = AddressVirtualSelectorPolicy.rawColumnNameForPublishedName(key);
+    return rawColumn == null ? null : dalEntity.getPropertyByColumnName(rawColumn, false);
   }
 
   /**
@@ -218,7 +383,7 @@ final class McpQuerySupport {
       SFEntity sfEntity) {
     return McpRoutingException.unknownFilterField(key,
         sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
-        filterablePropertyNames(sfEntity, dalEntity));
+        availableFilterNames(sfEntity, dalEntity));
   }
 
   /**
@@ -599,92 +764,15 @@ final class McpQuerySupport {
   private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
       Property target,
       Object value) {
-    appendAnd(where);
-    if (!prop.isPrimitive()) {
-      where.append(filterPath(prop, target, ".id")).append('=')
-          .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
-    } else {
-      where.append(filterPath(prop, target, "")).append('=').append(
-          McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
-    }
+    McpHqlConditions.appendEqualityAt(where, key, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), value);
   }
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Property prop,
       Property target, String key, JSONObject operators) throws JSONException {
-    String path = filterPath(prop, target, "");
-    Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
-    java.util.Iterator<String> ops = operators.keys();
-    while (ops.hasNext()) {
-      String op = ops.next();
-      appendAnd(where);
-      if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
-        where.append(betweenCondition(path, prop, type, key, operators.optJSONArray(op)));
-      } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
-        where.append(containsCondition(path, prop, type, key, operators.get(op)));
-      } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
-        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
-            inValues(key, operators.optJSONArray(op))));
-      } else {
-        String sql = McpBusinessFilters.operatorToSql(op);
-        if (sql == null) {
-          throw McpRoutingException.unknownFilterOperator(key, op,
-              McpBusinessFilters.operatorKeys());
-        }
-        where.append(path).append(' ').append(sql).append(' ')
-            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
-      }
-    }
-  }
-
-  private static String betweenCondition(String path, Property prop, Class<?> type, String key,
-      JSONArray bounds) throws JSONException {
-    if (bounds == null || bounds.length() != 2) {
-      // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
-      // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
-      // the opposite of the narrowing the caller asked for.
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_BETWEEN,
-          "the 'between' operator takes a two-element [from, to] array");
-    }
-    return path + " between "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0))
-        + " and "
-        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1));
-  }
-
-  /**
-   * ETP-5852: partial text search. Only on a text column — on a number, date, boolean or foreign
-   * key a substring match is meaningless, so it is refused instead of guessed.
-   */
-  private static String containsCondition(String path, Property prop, Class<?> type, String key,
-      Object text) {
-    if (!prop.isPrimitive()) {
-      throw McpRequestRefusals.containsOnReference(key, text);
-    }
-    if (!String.class.equals(type)) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "'contains' works only on text fields; use exact match, 'in' or a range here");
-    }
-    if (!(text instanceof String) || ((String) text).isEmpty()) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
-          "the 'contains' operator takes a non-empty text value");
-    }
-    return McpBusinessFilters.containsCondition(path, text);
-  }
-
-  /** ETP-5852: the values of an {@code in}, one request for several exact values. */
-  private static java.util.List<Object> inValues(String key, JSONArray values)
-      throws JSONException {
-    if (values == null || values.length() == 0) {
-      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_IN,
-          "the 'in' operator takes a non-empty array of values");
-    }
-    java.util.List<Object> list = new java.util.ArrayList<>();
-    for (int i = 0; i < values.length(); i++) {
-      list.add(values.get(i));
-    }
-    return list;
+    McpHqlConditions.appendOperatorConditionsAt(where, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), key, operators);
   }
 
   /**
@@ -715,15 +803,9 @@ final class McpQuerySupport {
           McpNamedFilters.summarize(sfEntity.getNamedFilters()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
-    appendAnd(where);
+    McpHqlConditions.appendAnd(where);
     where.append('(').append(fragment).append(')');
     return true;
-  }
-
-  private static void appendAnd(StringBuilder where) {
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
   }
 
   /**
@@ -797,10 +879,62 @@ final class McpQuerySupport {
   }
 
   /**
-   * Apply the optional IMP-2 field projection to a {@code etendo_list}/{@code etendo_get} response.
-   * Precedence: an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"}
-   * uses the entity's business-critical fields; anything else leaves the response full. A no-op
-   * when neither is present, so the default behavior is unchanged.
+   * The DAL property names of the window's list columns ({@code ETGO_SF_FIELD.GRID_SEQNO}, written
+   * by push-to-neo from the frontend contract), in list order (ETP-5848). Empty when the entity has
+   * none, in which case the caller leaves the response full.
+   */
+  static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab) {
+    return gridFields(sfEntity, adTab, null);
+  }
+
+  /**
+   * As {@link #gridFields(SFEntity, Tab)}, with the entity's property-path fields already in hand
+   * (ETP-6148); {@code null} looks them up on the first path row.
+   */
+  static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab,
+      NeoPropertyPaths knownPaths) {
+    java.util.Set<String> result = new java.util.LinkedHashSet<>();
+    Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEntity == null) {
+      return result;
+    }
+    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
+    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    crit.add(Restrictions.isNotNull(SFField.PROPERTY_GRIDPOSITION));
+    crit.addOrder(org.hibernate.criterion.Order.asc(SFField.PROPERTY_GRIDPOSITION));
+    NeoPropertyPaths propertyPaths = knownPaths;
+    for (SFField sfField : crit.list()) {
+      Column col = sfField.getADColumn();
+      Property prop = col == null ? null
+          : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        result.add(prop.getName());
+        continue;
+      }
+      // ETP-6148: a property-path list column, in its list position, under its API key.
+      String path = NeoFieldFilter.propertyPathOf(sfField);
+      if (col == null && path != null) {
+        if (propertyPaths == null) {
+          propertyPaths = NeoPropertyPaths.forEntity(sfEntity, dalEntity.getName());
+        }
+        NeoPropertyPaths.PathField pathField = propertyPaths.byPath(path);
+        if (pathField != null) {
+          result.add(pathField.getApiKey());
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Apply the field projection to a {@code etendo_list}/{@code etendo_get} response. Precedence:
+   * an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"} uses the
+   * entity's business-critical fields; otherwise {@code view:"full"} leaves the response full.
+   * With none of those, a list ({@code listDefault}) is cut to its default columns — the entity's
+   * {@code MCP_CONFIG} {@code list.fields}, else the window's list columns — and names the fields
+   * it left out; a get, or an entity with no default columns, stays full.
    *
    * <p>IMP-18: an explicit whitelist is also validated, and any name the entity cannot emit comes
    * back as {@code response.unknownFields} instead of vanishing. {@code fieldFilter} is the same
@@ -808,18 +942,23 @@ final class McpQuerySupport {
    * emittable set has to be the spec's exposure post-rename, not the DAL model.
    */
   static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab,
-      NeoFieldFilter fieldFilter) throws JSONException {
-    if (args == null) {
-      return;
-    }
+      NeoFieldFilter fieldFilter, boolean listDefault) throws JSONException {
+    JSONObject safeArgs = args == null ? new JSONObject() : args;
+    String view = safeArgs.optString(McpFieldProjection.PARAM_VIEW, null);
     java.util.Set<String> requested;
-    JSONArray fields = args.optJSONArray(McpFieldProjection.PARAM_FIELDS);
+    JSONArray fields = safeArgs.optJSONArray(McpFieldProjection.PARAM_FIELDS);
     boolean explicitWhitelist = fields != null;
     if (explicitWhitelist) {
       requested = McpFieldProjection.baseNames(McpFieldProjection.parseFields(fields));
-    } else if (McpFieldProjection.isSummaryView(
-        args.optString(McpFieldProjection.PARAM_VIEW, null))) {
+    } else if (McpFieldProjection.isSummaryView(view)) {
       requested = summaryFields(sfEntity, adTab);
+    } else if (listDefault && !McpFieldProjection.isFullView(view)) {
+      requested = McpListSection.configuredFields(sfEntity);
+      if (requested.isEmpty()) {
+        requested = gridFields(sfEntity, adTab,
+            fieldFilter == null ? null : NeoPropertyPaths.of(fieldFilter));
+      }
+      McpFieldProjection.reportOmittedFields(responseJson, requested);
     } else {
       return;
     }

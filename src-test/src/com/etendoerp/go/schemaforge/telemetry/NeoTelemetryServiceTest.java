@@ -43,6 +43,7 @@ import com.etendoerp.go.usageevents.LogCapture;
 /**
  * @covers com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService
  * @covers com.etendoerp.go.schemaforge.telemetry.LogNeoTelemetrySink
+ * @covers com.etendoerp.go.schemaforge.telemetry.MixpanelNeoTelemetryConfig
  */
 class NeoTelemetryServiceTest {
 
@@ -229,6 +230,37 @@ class NeoTelemetryServiceTest {
     assertEquals("mixed", emitted.get("types_source"));
   }
 
+  /**
+   * ETP-5581: the bounce-pair KPI properties pass the allowlist with their types; mistyped or
+   * out-of-bounds values are dropped.
+   */
+  @Test
+  void emitKeepsTheBounceKpiPropertiesWithTheirTypes() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED, mapOf(
+        "account_id", "CLIENT-1", "channel", "ui", "flag_enabled", true,
+        "detection_signal", "pis_link", "signals_count", 2, "confidence", "high",
+        "ambiguous", false, "adjacent", true, "preselected", true, "decision", "discarded",
+        "surface", "modal", "chosen_among_alternatives", false));
+    assertEquals(12, sink.last().getProperties().size(), sink.last().getProperties().toString());
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED,
+        mapOf("days_since_decided", 4L, "confidence", "review"));
+    assertEquals(4L, sink.last().getProperties().get("days_since_decided"));
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED, mapOf(
+        "pairs_shown", 3, "pairs_discarded", 1, "pairs_unchecked", 1, "pairs_sent_to_panel", 1,
+        "preselection_changed", true));
+    assertEquals(5, sink.last().getProperties().size(), sink.last().getProperties().toString());
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED, mapOf(
+        "signals_count", 4, "preselected", "Y", "days_since_decided", -1L,
+        "environment", "production", "$insert_id", "x"));
+    assertTrue(sink.last().getProperties().isEmpty(), sink.last().getProperties().toString());
+  }
+
   /** The contact flags must be real booleans and the contact age a whole number within bounds. */
   @Test
   void emitDropsMistypedOrOutOfBoundsContactKpiValues() {
@@ -254,6 +286,55 @@ class NeoTelemetryServiceTest {
       assertFalse(sink.last().getProperties().containsKey("days_since_created"),
           "must drop " + outOfBounds);
     }
+  }
+
+  /** ETP-6230: {@code internal} is an allowlisted boolean; the owner's address never is. */
+  @Test
+  void emitKeepsTheAccountingKpiPropsAndDropsAnEmail() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_FIRST_DOCUMENT_PROCESSED, mapOf(
+        "account_id", "CLIENT-1", "internal", true, "source", "spa", "operation", "post",
+        "email", "owner@etendo.ai", "ownerEmail", "owner@etendo.ai"));
+
+    Map<String, Object> emitted = sink.last().getProperties();
+    assertEquals(Map.of("account_id", "CLIENT-1", "internal", true, "source", "spa",
+        "operation", "post"), emitted);
+  }
+
+  @Test
+  void emitDropsANonBooleanInternalFlag() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_PERIOD_REFUSED,
+        mapOf("account_id", "CLIENT-1", "internal", "true"));
+
+    assertFalse(sink.last().getProperties().containsKey("internal"));
+    assertEquals("CLIENT-1", sink.last().getProperties().get("account_id"));
+  }
+
+  @Test
+  void emitKeepsTheAdjustedFlagOfTheInboxConfirmedEventAndDropsAnIdentifier() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED,
+        mapOf("account_id", "CLIENT-1", "adjusted", true, "recordId", "ROW-1", "invoiceId", "I1"));
+
+    assertEquals(Map.of("account_id", "CLIENT-1", "adjusted", true), sink.last().getProperties());
+  }
+
+  @Test
+  void emitDropsANonBooleanAdjustedFlag() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED,
+        mapOf("account_id", "CLIENT-1", "adjusted", "yes"));
+
+    assertFalse(sink.last().getProperties().containsKey("adjusted"));
   }
 
   @Test
@@ -319,6 +400,41 @@ class NeoTelemetryServiceTest {
     assertDoesNotThrow(() ->
         service.emit(NeoTelemetryEvents.BACKEND_ACCOUNTING_ENTRY_GENERATED,
             mapOf("status", "success")));
+  }
+
+  /**
+   * With the Mixpanel backend disabled ({@code ETGO_MIXPANEL_ENABLED=false}, here its system
+   * property twin) the runtime service never builds a Mixpanel sink, even when a token is present,
+   * and emitting an event neither throws nor submits anything.
+   */
+  @Test
+  void runtimeServiceWithMixpanelDisabledNeverBuildsTheMixpanelSinkAndEmitDoesNotThrow() {
+    String enabledKey = MixpanelNeoTelemetryConfig.PROP_ENABLED;
+    String tokenKey = MixpanelNeoTelemetryConfig.PROP_TOKEN;
+    String previousEnabled = System.getProperty(enabledKey);
+    String previousToken = System.getProperty(tokenKey);
+    System.setProperty(enabledKey, "false");
+    System.setProperty(tokenKey, "a-token-that-must-stay-unused");
+    try (org.mockito.MockedConstruction<MixpanelNeoTelemetrySink> mixpanel =
+             org.mockito.Mockito.mockConstruction(MixpanelNeoTelemetrySink.class)) {
+      NeoTelemetryService service = NeoTelemetryService.runtime();
+
+      assertDoesNotThrow(() -> service.emit(NeoTelemetryEvents.BACKEND_GOODS_SHIPMENT_COMPLETED,
+          mapOf("account_id", "CLIENT-A", "flag_enabled", true), "CLIENT-A"));
+
+      assertTrue(mixpanel.constructed().isEmpty(), "the Mixpanel sink must not be created");
+    } finally {
+      restore(enabledKey, previousEnabled);
+      restore(tokenKey, previousToken);
+    }
+  }
+
+  private static void restore(String key, String previous) {
+    if (previous == null) {
+      System.clearProperty(key);
+    } else {
+      System.setProperty(key, previous);
+    }
   }
 
   @Test
