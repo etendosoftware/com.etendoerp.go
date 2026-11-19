@@ -80,7 +80,9 @@ final class ConversionRateActions {
 
   private static final String CREATE_HINT = " To create the rate, call etendo_create on"
       + " conversion-rates/conversionRate with the same three fields: the inverse row and the"
-      + " closing of the previous range are done by the server in the same transaction.";
+      + " closing of the previous range are done by the server in the same transaction. An"
+      + " existing rate can only change its multipleRateBy (etendo_update; the inverse follows);"
+      + " to change its period, delete it with etendo_delete and create a new one.";
 
   static final Map<String, NeoActionContract> CONTRACTS = buildContracts();
 
@@ -107,7 +109,9 @@ final class ConversionRateActions {
             + " rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]} — the"
             + " two rows (rate and its inverse) the create inserts and the rows of the range in"
             + " force it closes one minute before validFromDate — or {creates:[], closes:[],"
-            + " error, errorKey} when the create would be refused (e.g. an overlapping range)."
+            + " error, errorKey, errorField} when the create would be refused (e.g. an"
+            + " overlapping range: error names the colliding range and the start to choose"
+            + " instead; errorField is the parameter at fault)."
             + CREATE_HINT,
         Param.required(ConversionRateWrites.F_TO_CURRENCY, NeoActionContract.TYPE_STRING,
             "Destination currency: C_Currency id or ISO code (e.g. CHF)."),
@@ -248,6 +252,9 @@ final class ConversionRateActions {
     } catch (ConversionRateRefusal refusal) {
       result.put("error", refusal.text());
       result.put("errorKey", refusal.getKey());
+      if (refusal.getField() != null) {
+        result.put("errorField", refusal.getField());
+      }
     }
     return result;
   }

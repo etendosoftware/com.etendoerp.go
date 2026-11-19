@@ -43,7 +43,9 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  * <p>Creating a range from {@code F} closes every earlier open range of the pair at
  * {@code F - 1 minute} (core's {@code ConversionRateEventHandler} compares ranges with an
  * inclusive {@code BETWEEN}, so the closing instant must be strictly before {@code F}). Any other
- * range that reaches {@code F} or later is an overlap and nothing is planned.</p>
+ * range that reaches {@code F} or later is an overlap and nothing is planned. A range never moves:
+ * an existing range only changes its rate; to change its period it is deleted and created
+ * again.</p>
  */
 final class ConversionRateRules {
 
@@ -107,15 +109,20 @@ final class ConversionRateRules {
   }
 
   /**
-   * What a write would do to the other ranges of the pair.
+   * What a create would do to the other ranges of the pair.
    *
-   * @param closes  the ranges whose end moves, in the order they must be written
-   * @param overlap {@code true} when the write collides with another range: nothing is planned
+   * @param closes   the open ranges whose end moves to one minute before the new start
+   * @param conflict the range the new one collides with, or {@code null}; when set, nothing is
+   *                 planned
    */
-  record Plan(List<Close> closes, boolean overlap) {
+  record Plan(List<Close> closes, Range conflict) {
 
-    static Plan ofOverlap() {
-      return new Plan(Collections.emptyList(), true);
+    boolean overlap() {
+      return conflict != null;
+    }
+
+    static Plan ofConflict(Range conflict) {
+      return new Plan(Collections.emptyList(), conflict);
     }
   }
 
@@ -150,52 +157,33 @@ final class ConversionRateRules {
       if (range.isOpen() && !closing.isBefore(range.validFrom())) {
         closes.add(new Close(range, closing));
       } else if (overlaps(range, from, LocalDateTime.MAX)) {
-        return Plan.ofOverlap();
+        return Plan.ofConflict(range);
       }
     }
-    return new Plan(closes, false);
+    return new Plan(closes, null);
   }
 
   /**
-   * Plans moving the start of {@code target} to {@code newFrom}. The range that {@code target}
-   * closed when it was created (the one ending exactly one minute before its start) follows it:
-   * its end becomes {@code newFrom - 1 minute}, shrinking or growing.
+   * The start an overlapping create should be later than: the start of the pair's open range
+   * (a new range must start at least one minute after it, which closes it), or, with no open
+   * range, the latest end among the ranges that reach {@code from}.
    *
-   * @param others  every other range of the pair
-   * @param target  the range being edited
-   * @param newFrom its new start, minute precision
-   * @return the adjacent range to re-close, or an overlap
+   * @param ranges every range of the pair
+   * @param from   the refused start
+   * @return the instant to suggest, or {@code null} when no range reaches {@code from}
    */
-  static Plan planMove(List<Range> others, Range target, LocalDateTime newFrom) {
-    LocalDateTime end = target.endOrMax();
-    if (newFrom.isAfter(end)) {
-      return Plan.ofOverlap();
-    }
-    Range previous = adjacentBefore(others, target.validFrom());
-    for (Range other : others) {
-      if (other != previous && overlaps(other, newFrom, end)) {
-        return Plan.ofOverlap();
-      }
-    }
-    if (previous == null) {
-      return new Plan(Collections.emptyList(), false);
-    }
-    LocalDateTime previousEnd = closingInstant(newFrom);
-    if (previousEnd.isBefore(previous.validFrom())) {
-      return Plan.ofOverlap();
-    }
-    return new Plan(List.of(new Close(previous, previousEnd)), false);
-  }
-
-  /** The closed range ending one minute before {@code start}, or {@code null}. */
-  static Range adjacentBefore(List<Range> ranges, LocalDateTime start) {
-    LocalDateTime expectedEnd = closingInstant(start);
+  static LocalDateTime suggestedStart(List<Range> ranges, LocalDateTime from) {
+    LocalDateTime latestEnd = null;
     for (Range range : ranges) {
-      if (!range.isOpen() && expectedEnd.equals(range.validTo())) {
-        return range;
+      if (range.isOpen()) {
+        return range.validFrom();
+      }
+      if (!range.validTo().isBefore(from)
+          && (latestEnd == null || range.validTo().isAfter(latestEnd))) {
+        latestEnd = range.validTo();
       }
     }
-    return null;
+    return latestEnd;
   }
 
   /** Whether {@code range} shares at least one instant with {@code [from, to]}, both inclusive. */

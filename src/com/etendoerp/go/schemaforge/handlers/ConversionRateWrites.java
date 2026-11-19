@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -39,7 +38,8 @@ import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
 
 /**
  * ETP-6365: the writes of the {@code conversion-rates} customization — create a manual range,
- * change its rate or start, delete it — always on both directions of the pair.
+ * change its rate, delete it — always on both directions of the pair. A range never changes its
+ * period: to change it, the range is deleted and created again.
  *
  * <p><b>Validate everything, then write.</b> Every refusal ({@link ConversionRateRefusal}) is
  * thrown before the first row is touched. The writes themselves run on the request's session and
@@ -60,11 +60,10 @@ import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
  *
  * <p><b>Order of the writes.</b> Core's {@code ConversionRateEventHandler} refuses (20504) a row
  * whose dates overlap another row of the pair at flush time, and Hibernate flushes inserts before
- * updates. A range that is being shortened is therefore written and flushed first, then the new or
- * moved range, then a range that grows.</p>
+ * updates. A create therefore closes the open range and flushes before it inserts the new one.</p>
  *
- * <p>One instance per request: it remembers the ISO codes of the pair it works on, so a failure
- * raised by the database can be worded with them ({@link #pairIsoCodes()}).</p>
+ * <p>One instance per request: it remembers the pair and the create it works on, so a failure
+ * raised by the database can be worded with them ({@link #overlapAfterFailure()}).</p>
  */
 class ConversionRateWrites {
 
@@ -85,6 +84,7 @@ class ConversionRateWrites {
   private final ConversionRateTriggerBypass bypass;
   private String fromIso;
   private String toIso;
+  private CreateRequest lastCreate;
 
   /** A validated create: everything the two rows need. */
   record CreateRequest(String clientId, Currency orgCurrency, Currency toCurrency, BigDecimal rate,
@@ -102,11 +102,6 @@ class ConversionRateWrites {
   ConversionRateWrites(ConversionRateStore store, ConversionRateTriggerBypass bypass) {
     this.store = store;
     this.bypass = bypass;
-  }
-
-  /** The {@code [from, to]} ISO codes of the pair being written, for a database refusal. */
-  String[] pairIsoCodes() {
-    return new String[] { fromIso, toIso };
   }
 
   // --- create --------------------------------------------------------------------------------
@@ -129,10 +124,12 @@ class ConversionRateWrites {
     fromIso = orgCurrency.getISOCode();
     toIso = to.getISOCode();
     if (orgCurrencyId.equals(to.getId())) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.ORG_CURRENCY, toIso);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.ORG_CURRENCY, toIso)
+          .on(F_TO_CURRENCY);
     }
     if (store.autoCurrencyIds(clientId, orgCurrencyId).contains(to.getId())) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.AUTO_CURRENCY, toIso);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.AUTO_CURRENCY, toIso)
+          .on(F_TO_CURRENCY);
     }
     BigDecimal rate = requireRate(body.opt(F_RATE));
     LocalDateTime validFrom = requirePastValidFrom(body.opt(F_VALID_FROM));
@@ -145,13 +142,39 @@ class ConversionRateWrites {
    * @throws ConversionRateRefusal {@code OVERLAP} when the new range collides with another
    */
   CreatePlan planCreate(CreateRequest request) {
-    List<Range> ranges = store.rangesOfPair(request.clientId(), request.orgCurrency().getId(),
-        request.toCurrency().getId());
+    lastCreate = request;
+    List<Range> ranges = rangesOf(request);
     Plan plan = ConversionRateRules.planCreate(ranges, request.validFrom());
     if (plan.overlap()) {
-      throw ConversionRateRefusal.overlapOf(fromIso, toIso);
+      throw overlapRefusal(ranges, plan.conflict(), request.validFrom());
     }
     return new CreatePlan(request, plan);
+  }
+
+  /**
+   * The overlap refusal for a create the database refused (core's 20504) after this instance
+   * planned it: the ranges are read again — the caller has rolled the session back — so the
+   * message names the range that now collides. Without a planned create, or when no range
+   * collides any more (a concurrent change), the message has no dates.
+   */
+  ConversionRateRefusal overlapAfterFailure() {
+    if (lastCreate == null) {
+      return ConversionRateRefusal.overlapOf(fromIso, toIso, null, null);
+    }
+    List<Range> ranges = rangesOf(lastCreate);
+    Plan plan = ConversionRateRules.planCreate(ranges, lastCreate.validFrom());
+    return overlapRefusal(ranges, plan.conflict(), lastCreate.validFrom());
+  }
+
+  private ConversionRateRefusal overlapRefusal(List<Range> ranges, Range conflict,
+      LocalDateTime from) {
+    return ConversionRateRefusal.overlapOf(fromIso, toIso, conflict,
+        ConversionRateRules.suggestedStart(ranges, from));
+  }
+
+  private List<Range> rangesOf(CreateRequest request) {
+    return store.rangesOfPair(request.clientId(), request.orgCurrency().getId(),
+        request.toCurrency().getId());
   }
 
   /**
@@ -181,66 +204,27 @@ class ConversionRateWrites {
   // --- update --------------------------------------------------------------------------------
 
   /**
-   * Changes the rate and/or the start of the range {@code row} belongs to, on both directions.
-   * {@code multipleRateBy} is the rate of {@code row} itself; its twin gets the inverse. Moving the
-   * start re-closes the range this one closed when it was created.
+   * Changes the rate of the range {@code row} belongs to, on both directions:
+   * {@code multipleRateBy} is the rate of {@code row} itself, its twin gets the inverse. Nothing
+   * else of a range can change — the same as the window, which only edits the rate ("Para cambiar
+   * el periodo, elimine la tasa y cree una nueva").
    *
-   * @throws ConversionRateRefusal when the range is locked, a fixed field changes or the new start
-   *     collides with another range
+   * @throws ConversionRateRefusal when the range is downloaded, or the body changes anything but
+   *     the rate
    */
   ConversionRate applyUpdate(ConversionRate row, JSONObject body) {
     rememberPair(row);
     checkEditable(row);
     rejectFixedFields(row, body);
     BigDecimal rate = body.has(F_RATE) ? requireRate(body.opt(F_RATE)) : null;
-    LocalDateTime newFrom = body.has(F_VALID_FROM) ? requirePastValidFrom(body.opt(F_VALID_FROM))
-        : null;
-
-    List<Range> ranges = rangesOf(row);
-    Range target = targetOf(ranges, row);
-    Plan move = null;
-    if (newFrom != null && !newFrom.equals(target.validFrom())) {
-      move = planMove(ranges, target, newFrom);
+    if (rate == null) {
+      return row;
     }
-    Plan plannedMove = move;
+    Range target = targetOf(rangesOf(row), row);
     return bypass.run(() -> {
-      if (plannedMove != null) {
-        moveStart(plannedMove, target, newFrom);
-      }
-      if (rate != null) {
-        writeRate(row, target, rate);
-      }
+      writeRate(row, target, rate);
       return row;
     });
-  }
-
-  private Plan planMove(List<Range> ranges, Range target, LocalDateTime newFrom) {
-    List<Range> others = new ArrayList<>(ranges);
-    others.remove(target);
-    Plan plan = ConversionRateRules.planMove(others, target, newFrom);
-    if (plan.overlap()) {
-      throw ConversionRateRefusal.overlapOf(fromIso, toIso);
-    }
-    return plan;
-  }
-
-  private void moveStart(Plan plan, Range target, LocalDateTime newFrom) {
-    Close adjacent = plan.closes().isEmpty() ? null : plan.closes().get(0);
-    boolean shrinksAdjacent = adjacent != null
-        && adjacent.newValidTo().isBefore(adjacent.range().validTo());
-    if (shrinksAdjacent) {
-      writeEnd(adjacent);
-      flush();
-    }
-    for (String id : target.rowIds()) {
-      ConversionRate moved = store.rate(id);
-      moved.setValidFromDate(ConversionRateStore.toDate(newFrom));
-      checkRow(moved);
-    }
-    flush();
-    if (adjacent != null && !shrinksAdjacent) {
-      writeEnd(adjacent);
-    }
   }
 
   private void writeRate(ConversionRate row, Range target, BigDecimal rate) {
@@ -322,14 +306,22 @@ class ConversionRateWrites {
         StoredCurrency stored = new StoredCurrency(F_CURRENCY.equals(field) ? row.getCurrency()
             : row.getToCurrency());
         if (!stored.matches(sent)) {
-          throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE);
+          throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE)
+              .on(field);
         }
       }
     }
-    if (body.has(F_VALID_TO) && !body.isNull(F_VALID_TO)) {
-      LocalDateTime sent = ConversionRateRules.parseValidFrom(body.opt(F_VALID_TO));
-      if (!Objects.equals(sent, truncated(row.getValidToDate()))) {
-        throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE);
+    rejectChangedInstant(body, F_VALID_FROM, row.getValidFromDate());
+    rejectChangedInstant(body, F_VALID_TO, row.getValidToDate());
+  }
+
+  /** Refuses a date sent with another value than the stored one (minute precision). */
+  private static void rejectChangedInstant(JSONObject body, String field, java.util.Date stored) {
+    if (body.has(field) && !body.isNull(field)) {
+      LocalDateTime sent = ConversionRateRules.parseValidFrom(body.opt(field));
+      if (!Objects.equals(sent, truncated(stored))) {
+        throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FIELD_NOT_EDITABLE)
+            .on(field);
       }
     }
   }
@@ -401,7 +393,8 @@ class ConversionRateWrites {
   private Currency resolveTargetCurrency(Object raw, String clientId) {
     String ref = idOf(raw);
     if (ref == null) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.CURRENCY_REQUIRED);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.CURRENCY_REQUIRED)
+          .on(F_TO_CURRENCY);
     }
     Currency currency = store.currency(ref);
     if (currency == null && ref.length() == 3) {
@@ -409,7 +402,8 @@ class ConversionRateWrites {
     }
     if (currency == null || !Boolean.TRUE.equals(currency.isActive())
         || !isVisibleTo(currency, clientId)) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.CURRENCY_INVALID, ref);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.CURRENCY_INVALID, ref)
+          .on(F_TO_CURRENCY);
     }
     return currency;
   }
@@ -422,7 +416,7 @@ class ConversionRateWrites {
   private static BigDecimal requireRate(Object raw) {
     BigDecimal rate = ConversionRateRules.parseRate(raw);
     if (rate == null) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_RATE);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_RATE).on(F_RATE);
     }
     return rate;
   }
@@ -434,10 +428,12 @@ class ConversionRateWrites {
   private LocalDateTime requirePastValidFrom(Object raw) {
     LocalDateTime validFrom = ConversionRateRules.parseValidFrom(raw);
     if (validFrom == null) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_VALID_FROM);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.INVALID_VALID_FROM)
+          .on(F_VALID_FROM);
     }
     if (ConversionRateRules.isFuture(validFrom, store.now())) {
-      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FUTURE_START);
+      throw ConversionRateRefusal.badRequest(ConversionRateRefusal.FUTURE_START)
+          .on(F_VALID_FROM);
     }
     return validFrom;
   }

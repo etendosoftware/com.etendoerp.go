@@ -55,8 +55,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * ({@link ConversionRateRefusal}).</p>
  *
  * <p><b>Update</b> ({@code PATCH}/{@code PUT}): only {@code multipleRateBy} (the inverse is
- * recomputed) and {@code validFromDate} (same overlap rules; the range closed by this one follows
- * it). <b>Delete</b> removes both rows and does not reopen the previous range. Any manual range can
+ * recomputed); any other field sent with another value is refused, as the window only edits the
+ * rate — a period is changed by deleting the range and creating a new one. <b>Delete</b> removes both rows and does not reopen the previous range. Any manual range can
  * be changed or deleted, used in accounting or not; only a downloaded range is refused. The writes
  * bypass the database triggers ({@link ConversionRateTriggerBypass}); what they enforced is
  * re-checked in {@link ConversionRateWrites}.</p>
@@ -163,7 +163,7 @@ public class ConversionRateHandler extends AbstractNeoHandler {
     } catch (Exception e) {
       NeoErrorResponses.rollbackUnlessBatchOwned();
       return NeoResponse.ensureTopLevelMessage(ConversionRateResponses.failure(e,
-          context.getHttpMethod(), writes.pairIsoCodes()));
+          context.getHttpMethod(), writes));
     } finally {
       exitAdminMode();
     }

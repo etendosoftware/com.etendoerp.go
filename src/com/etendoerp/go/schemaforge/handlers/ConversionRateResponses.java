@@ -82,19 +82,28 @@ final class ConversionRateResponses {
    *
    * @param failure    what was thrown
    * @param httpMethod the request method
-   * @param pairIso    the {@code [from, to]} ISO codes of the pair being written
+   * @param writes     the writer of the request, which words an overlap with its context
    * @return the error response
    */
-  static NeoResponse failure(Throwable failure, String httpMethod, String[] pairIso) {
+  static NeoResponse failure(Throwable failure, String httpMethod, ConversionRateWrites writes) {
     String text = messagesOf(failure);
     if (text.contains(SMF_SYNCED_DELETE.toLowerCase(Locale.ROOT))) {
       return ConversionRateRefusal.conflict(ConversionRateRefusal.SYNCED_LOCKED).toResponse();
     }
     if (text.contains(CORE_OVERLAP) || containsCoreOverlapText(text)) {
-      return ConversionRateRefusal.overlapOf(pairIso[0], pairIso[1]).toResponse();
+      return overlapAfterFailure(writes).toResponse();
     }
     log.error("[ETP-6365] Conversion rate write failed", failure);
     return NeoErrorResponses.fromException(failure, httpMethod, "conversion-rates write", null);
+  }
+
+  private static ConversionRateRefusal overlapAfterFailure(ConversionRateWrites writes) {
+    try {
+      return writes.overlapAfterFailure();
+    } catch (RuntimeException e) {
+      log.debug("Could not read the colliding range again: {}", e.getMessage());
+      return ConversionRateRefusal.overlapOf(null, null, null, null);
+    }
   }
 
   /** The core overlap refusal arrives translated (OBMessageUtils.messageBD), without its key. */

@@ -9621,7 +9621,7 @@ It validates everything first, then writes on the request's session and only flu
 commits, and on any failure the session is rolled back (`NeoErrorResponses.rollbackUnlessBatchOwned`),
 so a rate is never left without its inverse.
 
-**A range never starts in the future**: create and update refuse a `validFromDate` later than the
+**A range never starts in the future**: create refuses a `validFromDate` later than the
 server's current minute (`HH:mm:59` of the current minute is still accepted;
 `ETGO_ConvRateFutureStart`). The `serverClock` action gives the SPA that minute as its default.
 
@@ -9630,7 +9630,7 @@ documents that look a rate up afterwards; a posted invoice keeps the rate it was
 (`C_Conversion_Rate_Document` / the header rate). Only a downloaded row stays locked. Core's
 `C_CONVERSION_RATE_TRG` refuses (`@20506@`) to update or delete a range whose dates contain postings
 of the pair, so the customization's writes (create including the closing of the previous range,
-update including the move of the neighbour, delete) run with the database triggers disabled, through
+rate update, delete) run with the database triggers disabled, through
 core's `TriggerHandler` (`ConversionRateTriggerBypass`):
 
 - **Scope.** On PostgreSQL `TriggerHandler.disable()` runs
@@ -9650,17 +9650,20 @@ core's `TriggerHandler` (`ConversionRateTriggerBypass`):
   before writing) and fails the write, rolled back. **Skipped on purpose:** the `@20506@` "rate used in
   accounting" check. Those are the only rules of the two triggers. Core's Java
   `ConversionRateEventHandler` (overlap, 20504) is not a trigger and still runs at flush, which is why
-  the write order (shrink, then the new/moved range, then growth) is kept.
+  a create closes the open range and flushes before it inserts the new one.
 
 | Operation | Body | What the server does |
 |---|---|---|
 | create (`POST`) | `{toCurrency, multipleRateBy, validFromDate}` — `toCurrency` an id or an ISO code; `validFromDate` `yyyy-MM-dd'T'HH:mm[:ss]` (seconds dropped; a bare date is 00:00) | origin = organization currency of the request (`OBCurrencyUtils.getOrgCurrency`, else the client's), organization `*` of the tenant, `conversionRateType` `S`, not synced, open end (written as 9999-12-31, what core stores for an empty one). Closes every open range of the pair that started earlier at `validFromDate − 1 minute` (both directions), then inserts the rate (org → X, multiply X, divide 1/X) **and** its inverse (X → org, multiply 1/X, divide X). Answers the forward row in the generic `{response:{status:0,data:[row]}}` shape |
-| update (`PATCH`/`PUT`) | `multipleRateBy` and/or `validFromDate` | applied to both rows (the twin gets 1/X; a legacy range without its inverse gets one). Moving the start re-closes the range this one closed (the one ending exactly a minute before the old start) at `newStart − 1 minute`. `currency`/`toCurrency`/`validToDate` with another value → 400 |
+| update (`PATCH`/`PUT`) | `multipleRateBy` only | applied to both rows (the twin gets 1/X; a legacy range without its inverse gets one). The window only edits the rate, so `validFromDate`, `validToDate`, `currency` or `toCurrency` sent with another value → 400 `ETGO_ConvRateFieldNotEditable` ("Solo se puede modificar la tasa. Para cambiar el periodo, elimine la tasa y cree una nueva."), `error.field` naming it. To change a period: delete and create again |
 | delete | — | deletes both rows; the range it had closed is **not** reopened |
 
 A range is the pair of rows with the same `ValidFrom`/`ValidTo`; `ValidTo` empty or in year 2999+
 means open. Refusals, all before anything is written (Spanish/English text in
-`messages/neo_hints_*.properties`, key in `error.messageKeys`):
+`messages/neo_hints_*.properties`, key in `error.messageKeys`, and `error.field` — the request
+field at fault — on the field-bound ones: `toCurrency` for the currency refusals, `multipleRateBy`
+for `InvalidRate`, `validFromDate` for `InvalidValidFrom`/`FutureStart`/`Overlap`, the field sent
+for `FieldNotEditable`):
 
 | Key | Status | When |
 |---|---|---|
@@ -9672,7 +9675,7 @@ means open. Refusals, all before anything is written (Spanish/English text in
 | `ETGO_ConvRateInvalidValidFrom` | 400 | start missing or not a date |
 | `ETGO_ConvRateFutureStart` | 400 | start later than the server's current minute — "La fecha y hora de inicio no puede ser posterior al momento actual." |
 | `ETGO_ConvRateFieldNotEditable` | 400 | an update changes a fixed field |
-| `ETGO_ConvRateOverlap` | 409 | the new (or moved) range falls inside a closed range, or does not start after the start of the range in force — "Ya existe una tasa de conversión para EUR → CHF en las fechas indicadas." Also the translation of core's 20504 |
+| `ETGO_ConvRateOverlap` | 409 | the new range falls inside a closed range, or does not start after the start of the range in force — "Ya existe una tasa de conversión para EUR → CHF en las fechas indicadas (01/11/2026 09:00 – 18/11/2026 14:29). Elija una fecha de inicio posterior al 18/11/2026 14:30." `{2}`–`{3}` is the colliding range (`dd/MM/yyyy HH:mm` in every language; an open end reads "sin fecha de fin" / "no end date", key `ETGO_ConvRateNoEndDate`); `{4}` is the start of the pair's open range, or, with none, the latest end of the colliding ranges. Also the translation of core's 20504 (the ranges are read again after the rollback to fill the dates) |
 | `ETGO_ConvRateSyncedLocked` | 409 | update/delete of a downloaded row (also the translation of `SMFCR_CannotDeleteSyncedRate`) |
 | `ETGO_ConvRateNoOrgCurrency` | 422 | the organization has no currency |
 
@@ -9690,7 +9693,7 @@ follow. The function is total (every edge case answers `HISTORIC`).
 | Action | Parameters | Answer (`response.data`) |
 |---|---|---|
 | `manualCurrencyOptions` | optional `withoutRates` (boolean, default `false`; `"true"`/`"false"` accepted on the query string) | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; with `withoutRates: true` also minus every currency that already has an active `C_Conversion_Rate` row of the client with the organization currency, in either direction and on any date — the list of the "Nueva divisa" popup (a currency that already has rates gets a new range from its own "Nueva tasa · ISO" entry). `name`/`symbol` in the request language |
-| `previewManualRate` | `toCurrency`, `multipleRateBy`, `validFromDate` | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey}` with the refusal a create would get. Writes nothing |
+| `previewManualRate` | `toCurrency`, `multipleRateBy`, `validFromDate` | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey, errorField}` with the refusal a create would get (same text as the create; `errorField` as `error.field` above, absent for refusals bound to no field). Writes nothing |
 | `serverClock` | — | `{now: "yyyy-MM-dd'T'HH:mm:00"}` — the server's current minute, server-local wall clock (the zone `validFromDate` is read in); the default start of a new rate |
 | `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now (latest start wins); `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
 
