@@ -38,6 +38,7 @@ import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completi
 import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
 import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
 
+import com.etendoerp.go.portal.PortalKpiTelemetry;
 import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
 import com.etendoerp.go.usage.quota.QuotaClientCache;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
@@ -713,6 +714,34 @@ public class CreateDraftInvoiceHandlerTest {
       new CreateDraftInvoiceHandler().markQuotationAsInvoiceCreated("q-1");
       verify(quotation).setDocumentStatus("ETGO_CI");
       verify(dal).save(quotation);
+    }
+  }
+
+  /**
+   * ETP-6209 KPI — marking a quotation as invoice-created is an app acceptance, unless the customer
+   * had already accepted it from the portal ({@code ETGO_AC}).
+   */
+  @Test
+  public void testMarkQuotationRecordsAnAppAcceptanceUnlessAcceptedFromThePortal() {
+    // Columns: quotation status before, acceptances recorded.
+    Object[][] cases = { { "UE", 1 }, { "ETGO_AC", 0 } };
+    for (Object[] c : cases) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<PortalKpiTelemetry> kpi = Mockito.mockStatic(PortalKpiTelemetry.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Order quotation = mock(Order.class);
+        when(quotation.getDocumentStatus()).thenReturn((String) c[0]);
+        when(dal.get(eq(Order.class), eq("q-1"))).thenReturn(quotation);
+        kpi.when(() -> PortalKpiTelemetry.appQuotationConverted(any(), any()))
+            .thenCallRealMethod();
+
+        new CreateDraftInvoiceHandler().markQuotationAsInvoiceCreated("q-1");
+
+        kpi.verify(() -> PortalKpiTelemetry.appQuotationDecided(true, quotation),
+            Mockito.times((Integer) c[1]));
+        verify(quotation).setDocumentStatus("ETGO_CI");
+      }
     }
   }
 
@@ -5360,11 +5389,12 @@ public class CreateDraftInvoiceHandlerTest {
 
   /**
    * ETP-5709: the quotation status guard mirrors where the SPA offers the action
-   * (QuotationTopbarActions opens QuotationConfirmModal for CO or UE): both are accepted; draft,
+   * (QuotationTopbarActions opens QuotationConfirmModal for CO or UE): both are accepted, and so is
+   * a quotation the customer accepted from the portal (ETGO_AC, ETP-6209); draft,
    * rejected, order-converted, already-invoiced and voided quotations are refused.
    */
   @Test
-  public void requireQuotationInvoiceable_realCheck_acceptsUeAndCoRefusesTheRest() {
+  public void requireQuotationInvoiceable_realCheck_acceptsUeCoAndAcceptedRefusesTheRest() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -5372,7 +5402,8 @@ public class CreateDraftInvoiceHandlerTest {
       when(quotation.getDocumentNo()).thenReturn("QT-9");
       when(dal.get(Order.class, "q-1")).thenReturn(quotation);
 
-      for (String ok : new String[] {"UE", "CO"}) {
+      // ETGO_AC: accepted by the customer from the portal, still invoiceable (ETP-6209).
+      for (String ok : new String[] {"UE", "CO", "ETGO_AC"}) {
         when(quotation.getDocumentStatus()).thenReturn(ok);
         new TestableHandler().requireQuotationInvoiceable("q-1");
       }

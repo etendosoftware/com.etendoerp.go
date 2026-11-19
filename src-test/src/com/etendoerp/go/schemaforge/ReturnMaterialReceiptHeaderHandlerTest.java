@@ -2054,10 +2054,11 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
   /**
    * sifDefaults on a customer return previews the factura rectificativa createReturnInvoice would
-   * create: every active system, and R4 as SII motive, TicketBAI code and VERI*FACTU type.
+   * create: every active system, with R1 preselected (editable) as SII's motive, TicketBAI's code
+   * and VERI*FACTU's type.
    */
   @Test
-  public void handle_sifDefaultsPreviewsR4InEveryActiveSystem() throws Exception {
+  public void handle_sifDefaultsPreselectsR1InEveryActiveSystem() throws Exception {
     try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
         new InvoiceSifPreviewTestSupport.PreviewMocks(true)) {
       ShipmentInOut returnDoc = mock(ShipmentInOut.class);
@@ -2078,9 +2079,10 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertTrue(data.getBoolean("sales"));
       assertTrue(data.getBoolean("rectificative"));
       JSONObject fields = data.getJSONObject("fields");
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
-      assertEquals("R4", fields.getString(Invoice.PROPERTY_ETVFACINVTYPE));
+      // ETP-6179 (decided by the user): a return's rectificative preselects R1 in every system.
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_AEATSIIMOTIVORECTIF));
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_TBAIREVERSEINVOICECODE));
+      assertEquals("R1", fields.getString(Invoice.PROPERTY_ETVFACINVTYPE));
       Mockito.verify(mocks.dal, Mockito.never()).save(any());
     }
   }
@@ -2144,7 +2146,8 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
             .fieldName("createReturnInvoice").recordId("rec-1").requestBody(body).build());
 
         assertEquals(200, result.getHttpStatus());
-        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body));
+        sifMock.verify(() -> InvoiceSifPreset.applyBeforeCompletion(invoice, body,
+            InvoiceSifPreset.RETURN_RECTIFICATION_DEFAULT));
         Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
             .process(eq("ret-inv-sif"), eq("CO"), anyString(), anyString(), anyString(), any(),
                 any());

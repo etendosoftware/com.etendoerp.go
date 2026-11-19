@@ -197,6 +197,8 @@ class McpRecordUrlsTest {
 
       assertEquals(APP_BASE + "/" + SPEC + "/" + RECORD_ID,
           flat.getString(McpRecordUrls.KEY_URL));
+      assertTrue(flat.getString(McpRecordUrls.KEY_URL_NOTE).contains("portalLink"),
+          "the link says it is not for a customer and names the portal link instead");
     }
 
     @Test

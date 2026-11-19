@@ -367,7 +367,9 @@ project = os.environ["PROJECT_KEY"]
 # In PR mode every read must be scoped to the PR, or it reads the main branch
 # instead (the bug this replaces). Empty in --all-issues mode → reads default branch.
 pr_key = os.environ.get("SONAR_PR_KEY", "")
-PR_Q = f"&pullRequest={pr_key}" if pr_key else ""
+# Encoded: a hotfix branch key (local-hotfix/#163-ETP-X) carries a '#', which unencoded ends the
+# URL there — Sonar then answered 404 for every PR query and the gate step failed.
+PR_Q = f"&pullRequest={urllib.parse.quote(pr_key, safe='')}" if pr_key else ""
 
 import base64 as b64
 credentials = b64.b64encode(f"{token}:".encode()).decode()
@@ -1000,7 +1002,8 @@ if hotspot_metrics:
     hs_url = f"{host}/security_hotspots?id={pkey}"
     # Scope the UI link the same way the analysis was scoped: PR > branch > newcode.
     if pr_key:
-        hs_url += f"&pullRequest={pr_key}"
+        from urllib.parse import quote
+        hs_url += f"&pullRequest={quote(pr_key, safe='')}"
     elif branch and branch != "this branch":
         hs_url += f"&branch={branch}&inNewCodePeriod=true"
     else:
@@ -1076,7 +1079,7 @@ fi
 # (pp, default 1) below the base branch's, or below the absolute COVERAGE_MINIMUM
 # (default 70). Mirrors the Jenkins sonarUtils.compareCoverage gate. Current and
 # base coverage are queried live from Sonar by scripts/compare-sonar-coverage.py, the
-# same gate the CI's "Sonar Build" job runs (in --context ci, where it fails closed).
+# same gate the CI's "Go tests + Sonar + coverage" jobs run (in --context ci, where it fails closed).
 CMP_RC=0
 if [[ "$COMPARE_COVERAGE" == "true" ]]; then
   CMP_BRANCH="${BASE_REF#origin/}"

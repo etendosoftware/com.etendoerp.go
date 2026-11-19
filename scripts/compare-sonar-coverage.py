@@ -2,15 +2,19 @@
 """Coverage-decrease gate: this module's one implementation of the rule Jenkins' "Compare Coverage
 Results" stage enforces (sonarUtils.compareCoverage in com.etendoerp.jenkins.pipelines).
 
-Called by run-sonar.sh --compare-coverage (by hand, before a push) and by the "Sonar Build" job of
-.github/workflows/mini-pipeline.yml. etendo_schema_forge has the same gate in
-scripts/compare-sonar-coverage.js; this is its counterpart, with the same options and rules.
+Called by run-sonar.sh --compare-coverage (by hand, before a push) and by the Go tests + Sonar +
+coverage jobs of .github/workflows/mini-pipeline.yml and full-pipeline-pilot.yml. etendo_schema_forge has
+the same gate in scripts/compare-sonar-coverage.js; this is its counterpart, with the same options and rules.
 
 Rule, on the OVERALL coverage read live from SonarQube:
   current < COVERAGE_MINIMUM            -> fail (no base comparison)
   current < base - COVERAGE_TOLERANCE   -> fail
   otherwise                             -> pass
 A base branch with no coverage yet (404 or no measure) passes with a warning.
+
+With --check-quality-gate (and --report-task), it then reads the quality gate of that same analysis
+(api/qualitygates/project_status?analysisId=...) and fails when it is ERROR, listing the conditions
+that failed: one wait, one check for the coverage rule and SonarQube's gate (ETP-6324).
 
 Context:
   push (default)  a tooling failure (SonarQube unreachable, a measure that cannot be read, an
@@ -25,6 +29,7 @@ Usage:
       [--label <text>]           how the current analysis is named in the output
       [--project-key <key>]      default: sonar.projectKey of sonar-project.properties
       [--report-task <file>]     first wait for that scanner task (ceTaskId) to be processed
+      [--check-quality-gate]     then fail on that analysis's quality gate (needs --report-task)
       [--wait-timeout <seconds>] default 600
       [--context push|ci]
 
@@ -97,6 +102,15 @@ class Sonar:
     def task_status(self, task_id):
         return (self.get('/api/ce/task', id=task_id).get('task') or {}).get('status', '')
 
+    def task_analysis_id(self, task_id):
+        return (self.get('/api/ce/task', id=task_id).get('task') or {}).get('analysisId', '')
+
+    def quality_gate(self, analysis_id):
+        """(status, failed conditions) of the analysis's quality gate: OK, ERROR or NONE."""
+        status = self.get('/api/qualitygates/project_status', analysisId=analysis_id).get('projectStatus') or {}
+        failed = [c for c in status.get('conditions') or [] if c.get('status') == 'ERROR']
+        return status.get('status', ''), failed
+
     def coverage(self, project_key, **selector):
         """Overall coverage in %, or None when there is no coverage measure. `selector` is
         branch=... or pullRequest=..., or nothing for the project's main branch."""
@@ -145,6 +159,35 @@ def decide(current, base, minimum, tolerance):
                   f'and {minimum:.2f}%).')
 
 
+def describe_condition(condition):
+    """'new_violations: 3 (GT 0)' for a failed quality gate condition."""
+    return (f"{condition.get('metricKey', '?')}: {condition.get('actualValue', '?')} "
+            f"({condition.get('comparator', '?')} {condition.get('errorThreshold', '?')})")
+
+
+def check_quality_gate(sonar, task, out, tooling):
+    """0 when the gate of the task's analysis passed, 1 when it failed; tooling() otherwise."""
+    out.write('\n## Quality gate\n\n')
+    try:
+        analysis = sonar.task_analysis_id(task)
+        if not analysis:
+            return tooling(f'the analysis of task {task} has no analysisId')
+        status, failed = sonar.quality_gate(analysis)
+    except (NotFound, SonarError) as error:
+        return tooling(f'the quality gate could not be read: {error}')
+    if status == 'ERROR':
+        out.write('❌ QUALITY GATE FAILED. Conditions not met:\n')
+        out.write(''.join(f'- {describe_condition(c)}\n' for c in failed) or '- (none listed)\n')
+        return 1
+    if status == 'OK':
+        out.write('✅ Quality gate passed.\n')
+        return 0
+    if status == 'NONE':
+        out.write('⚠️ The project has no quality gate: nothing to check.\n')
+        return 0
+    return tooling(f'unexpected quality gate status {status!r}')
+
+
 def run(args, env, sonar, out, sleep=time.sleep):
     """The gate; returns the exit code and writes its report to `out`."""
     ci = args.context == 'ci'
@@ -166,6 +209,11 @@ def run(args, env, sonar, out, sleep=time.sleep):
     label = args.label or (f'PR #{args.pull_request}' if args.pull_request else args.branch or 'this branch')
     out.write(f'## Coverage: {label} vs {args.base_branch}\n\n')
 
+    if args.check_quality_gate and not args.report_task:
+        out.write('--check-quality-gate needs --report-task: the gate is read for that analysis.\n')
+        return 2
+
+    task = ''
     if args.report_task:
         try:
             task = read_properties(args.report_task).get('ceTaskId', '')
@@ -205,7 +253,10 @@ def run(args, env, sonar, out, sleep=time.sleep):
     out.write(f"| {args.base_branch} (base) | {'—' if base is None else f'{base:.2f}%'} |\n\n")
     out.write(f'{message}\n')
     out.write(f'Rule: at least {minimum:.2f}%, and no more than {tolerance:.2f}pp below the base.\n')
-    return 0 if passed else 1
+    code = 0 if passed else 1
+    if args.check_quality_gate:
+        code = max(code, check_quality_gate(sonar, task, out, tooling))
+    return code
 
 
 def parse(argv):
@@ -219,6 +270,7 @@ def parse(argv):
     parser.add_argument('--report-task', default='')
     parser.add_argument('--wait-timeout', type=int, default=DEFAULT_WAIT_TIMEOUT)
     parser.add_argument('--context', choices=('push', 'ci'), default='push')
+    parser.add_argument('--check-quality-gate', action='store_true')
     return parser.parse_args(argv)
 
 

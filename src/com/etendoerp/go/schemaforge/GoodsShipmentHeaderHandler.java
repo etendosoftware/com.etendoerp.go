@@ -45,13 +45,16 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.GoodsShipmentTelemetry;
 
 /**
  * Post-hook for the Goods Shipment header entity.
  *
- * Appends {@code invoiceStatus} (0–100 integer) to every GET response by
- * calling the existing {@code C_GETINVOICESTATUSFROMSHIPMENT} DB function.
- * List responses use a single batch IN query to avoid N+1.
+ * Appends {@code invoiceStatus} (0–100 integer) to every GET response, computed by
+ * {@code buildInvoiceStatusSql}: per line, the greatest of the M_MatchSI, direct-link and
+ * order-line arms, capped at what the line moved (ETP-6002), over what the shipment moved. It is
+ * NOT the core {@code C_GETINVOICESTATUSFROMSHIPMENT} function behind the AD column, which counts
+ * M_MatchSI only. List responses use a single batch IN query to avoid N+1.
  *
  * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
  * {@code Java_Qualifier} ({@code goodsShipmentHeaderHandler}) and the class's {@code @Named} were
@@ -209,6 +212,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       // header's CURRENT warehouse right before the native completion flow runs.
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
       refreshDraftMatchQuantities(context.getRecordId());
+      GoodsShipmentTelemetry.beforeAction(context);
       return null; // let NEO native process handle completion
     }
     context.setAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE, INVOICE_IMPORT_POLICY);
@@ -251,6 +255,12 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && ACTION_DOCUMENT_ACTION.equals(context.getFieldName())
+        && "POST".equals(context.getHttpMethod())) {
+      GoodsShipmentTelemetry.afterAction(context);
+      return null;
+    }
     try {
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
@@ -620,11 +630,15 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "SELECT iol.m_inout_id, " +
       "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 " +
       "       ELSE LEAST(100, ROUND( " +
-      "         COALESCE(SUM(GREATEST( " +
+      // ETP-6002: each line counts at most what it moved. The direct arm reads the whole invoice
+      // line, so a first partial shipment line linked by the column counted the full invoiced
+      // quantity (two lines of 1 on one invoice line of 2 read 2 + 1). Same cap as the goods
+      // receipt header and the line enrichment of AbstractInOutLineHandler.
+      "         COALESCE(SUM(LEAST(GREATEST( " +
       "           COALESCE(msi_qty.qtymatched, 0), " +
       "           COALESCE(direct_qty.qtyinvoiced, 0), " +
       "           COALESCE(ol_qty.qtyinvoiced, 0) " +
-      "         )), 0) / SUM(ABS(iol.movementqty)) * 100 " +
+      "         ), ABS(iol.movementqty))), 0) / SUM(ABS(iol.movementqty)) * 100 " +
       "       )) " +
       "  END " +
       "FROM m_inoutline iol " +

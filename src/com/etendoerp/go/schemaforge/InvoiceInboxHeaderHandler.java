@@ -42,9 +42,11 @@ import java.util.Set;
  * {@code POST /sws/neo/invoice-inbox/header/{id}/action/discard} is not gated by those method
  * flags (sub-endpoints are not), so it is served here, by {@link InvoiceInboxDiscard}. It is
  * hidden from MCP ({@link #agentExcludedActions()}), and so is {@code GET .../action/review}
- * (ETP-6050, {@link InvoiceInboxReview}), the review panel's read: REST and the SPA have them,
- * agents do not, until the confirm action (ETP-6051) arrives and both are declared together
- * (neo-headless.md §4.12.9).</p>
+ * (ETP-6050, {@link InvoiceInboxReview}), the review panel's read, and the panel's two writes,
+ * {@code POST .../action/apply} ({@link InvoiceInboxApply}) and {@code POST
+ * .../action/mark-reviewed} ({@link InvoiceInboxMarkReviewed}), and so is the confirm action
+ * ({@code POST .../action/confirm}, ETP-6051, {@link InvoiceInboxConfirm}): REST and the SPA have
+ * them, agents do not, and all of them are declared together (neo-headless.md §4.12.9).</p>
  */
 
 @NeoExtension(spec = "invoice-inbox", entity = "header")
@@ -59,6 +61,11 @@ public class InvoiceInboxHeaderHandler implements NeoHandler {
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
+    return dispatchAction(context);
+  }
+
+  /** Routes an inbox action to its implementation; {@code null} for an action not served here. */
+  private static NeoResponse dispatchAction(NeoContext context) {
     String action = context.getFieldName();
     boolean post = "POST".equals(context.getHttpMethod());
     if (InvoiceInboxReview.ACTION.equals(action)) {
@@ -66,6 +73,19 @@ public class InvoiceInboxHeaderHandler implements NeoHandler {
       return "GET".equals(context.getHttpMethod())
           ? InvoiceInboxReview.review(context.getRecordId())
           : NeoResponse.error(405, "The review action only supports GET");
+    }
+    if (InvoiceInboxApply.ACTION.equals(action)) {
+      return post ? InvoiceInboxApply.apply(context.getRecordId(), context.getRequestBody())
+          : NeoResponse.error(405, "The apply action only supports POST");
+    }
+    if (InvoiceInboxMarkReviewed.ACTION.equals(action)) {
+      return post ? InvoiceInboxMarkReviewed.markReviewed(context.getRecordId(),
+          context.getRequestBody())
+          : NeoResponse.error(405, "The mark-reviewed action only supports POST");
+    }
+    if (InvoiceInboxConfirm.ACTION.equals(action)) {
+      return post ? InvoiceInboxConfirm.confirm(context.getRecordId(), context.getRequestBody())
+          : NeoResponse.error(405, "The confirm action only supports POST");
     }
     if (!InvoiceInboxDiscard.ACTION.equals(action)) {
       return null;
@@ -80,9 +100,15 @@ public class InvoiceInboxHeaderHandler implements NeoHandler {
     return true;
   }
 
-  /** Discard is irreversible and review is the panel's own read: both ship for people only. */
+  /**
+   * Discard is irreversible; review, apply and mark-reviewed are the review panel's own read and
+   * edits; confirm (ETP-6051) creates and completes an invoice with its vendor and products from a
+   * document nobody but its reviewer vouched for: all five ship for people only
+   * (neo-headless.md §4.12.9).
+   */
   @Override
   public Set<String> agentExcludedActions() {
-    return Set.of(InvoiceInboxDiscard.ACTION, InvoiceInboxReview.ACTION);
+    return Set.of(InvoiceInboxDiscard.ACTION, InvoiceInboxReview.ACTION, InvoiceInboxApply.ACTION,
+        InvoiceInboxMarkReviewed.ACTION, InvoiceInboxConfirm.ACTION);
   }
 }

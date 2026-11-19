@@ -837,6 +837,100 @@ class ContactsLocationAddressHandlerTest {
     }
   }
 
+  /**
+   * ETP-5806 CP-12b (QA finding) — MCP's {@code etendo_update} always maps to HTTP PUT
+   * ({@code McpToolRouter#handleUpdate}), so a single-field edit (e.g. only {@code buildingName})
+   * used to reach {@code validateUpdateMandatoryFields} with streetName/buildingNumber/cityName/
+   * country genuinely absent from the body — a clean 400 — even though the stored record already
+   * had them. A PUT whose body alone cannot satisfy the mandatory fields is now merged into just
+   * like a PATCH, so the edit succeeds and the fields it did not mention are preserved.
+   */
+  @Test
+  void putMissingMandatoryStructuredFieldsMergesStoredAddressBeforeValidating() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject body = new JSONObject();
+    body.put("buildingName", "Edificio Central");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse response = handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Edificio Central");
+    }
+  }
+
+  /**
+   * A genuine full-replace PUT that already carries every mandatory structured field is
+   * untouched by the CP-12b fix: the merge check is false, so nothing not mentioned is merged in
+   * (a non-mandatory field like postalCode is still cleared when omitted).
+   */
+  @Test
+  void putCarryingEveryMandatoryFieldStillReplacesNonMandatoryOnesItOmits() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "106");
+    // postalCode intentionally omitted
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse response = handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setPostalCode(null);
+    }
+  }
+
+  /**
+   * ETP-5806 CP-12c (QA finding) — the UI pop-up always computes and sends a fresh {@code name}
+   * on save; an MCP caller that edits only the structured address fields never sends {@code name}
+   * at all, so it went stale relative to the address it just changed while addressLine1/
+   * addressLine2 updated correctly. {@code name} is now recomputed unconditionally from the
+   * post-write record when the caller does not send one.
+   */
+  @Test
+  void putWithoutNameRecomputesTheDisplayNameFromTheNewAddress() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    when(geoLoc.getCityName()).thenReturn("Valencia");
+    when(geoLoc.getAddressLine1()).thenReturn("Gran Via, 45");
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Valencia");
+    body.put("country", "106");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      verify(bpLoc).setName("Valencia, Gran Via, 45");
+    }
+  }
+
+  /** With the flag off, the legacy behaviour is unchanged: an omitted name is never recomputed. */
+  @Test
+  void putWithoutNameFlagOffNeverRecomputesTheDisplayName() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      verify(bpLoc, never()).setName(any());
+    }
+  }
+
   /** A write whose `updated` no longer matches the stored row is refused before touching it. */
   @Test
   void staleUpdatedIsRefusedWithoutWriting() throws Exception {

@@ -36,7 +36,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.base.weld.test.WeldBaseTest;
+import org.openbravo.test.base.OBBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -57,7 +57,7 @@ import org.openbravo.model.common.order.Order;
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  * @covers com.etendoerp.go.schemaforge.NeoCertificateHelper
  */
-public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
+public class NativeWriteIsolationIntegrationTest extends OBBaseTest {
 
   /** {@code C_Order}. */
   private static final String ORDER_TABLE_ID = "259";

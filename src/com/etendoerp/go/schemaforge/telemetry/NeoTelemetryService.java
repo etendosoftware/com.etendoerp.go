@@ -95,6 +95,8 @@ public class NeoTelemetryService {
    * already sends; no record id of any kind (contact, category, organization) is ever allowed.
    */
   private static final String PROP_ACCOUNT_ID = "account_id";
+  /** ETP-6230: tenant owner is on an internal e-mail domain (a boolean, never the address). */
+  private static final String PROP_INTERNAL = "internal";
   private static final String PROP_IS_CUSTOMER = "is_customer";
   private static final String PROP_IS_VENDOR = "is_vendor";
   private static final String PROP_PREVIOUS_IS_CUSTOMER = "previous_is_customer";
@@ -126,6 +128,7 @@ public class NeoTelemetryService {
   private static final String PROP_PAIRS_UNCHECKED = "pairs_unchecked";
   private static final String PROP_PAIRS_SENT_TO_PANEL = "pairs_sent_to_panel";
   private static final String PROP_PRESELECTION_CHANGED = "preselection_changed";
+  private static final String PROP_ADJUSTED = "adjusted";
   /** ETP-6247 — the remittance SEPA file event ({@code backend_remittance_file_generated}). */
   private static final String PROP_DIRECTION = "direction";
   private static final String PROP_INVOICE_COUNT = "invoice_count";
@@ -162,6 +165,7 @@ public class NeoTelemetryService {
       PROP_TOOL,
       PROP_VERB,
       PROP_ACCOUNT_ID,
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -190,6 +194,7 @@ public class NeoTelemetryService {
       PROP_INVOICE_COUNT,
       PROP_IS_REGENERATION,
       PROP_ROLE_GROUPS,
+      PROP_ADJUSTED,
       "category",
       "channel",
       "count",
@@ -217,6 +222,7 @@ public class NeoTelemetryService {
   private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       PROP_CRITICAL,
       "supportRequested",
+      PROP_INTERNAL,
       PROP_IS_CUSTOMER,
       PROP_IS_VENDOR,
       PROP_PREVIOUS_IS_CUSTOMER,
@@ -227,7 +233,8 @@ public class NeoTelemetryService {
       PROP_PRESELECTED,
       PROP_CHOSEN_AMONG_ALTERNATIVES,
       PROP_PRESELECTION_CHANGED,
-      PROP_IS_REGENERATION));
+      PROP_IS_REGENERATION,
+      PROP_ADJUSTED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();
@@ -235,6 +242,7 @@ public class NeoTelemetryService {
   private final NeoTelemetrySink sink;
   private final LongSupplier nanoClock;
   private final Clock clock;
+  private final NeoTelemetryIdentityResolver identityResolver;
 
   /**
    * Creates the default logging backend telemetry service.
@@ -256,13 +264,14 @@ public class NeoTelemetryService {
     if (!config.isConfigured()) {
       log.info("Backend Mixpanel telemetry is not configured enabled={} tokenPresent={}",
           config.isEnabled(), config.getToken() != null);
-      return new NeoTelemetryService(logSink, System::nanoTime, Clock.systemUTC());
+      return new NeoTelemetryService(logSink, System::nanoTime, Clock.systemUTC(),
+          NeoTelemetryIdentityResolver.none());
     }
     log.info("Backend Mixpanel telemetry is configured apiHost={} distinctId={}",
         config.getApiHost(), config.getDistinctId());
     return new NeoTelemetryService(
         new CompositeNeoTelemetrySink(logSink, new MixpanelNeoTelemetrySink(config)),
-        System::nanoTime, Clock.systemUTC());
+        System::nanoTime, Clock.systemUTC(), RuntimeNeoTelemetryIdentityResolver.INSTANCE);
   }
 
   /**
@@ -276,6 +285,13 @@ public class NeoTelemetryService {
   }
 
   NeoTelemetryService(NeoTelemetrySink sink, LongSupplier nanoClock, Clock clock) {
+    this(sink, nanoClock, clock, NeoTelemetryIdentityResolver.none());
+  }
+
+  NeoTelemetryService(NeoTelemetrySink sink, LongSupplier nanoClock, Clock clock,
+      NeoTelemetryIdentityResolver identityResolver) {
+    this.identityResolver = identityResolver == null ? NeoTelemetryIdentityResolver.none()
+        : identityResolver;
     this.sink = sink == null ? NeoTelemetrySink.noop() : sink;
     this.nanoClock = nanoClock == null ? System::nanoTime : nanoClock;
     this.clock = clock == null ? Clock.systemUTC() : clock;
@@ -307,11 +323,33 @@ public class NeoTelemetryService {
     }
     try {
       sink.emit(new NeoTelemetryEvent(eventName, sanitizeProperties(properties),
-          Instant.now(clock), StringUtils.trimToNull(clientId)));
+          Instant.now(clock), StringUtils.trimToNull(clientId), identityOf(clientId)));
     } catch (Exception e) {
       log.warn("Backend telemetry sink failed for event {}: {} {}", eventName,
           e.getClass().getSimpleName(), e.getMessage());
     }
+  }
+
+  /**
+   * Captures the identity of the current session with this service's own resolver, on the calling
+   * thread, for an emitter that sends from a background thread that has no session (ETP-6228);
+   * hand it over with {@link NeoTelemetryIdentity#runWith}. Never throws.
+   *
+   * @param clientId the client the event happened under, or {@code null} for the session's
+   * @param userId the user, or {@code null} for the session's
+   * @return the identity, {@link NeoTelemetryIdentity#NONE} when nothing resolves
+   */
+  public NeoTelemetryIdentity captureIdentity(String clientId, String userId) {
+    return identityResolver.resolve(clientId, userId);
+  }
+
+  /**
+   * The identity of the event being built (ETP-6228): the one handed to this thread by an emitter
+   * that sends from a background thread, else the one of the current session.
+   */
+  private NeoTelemetryIdentity identityOf(String clientId) {
+    NeoTelemetryIdentity handedOff = NeoTelemetryIdentity.handedOff();
+    return handedOff != null ? handedOff : identityResolver.resolve(clientId, null);
   }
 
   /**

@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -329,7 +330,7 @@ class ReportSelectorsServletTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-        "bpartner", "product", "warehouse", "project", "org",
+        "bpartner", "product", "product-all", "warehouse", "project", "org",
         "account", "acctschema", "accounting", "year", "currency", "tax"
     })
     @DisplayName("returns 200 with valid JSON for each selector type")
@@ -388,6 +389,52 @@ class ReportSelectorsServletTest {
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+    }
+
+    @Test
+    @DisplayName("product-all has no stock clause (services/unstocked items) while product keeps it")
+    void productAllHasNoStockScope() throws Exception {
+      for (String type : new String[] { "product-all", "product" }) {
+        configureAuthenticatedGet(type);
+        when(request.getParameter("warehouseIds")).thenReturn("AA11BB22");
+        when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+        when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3" });
+        servlet.doGet(request, response);
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(session, times(2)).createNativeQuery(sql.capture());
+        for (String q : sql.getAllValues()) {
+          assertEquals(type.equals("product"), q.contains("m_storage_detail"), type + ": " + q);
+        }
+        clearInvocations(session);
+      }
+    }
+
+    @Test
+    @DisplayName("product-all scopes by the role's orgs on m_product.ad_org_id")
+    void productAllBindsRoleOrgsOnProduct() throws Exception {
+      configureAuthenticatedGet("product-all");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3", "D4E5F6" });
+
+      servlet.doGet(request, response);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      for (String q : sql.getAllValues()) {
+        assertTrue(q.contains("m_product.ad_org_id IN (:roleOrgIds)"), q);
+      }
+      verify(dataQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
+    }
+
+    @Test
+    @DisplayName("product-all accepts ids (no 400) and resolves exactly those rows")
+    void productAllAcceptsIds() throws Exception {
+      configureAuthenticatedGet("product-all");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22"));
     }
 
     @Test
@@ -597,6 +644,163 @@ class ReportSelectorsServletTest {
   // ===========================================================================
   // doGet - internal error handling
   // ===========================================================================
+
+  // ===========================================================================
+  // ids lookup (ETP-6239): labels for a selection restored from a link
+  // ===========================================================================
+
+  @Nested
+  @DisplayName("ids lookup")
+  class IdsLookupTests {
+
+    private List<String> sqlRun() {
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      return sql.getAllValues();
+    }
+
+    @Test
+    @DisplayName("bpartner ids resolve exactly those rows: IN (:ids) under the client scope, q and paging ignored")
+    @SuppressWarnings("unchecked")
+    void resolvesExactlyTheRequestedRows() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      when(request.getParameter("ids")).thenReturn("AA11BB22, CC33DD44,bad'id");
+      when(request.getParameter("q")).thenReturn("ignored");
+      when(request.getParameter("limit")).thenReturn("1");
+      when(request.getParameter("offset")).thenReturn("50");
+      when(countQuery.uniqueResult()).thenReturn(2);
+      when(dataQuery.list()).thenReturn(Arrays.asList(new Object[]{ "AA11BB22", "A", "A" }, new Object[]{ "CC33DD44", "B", "B" }));
+
+      servlet.doGet(request, response);
+
+      for (String sql : sqlRun()) {
+        assertTrue(sql.contains("ad_client_id = :clientId"), sql);
+        assertTrue(sql.contains("c_bpartner_id IN (:ids)"), sql);
+      }
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22", "CC33DD44"));
+      verify(dataQuery).setParameter("search", "%%"); // q is not applied
+      verify(dataQuery).setMaxResults(2); // one row per id, not the request's limit
+      verify(dataQuery).setFirstResult(0);
+      assertEquals(2, new JSONObject(getResponseBody()).getJSONArray("items").length());
+    }
+
+    @Test
+    @DisplayName("ids resolve inactive records too; the normal list keeps isactive='Y'")
+    void idsIgnoreIsActiveButListKeepsIt() throws Exception {
+      for (String type : new String[] { "bpartner", "product" }) {
+        configureAuthenticatedGet(type);
+        when(request.getParameter("ids")).thenReturn("AA11BB22");
+        servlet.doGet(request, response);
+        assertFalse(sqlRun().get(0).contains("isactive"), type);
+        clearInvocations(session);
+        when(request.getParameter("ids")).thenReturn(null);
+        servlet.doGet(request, response);
+        assertTrue(sqlRun().get(0).contains("isactive='Y'"), type);
+        clearInvocations(session);
+      }
+    }
+
+    @Test
+    @DisplayName("product ids filter the product selector too")
+    void productIds() throws Exception {
+      configureAuthenticatedGet("product");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      assertTrue(sqlRun().get(0).contains("m_product_id IN (:ids)"));
+    }
+
+    @Test
+    @DisplayName("a blank or fully invalid ids list returns no rows and never runs the whole selector")
+    void blankOrInvalidIdsReturnNothing() throws Exception {
+      for (String ids : new String[] { "", "   ", ",", "x'; DROP TABLE y;--" }) {
+        configureAuthenticatedGet("bpartner");
+        when(request.getParameter("ids")).thenReturn(ids);
+        stringWriter.getBuffer().setLength(0);
+
+        servlet.doGet(request, response);
+
+        JSONObject json = new JSONObject(getResponseBody());
+        assertEquals(0, json.getJSONArray("items").length(), ids);
+        assertEquals(0, json.getInt("totalCount"), ids);
+      }
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("a selector without an ids lookup refuses it instead of listing everything")
+    void unsupportedSelectorRefusesIds() throws Exception {
+      configureAuthenticatedGet("org");
+      when(request.getParameter("ids")).thenReturn("AA11BB22");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("ids beyond the cap of 100 are dropped, not an error")
+    void idsBeyondTheCapAreDropped() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      List<String> sent = new java.util.ArrayList<>();
+      for (int i = 0; i < 120; i++) {
+        sent.add(String.format("AB%04X", i));
+      }
+      when(request.getParameter("ids")).thenReturn(String.join(",", sent));
+
+      servlet.doGet(request, response);
+
+      verify(response, never()).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(dataQuery).setParameterList("ids", sent.subList(0, 100));
+      verify(dataQuery).setMaxResults(100);
+    }
+
+    @Test
+    @DisplayName("an unsupported selector answers 400 to a blank ids too")
+    void unsupportedSelectorRefusesBlankIds() throws Exception {
+      configureAuthenticatedGet("org");
+      when(request.getParameter("ids")).thenReturn("");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      verify(session, never()).createNativeQuery(anyString());
+    }
+
+    @Test
+    @DisplayName("product ids sit on top of the client and role-org scoping, keeping only the safe ids")
+    void productIdsKeepTheScoping() throws Exception {
+      configureAuthenticatedGet("product");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3", "D4E5F6" });
+      when(request.getParameter("ids")).thenReturn("AA11BB22,x'y, CC33DD44");
+
+      servlet.doGet(request, response);
+
+      for (String sql : sqlRun()) {
+        assertTrue(sql.contains("ad_client_id = :clientId"), sql);
+        assertTrue(sql.contains("l.ad_org_id IN (:roleOrgIds)"), sql);
+        assertTrue(sql.contains("m_product_id IN (:ids)"), sql);
+      }
+      verify(dataQuery).setParameterList("ids", Arrays.asList("AA11BB22", "CC33DD44"));
+      verify(dataQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
+    }
+
+    @Test
+    @DisplayName("without ids the normal list is unchanged: no ids predicate, the request's q and paging apply")
+    void normalPathUnchanged() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      when(request.getParameter("q")).thenReturn("acme");
+      when(request.getParameter("limit")).thenReturn("7");
+
+      servlet.doGet(request, response);
+
+      assertFalse(sqlRun().get(0).contains(":ids"));
+      verify(dataQuery).setParameter("search", "%acme%");
+      verify(dataQuery).setMaxResults(7);
+    }
+  }
 
   @Nested
   @DisplayName("doGet - internal errors")

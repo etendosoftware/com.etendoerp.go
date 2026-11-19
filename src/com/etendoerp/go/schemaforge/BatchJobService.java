@@ -46,6 +46,8 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+
 /**
  * Asynchronous batch jobs (ETP-5677): submit a batch, get a {@code jobId} straight away, poll its
  * status, cancel it. The one implementation behind both channels — REST
@@ -77,10 +79,15 @@ public final class BatchJobService {
   public static final String PARAM_ASYNC = "async";
   /** Most operations accepted by one async job. */
   static final int MAX_OPS = 5000;
-  /** Active (QUEUED + RUNNING) jobs allowed per user. */
-  static final int MAX_ACTIVE_PER_USER = 2;
+  /**
+   * Active (QUEUED + RUNNING) jobs allowed per user. Matches the import client's four parallel
+   * submits (ETP-5676): at 2 every import answered half its submits with a 429 and ran at half speed.
+   */
+  static final int MAX_ACTIVE_PER_USER = 4;
   /** Active (QUEUED + RUNNING) jobs allowed per client (tenant). */
-  static final int MAX_ACTIVE_PER_CLIENT = 4;
+  static final int MAX_ACTIVE_PER_CLIENT = 6;
+  /** Active (QUEUED + RUNNING) jobs allowed across every tenant, counted on the shared table. */
+  static final int MAX_ACTIVE_TOTAL = 12;
   /** How often the holding node refreshes the heartbeat of its jobs. */
   static final int HEARTBEAT_INTERVAL_SECONDS = 10;
   /** A QUEUED/RUNNING job without a heartbeat for this long belongs to a dead node. */
@@ -89,8 +96,18 @@ public final class BatchJobService {
   static final int RETENTION_HOURS = 24;
   /** Back-off hint sent with a 429. */
   static final int RETRY_AFTER_SECONDS = 5;
-  private static final int WORKER_THREADS = 2;
+  /**
+   * Worker threads per node. As many as {@link #MAX_ACTIVE_TOTAL}: the cap is cluster-wide and every
+   * job runs on the node that accepted it, so a single node must be able to run all of them.
+   */
+  static final int WORKER_THREADS = MAX_ACTIVE_TOTAL;
   private static final int QUEUE_CAPACITY = 50;
+  /** Tag of the submit-decision log lines, searchable in Datadog. */
+  static final String LIMIT_LOG_TAG = "[BATCH-JOB-LIMIT]";
+  static final String LIMIT_USER = "user";
+  static final String LIMIT_TENANT = "tenant";
+  static final String LIMIT_TOTAL = "total";
+  static final String LIMIT_QUEUE = "queue";
 
   private static final String KEY_ROWS = "rows";
   private static final String KEY_COMMITTED = BatchService.FIELD_COMMITTED;
@@ -253,9 +270,13 @@ public final class BatchJobService {
    * @throws JobException 400 malformed payload, 429 over the concurrency limit or queue full
    * @throws JSONException on an unexpected serialisation failure
    *
-   * <p>The per-user / per-client limits are <i>soft</i>: the count and the insert are not one atomic
-   * step, so simultaneous submits can overshoot them by the number of racing requests. They bound
-   * a runaway client, not a precise quota.</p>
+   * <p>The per-user / per-client / total limits are <i>soft</i>: the count and the insert are not
+   * one atomic step, so simultaneous submits can overshoot them by the number of racing requests.
+   * They bound a runaway client, not a precise quota.</p>
+   *
+   * <p>Every decision is logged under {@value #LIMIT_LOG_TAG} with the three counts and limits: a
+   * refusal at WARN (indexed in full), an acceptance at INFO, so how often each limit is reached —
+   * and how close the accepted jobs run to it — can be followed in Datadog before raising them.</p>
    */
   public JSONObject submit(Owner owner, JSONArray ops, String channel, RowRunner runner)
       throws JSONException {
@@ -264,8 +285,11 @@ public final class BatchJobService {
       throw new JobException(400, invalid, null);
     }
     housekeeping(true);
-    if (store.countActiveForUser(owner.clientId(), owner.userId()) >= MAX_ACTIVE_PER_USER
-        || store.countActiveForClient(owner.clientId()) >= MAX_ACTIVE_PER_CLIENT) {
+    ActiveCounts active = new ActiveCounts(store.countActiveForUser(owner.clientId(), owner.userId()),
+        store.countActiveForClient(owner.clientId()), store.countActive());
+    String limit = active.limitReached();
+    if (limit != null) {
+      logLimit(true, limit, owner, channel, active);
       throw tooBusy("Too many batch jobs are running; retry shortly");
     }
     List<List<Integer>> rows = BatchRowGrouper.group(ops);
@@ -287,8 +311,10 @@ public final class BatchJobService {
       // INTERRUPTED after the stale window.
       held.remove(job.id);
       store.delete(job.id);
+      logLimit(true, LIMIT_QUEUE, owner, channel, active);
       throw tooBusy("The batch job queue is full; retry shortly");
     }
+    logLimit(false, null, owner, channel, active);
     JSONObject accepted = new JSONObject();
     accepted.put(KEY_JOB_ID, job.id);
     accepted.put(KEY_STATE, BatchJobState.QUEUED.name());
@@ -299,6 +325,39 @@ public final class BatchJobService {
 
   private static JobException tooBusy(String message) {
     return new JobException(429, message, RETRY_AFTER_SECONDS);
+  }
+
+  /** The active (QUEUED + RUNNING) jobs a submit is judged against, before it is recorded. */
+  record ActiveCounts(int user, int client, int total) {
+    /** @return the first limit already reached ({@code user}, {@code tenant}, {@code total}), or null */
+    String limitReached() {
+      if (user >= MAX_ACTIVE_PER_USER) {
+        return LIMIT_USER;
+      }
+      if (client >= MAX_ACTIVE_PER_CLIENT) {
+        return LIMIT_TENANT;
+      }
+      return total >= MAX_ACTIVE_TOTAL ? LIMIT_TOTAL : null;
+    }
+  }
+
+  /**
+   * One line per submit decision. The counts are the ones the decision saw, before this job; on an
+   * acceptance they say how close the tenant ran to its limits.
+   */
+  private static void logLimit(boolean refused, String limit, Owner owner, String channel,
+      ActiveCounts active) {
+    if (refused) {
+      log.warn("{} refused limit={} client={} user={} channel={} activeUser={}/{} "
+          + "activeClient={}/{} activeTotal={}/{}", LIMIT_LOG_TAG, limit, owner.clientId(),
+          owner.userId(), channel, active.user(), MAX_ACTIVE_PER_USER, active.client(),
+          MAX_ACTIVE_PER_CLIENT, active.total(), MAX_ACTIVE_TOTAL);
+    } else {
+      log.info("{} accepted client={} user={} channel={} activeUser={}/{} activeClient={}/{} "
+          + "activeTotal={}/{}", LIMIT_LOG_TAG, owner.clientId(), owner.userId(), channel,
+          active.user(), MAX_ACTIVE_PER_USER, active.client(), MAX_ACTIVE_PER_CLIENT, active.total(),
+          MAX_ACTIVE_TOTAL);
+    }
   }
 
   private static String opPrefix(int index) {
@@ -474,7 +533,10 @@ public final class BatchJobService {
           outcome = BatchJobState.CANCELLED;
           break;
         }
-        results.put(runRow(r, ops, rows.get(r), runner));
+        JSONObject row = runRow(r, ops, rows.get(r), runner);
+        // ETP-6230: a period refusal of an async row never reaches the REST/MCP observers.
+        AccountingKpiTelemetry.observeBatchRow(row, owner.clientId());
+        results.put(row);
         if (!store.flush(jobId, results.length(), results.toString())) {
           return;
         }

@@ -3,22 +3,31 @@ name: Full Pipeline Pilot
 # ETP-6149: the go full pipeline (Jenkins etendo-go-tests) as parallel GitHub Actions jobs, run in
 # shadow next to Jenkins on what reaches main. Jenkins runs it almost all in series: a successful
 # run takes a median 103 min, and a failure re-runs all of it. Here each block is its own job, so
-# a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
-# compares duration and failures per block with Jenkins before anything is replaced.
+# a failed block re-runs alone ("Re-run failed jobs"). main requires its "Go tests + Sonar +
+# coverage" check (ETP-6299).
 #
-# Every job name starts with "Pilot: ". The cut job (auto-cut.mjs in com.etendoerp.jenkins.pipelines)
-# and base-branch-health.yml ignore the checks with that prefix, so a red or still running pilot
-# job neither holds a cut nor turns main red while Jenkins is the gate. Dropping the prefix when
-# Actions replaces Jenkins makes them count.
+# ETP-6320: the job names no longer start with "Pilot: ", the prefix the cut job (auto-cut.mjs in
+# com.etendoerp.jenkins.pipelines) and base-branch-health.yml skipped while Jenkins was the gate. They
+# count now: a red pilot job holds the cut and turns main red. Cell report never fails.
 #
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
-#   go-tests     the module's Java suite, both halves, and the JaCoCo report. Sonar and the
-#                coverage comparison stay in Jenkins during the pilot: a second analysis of the
-#                same branch would overwrite the one Jenkins publishes.
+#   go-tests     the module's Java suite, both halves, the JaCoCo report and (ETP-6299), when every
+#                test passed, the SonarQube analysis with that coverage: a pull request analysis
+#                on a PR (the server then posts "SonarQube Code Analysis") and a branch analysis on
+#                a push to main, the base the next PRs compare against. On a PR it then runs the
+#                coverage gate against main (scripts/compare-sonar-coverage.py, thresholds from the
+#                organization variables COVERAGE_MINIMUM and COVERAGE_TOLERANCE, ETP-6298). One
+#                job: the analysis reads the report where the tests left it, and a failed test
+#                already turns the check red. Until the mini pipeline stops running on main
+#                (ETP-6300) both analyze the same commit with the same tests, so the later
+#                analysis replaces an equivalent one.
 #   integration  Tomcat, jsreport and E2E_SUITE=integration from schema_forge, the same 57 specs
 #                as Jenkins.
-#   cell-report  after both: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
+#   public-api   ETP-6370: schema_forge's public API suite (gateway/e2e) on its own environment,
+#                signed in as GOAdmin of GOClient; on a PR only when the diff touches more than
+#                docs and tests (always on a push).
+#   cell-report  after every test job: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
 #                com.etendoerp.jenkins.pipelines), the run summary and, when the DD_API_KEY secret
 #                exists, the run sent to Datadog as etendo.ci.pilot.* metrics. Reporting only: it
 #                never turns the run red.
@@ -33,11 +42,16 @@ name: Full Pipeline Pilot
 #   local-env-logs                 the environment build and Tomcat logs, and the runner load
 #                                  (vmstat every 10 s, with the E2E suite's window)
 #   go-junit, pw-cell-results      the raw results cell-report reads
+#   public-api-e2e                 the public API suite's JUnit, the gateway log and the env logs
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
 # and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
 # the Bitbucket modules listed in jenkinsExtraModules.txt and com.etendoerp.jenkins.pipelines;
-# DD_API_KEY (optional, EU site) sends the metrics.
+# DD_API_KEY (optional, EU site) sends the metrics; SONAR_TOKEN/SONAR_HOST_URL publish the analysis
+# and SONAR_READ_TOKEN (the analysis token gets 403 on measures) reads the coverage to compare.
+# The public API job also uses PUBLIC_API_E2E_EMAIL/PASSWORD (GOAdmin of the GOClient sample data).
+# The scanner timeouts come from the organization variables SONAR_SOCKET_TIMEOUT and
+# SONAR_RESPONSE_TIMEOUT (seconds; unset, 60), to raise without a PR when SonarQube is slow (ETP-6390).
 
 # Only what reaches main: the daily cut (mergeblock/*), a hotfix (hotfix/*) and the push to main.
 # Feature branches keep the mini pipeline (mini-pipeline.yml) on their PRs into develop.
@@ -64,11 +78,124 @@ env:
   RETENTION_DAYS: 30
 
 jobs:
+  # ETP-6316: a push to main that merges a cut (mergeblock/*) or a hotfix (hotfix/*) carries the tree
+  # the pilot already tested on that PR: main is strict, so the merged tree equals the PR head's.
+  # Jenkins' Route Build skips that push; here the tests and the integration are skipped too, and
+  # validated-cut-sonar keeps main's Sonar analysis (the base the next PRs compare against) with the
+  # coverage of the PR's run. Anything else runs in full: a PR, a dispatch, a direct push, a red or
+  # missing PR run, an expired coverage artifact, or an error while looking (never a red job).
+  route:
+    name: Route
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      validated_run: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Find the pilot run that validated this push
+        id: find
+        if: github.event_name == 'push'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.sha;
+            const full = (why) => core.notice(`Full run: ${why}.`);
+            try {
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: sha,
+              });
+              const pr = prs.find(p => p.merged_at && p.merge_commit_sha === sha && p.base.ref === 'main'
+                && /^(mergeblock|hotfix)\//.test(p.head.ref));
+              if (!pr) return full(`${sha.slice(0, 9)} does not merge a mergeblock/* or hotfix/* PR`);
+              const tree = async (s) => (await github.rest.git.getCommit({ owner, repo, commit_sha: s })).data.tree.sha;
+              if (await tree(sha) !== await tree(pr.head.sha)) {
+                return full(`the tree of ${sha.slice(0, 9)} differs from #${pr.number}'s head ${pr.head.sha.slice(0, 9)}`);
+              }
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner, repo, workflow_id: 'full-pipeline-pilot.yml', head_sha: pr.head.sha,
+                event: 'pull_request', per_page: 100,
+              });
+              const run = runs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+              if (!run) return full(`#${pr.number} has no pilot run on ${pr.head.sha.slice(0, 9)}`);
+              if (run.conclusion !== 'success') {
+                return full(`#${pr.number}'s pilot run ${run.html_url} ended ${run.conclusion || run.status}`);
+              }
+              // Without the "Pilot: " prefix the jobs had before ETP-6320, so a PR run from before it counts.
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, filter: 'latest', per_page: 100,
+              });
+              const missing = ['Go tests + Sonar + coverage', 'Integration (Tomcat + Playwright)', 'Public API E2E'].filter(n =>
+                !jobs.some(j => j.name.replace(/^Pilot: /, '') === n && j.conclusion === 'success'));
+              if (missing.length) return full(`${run.html_url} did not pass ${missing.join(', ')}`);
+              const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+                owner, repo, run_id: run.id, name: 'go-tests-reports',
+              });
+              if (!data.artifacts.some(a => !a.expired)) return full(`${run.html_url} has no go-tests-reports left`);
+              core.setOutput('run_id', String(run.id));
+              core.notice(`#${pr.number} (${pr.head.ref}) was validated by ${run.html_url}: tests and integration skipped.`);
+            } catch (e) {
+              full(`could not look up the validated PR (${e.message})`);
+            }
+
+  # Main's Sonar branch analysis for a validated push: the scanner alone, with the JaCoCo report the
+  # PR's go-tests job uploaded. sonar.java.binaries is ".", so nothing needs compiling.
+  validated-cut-sonar:
+    name: Sonar with the cut coverage
+    needs: route
+    if: needs.route.outputs.validated_run != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: Sonar's blame and new-code detection need it.
+          fetch-depth: 0
+
+      - name: Download the PR run's coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: go-tests-reports
+          path: ${{ runner.temp }}/pr-reports
+          run-id: ${{ needs.route.outputs.validated_run }}
+          github-token: ${{ github.token }}
+
+      - name: Locate the JaCoCo report
+        id: jacoco
+        run: |
+          xml=$(find "$RUNNER_TEMP/pr-reports" -name jacocoRootReport.xml | head -1)
+          if [ -z "$xml" ]; then
+            echo "::error::The PR run's go-tests-reports has no jacocoRootReport.xml."
+            exit 1
+          fi
+          echo "xml=$xml" >> "$GITHUB_OUTPUT"
+
+      # Without it the scanner treats the module as a Gradle build.
+      - name: Delete build.gradle
+        run: rm -f build.gradle
+
+      - name: Sonar analysis
+        uses: sonarsource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_SCANNER_OPTS: "-Xmx4096m"
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=${{ steps.jacoco.outputs.xml }} -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
+
   go-tests:
-    name: 'Pilot: Go tests + coverage'
+    name: Go tests + Sonar + coverage
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
+    needs: route
+    # Skipped on a push to main that merges a cut the pilot already validated (ETP-6316).
+    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -87,6 +214,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: etendo_core/modules/com.etendoerp.go
+          # The whole history: Sonar's blame and new-code detection need it.
+          fetch-depth: 0
 
       - name: Build the Etendo GO environment
         id: build-env
@@ -99,6 +228,11 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          # ETP-6319: the snapshot cache Jenkins uses. This job publishes snapshots where Jenkins does
+          # (a push to main, a mergeblock/* cut), with the read-write keys; integration only reads.
+          localenv_s3_key: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_KEY || secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && secrets.LOCALENV_CACHE_RW_SECRET || secrets.LOCALENV_CACHE_RO_SECRET }}
+          localenv_push: ${{ (github.event_name == 'push' || startsWith(github.head_ref, 'mergeblock/')) && '1' || '0' }}
 
       # Jenkins runs `test --tests "com.etendoerp.go.*"` (the database-free half, finalized by
       # goIsolatedDalTest). Here both halves go in one Gradle invocation, as in the mini pipeline;
@@ -177,9 +311,57 @@ jobs:
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
+      # The steps below run only when every step above passed, so Sonar never gets the coverage of
+      # a partial run, and a push to main never replaces main's analysis with one.
+      # As the mini pipeline does: without it the scanner treats the module as a Gradle build. The
+      # tests are over, so the environment no longer needs it.
+      - name: Delete build.gradle
+        run: rm -f etendo_core/modules/com.etendoerp.go/build.gradle
+
+      - name: Sonar analysis
+        uses: sonarsource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_SCANNER_OPTS: "-Xmx4096m"
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: etendo_core/modules/com.etendoerp.go
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
+
+      # Fails the job when the coverage is below the minimum, more than the tolerance below main, or
+      # cannot be evaluated (--context ci), and when this analysis's quality gate failed
+      # (--check-quality-gate): the same gate "SonarQube Code Analysis" reports, read in the same wait.
+      - name: Compare coverage with main
+        if: github.event_name == 'pull_request'
+        working-directory: etendo_core/modules/com.etendoerp.go
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          COVERAGE_MINIMUM: ${{ vars.COVERAGE_MINIMUM }}
+          COVERAGE_TOLERANCE: ${{ vars.COVERAGE_TOLERANCE }}
+        run: |
+          set -o pipefail
+          # This workflow comes from the merge ref but the script from the PR head, which can predate
+          # --check-quality-gate (ETP-6324): a main -> develop back-merge, or a hotfix cut from an older
+          # main. Then compare the coverage alone and say the gate was not read (ETP-6326).
+          gate=--check-quality-gate
+          if ! grep -q -- "--check-quality-gate" scripts/compare-sonar-coverage.py; then
+            gate=
+            msg="The checked-out compare-sonar-coverage.py predates --check-quality-gate: quality gate not read here."
+            echo "::warning::$msg"
+            echo "> $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt $gate \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
   integration:
-    name: 'Pilot: Integration (Tomcat + Playwright)'
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
+    name: Integration (Tomcat + Playwright)
+    needs: route
+    # Skipped on a push to main that merges a cut the pilot already validated (ETP-6316).
+    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -227,6 +409,8 @@ jobs:
           core_branch: ${{ env.CORE_BRANCH }}
           module_branch: ${{ env.MODULE_BRANCH }}
           base_ref: ${{ github.base_ref }}
+          localenv_s3_key: ${{ secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ secrets.LOCALENV_CACHE_RO_SECRET }}
 
       - name: Start Tomcat
         working-directory: etendo_core
@@ -366,10 +550,207 @@ jobs:
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
+  # ETP-6370: the public API suite of schema_forge (gateway/e2e), the lane ETP-6058 planned for
+  # Jenkins next to Playwright. A job here has its own runner, so it builds its own environment and
+  # signs in as GOAdmin of the GOClient sample data instead of waiting for Playwright's onboarding:
+  # no tenant is shared with the integration suite. The suite creates and deletes its own records
+  # and its two API keys on every run (scripts/public-api-e2e-ci.mjs in schema_forge).
+  public-api:
+    name: Public API E2E
+    needs: route
+    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      # First: checking etendo_core out into etendo_core/ wipes anything already there, the module
+      # included. A few seconds, so it runs even when the suite is skipped.
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ env.CORE_BRANCH }}
+          path: etendo_core
+
+      - name: Checkout com.etendoerp.go
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: etendo_core/modules/com.etendoerp.go
+          # The PR's diff against its target, for the change detection.
+          fetch-depth: 0
+
+      # As publicApiE2e.groovy: a PR runs the suite only when its diff can change what the API serves,
+      # anything but documentation and tests; a push or a dispatch always does. Without a change every
+      # later step is skipped and the job is green.
+      - name: Does this change touch the public API?
+        id: changes
+        working-directory: etendo_core/modules/com.etendoerp.go
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -z "$BASE_REF" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "Not a PR: the suite runs."; exit 0
+          fi
+          files="$(git diff --name-only "origin/$BASE_REF...HEAD")" || { echo "run=true" >> "$GITHUB_OUTPUT"; echo "::warning::Could not diff against origin/$BASE_REF: the suite runs."; exit 0; }
+          hits="$(printf '%s\n' "$files" | grep -v -E '^(docs/|src-test/)|\.md$' | grep -v '^$' || true)"
+          if [ -n "$hits" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Files that can change the public API:"; printf '%s\n' "$hits" | head -20
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Public API E2E skipped: only documentation and tests changed." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Before the 10-minute environment: missing secrets fail at once and say which.
+      - name: Check the GOAdmin secrets
+        if: steps.changes.outputs.run == 'true'
+        env:
+          PUBLIC_API_E2E_EMAIL: ${{ secrets.PUBLIC_API_E2E_EMAIL }}
+          PUBLIC_API_E2E_PASSWORD: ${{ secrets.PUBLIC_API_E2E_PASSWORD }}
+        run: |
+          if [ -z "$PUBLIC_API_E2E_EMAIL" ] || [ -z "$PUBLIC_API_E2E_PASSWORD" ]; then
+            echo "::error::The repo secrets PUBLIC_API_E2E_EMAIL and PUBLIC_API_E2E_PASSWORD (GOAdmin of GOClient) are not set."
+            exit 1
+          fi
+
+      # The same environment as the integration job, with schema_forge on the paired branch: the
+      # gateway and the suite come from there.
+      - name: Build the Etendo GO environment
+        if: steps.changes.outputs.run == 'true'
+        uses: ./etendo_core/modules/com.etendoerp.go/.github/actions/etendo-env
+        with:
+          etendobot_token: ${{ secrets.ETENDOBOT_TOKEN }}
+          nexus_user: ${{ secrets.NEXUS_USER }}
+          nexus_password: ${{ secrets.NEXUS_PASSWORD }}
+          bitbucket_ssh_key: ${{ secrets.BITBUCKET_SSH_KEY }}
+          core_branch: ${{ env.CORE_BRANCH }}
+          module_branch: ${{ env.MODULE_BRANCH }}
+          base_ref: ${{ github.base_ref }}
+          localenv_s3_key: ${{ secrets.LOCALENV_CACHE_RO_KEY }}
+          localenv_s3_secret: ${{ secrets.LOCALENV_CACHE_RO_SECRET }}
+
+      - name: Start Tomcat
+        if: steps.changes.outputs.run == 'true'
+        working-directory: etendo_core
+        env:
+          LE: ${{ github.workspace }}/etendo-localenv/bin/local-env.sh
+          LOCALENV_CACHE: ${{ runner.temp }}/localenv-cache
+          LOCALENV_UPDATE_CHECK_SECS: '0'
+        run: |
+          "$LE" start --tomcat
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/etendo >/dev/null && exit 0
+            sleep 5
+          done
+          echo "::error::Etendo did not answer on http://localhost:8080/etendo"
+          tail -100 build/local-env/tomcat.log
+          exit 1
+
+      - uses: actions/setup-node@v4
+        if: steps.changes.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: etendo_core/schema_forge/package-lock.json
+          registry-url: https://npm.pkg.github.com
+
+      - name: Install schema_forge
+        if: steps.changes.outputs.run == 'true'
+        working-directory: etendo_core/schema_forge
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+        run: |
+          cp .env.example .env
+          make install
+
+      # api-gateway-core is not published: the install packs it from the schema_forge_core tag
+      # schema_forge's package.json pins.
+      - name: Pinned schema_forge_core version
+        id: core
+        if: steps.changes.outputs.run == 'true'
+        working-directory: etendo_core/schema_forge
+        # The pin sits in devDependencies; scripts/public-api-e2e-ci.mjs reads it from either.
+        run: |
+          v="$(node -p "const p = require('./package.json'); (p.dependencies || {})['@etendosoftware/schema-forge-core'] || (p.devDependencies || {})['@etendosoftware/schema-forge-core'] || ''")"
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::@etendosoftware/schema-forge-core is pinned to '$v' in package.json, expected an exact x.y.z (the core's tag)."
+            exit 1
+          fi
+          echo "schema_forge_core: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout schema_forge_core at the pinned version
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/schema_forge_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: refs/tags/${{ steps.core.outputs.version }}
+          path: schema_forge_core
+          persist-credentials: false
+
+      - name: Build the gateway
+        if: steps.changes.outputs.run == 'true'
+        working-directory: etendo_core/schema_forge
+        env:
+          PUBLIC_API_CORE_DIR: ${{ github.workspace }}/schema_forge_core
+          NODE_AUTH_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+        run: make public-api-e2e-ci-install
+
+      # Signs in, creates two API keys, starts the gateway on a free port, runs the suite and always
+      # deletes the keys. Its own timer stops it before the job's limit, so the cleanup still runs.
+      - name: Public API E2E
+        if: steps.changes.outputs.run == 'true'
+        working-directory: etendo_core/schema_forge
+        env:
+          NEO_BASE_URL: http://localhost:8080/etendo
+          PUBLIC_API_E2E_EMAIL: ${{ secrets.PUBLIC_API_E2E_EMAIL }}
+          PUBLIC_API_E2E_PASSWORD: ${{ secrets.PUBLIC_API_E2E_PASSWORD }}
+          PUBLIC_API_E2E_RESULTS_DIR: ${{ runner.temp }}/public-api-e2e
+          PUBLIC_API_E2E_TIMEOUT_MINUTES: '30'
+        run: make public-api-e2e-ci
+
+      - name: Summary
+        if: always() && steps.changes.outputs.run == 'true'
+        env:
+          JUNIT: ${{ runner.temp }}/public-api-e2e/junit.xml
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, xml.etree.ElementTree as ET
+          path = os.environ['JUNIT']
+          try:
+              root = ET.parse(path).getroot()
+          except (OSError, ET.ParseError):
+              print('## Public API E2E\n\nNo junit.xml: the suite did not start (see the step log).')
+              raise SystemExit
+          suites = [root] if root.tag == 'testsuite' else list(root.iter('testsuite'))
+          n = sum(int(s.get('tests', 0)) for s in suites)
+          f = sum(int(s.get('failures', 0)) + int(s.get('errors', 0)) for s in suites)
+          sk = sum(int(s.get('skipped', 0)) for s in suites)
+          print(f'## Public API E2E\n\n{n} tests, {f} failed, {sk} skipped')
+          for case in root.iter('testcase'):
+              if case.find('failure') is not None or case.find('error') is not None:
+                  print(f"- {case.get('classname', '')} › {case.get('name', '')}")
+          PY
+
+      - name: Upload the results
+        if: always() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-api-e2e
+          path: |
+            ${{ runner.temp }}/public-api-e2e
+            etendo_core/build/local-env/*.log
+          retention-days: ${{ env.RETENTION_DAYS }}
+          if-no-files-found: ignore
+
   cell-report:
-    name: 'Pilot: Cell report'
-    needs: [go-tests, integration]
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    name: Cell report
+    # public-api too, though it reads only the Go and E2E results: the run's duration and the job
+    # durations sent to Datadog are measured here, and a job still running would be left out of both.
+    needs: [route, go-tests, integration, public-api]
+    if: ${{ !cancelled() && needs.route.outputs.validated_run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

@@ -112,6 +112,37 @@ class InboxMatcherTest {
     return out;
   }
 
+  // ---------------------------------------------------------------- new-product defaults (ETP-6051)
+
+  @Test
+  @DisplayName("a line that is a new product is pre-filled, with the organization of the row")
+  void aNewProductLineIsPreFilledWithTheOrganizationOfTheRow() throws Exception {
+    lookups.products = List.of(List.of());
+    lookups.unitsByPrinted.put("kg", new Party("U-KG", "Kilogramo"));
+    lookups.defaultCategory = java.util.Optional.of(new Party("C-DEF", "General"));
+    JSONObject extraction = extraction();
+    extraction.getJSONArray(LINE_ITEMS).getJSONObject(0).put("unit", "kg");
+
+    JSONObject document = new InboxMatcher(lookups, "ROW-ORG").build(extraction);
+
+    JSONObject line = document.getJSONArray("lines").getJSONObject(0);
+    assertEquals("kg", line.getString("unitPrinted"));
+    JSONObject draft = line.getJSONObject("product").getJSONObject("new");
+    assertEquals("U-KG", draft.getString("uomId"));
+    assertEquals("ocr", draft.getString("uomSource"));
+    assertEquals("C-DEF", draft.getString("categoryId"));
+    assertEquals(List.of("ROW-ORG"), lookups.categoryOrganizations);
+  }
+
+  @Test
+  @DisplayName("a document from an extraction without the unit key still builds (the old shape)")
+  void anExtractionWithoutTheUnitKeyStillBuilds() throws Exception {
+    JSONObject line = build(extraction()).getJSONArray("lines").getJSONObject(0);
+
+    assertFalse(line.has("unitPrinted"));
+    assertEquals("linked", line.getJSONObject("product").getString(STATE));
+  }
+
   // ---------------------------------------------------------------- the happy path
 
   @Test
@@ -336,9 +367,9 @@ class InboxMatcherTest {
   }
 
   @Test
-  @DisplayName("without a printed total (null, zero, negative) it is computed from the lines with their tax")
+  @DisplayName("without a printed total (null or zero) it is computed from the lines with their tax")
   void theTotalFallsBackToTheLines() throws Exception {
-    for (Object printed : new Object[] { JSONObject.NULL, 0, -4.0 }) {
+    for (Object printed : new Object[] { JSONObject.NULL, 0 }) {
       JSONObject extraction = extraction();
       extraction.put(TOTAL, printed);
       extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21))
@@ -353,6 +384,18 @@ class InboxMatcherTest {
   }
 
   @Test
+  @DisplayName("ETP-6050: a printed NEGATIVE total is honoured (a credit document), whatever the lines add up to")
+  void aPrintedNegativeTotalIsKept() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, -4.0);
+
+    JSONObject header = header(build(extraction));
+
+    assertEquals(-4.0, header.getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("printed", header.getString("totalSource"));
+  }
+
+  @Test
   @DisplayName("the computed total is rounded half up to cents")
   void theComputedTotalIsRounded() throws Exception {
     JSONObject extraction = extraction();
@@ -360,6 +403,66 @@ class InboxMatcherTest {
     extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 1, 10.005, JSONObject.NULL)));
 
     assertEquals(10.01, header(build(extraction)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the computed total applies the line discount (percent read, amount converted)")
+  void theTotalAppliesTheLineDiscount() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", 10).put("discount_amount", JSONObject.NULL)));
+
+    JSONObject document = build(extraction);
+
+    // 2 x 50 less 10 % = 90.00, tax 21 % = 18.90
+    assertEquals(108.9, header(document).getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals(10.0, document.getJSONArray("lines").getJSONObject(0).getDouble("discount"), 0.0);
+
+    JSONObject byAmount = extraction();
+    byAmount.put(TOTAL, JSONObject.NULL);
+    byAmount.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", JSONObject.NULL).put("discount_amount", 10)));
+    assertEquals(108.9, header(build(byAmount)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a printed total is kept as printed whatever the discount")
+  void aPrintedTotalIgnoresTheDiscount() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 2, 50, 21)
+        .put("discount_percent", 10)));
+
+    JSONObject header = header(build(extraction));
+
+    assertEquals(121.0, header.getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("printed", header.getString("totalSource"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the total rounds twice, like GO: the price after the discount to six decimals, then the line to cents")
+  void theTotalRoundsInTwoSteps() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("Widget", 48324, 0.2771, 0)
+        .put("discount_percent", 77.1721)));
+    lookups.taxByRate.put("0", new TaxAnswer(true, new Tax("T0", "IVA 0%", BigDecimal.ZERO),
+        List.of()));
+
+    // rounded once the product would be 3056.79
+    assertEquals(3056.78, header(build(extraction)).getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the tax is rounded per rate on the sum of the nets, not per line")
+  void theTaxIsRoundedPerRate() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, JSONObject.NULL);
+    extraction.put(LINE_ITEMS, new JSONArray().put(line("A", 1, 0.05, 10)).put(line("B", 1, 0.05, 10)));
+    lookups.products = List.of(List.of(), List.of());
+
+    // base 0.10, tax 0.01 (per line 0.005 would round to 0.01 twice = 0.02)
+    assertEquals(0.11, header(build(extraction)).getDouble(TOTAL_AMOUNT), 0.0);
   }
 
   @Test
@@ -376,6 +479,150 @@ class InboxMatcherTest {
     assertEquals(0, document.getJSONArray("lines").length());
     assertEquals("linked", header(document).getJSONObject(VENDOR).getString(STATE),
         "the vendor is still matched without lines");
+  }
+
+  // ---------------------------------------------------------------- currency, scale, rounding mode
+
+  private JSONObject withoutPrintedTotal(JSONObject extraction, JSONObject... lines)
+      throws Exception {
+    extraction.put(TOTAL, JSONObject.NULL);
+    JSONArray array = new JSONArray();
+    for (JSONObject line : lines) {
+      array.put(line);
+    }
+    extraction.put(LINE_ITEMS, array);
+    return extraction;
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the header stores the currency of the linked vendor and the computed total follows its decimals (3)")
+  void theComputedTotalFollowsTheScaleOfTheVendorCurrency() throws Exception {
+    lookups.currency = java.util.Optional.of(new OcrLookups.DocCurrency("KWD", "KWD", "K", 3));
+
+    JSONObject header = header(build(withoutPrintedTotal(extraction(),
+        line("Widget", 1, 0.12345, 21))));
+
+    assertEquals("KWD", header.getString("currencyId"));
+    assertEquals(List.of("V1"), lookups.currencyAsks, "asked with the linked vendor");
+    // net 0.123, tax 21 % = 0.026
+    assertEquals(0.149, header.getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a currency without decimals rounds the computed total to whole units")
+  void aCurrencyWithoutDecimalsRoundsTheComputedTotalToUnits() throws Exception {
+    lookups.currency = java.util.Optional.of(new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0));
+
+    JSONObject header = header(build(withoutPrintedTotal(extraction(),
+        line("Widget", 3, 0.5, 21))));
+
+    // net 1.5 -> 2, tax round0(0.42) = 0
+    assertEquals(2.0, header.getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("JPY", header.getString("currencyId"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a currency that cannot be established leaves no currencyId and rounds to cents")
+  void withoutACurrencyTheTotalIsInCentsAndNoCurrencyIsStored() throws Exception {
+    JSONObject header = header(build(withoutPrintedTotal(extraction(),
+        line("Widget", 1, 10.005, JSONObject.NULL))));
+
+    assertFalse(header.has("currencyId"));
+    assertEquals(10.01, header.getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a vendor that is not linked asks the document currency with no vendor")
+  void anUnlinkedVendorAsksTheCurrencyWithoutAVendor() throws Exception {
+    lookups.byTaxId.clear();
+    lookups.byName = List.of();
+
+    build(extraction());
+
+    assertEquals(1, lookups.currencyAsks.size());
+    assertNull(lookups.currencyAsks.get(0));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a printed total is kept at its own cents, at the default scale")
+  void aPrintedTotalKeepsItsCentsAtTheDefaultScale() throws Exception {
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, 121.55);
+
+    JSONObject header = header(build(extraction));
+
+    assertEquals(121.55, header.getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("printed", header.getString("totalSource"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a printed total is never touched by the currency (its decimals are the document's, not the currency's)")
+  void aPrintedTotalIsNotRoundedToTheScaleOfTheCurrency() throws Exception {
+    lookups.currency = java.util.Optional.of(new OcrLookups.DocCurrency("JPY", "JPY", "Y", 0));
+    JSONObject extraction = extraction();
+    extraction.put(TOTAL, 121.55);
+
+    JSONObject header = header(build(extraction));
+
+    assertEquals(121.55, header.getDouble(TOTAL_AMOUNT), 0.0);
+  }
+
+  @Test
+  @DisplayName("ETP-6050: the lines carry the rounding mode of their tax and the computed total follows it")
+  void theLinesAreStampedAndTheTotalFollowsALineBasedTax() throws Exception {
+    lookups.taxModes.put("T21", "L");
+    // Two lines of net 0.13 (0.125 rounded half up) at 21 %. Per line the tax is 0.0273, which
+    // rounds to 0.03, so the lines add up to 0.06. On the sum, 0.26 at 21 % is 0.0546, which rounds
+    // to 0.05.
+    lookups.products = List.of(List.of(), List.of());
+
+    JSONObject document = build(withoutPrintedTotal(extraction(),
+        line("A", 1, 0.125, 21), line("B", 1, 0.125, 21)));
+
+    JSONArray lines = document.getJSONArray("lines");
+    assertEquals("L", lines.getJSONObject(0).getJSONObject("tax").getString("docTaxAmount"));
+    assertEquals("L", lines.getJSONObject(1).getJSONObject("tax").getString("docTaxAmount"));
+    assertEquals(0.32, header(document).getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals(1, lookups.taxModeAsks.size(), "one lookup for the whole document");
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a tax with no known mode is document based and a pending tax is not stamped")
+  void anUnknownModeIsDocumentBasedAndAPendingTaxIsNotStamped() throws Exception {
+    lookups.products = List.of(List.of(), List.of());
+    lookups.taxByRate.put("7", new TaxAnswer(true, null, List.of()));
+
+    JSONObject document = build(withoutPrintedTotal(extraction(),
+        line("A", 1, 0.125, 21), line("B", 1, 10, 7)));
+
+    JSONArray lines = document.getJSONArray("lines");
+    assertEquals("D", lines.getJSONObject(0).getJSONObject("tax").getString("docTaxAmount"));
+    assertFalse(lines.getJSONObject(1).getJSONObject("tax").has("docTaxAmount"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: negative quantities and prices are kept as read and add up as a credit")
+  void negativeQuantitiesAndPricesAreKeptAndAddedUp() throws Exception {
+    lookups.products = List.of(List.of(), List.of());
+
+    JSONObject document = build(withoutPrintedTotal(extraction(),
+        line("Credit", -2, 50, 21), line("Refund", 1, -10, 21)));
+
+    JSONArray lines = document.getJSONArray("lines");
+    assertEquals(-2.0, lines.getJSONObject(0).getDouble("quantity"), 0.0);
+    assertEquals(-10.0, lines.getJSONObject(1).getDouble("unitPrice"), 0.0);
+    // net -110.00, tax -23.10
+    assertEquals(-133.1, header(document).getDouble(TOTAL_AMOUNT), 0.0);
+    assertEquals("lines", header(document).getString("totalSource"));
+  }
+
+  @Test
+  @DisplayName("ETP-6050: a zero quantity is a line of zero, so the total is 0 and not null")
+  void aZeroQuantityLineGivesATotalOfZero() throws Exception {
+    JSONObject header = header(build(withoutPrintedTotal(extraction(),
+        line("Free", 0, 50, 21))));
+
+    assertEquals(0.0, header.getDouble(TOTAL_AMOUNT), 0.0);
   }
 
   // ---------------------------------------------------------------- date

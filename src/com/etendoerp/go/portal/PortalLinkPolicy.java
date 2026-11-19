@@ -29,13 +29,14 @@ import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
- * The single gate that decides whether a sales-invoice email carries a portal link, and the builder
- * of the link itself.
+ * The single gate that decides whether a sales document email carries a portal link, and the
+ * builder of the link itself.
  *
- * <p><b>The gate does not protect the portal.</b> The {@code /portal/:token} route, the three
- * {@code /sws/portal/*} endpoints, the table and the revoke action all ship unconditionally — what
- * protects them is the token (plan §5). The gate decides one thing only: whether an invoice email
- * carries the link. See plan §2.5.
+ * <p><b>The gate does not protect the portal.</b> The {@code /portal/:token} route, the
+ * {@code /sws/portal/*} endpoints and the {@code etgo_portal_link} table all ship unconditionally —
+ * what protects them is the token (plan §5). The gate decides one thing only: whether a quotation,
+ * order, shipment or invoice email carries the link (ETP-6209; the MVP plan §2.5 covered the
+ * invoice only). A renewal is not gated: it replaces a link the gate already let out.
  *
  * <p><b>One gate: the {@link GoFeatureFlags#FLAG_BP_PORTAL_LINK} flag, evaluated for the account
  * sending the invoice.</b> Enabling one person is a ConfigCat targeting rule on that account's
@@ -70,7 +71,7 @@ public final class PortalLinkPolicy {
   }
 
   /**
-   * Evaluates the gate: is the portal link switched on for the account sending this invoice.
+   * Evaluates the gate: is the portal link switched on for the account sending this document.
    *
    * <p>The account is resolved by {@link GoAccountResolver#currentAccountEmail()}; no account, or
    * any failure resolving it, answers "no link", never "allow".

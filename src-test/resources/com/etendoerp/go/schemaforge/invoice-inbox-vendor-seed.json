@@ -1,0 +1,145 @@
+{
+  "description": "Backend-only fixture of the vendor a confirmed invoice inbox document creates (ETP-6051), pinning InvoiceInboxConfirmSeeds. It follows the SPA popup's seed (buildOcrContactSeed + buildOcrContactAddressSeed in CreateContactModalAdapter.jsx, resolveContactCategorySeed, and the Spain fallback of lib/defaultCountry.js); no SPA-side copy exists yet. The unique 'Proveedor' category is always seeded; with the flag off vendor=true is sent too; customer is never sent. `countries` is the list the printed country is matched against (id, ISO code, name; accents and case ignored).",
+  "countries": [
+    {
+      "id": "C_ES",
+      "iso": "ES",
+      "name": "Spain"
+    },
+    {
+      "id": "C_ES",
+      "iso": "ES",
+      "name": "España"
+    },
+    {
+      "id": "C_FR",
+      "iso": "FR",
+      "name": "France"
+    },
+    {
+      "id": "C_FR",
+      "iso": "FR",
+      "name": "Francia"
+    },
+    {
+      "id": "C_DE",
+      "iso": "DE",
+      "name": "Germany"
+    }
+  ],
+  "cases": [
+    {
+      "name": "everything printed, flag off: category and vendor=true",
+      "extracted": {
+        "name": "  Acme SL ",
+        "taxId": "B12345678",
+        "email": "ap@acme.test",
+        "phone": "+34 600 000 000",
+        "address": "Calle Mayor 1",
+        "postalCode": "28001",
+        "city": "Madrid",
+        "country": "España"
+      },
+      "categoryType": false,
+      "categoryId": "BPG_PROVEEDOR",
+      "vendor": {
+        "name": "Acme SL",
+        "taxID": "B12345678",
+        "etgoEmail": "ap@acme.test",
+        "etgoPhone": "+34 600 000 000",
+        "vendor": true,
+        "businessPartnerCategory": "BPG_PROVEEDOR"
+      },
+      "usableAddress": true,
+      "countryId": "C_ES",
+      "address": {
+        "country": "C_ES",
+        "addressLine1": "Calle Mayor 1",
+        "postalCode": "28001",
+        "cityName": "Madrid"
+      }
+    },
+    {
+      "name": "flag on takes the category and no vendor flag",
+      "extracted": {
+        "name": "Acme SL",
+        "taxId": "B12345678",
+        "address": "Calle Mayor 1",
+        "country": ""
+      },
+      "categoryType": true,
+      "categoryId": "BPG_PROVEEDOR",
+      "vendor": {
+        "name": "Acme SL",
+        "taxID": "B12345678",
+        "businessPartnerCategory": "BPG_PROVEEDOR"
+      },
+      "usableAddress": true,
+      "countryId": "C_ES",
+      "address": {
+        "country": "C_ES",
+        "addressLine1": "Calle Mayor 1"
+      }
+    },
+    {
+      "name": "country by English name and ISO code, accents ignored",
+      "extracted": {
+        "name": "Acme",
+        "taxId": "FR123",
+        "city": "Paris",
+        "country": "FRANCE"
+      },
+      "categoryType": false,
+      "categoryId": "BPG_PROVEEDOR",
+      "vendor": {
+        "name": "Acme",
+        "taxID": "FR123",
+        "vendor": true,
+        "businessPartnerCategory": "BPG_PROVEEDOR"
+      },
+      "usableAddress": true,
+      "countryId": "C_FR",
+      "address": {
+        "country": "C_FR",
+        "cityName": "Paris"
+      }
+    },
+    {
+      "name": "printed country that matches nothing is never guessed",
+      "extracted": {
+        "name": "Acme",
+        "taxId": "X1",
+        "city": "Oslo",
+        "country": "Norway"
+      },
+      "categoryType": false,
+      "categoryId": null,
+      "vendor": {
+        "name": "Acme",
+        "taxID": "X1",
+        "vendor": true
+      },
+      "usableAddress": true,
+      "countryId": null
+    },
+    {
+      "name": "nothing printed: no usable address, none invented (no category found, flag off: vendor=true only)",
+      "extracted": {
+        "name": "Acme",
+        "taxId": "X1",
+        "address": "  ",
+        "postalCode": "",
+        "city": "",
+        "country": ""
+      },
+      "categoryType": false,
+      "categoryId": null,
+      "vendor": {
+        "name": "Acme",
+        "taxID": "X1",
+        "vendor": true
+      },
+      "usableAddress": false
+    }
+  ]
+}

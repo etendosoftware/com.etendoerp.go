@@ -503,6 +503,8 @@ public class McpServlet extends HttpServlet {
    */
   private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
       JSONObject params, JSONObject result, String forcedErrorCode) {
+    // ETP-6230: before the usage-log switch below — the KPI must not depend on it.
+    observeAccountingKpi(identity, toolName, params, result);
     try {
       if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
         return;
@@ -547,7 +549,7 @@ public class McpServlet extends HttpServlet {
           .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
           .payload(payload)
           .build();
-      McpUsageLogger.enqueue(row);
+      McpUsageLogger.enqueue(row, McpUsageTelemetry.currentIdentity());
       if (payload != null) {
         // ETP-5639: Datadog sees an accepted report, and where to read it — counts only.
         McpFeedbackTool.logReceived(row);
@@ -555,6 +557,19 @@ public class McpServlet extends HttpServlet {
     } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
       log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
     }
+  }
+
+  /** Feeds the accounting KPI telemetry (ETP-6230) with one finished tool call; never throws. */
+  private static void observeAccountingKpi(AuthIdentity identity, String toolName,
+      JSONObject params, JSONObject result) {
+    McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+    String clientId = null;
+    if (tenant != null) {
+      clientId = tenant.getClientId();
+    } else if (identity != null) {
+      clientId = identity.clientId;
+    }
+    McpAccountingKpiObserver.observe(clientId, toolName, params, result);
   }
 
   /**

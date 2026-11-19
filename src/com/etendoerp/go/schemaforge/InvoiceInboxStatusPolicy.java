@@ -63,6 +63,39 @@ public final class InvoiceInboxStatusPolicy {
     return changed;
   }
 
+  /**
+   * Applies a verdict after the user edited the document (ETP-6050). Wider than {@link #apply}: an
+   * {@code ERROR} row whose code is not a validation one ({@code UNREADABLE}, {@code SERVICE_FAILURE},
+   * {@code CONFIRM_FAILED}) also moves, because the user may complete by hand what the worker could
+   * not read. Never a {@code FOREIGN_RECEIVER} row (discard only) nor any state but
+   * {@code PENDING_REVIEW} and {@code ERROR}; the caller sends an edited {@code READY} row back to
+   * {@code PENDING_REVIEW} first.
+   *
+   * @param row    the inbox row
+   * @param result the validation verdict of the edited document
+   * @return {@code true} when the row was changed
+   */
+  public static boolean applyAfterEdit(IncomingDocument row, InvoiceInboxValidator.Result result) {
+    if (!isMovableAfterEdit(row)) {
+      return false;
+    }
+    String status = result.isValid() ? PENDING_REVIEW : ERROR;
+    String code = result.getErrorCode();
+    boolean changed = !status.equals(row.getStatus())
+        || (code == null ? row.getErrorCode() != null : !code.equals(row.getErrorCode()));
+    row.setStatus(status);
+    row.setErrorCode(code);
+    // The reason of a failed confirmation belongs to the attempt, not to the edited document.
+    row.setErrorDetail(null);
+    return changed;
+  }
+
+  private static boolean isMovableAfterEdit(IncomingDocument row) {
+    String status = row.getStatus();
+    return PENDING_REVIEW.equals(status) || (ERROR.equals(status)
+        && !InvoiceInboxValidator.FOREIGN_RECEIVER.equals(row.getErrorCode()));
+  }
+
   private static boolean isMovable(IncomingDocument row) {
     String status = row.getStatus();
     if (PENDING_REVIEW.equals(status)) {

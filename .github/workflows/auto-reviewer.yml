@@ -6,7 +6,10 @@ on:
 
 jobs:
   make-review:
-    if:  github.head_ref != 'main'
+    # Cut PRs (mergeblock/*) are skipped: their diff often exceeds GitHub's 20000-line limit
+    # (406), a red make-review holds the automatic cut, and every PR they carry was already
+    # reviewed when it entered develop.
+    if: github.head_ref != 'main' && !startsWith(github.head_ref, 'mergeblock/')
     runs-on: ubuntu-latest
     env:
       PULL_REQUEST: ${{ github.event.pull_request.number }}

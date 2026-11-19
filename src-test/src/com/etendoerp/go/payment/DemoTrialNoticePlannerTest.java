@@ -19,6 +19,7 @@ package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -130,6 +131,47 @@ public class DemoTrialNoticePlannerTest {
 
     assertEquals("reminder-3", notice.milestone());
     assertEquals(restartedAt, notice.getTrialStartedAt());
+  }
+
+  // ===================== ETP-6223: an edited trial end =====================
+
+  @Test
+  public void anExtendedTrialIsRemindedAgainstItsEditedEnd() {
+    Instant editedEnd = END.plus(Duration.ofDays(30));
+    EnvironmentSnapshot extended = new EnvironmentSnapshot(EnvironmentType.DEMO, START,
+        SubscriptionStatus.NONE, null, false, editedEnd);
+
+    // Past the standard end, nothing is owed: the trial now runs to the edited end.
+    assertFalse(planner.plan(extended, END, FOURTEEN_DAYS).isPresent());
+    DemoTrialNotice reminder = planner.plan(extended, editedEnd.minus(Duration.ofDays(3)),
+        FOURTEEN_DAYS).get();
+    assertEquals("reminder-3", reminder.milestone());
+    assertEquals(editedEnd, reminder.getTrialEndsAt());
+    assertEquals(DemoTrialNotice.Kind.EXPIRED,
+        planner.plan(extended, editedEnd, FOURTEEN_DAYS).get().getKind());
+  }
+
+  @Test
+  public void anEditedTrialIsIdentifiedByItsEndSoANewDateIsNotifiedAgain() {
+    Instant firstEnd = END.plus(Duration.ofDays(10));
+    Instant movedEnd = END.plus(Duration.ofDays(20));
+    DemoTrialNotice first = planner.plan(new EnvironmentSnapshot(EnvironmentType.DEMO, START,
+        SubscriptionStatus.NONE, null, false, firstEnd), firstEnd.minus(Duration.ofDays(1)),
+        FOURTEEN_DAYS).get();
+    DemoTrialNotice moved = planner.plan(new EnvironmentSnapshot(EnvironmentType.DEMO, START,
+        SubscriptionStatus.NONE, null, false, movedEnd), movedEnd.minus(Duration.ofDays(1)),
+        FOURTEEN_DAYS).get();
+
+    assertEquals(first.milestone(), moved.milestone());
+    assertNotEquals(first.trialKey(), moved.trialKey());
+  }
+
+  @Test
+  public void aStandardTrialKeepsTheKeyItAlwaysHad() {
+    DemoTrialNotice notice = owed(END.minus(Duration.ofDays(1)));
+
+    assertFalse(notice.isTrialEndEdited());
+    assertEquals(START.toString(), notice.trialKey());
   }
 
   @Test

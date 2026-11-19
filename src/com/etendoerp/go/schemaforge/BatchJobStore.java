@@ -98,6 +98,13 @@ interface BatchJobStore {
   int countActiveForClient(String clientId);
 
   /**
+   * Counts the jobs of every tenant that are still queued or running, on every node.
+   *
+   * @return QUEUED + RUNNING jobs in the whole installation
+   */
+  int countActive();
+
+  /**
    * Claims a job for this node.
    *
    * @param jobId the id of the job to claim

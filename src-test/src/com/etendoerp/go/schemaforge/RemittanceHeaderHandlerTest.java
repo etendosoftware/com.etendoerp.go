@@ -440,6 +440,30 @@ class RemittanceHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-5850: the MCP's {@code etendo_selectors} has no HTTP request; its {@code recordContext}
+   * reaches the hook as query parameters only. The account read there must narrow the types too.
+   */
+  @Test
+  void theTypeSelectorReadsTheAccountFromTheQueryParamsWithoutARequest() throws Exception {
+    RemittanceType core = mock(RemittanceType.class);
+    when(core.getId()).thenReturn(TYPE_ID);
+    when(core.getIdentifier()).thenReturn("Remesa de cobro (adeudo SEPA)");
+    selectorRows = List.of(core);
+    selectorTotal = 1;
+    doReturn(null).when(handler).currentRequest();
+    NeoContext ctx = selector("remittanceType");
+    when(ctx.getQueryParams()).thenReturn(Map.of("FIN_Financial_Account_ID", ACC_ID));
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(1, response.getBody().getJSONArray("items").length());
+    assertEquals(2, queries.size());
+    for (Recorded query : queries) {
+      assertEquals(ACC_ID, query.params.get("account"));
+    }
+  }
+
   @Test
   void theTypeSelectorIsEmptyWithoutAnAccount() throws Exception {
     doReturn(request(Map.of("FIN_Financial_Account_ID", new String[] { "  " })))
