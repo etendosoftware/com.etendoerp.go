@@ -1415,7 +1415,7 @@ row error instead of "plan limit reached". Every other SPA write path translates
 the functional repo, then a core version bump. Workaround meanwhile: none in the import; the
 quota banner and `/account` show the limit.
 
-### 🟡 5.19 A request right after `POST /sws/go/session` or `/session/environment` can get a 401 — owed to ETP-5912
+### ✅ 5.19 A request right after `POST /sws/go/session` or `/session/environment` can get a 401 — fixed (ETP-5912, ETP-6152)
 
 **Ticket:** owner [ETP-5912](https://etendoproject.atlassian.net/browse/ETP-5912). Related
 ETP-5051 (where it was observed, outside its scope; pre-existing) and ETP-5455 (the backend-managed
@@ -1429,7 +1429,15 @@ succeeded. The pattern looks like **commit-after-response**: the response, with 
 cookie, reaches the client before the transaction that stores the session is committed, so a fast
 next request does not find it yet. Not confirmed in the code.
 
-**Workaround:** none in the product. In the observation a repeat of the same request moments
+**Status: confirmed and fixed.** The hypothesis was right: the session row was written through the
+request's DAL transaction, which the Etendo request filter commits only after the servlet returns.
+ETP-6152 made `commitAndSetSessionCookies` / `commitAndClearSessionCookies` commit the session write
+before any session cookie is set, in every issued or rotated path (`/session`, `/session/register`,
+`/session/environment` and its re-entry, `/session/link`, `/session/refresh`, SSO, support handoff,
+change-password, logout). `GoSessionEndpointsTest` pins the commit-before-response order with
+`InOrder` and checks that a failed commit answers an error with no cookie.
+
+**Workaround (before the fix):** none in the product. In the observation a repeat of the same request moments
 later went through; whether the SPA hits the window in practice was not measured.
 
 **To investigate:** when the session row is committed relative to writing the response in the
