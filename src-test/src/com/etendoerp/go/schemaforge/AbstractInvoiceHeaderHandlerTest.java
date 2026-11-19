@@ -1279,6 +1279,10 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * The total is not read at all: an invoice record that carries no {@code grandTotalAmount}
+   * resolves its subtype from the document type alone, without a JSON lookup failure.
+   */
   @Test
   public void enrichInvoiceSubtype_arcDocTypeId_setsRectificativaSubtype() throws Exception {
     JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
@@ -1334,26 +1338,6 @@ public class AbstractInvoiceHeaderHandlerTest {
     JSONObject rec = new JSONObject()
         .put("transactionDocument", "dt-arc")
         .put("grandTotalAmount", 27.83);
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      DocumentType dt = mock(DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("ARC");
-      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
-
-      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
-
-      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
-    }
-  }
-
-  /**
-   * The total is not read at all: an invoice record that carries no {@code grandTotalAmount}
-   * resolves its subtype from the document type alone, without a JSON lookup failure.
-   */
-  @Test
-  public void enrichInvoiceSubtype_noGrandTotal_resolvesFromDocTypeAlone() throws Exception {
-    JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -3678,46 +3662,6 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   /**
-   * ETP-5703 repro (A): an invoice header created with only {@code businessPartner} was refused
-   * with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
-   * location. The create pre-hook must fill it from that location.
-   */
-  @Test
-  public void injectPartnerAddress_createWithSingleBillToLocation_fillsIt() throws Exception {
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Location only = mock(Location.class);
-      when(only.getId()).thenReturn("loc-1");
-      locationCriteria(dal, Collections.singletonList(only));
-      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
-
-      handler.resolveServerCreateFields(createContext(body));
-
-      assertEquals("loc-1", body.getString("partnerAddress"));
-    }
-  }
-
-  /** With two bill-to locations the choice is the caller's: nothing is filled. */
-  @Test
-  public void injectPartnerAddress_twoBillToLocations_abstains() throws Exception {
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Location first = mock(Location.class);
-      Location second = mock(Location.class);
-      when(first.getId()).thenReturn("loc-1");
-      when(second.getId()).thenReturn("loc-2");
-      locationCriteria(dal, java.util.Arrays.asList(first, second));
-      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
-
-      handler.resolveServerCreateFields(createContext(body));
-
-      assertFalse(body.has("partnerAddress"));
-    }
-  }
-
-  /**
    * The caller's own address is kept, and a partner still a batch {@code $ref:} placeholder is
    * never looked up — neither case reaches the DAL.
    */
@@ -3738,7 +3682,11 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   /**
-   * ETP-5710 repro: MCP etendo_create runs the mandatory pre-check before the pre-hook, so the
+   * ETP-5703 repro (A): an invoice header created with only {@code businessPartner} was refused
+   * with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
+   * location. The create pre-hook must fill it from that location.
+   *
+   * <p>ETP-5710 repro: MCP etendo_create runs the mandatory pre-check before the pre-hook, so the
    * partner-address default has to be reachable through the generic hook the MCP path calls.
    */
   @Test
@@ -3757,7 +3705,10 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
-  /** Several bill-to locations: the hook abstains, so the pre-check still reports the field. */
+  /**
+   * Several bill-to locations: the choice is the caller's, so the hook abstains and the pre-check
+   * still reports the field.
+   */
   @Test
   public void resolveServerCreateFields_twoBillToLocations_leavesFieldMissing() throws Exception {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {

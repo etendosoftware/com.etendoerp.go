@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -82,34 +83,20 @@ class CorsUtilsTest {
       verify(response).setHeader("Vary", "Origin");
     }
 
-    @Test
-    void sameOriginAsRequestUrlSetsCorsHeaders() {
-      when(request.getHeader("Origin")).thenReturn("http://myserver:8080");
-      when(request.getRequestURL()).thenReturn(new StringBuffer("http://myserver:8080/etendo/api"));
+    /** The request's own origin and the local dev server (vite, port 3100) are echoed back. */
+    @ParameterizedTest(name = "{0} from {1}")
+    @CsvSource({
+        "http://myserver:8080, http://myserver:8080/etendo/api",
+        "http://localhost:3100, http://server:8080/api",
+        "http://127.0.0.1:3100, http://server:8080/api",
+    })
+    void allowedOriginIsEchoedBack(String origin, String requestUrl) {
+      when(request.getHeader("Origin")).thenReturn(origin);
+      when(request.getRequestURL()).thenReturn(new StringBuffer(requestUrl));
 
       CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
 
-      verify(response).setHeader("Access-Control-Allow-Origin", "http://myserver:8080");
-    }
-
-    @Test
-    void viteDevServerOriginIsAllowedByDefault() {
-      when(request.getHeader("Origin")).thenReturn("http://localhost:3100");
-      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
-
-      CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
-
-      verify(response).setHeader("Access-Control-Allow-Origin", "http://localhost:3100");
-    }
-
-    @Test
-    void viteDevServerLoopbackOriginIsAllowedByDefault() {
-      when(request.getHeader("Origin")).thenReturn("http://127.0.0.1:3100");
-      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
-
-      CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
-
-      verify(response).setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:3100");
+      verify(response).setHeader("Access-Control-Allow-Origin", origin);
     }
 
     @Test
