@@ -40,6 +40,8 @@ import org.openbravo.dal.security.OrganizationStructureProvider;
 
 /**
  * ETP-5086: organization context and org-proximity ordering of the combo first-option fallback.
+ *
+ * @covers com.etendoerp.go.schemaforge.OrgPreference
  */
 public class NeoFallbackOrganizationTest {
 
@@ -61,25 +63,25 @@ public class NeoFallbackOrganizationTest {
   @Test
   public void bodyOrgIsUsed() throws Exception {
     Map<String, String> params = new HashMap<>();
-    NeoDefaultsService.putFallbackOrganization(params, ctx("ORG1", "P1"));
+    OrgPreference.putFallbackOrganization(params, ctx("ORG1", "P1"));
     assertEquals("ORG1", params.get("AD_Org_ID"));
     assertFalse(params.containsKey("parentId"));
-    assertEquals("Y", params.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+    assertEquals("Y", params.get(OrgPreference.PARAM_PREFER_CONTEXT_ORG));
   }
 
   @Test
   public void parentIdIsUsedWithoutBodyOrg() throws Exception {
     Map<String, String> params = new HashMap<>();
-    NeoDefaultsService.putFallbackOrganization(params, ctx(null, "P1"));
+    OrgPreference.putFallbackOrganization(params, ctx(null, "P1"));
     assertEquals("P1", params.get("parentId"));
     assertFalse(params.containsKey("AD_Org_ID"));
-    assertEquals("Y", params.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+    assertEquals("Y", params.get(OrgPreference.PARAM_PREFER_CONTEXT_ORG));
   }
 
   @Test
   public void orgZeroFallsBackToParentId() throws Exception {
     Map<String, String> params = new HashMap<>();
-    NeoDefaultsService.putFallbackOrganization(params, ctx("0", "P1"));
+    OrgPreference.putFallbackOrganization(params, ctx("0", "P1"));
     assertEquals("P1", params.get("parentId"));
     assertFalse(params.containsKey("AD_Org_ID"));
   }
@@ -87,14 +89,14 @@ public class NeoFallbackOrganizationTest {
   @Test
   public void orgZeroWithoutParentAddsNothing() throws Exception {
     Map<String, String> params = new HashMap<>();
-    NeoDefaultsService.putFallbackOrganization(params, ctx("0", null));
+    OrgPreference.putFallbackOrganization(params, ctx("0", null));
     assertTrue(params.isEmpty());
   }
 
   @Test
   public void noSourceKeepsTodaysBehaviour() throws Exception {
     Map<String, String> params = new HashMap<>();
-    NeoDefaultsService.putFallbackOrganization(params, ctx(null, null));
+    OrgPreference.putFallbackOrganization(params, ctx(null, null));
     assertTrue(params.isEmpty());
   }
 
@@ -102,10 +104,10 @@ public class NeoFallbackOrganizationTest {
   public void existingAdOrgIdIsNotOverridden() throws Exception {
     Map<String, String> params = new HashMap<>();
     params.put("AD_Org_ID", "CALLER");
-    NeoDefaultsService.putFallbackOrganization(params, ctx("ORG1", "P1"));
+    OrgPreference.putFallbackOrganization(params, ctx("ORG1", "P1"));
     assertEquals("CALLER", params.get("AD_Org_ID"));
     assertFalse(params.containsKey("parentId"));
-    assertFalse(params.containsKey(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG));
+    assertFalse(params.containsKey(OrgPreference.PARAM_PREFER_CONTEXT_ORG));
   }
 
   @Test
@@ -129,29 +131,29 @@ public class NeoFallbackOrganizationTest {
   public void orderByPutsProximityBeforeDisplayName() {
     SelectorQueryBuilder.HqlWithParams order = SelectorOrgFilter.buildOrgProximityOrder("e",
         Arrays.asList("CHILD", "PARENT"));
-    String withOrg = SelectorQueryExecutor.orderBy(order, "e", "name");
+    String withOrg = OrgPreference.orderBy(order, "e", "name");
     assertTrue(withOrg, withOrg.startsWith(" ORDER BY " + order.getHql() + ", e.name, e.id"));
   }
 
   @Test
   public void orderByIsUnchangedWithoutPreference() {
-    assertEquals(" ORDER BY e.name, e.id", SelectorQueryExecutor.orderBy(null, "e", "name"));
+    assertEquals(" ORDER BY e.name, e.id", OrgPreference.orderBy(null, "e", "name"));
   }
 
   @Test
   public void selectorServiceForwardsPreferenceOnlyWithFlagAndOrg() {
     Map<String, Object> filter = new HashMap<>();
     Map<String, String> flagged = new HashMap<>();
-    flagged.put(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG, "Y");
-    NeoSelectorService.putOrgPreference(filter, flagged, "ORG1");
-    assertEquals("ORG1", filter.get(SelectorQueryExecutor.PARAM_PREFER_ORG));
+    flagged.put(OrgPreference.PARAM_PREFER_CONTEXT_ORG, "Y");
+    OrgPreference.putOrgPreference(filter, flagged, "ORG1");
+    assertEquals("ORG1", filter.get(OrgPreference.PARAM_PREFER_ORG));
 
     Map<String, Object> noOrg = new HashMap<>();
-    NeoSelectorService.putOrgPreference(noOrg, flagged, null);
+    OrgPreference.putOrgPreference(noOrg, flagged, null);
     assertTrue(noOrg.isEmpty());
 
     Map<String, Object> noFlag = new HashMap<>();
-    NeoSelectorService.putOrgPreference(noFlag, new HashMap<>(), "ORG1");
+    OrgPreference.putOrgPreference(noFlag, new HashMap<>(), "ORG1");
     assertTrue(noFlag.isEmpty());
   }
 

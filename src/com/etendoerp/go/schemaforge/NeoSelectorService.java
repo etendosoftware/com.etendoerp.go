@@ -497,7 +497,7 @@ public class NeoSelectorService {
       ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
           SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
     }
-    putOrgPreference(ctxFilterParams, safeContextParams, contextOrganizationId);
+    OrgPreference.putOrgPreference(ctxFilterParams, safeContextParams, contextOrganizationId);
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);
@@ -510,18 +510,6 @@ public class NeoSelectorService {
     return SelectorQueryExecutor.execute(
         meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
         contextOrganizationId, ctxFilterParams);
-  }
-
-  /**
-   * ETP-5086: the first-option fallback (flag {@code preferContextOrg=Y}) ranks candidates by
-   * closeness to the resolved context organization; any other request keeps display order.
-   */
-  static void putOrgPreference(Map<String, Object> filterParams, Map<String, String> contextParams,
-      String contextOrganizationId) {
-    if ("Y".equals(contextParams.get(NeoDefaultsService.PARAM_PREFER_CONTEXT_ORG))
-        && StringUtils.isNotBlank(contextOrganizationId)) {
-      filterParams.put(SelectorQueryExecutor.PARAM_PREFER_ORG, contextOrganizationId);
-    }
   }
 
   private static NeoResponse enrichProductSelectorIfNeeded(NeoResponse selectorResult, SelectorMeta meta,

@@ -70,10 +70,6 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
-  /** Context param asking the selector to rank candidates by closeness to the context org (ETP-5086). */
-  static final String PARAM_PREFER_CONTEXT_ORG = "preferContextOrg";
-  private static final String PARAM_AD_ORG_ID = "AD_Org_ID";
-  private static final String PARAM_PARENT_ID = "parentId";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
   private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
@@ -1461,41 +1457,8 @@ public class NeoDefaultsService {
       params.put("IsSOTrx", soTrx);
       params.put("isSOTrx", soTrx);
     }
-    putFallbackOrganization(params, ctx);
+    OrgPreference.putFallbackOrganization(params, ctx);
     return params;
-  }
-
-  /**
-   * ETP-5086: gives the combo first-option fallback an organization context, so the selector
-   * restricts candidates to the target record's organization tree (plus {@code *}) and ranks them
-   * by closeness to that organization (exact org, nearest ancestor, {@code *}) before the display
-   * name. The organization comes from the record being created (request body), else from the
-   * parent record (via {@code parentId}). Organization {@code 0} carries no preference. With
-   * neither source, nothing is added and the fallback behaves as before.
-   */
-  static void putFallbackOrganization(Map<String, String> params, NeoContext ctx) {
-    if (ctx == null || params.containsKey(PARAM_AD_ORG_ID) || params.containsKey(PARAM_PARENT_ID)) {
-      return;
-    }
-    String orgId = null;
-    JSONObject requestBody = ctx.getRequestBody();
-    if (requestBody != null) {
-      orgId = StringUtils.trimToNull(requestBody.optString("organization", null));
-    }
-    if ("0".equals(orgId)) {
-      orgId = null;
-    }
-    if (orgId != null) {
-      params.put(PARAM_AD_ORG_ID, orgId);
-      params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
-      return;
-    }
-    Map<String, String> queryParams = ctx.getQueryParams();
-    String parentId = queryParams != null ? StringUtils.trimToNull(queryParams.get(PARAM_PARENT_ID)) : null;
-    if (parentId != null) {
-      params.put(PARAM_PARENT_ID, parentId);
-      params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
-    }
   }
 
   static Object resolveFirstComboOption(Column col, NeoContext ctx) {
