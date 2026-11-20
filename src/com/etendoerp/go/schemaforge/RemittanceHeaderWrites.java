@@ -107,8 +107,8 @@ final class RemittanceHeaderWrites {
   /**
    * ETP-6247 — the SEPA values a remittance takes from its account and type, written into the body
    * so the generic write persists them (the database no longer defaults or re-copies them; the
-   * Classic form gets them from the {@code REM_Remittance_SepaDefaults} callout). A valid value the
-   * body already carries is always respected (the user typed it on purpose).
+   * Classic form gets them from the {@code RemittanceSepaDefaultsCallout} callout). A valid value
+   * the body already carries is always respected (the user typed it on purpose).
    * <ul>
    *   <li><b>Create</b>: the account's IBAN when the body has none; for a collection the account's
    *       valid creditor identifier when the body has none, and the scheme {@code CORE} when the
@@ -191,7 +191,7 @@ final class RemittanceHeaderWrites {
 
   /**
    * A collection type: its payment method is a pay-in one, the same rule the Classic callout
-   * {@code REM_Remittance_SepaDefaults} uses.
+   * {@code RemittanceSepaDefaultsCallout} uses.
    */
   private static boolean isCollection(RemittanceType type) {
     return type != null && type.getPaymentMethod() != null

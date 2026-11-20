@@ -51,8 +51,9 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  * Real-database acceptance of the REM trigger {@code REM_REMITTANCE_TRG} as ETP-6247 left it: it
  * only FREEZES the SEPA values (IBAN, creditor identifier, direct debit scheme, financed flag) once
  * the remittance is processed, inside the test transaction, rolled back after each test. It no
- * longer copies nor defaults anything: the Classic callout {@code REM_Remittance_SepaDefaults} and
- * the GO write path ({@link RemittanceHeaderWrites}) do. Pins:
+ * longer copies nor defaults anything: the Classic callout
+ * {@code RemittanceSepaDefaultsCallout} and the GO write path ({@link RemittanceHeaderWrites}) do.
+ * Pins:
  * <ul>
  *   <li>insert: nothing is copied or defaulted (a remittance without IBAN, creditor identifier or
  *       scheme keeps them empty; a provided value is kept; the scheme is only {@code CORE} or

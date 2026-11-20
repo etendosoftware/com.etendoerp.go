@@ -2951,7 +2951,7 @@ everything is Classic's model.
     the account's valid identifier into the body of a COLLECTION create, and again on an update that
     changes the account or switches between collection and payment (a payment, or an account without
     a valid one, clears it); an identifier the body carries is respected. The Classic form gets the
-    same from the callout `REM_Remittance_SepaDefaults` (module `org.openbravo.module.remittance`).
+    same from the callout `RemittanceSepaDefaultsCallout` (module `org.openbravo.module.remittance`).
     `confirm` and `generateFile` snapshot the account's
     valid identifier into a remittance that has none, in their own transaction before the file is
     generated (`RemittanceCreditorId.forFile`), so remittances created before this change behave
@@ -3041,7 +3041,7 @@ everything is Classic's model.
     when the body brings none, and, while the remittance is not processed, on an update that changes
     the account or switches between collection and payment (any other type change keeps a typed IBAN);
     an IBAN the body carries is kept. The SPA sends a blank IBAN on an account change, and the server
-    resolves it. The Classic form gets the same from the callout `REM_Remittance_SepaDefaults`.
+    resolves it. The Classic form gets the same from the callout `RemittanceSepaDefaultsCallout`.
     `confirm` / `generateFile` snapshot the account's valid IBAN into a
     remittance without a copy (`RemittanceIban.forFile`), as for the creditor identifier.
   - **Write: the header's CRUD, field `iBAN`** (decisions `entities.remittance.fields.iBAN`,
