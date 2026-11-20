@@ -245,6 +245,31 @@ public interface NeoHandler {
   }
 
   /**
+   * A more precise refusal for a {@code DELETE} the CRUD target guard has already refused because
+   * the current tenant can READ the row but not write it — typically a System ({@code 0}) row
+   * shared by every client (ETP-6365).
+   *
+   * <p><b>Why.</b> The guard ({@code NeoActionRecordGuard.deleteRefusalFor}) answers such a row
+   * the same 404 an unknown id gets, before any customization runs. For a row the tenant can see
+   * in the app that answer is wrong, and only the customization knows the real reason (a
+   * downloaded conversion rate is locked, for one). Shared code never names the entity.</p>
+   *
+   * <p><b>Contract.</b> Asked only for a {@code DELETE} on a row that exists, that the tenant can
+   * read and that the guard refused; never for another tenant's row or an unknown id. It can only
+   * replace one refusal with another: the engine uses the answer when it is an error (status
+   * {@code >= 400}) and keeps the 404 otherwise — a {@code null} or a success answer can never
+   * make the row deletable. Pure: no write.</p>
+   *
+   * <p>Readers: {@code NeoWritePreflight} (REST single and batch), MCP {@code etendo_delete}.</p>
+   *
+   * @param context the delete request context; its record id names the row
+   * @return the refusal to answer instead of the 404, or {@code null} (the default) to keep it
+   */
+  default NeoResponse refusalForReadOnlyTarget(NeoContext context) {
+    return null;
+  }
+
+  /**
    * Answers whether the app offers {@code candidateId} for the reference {@code propertyName} of
    * the record being written, when the picker the app shows for that field is this
    * customization's own and not the field's generic selector (ETP-6365).

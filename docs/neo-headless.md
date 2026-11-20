@@ -10091,6 +10091,13 @@ core's `TriggerHandler` (`ConversionRateTriggerBypass`):
 client's rows **and** the System (`0`) ones (`ConversionRateWrites.writableRate`): a downloaded row
 of either answers 409 `ETGO_ConvRateSyncedLocked`; any other System row answers 404 like an unknown
 id or another tenant's row. Only the tenant's own non-downloaded rows are ever written.
+A delete of a System row never reaches the customization's `handle`: the shared CRUD target guard
+(`NeoActionRecordGuard.deleteRefusalFor`, used by `NeoWritePreflight` for REST single and batch and
+by MCP `etendo_delete`) refuses it first, because the tenant cannot write it. The guard then asks
+the customization to word that refusal (`NeoHandler.refusalForReadOnlyTarget`, structural: asked
+only for a row the tenant can read, and only an error answer replaces the 404), and
+`ConversionRateHandler` answers the synced-lock 409 for a downloaded row. Same answer on every
+channel.
 
 A range is the pair of rows with the same `ValidFrom`/`ValidTo`; `ValidTo` empty or in year 2999+
 means open. Refusals, all before anything is written (Spanish/English text in

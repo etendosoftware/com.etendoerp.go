@@ -1290,7 +1290,9 @@ public class McpToolRouter {
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
-    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
+    // ETP-6365: same guard as REST (NeoWritePreflight), so both answer a refused delete alike.
+    NeoResponse targetRefusal = NeoActionRecordGuard.deleteRefusalFor(sfEntity, hookCtx);
     if (targetRefusal != null) {
       return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
     }
@@ -1312,7 +1314,6 @@ public class McpToolRouter {
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     // ETP-5415: routed through NeoExtensionDispatcher. Note this surface has NO post-hook — the
     // delete returns its own payload and never calls afterHandle. Preserved as-is; see D14.
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)

@@ -101,6 +101,33 @@ public class ConversionRateHandler extends AbstractNeoHandler {
     return NeoResponse.noContent();
   }
 
+  /**
+   * The delete of a row the tenant can read but not delete — a System ({@code 0}) rate, where the
+   * downloader writes — reaches here instead of the customization: the CRUD guard refused it
+   * first. A downloaded one is answered with the synced-lock refusal (409
+   * {@code ETGO_ConvRateSyncedLocked}) on every channel; any other keeps the guard's 404. The row
+   * is never written either way.
+   *
+   * @param context the delete context
+   * @return the 409, or {@code null} to keep the 404
+   */
+  @Override
+  public NeoResponse refusalForReadOnlyTarget(NeoContext context) {
+    String recordId = StringUtils.trimToNull(context == null ? null : context.getRecordId());
+    if (recordId == null) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      new ConversionRateWrites(store()).writableRate(recordId);
+      return null;
+    } catch (ConversionRateRefusal refusal) {
+      return refusal.toResponse();
+    } finally {
+      exitAdminMode();
+    }
+  }
+
   private NeoResponse runAction(NeoContext context) {
     return run(context, writes -> ConversionRateActions.run(context, store(), writes));
   }
