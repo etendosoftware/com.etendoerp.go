@@ -45,7 +45,7 @@ import com.etendoerp.go.schemaforge.email.EmailSendContext;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
-import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+import com.etendoerp.go.schemaforge.email.render.EmailFooter;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 
@@ -70,6 +70,14 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
   static final String MESSAGE_NO_LINK = "The portal link of the decision was not found";
   private static final String CONTENT_TEMPLATE = "custom";
   private static final String KEY_PREFIX = "portal-quotation-decision.";
+  private static final String CONFIRM_PREFIX = KEY_PREFIX + "confirm.";
+  /**
+   * Longest "Otros" text shown in the Motivo column, ellipsis included: one of three equal columns
+   * of a 620px card, so a long text must not stretch the table. The full text stays in the
+   * decision row and in the quotation's notes.
+   */
+  static final int MAX_REASON_TEXT_CHARS = 80;
+  private static final String ELLIPSIS = "\u2026";
 
   private final PortalLinkService linkService;
   private final PortalDecisionService decisionService;
@@ -159,24 +167,9 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
           "A decision link could not be built: the app base URL may not be configured");
     }
     String tenantName = StringUtils.defaultString(session.getClientName());
-    String documentNumber = documentNumber(quotationId);
-    String action = EmailMessages.get(KEY_PREFIX + "action." + decision, language);
-    EmailContent.Builder content = EmailContent.builder()
-        .paragraphHtml(EmailEscape.applyBold(EmailMessages.get(KEY_PREFIX + "confirm.body",
-            language, EmailEscape.escapeHtml(action), EmailEscape.escapeHtml(documentNumber),
-            EmailEscape.escapeHtml(tenantName))));
-    if (reasonCode != null) {
-      String reason = EmailMessages.get(KEY_PREFIX + "reason." + reasonCode, language);
-      content.detail(EmailMessages.get(KEY_PREFIX + "reason.label", language),
-          reasonText == null ? reason : reason + " — " + reasonText);
-    }
-    // The button names the decision ("Confirmar rechazo"): one click on it applies it (the
-    // landing auto-submits the confirmation; a bare GET of the link applies nothing).
-    content.cta(EmailMessages.get(KEY_PREFIX + "confirm.cta." + decision, language),
-            minted.get().getUrl())
-        .linkFallbackText(EmailMessages.get("link.fallback", language))
-        .note(EmailMessages.get(KEY_PREFIX + "confirm.note", language))
-        .signature(EmailMessages.get("signature", language));
+    QuotationFacts quotation = quotationFacts(quotationId);
+    EmailContent content = buildContent(decision, language, tenantName, quotation,
+        reasonValue(reasonCode, reasonText, language), minted.get().getUrl());
     try {
       JSONObject data = new JSONObject();
       String name = StringUtils.trimToNull(session.getBusinessPartnerName());
@@ -184,9 +177,9 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
         data.put("name", name);
       }
       data.put("link", minted.get().getUrl());
-      data.put("subject", EmailMessages.get(KEY_PREFIX + "confirm.subject", language,
-          documentNumber));
-      data.put("body", EmailLayout.render(content.build()));
+      data.put("subject", EmailMessages.get(CONFIRM_PREFIX + "subject." + decision, language,
+          quotation.number));
+      data.put("body", EmailLayout.render(content));
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
           data, null).withSendCorrelationId(minted.get().getId()));
     } catch (JSONException e) {
@@ -229,13 +222,91 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
     return linkId == null ? Optional.empty() : linkService.findLink(linkId);
   }
 
-  static String documentNumber(String quotationId) {
+  /**
+   * Composes the card (ETP-6209 design): who asks, what is confirmed, the quotation's facts, the
+   * button and what to do when the request is not theirs. Accept shows the total; reject shows the
+   * customer's reason instead (PO decision: exactly the Figma, no amount).
+   */
+  private static EmailContent buildContent(String decision, String language, String tenantName,
+      QuotationFacts quotation, String reason, String url) {
+    boolean accept = PortalDecisionService.DECISION_ACCEPT.equals(decision);
+    EmailContent.Builder content = EmailContent.builder()
+        // No public logo URL exists: the portal's logo endpoint needs the customer's session token,
+        // which must never travel in an image request. The card shows the company's initials.
+        .issuer(tenantName, null)
+        .badge(EmailMessages.get(CONFIRM_PREFIX + "badge", language))
+        .title(EmailMessages.get(CONFIRM_PREFIX + "title." + decision, language))
+        .subtitle(EmailMessages.get(CONFIRM_PREFIX + "subtitle." + decision, language))
+        .summaryTitle(EmailMessages.get(CONFIRM_PREFIX + "summary.title", language))
+        .detail(EmailMessages.get(CONFIRM_PREFIX + "summary.company", language), tenantName)
+        .detail(EmailMessages.get(CONFIRM_PREFIX + "summary.number", language), quotation.number);
+    if (accept) {
+      content.detail(EmailMessages.get(CONFIRM_PREFIX + "summary.total", language),
+          quotation.total);
+    } else {
+      content.detail(EmailMessages.get(KEY_PREFIX + "reason.label", language), reason);
+    }
+    // The button names the decision ("Confirmar rechazo"): one click on it applies it (the
+    // landing auto-submits the confirmation; a bare GET of the link applies nothing).
+    return content.ctaNote(EmailMessages.get(CONFIRM_PREFIX + "note." + decision, language))
+        .cta(EmailMessages.get(CONFIRM_PREFIX + "cta." + decision, language), url)
+        .linkFallbackText(EmailMessages.get(CONFIRM_PREFIX + "fallback", language))
+        .warning(EmailMessages.get(CONFIRM_PREFIX + "warning.title", language),
+            EmailMessages.get(CONFIRM_PREFIX + "warning." + decision, language))
+        .footer(EmailFooter.etendo(accept ? EmailFooter.Piece.DECISION_ACCEPT
+            : EmailFooter.Piece.DECISION_REJECT, language))
+        .build();
+  }
+
+  /**
+   * The Motivo column: the customer's portal reason in the email's language — never the tenant's
+   * internal reject reason. For "Otros" it is the text the customer typed (whitespace collapsed,
+   * cut to {@value #MAX_REASON_TEXT_CHARS} characters with an ellipsis; the layout escapes it),
+   * falling back to the "Otros" label when that text is empty.
+   *
+   * @param reasonCode the portal reason code, or {@code null} (accept)
+   * @param reasonText the "Otros" text, or {@code null}
+   * @param language the email's language
+   * @return the value, or {@code null} when there is no reason
+   */
+  static String reasonValue(String reasonCode, String reasonText, String language) {
+    if (reasonCode == null) {
+      return null;
+    }
+    String text = StringUtils.trimToNull(StringUtils.normalizeSpace(reasonText));
+    if (PortalDecisionService.REASON_OTHER.equals(reasonCode) && text != null) {
+      return StringUtils.abbreviate(text, ELLIPSIS, MAX_REASON_TEXT_CHARS);
+    }
+    return EmailMessages.get(KEY_PREFIX + "reason." + reasonCode, language);
+  }
+
+  /**
+   * The quotation's number and total, read in admin mode (the portal has no Etendo session). The
+   * total is formatted like every other GO document email's ({@code formatAmount}).
+   */
+  static QuotationFacts quotationFacts(String quotationId) {
     OBContext.setAdminMode(true);
     try {
       Order quotation = OBDal.getInstance().get(Order.class, quotationId);
-      return quotation == null ? "" : StringUtils.defaultString(quotation.getDocumentNo());
+      if (quotation == null) {
+        return new QuotationFacts("", null);
+      }
+      return new QuotationFacts(StringUtils.defaultString(quotation.getDocumentNo()),
+          DalEmailContractDataResolver.formatAmount(quotation.getGrandTotalAmount(),
+              quotation.getCurrency()));
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /** What the card states about the quotation. */
+  static final class QuotationFacts {
+    private final String number;
+    private final String total;
+
+    QuotationFacts(String number, String total) {
+      this.number = number;
+      this.total = total;
     }
   }
 }

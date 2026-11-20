@@ -232,6 +232,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.
+- **The confirmation email's design** (card per the Figma, Etendo footer, the Motivo column and
+  why the avatar is the company's initials) is in `transactional-email-contracts.md` → *Portal
+  email design*.
 - **One step from the email (call with the PO).** The confirmation email's button is explicit
   ("Confirmar rechazo" / "Confirmar aceptación", `portal-quotation-decision.confirm.cta.<DECISION>`)
   and opens the landing (`/portal/decision/<token>` in the SPA), whose script sends

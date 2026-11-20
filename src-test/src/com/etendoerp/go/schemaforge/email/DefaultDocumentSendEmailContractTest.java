@@ -82,6 +82,9 @@ public class DefaultDocumentSendEmailContractTest {
     // Regression guard: an untouched send must stay byte-identical to pre-fix behavior.
     assertTrue("expected the default copy in body: " + body, body.contains(DEFAULT_COPY));
     assertTrue("expected the document link in body: " + body, body.contains(DOWNLOAD_LINK));
+    // ETP-6209: the Etendo footer belongs to portal emails only; without a portal link, none.
+    assertFalse("no Etendo footer without a portal link: " + body,
+        body.contains("Creado con Etendo"));
   }
 
   @Test
@@ -503,6 +506,8 @@ public class DefaultDocumentSendEmailContractTest {
     assertFalse("no download button next to the portal one: " + body,
         body.contains("Descargar documento"));
     assertFalse("the download link is not offered: " + body, body.contains(DOWNLOAD_LINK));
+    // ETP-6209: an email that reaches the customer through the portal closes with the Etendo footer.
+    assertTrue(body, body.contains("Creado con Etendo"));
     // The intro is a plain sentence; the only link is the button.
     assertTrue(body, body.contains("<strong>portal de cliente</strong>. El enlace es válido"
         + " durante 48 horas."));

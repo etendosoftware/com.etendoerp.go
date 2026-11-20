@@ -32,6 +32,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Optional;
@@ -44,6 +45,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.portal.PortalDecisionService;
@@ -89,8 +91,12 @@ public class PortalDecisionEmailContractsTest {
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
     BusinessPartner customer = mock(BusinessPartner.class);
     when(customer.getName()).thenReturn("Cliente SL");
+    Currency euro = mock(Currency.class);
+    when(euro.getISOCode()).thenReturn("EUR");
     Order quotation = mock(Order.class);
     when(quotation.getDocumentNo()).thenReturn("PR-7");
+    when(quotation.getGrandTotalAmount()).thenReturn(new BigDecimal("2450.00"));
+    when(quotation.getCurrency()).thenReturn(euro);
     when(quotation.getBusinessPartner()).thenReturn(customer);
     when(obDal.get(Order.class, QUOTATION_ID)).thenReturn(quotation);
     linkService = mock(PortalLinkService.class);
@@ -158,10 +164,10 @@ public class PortalDecisionEmailContractsTest {
   public void theConfirmationButtonNamesTheDecisionInTheLinksLanguage() throws Exception {
     // Columns: decision, language, button, subject.
     String[][] cases = {
-        { "ACCEPT", "es_ES", "Confirmar aceptación", "Confirme su decisión sobre el presupuesto PR-7" },
-        { "REJECT", "es_ES", "Confirmar rechazo", "Confirme su decisión sobre el presupuesto PR-7" },
-        { "ACCEPT", "en_US", "Confirm acceptance", "Confirm your decision on quotation PR-7" },
-        { "REJECT", "en_US", "Confirm rejection", "Confirm your decision on quotation PR-7" },
+        { "ACCEPT", "es_ES", "Confirmar aceptación", "Confirma la aceptación del presupuesto PR-7" },
+        { "REJECT", "es_ES", "Confirmar rechazo", "Confirma el rechazo del presupuesto PR-7" },
+        { "ACCEPT", "en_US", "Confirm acceptance", "Confirm the acceptance of quotation PR-7" },
+        { "REJECT", "en_US", "Confirm rejection", "Confirm the rejection of quotation PR-7" },
     };
     PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
     when(minted.getId()).thenReturn(DECISION_ID);
@@ -188,7 +194,36 @@ public class PortalDecisionEmailContractsTest {
   }
 
   @Test
-  public void aRejectionShowsItsReasonAndTheFreeTextOnlyForOther() throws Exception {
+  public void aRejectionShowsTheCustomersReasonAndForOtherTheTextTheyTyped() throws Exception {
+    PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
+    when(minted.getId()).thenReturn(DECISION_ID);
+    when(minted.getUrl()).thenReturn(DECISION_URL);
+    when(decisionService.mint(anyString(), anyString(), anyString(), any(), any(), anyString(),
+        any())).thenReturn(Optional.of(minted));
+    PortalLink session = link();
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
+    String tooLong = String.join("", Collections.nCopies(100, "x"));
+
+    String price = resolveConfirmation("REJECT", "PRICE", null).getData().getString("body");
+    String other = resolveConfirmation("REJECT", "OTHER", "Plazo <demasiado> largo")
+        .getData().getString("body");
+    String blank = resolveConfirmation("REJECT", "OTHER", "   ").getData().getString("body");
+    String cut = resolveConfirmation("REJECT", "OTHER", tooLong).getData().getString("body");
+
+    assertTrue(price, price.contains(">Precio<"));
+    // "Otros": the customer's own text, escaped, in place of the label.
+    assertTrue(other, other.contains(">Plazo &lt;demasiado&gt; largo<"));
+    assertFalse(other, other.contains(">Otros<"));
+    assertTrue("an empty text falls back to the label: " + blank, blank.contains(">Otros<"));
+    int max = PortalDecisionConfirmEmailContract.MAX_REASON_TEXT_CHARS;
+    assertTrue(cut, cut.contains(">" + tooLong.substring(0, max - 1) + "\u2026<"));
+    assertFalse(cut, cut.contains(tooLong.substring(0, max)));
+    // A rejection shows no amount (PO decision: exactly as the design).
+    assertFalse(price, price.contains("Importe total"));
+  }
+
+  @Test
+  public void anAcceptanceShowsTheCompanyTheNumberAndTheFormattedTotal() throws Exception {
     PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
     when(minted.getId()).thenReturn(DECISION_ID);
     when(minted.getUrl()).thenReturn(DECISION_URL);
@@ -197,12 +232,15 @@ public class PortalDecisionEmailContractsTest {
     PortalLink session = link();
     when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
 
-    String price = resolveConfirmation("REJECT", "PRICE", null).getData().getString("body");
-    String other = resolveConfirmation("REJECT", "OTHER", "Plazo demasiado largo")
-        .getData().getString("body");
+    String body = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
 
-    assertTrue(price, price.contains("Precio"));
-    assertTrue(other, other.contains("Otros — Plazo demasiado largo"));
+    assertTrue(body, body.contains(">Acme<"));
+    assertTrue(body, body.contains(">PR-7<"));
+    assertTrue(body, body.contains("Importe total"));
+    assertTrue(body, body.contains(">2450.00 EUR<"));
+    assertFalse(body, body.contains(">Motivo<"));
+    // The Etendo footer closes the card.
+    assertTrue(body, body.contains("Creado con Etendo"));
   }
 
   @Test

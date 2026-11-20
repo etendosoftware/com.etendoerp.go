@@ -42,6 +42,16 @@ public final class EmailContent {
   private final String linkFallbackText;
   private final List<String> notes;
   private final String signature;
+  private final EmailFooter footer;
+  private final String issuerName;
+  private final String issuerLogoUrl;
+  private final String badge;
+  private final String title;
+  private final String subtitle;
+  private final String summaryTitle;
+  private final String ctaNote;
+  private final String warningTitle;
+  private final String warningText;
 
   private EmailContent(Builder builder) {
     this.greeting = builder.greeting;
@@ -53,6 +63,16 @@ public final class EmailContent {
     this.linkFallbackText = builder.linkFallbackText;
     this.notes = Collections.unmodifiableList(new ArrayList<>(builder.notes));
     this.signature = builder.signature;
+    this.footer = builder.footer;
+    this.issuerName = builder.issuerName;
+    this.issuerLogoUrl = builder.issuerLogoUrl;
+    this.badge = builder.badge;
+    this.title = builder.title;
+    this.subtitle = builder.subtitle;
+    this.summaryTitle = builder.summaryTitle;
+    this.ctaNote = builder.ctaNote;
+    this.warningTitle = builder.warningTitle;
+    this.warningText = builder.warningText;
   }
 
   /**
@@ -143,6 +163,107 @@ public final class EmailContent {
    */
   public String getSignature() {
     return signature;
+  }
+
+  /**
+   * The marketing footer (ETP-6209).
+   *
+   * @return the footer, or {@code null} for an email that carries none — every email but the
+   *     customer portal ones
+   */
+  public EmailFooter getFooter() {
+    return footer;
+  }
+
+  /**
+   * Indicates whether the email uses the centred card design (ETP-6209: the portal decision
+   * confirmations) instead of the standard Etendo letter. A title is what selects it.
+   *
+   * @return {@code true} when a title was set
+   */
+  public boolean isCard() {
+    return title != null;
+  }
+
+  /**
+   * Name of the company the card email comes from, shown as initials when it has no logo.
+   *
+   * @return the name, or {@code null}
+   */
+  public String getIssuerName() {
+    return issuerName;
+  }
+
+  /**
+   * Public URL of the issuing company's logo.
+   *
+   * @return the URL, or {@code null} to show the initials avatar
+   */
+  public String getIssuerLogoUrl() {
+    return issuerLogoUrl;
+  }
+
+  /**
+   * Status pill under the issuer avatar of a card email.
+   *
+   * @return the badge text, or {@code null}
+   */
+  public String getBadge() {
+    return badge;
+  }
+
+  /**
+   * Headline of a card email.
+   *
+   * @return the title, or {@code null} for a standard email
+   */
+  public String getTitle() {
+    return title;
+  }
+
+  /**
+   * Line under the headline of a card email.
+   *
+   * @return the subtitle, or {@code null}
+   */
+  public String getSubtitle() {
+    return subtitle;
+  }
+
+  /**
+   * Caption of a card email's summary box, whose columns are {@link #getDetails()}.
+   *
+   * @return the caption, or {@code null}
+   */
+  public String getSummaryTitle() {
+    return summaryTitle;
+  }
+
+  /**
+   * Line right above a card email's button.
+   *
+   * @return the note, or {@code null}
+   */
+  public String getCtaNote() {
+    return ctaNote;
+  }
+
+  /**
+   * Heading of a card email's "did you not ask for this" block.
+   *
+   * @return the heading, or {@code null} when the block is omitted
+   */
+  public String getWarningTitle() {
+    return warningTitle;
+  }
+
+  /**
+   * Body of a card email's "did you not ask for this" block.
+   *
+   * @return the text, or {@code null}
+   */
+  public String getWarningText() {
+    return warningText;
   }
 
   /**
@@ -239,6 +360,16 @@ public final class EmailContent {
     private String ctaUrl;
     private String linkFallbackText;
     private String signature;
+    private EmailFooter footer;
+    private String issuerName;
+    private String issuerLogoUrl;
+    private String badge;
+    private String title;
+    private String subtitle;
+    private String summaryTitle;
+    private String ctaNote;
+    private String warningTitle;
+    private String warningText;
 
     /**
      * Sets the greeting line.
@@ -356,6 +487,99 @@ public final class EmailContent {
      */
     public Builder signature(String value) {
       this.signature = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Adds the marketing footer (ETP-6209). Omitted by default, which keeps every email that does
+     * not ask for it byte-identical.
+     *
+     * @param value the footer, or {@code null} for none
+     * @return this builder
+     */
+    public Builder footer(EmailFooter value) {
+      this.footer = value;
+      return this;
+    }
+
+    /**
+     * Sets the issuing company of a card email: its name, and its logo when it has a public one.
+     *
+     * @param name the company name, shown as initials when there is no logo
+     * @param logoUrl a public logo URL, or {@code null}
+     * @return this builder
+     */
+    public Builder issuer(String name, String logoUrl) {
+      this.issuerName = StringUtils.trimToNull(name);
+      this.issuerLogoUrl = StringUtils.trimToNull(logoUrl);
+      return this;
+    }
+
+    /**
+     * Sets the status pill of a card email.
+     *
+     * @param value the badge text
+     * @return this builder
+     */
+    public Builder badge(String value) {
+      this.badge = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Sets the headline, which switches the email to the card design.
+     *
+     * @param value the title
+     * @return this builder
+     */
+    public Builder title(String value) {
+      this.title = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Sets the line under the headline of a card email.
+     *
+     * @param value the subtitle
+     * @return this builder
+     */
+    public Builder subtitle(String value) {
+      this.subtitle = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Sets the caption of a card email's summary box; the box's columns are the details.
+     *
+     * @param value the caption
+     * @return this builder
+     */
+    public Builder summaryTitle(String value) {
+      this.summaryTitle = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Sets the line right above a card email's button.
+     *
+     * @param value the note
+     * @return this builder
+     */
+    public Builder ctaNote(String value) {
+      this.ctaNote = StringUtils.trimToNull(value);
+      return this;
+    }
+
+    /**
+     * Sets a card email's "did you not ask for this" block.
+     *
+     * @param heading the block heading
+     * @param text the block body
+     * @return this builder
+     */
+    public Builder warning(String heading, String text) {
+      this.warningTitle = StringUtils.trimToNull(heading);
+      this.warningText = StringUtils.trimToNull(text);
       return this;
     }
 
