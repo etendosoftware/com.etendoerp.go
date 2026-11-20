@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -137,7 +138,7 @@ class NeoAttachmentStoreTest {
     assertEquals("factura.pdf", response.getBody().getString("name"));
     assertEquals("uploaded", response.getBody().getString("message"));
     verify(manager).upload(any(), eq(TAB_ID), eq(RECORD), eq(ORG), any(File.class));
-    helper.verify(() -> NeoAttachmentsHelper.markAsMain(any()), never());
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(any(), anyBoolean()), never());
   }
 
   @Test
@@ -147,7 +148,7 @@ class NeoAttachmentStoreTest {
     when(stored.getId()).thenReturn("ATT1");
     helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD,
         "factura.pdf")).thenReturn(stored);
-    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
+    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored, false)).then(invocation -> null);
 
     NeoResponse response = NeoAttachmentStore.store(
         upload("factura.pdf", PDF.length, writing(PDF), true));
@@ -155,7 +156,7 @@ class NeoAttachmentStoreTest {
     assertEquals(201, response.getHttpStatus());
     assertEquals("ATT1", response.getBody().getString("id"));
     assertTrue(response.getBody().getBoolean("isMain"));
-    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored));
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored, false));
   }
 
   @Test
@@ -423,7 +424,7 @@ class NeoAttachmentStoreTest {
   void correctionAndMainTogether() throws Exception {
     Attachment stored = storedAs("foto.webp", "application/octet-stream");
     stubUpdateDataType(true);
-    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
+    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored, false)).then(invocation -> null);
 
     NeoResponse response = NeoAttachmentStore.store(
         upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), true));
@@ -433,7 +434,7 @@ class NeoAttachmentStoreTest {
     assertTrue(response.getBody().getBoolean("isMain"));
     helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
     verifyEntityUntouched(stored);
-    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored));
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored, false));
   }
 
   @Test
@@ -461,7 +462,7 @@ class NeoAttachmentStoreTest {
 
     assertEquals(500, response.getHttpStatus());
     verify(dal).rollbackAndClose();
-    helper.verify(() -> NeoAttachmentsHelper.markAsMain(any()), never());
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(any(), anyBoolean()), never());
   }
 
   @Test
@@ -470,7 +471,7 @@ class NeoAttachmentStoreTest {
     Attachment stored = storedAs("foto.webp", "application/octet-stream");
     helper.when(() -> NeoAttachmentsHelper.updateDataType(anyString(), anyString()))
         .thenThrow(new IllegalStateException("boom"));
-    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
+    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored, false)).then(invocation -> null);
 
     NeoResponse response = NeoAttachmentStore.store(
         upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), true));
@@ -478,6 +479,6 @@ class NeoAttachmentStoreTest {
     assertEquals(201, response.getHttpStatus());
     assertEquals("ATT1", response.getBody().getString("id"));
     assertTrue(response.getBody().getBoolean("isMain"));
-    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored));
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored, false));
   }
 }

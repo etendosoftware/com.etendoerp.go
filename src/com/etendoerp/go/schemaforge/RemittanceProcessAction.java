@@ -34,6 +34,7 @@ import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.module.remittance.Remittance;
 import org.openbravo.module.remittance.RemittanceLine;
 import org.openbravo.module.remittance.process.REMRemittanceProcess;
+import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
 import org.openbravo.scheduling.ProcessBundle;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -50,6 +51,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
  * account ↔ method link setup ({@code checkPMSetup}, which the links {@link
  * RemittanceSepaProvisioning} creates satisfy) — creates the payments, marks the remittance
  * processed and refreshes its status. A refusal is answered 422 with REM's own text.
+ *
+ * <p>ETP-6247: the process does NOT settle. It creates the payments in status Remitted
+ * ({@code REM_SENT}); the invoices stay unpaid until «Cobrada» ({@link RemittanceStatusAction}).
  *
  * <p>The process runs directly, like {@code NeoProcessService}'s scheduling-process strategy, so a
  * role that may write the remittance window may process it without a separate
@@ -73,6 +77,8 @@ final class RemittanceProcessAction {
   static final String MSG_PROCESS_FAILED = "ETGO_RemittanceProcessFailed";
   static final String MSG_NOT_PROCESSED = "ETGO_RemittanceNotProcessed";
   static final String MSG_REACTIVATE_FAILED = "ETGO_RemittanceReactivateFailed";
+  /** ETP-6247: a collected, paid, partially settled or voided remittance cannot be reactivated. */
+  static final String MSG_REACTIVATE_NOT_ALLOWED = "ETGO_RemittanceReactivateNotAllowed";
 
   private RemittanceProcessAction() {
   }
@@ -80,8 +86,8 @@ final class RemittanceProcessAction {
   static void addContract(Map<String, NeoActionContract> contracts) {
     contracts.put(ACTION, NeoActionContract.write(ACTION,
         "Processes the remittance with the remittance module's own process (the «Process "
-            + "Remittance» button): creates the payments of its lines and marks it processed; its "
-            + "status becomes PR. Refused when it is already processed or has no lines. Returns "
+            + "Remittance» button): creates the payments of its lines (status Remitted, nothing "
+            + "settled) and marks it processed; its status becomes PR. Refused when it is already processed or has no lines. Returns "
             + "status (the remittance status code) and message.",
         Param.options(P_GROUPING, "'" + GROUPING_NONE + "' one payment per line (default), '"
             + GROUPING_BP_DUE_DATE + "' one payment per business partner and due date.",
@@ -91,8 +97,9 @@ final class RemittanceProcessAction {
     contracts.put(ACTION_REACTIVATE, NeoActionContract.write(ACTION_REACTIVATE,
         "Reactivates a processed remittance with the remittance module's own process: removes the "
             + "payments the processing created and marks it not processed again; its status "
-            + "becomes PE. Refused when it is not processed, is posted, has settled or returned "
-            + "lines, or its payments cannot be reactivated. Takes no parameters. Returns status "
+            + "becomes PE. Only while the remittance is PR (processed) or SB (sent to bank). "
+            + "Refused when it is not processed, is collected/paid/partially settled/voided, is "
+            + "posted, has settled or returned lines, or its payments cannot be reactivated. Takes no parameters. Returns status "
             + "(the remittance status code) and message.")
         .withIdDescription("the id of the remittance")
         .withFieldValuesBody());
@@ -119,6 +126,7 @@ final class RemittanceProcessAction {
     }
     String grouping = StringUtils.defaultIfBlank(params.optString(P_GROUPING, null),
         GROUPING_NONE);
+    disableAutomaticSettlement(remittance);
     return runAndAnswer(remittance, grouping, MSG_PROCESS_FAILED);
   }
 
@@ -134,32 +142,87 @@ final class RemittanceProcessAction {
     if (!Boolean.TRUE.equals(remittance.isProcessed())) {
       return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_NOT_PROCESSED);
     }
+    if (RemittanceStatusAction.isSettledOrVoided(
+        remittance.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS))) {
+      return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, MSG_REACTIVATE_NOT_ALLOWED);
+    }
+    refreshForReactivation(remittance);
     return runAndAnswer(remittance, REACTIVATE_CODE, MSG_REACTIVATE_FAILED);
+  }
+
+  /**
+   * REM's reactivation deletes the payments and then the bank instructions it finds in the
+   * remittance's {@code getREMInstructionList()}. When the remittance was processed in THIS session
+   * (a batch, or a confirm and a reactivate in one transaction) that inverse collection was loaded
+   * before the instructions were created and does not hold them, so they are never deleted and the
+   * payments' delete breaks {@code rem_intruction_payment}. Pending changes are flushed and the
+   * remittance detached, so REM loads it, and its instructions, again from the database.
+   */
+  static void refreshForReactivation(Remittance remittance) {
+    OBDal dal = OBDal.getInstance();
+    dal.flush();
+    dal.getSession().evict(remittance);
+  }
+
+  /**
+   * ETP-6247 — the remittance is processed WITHOUT the automatic settlement: the
+   * automated-remittance hook settles the payments on process only when
+   * {@code EM_Etar_Automaticprocess = 'Y'}, and an earlier version of Etendo GO created remittances
+   * with it on. Reset to {@code N} before REM runs, so the payments stay Remitted and the invoices
+   * unpaid until «Cobrada» ({@link RemittanceStatusAction}). The caller runs in a transaction and
+   * flushes through REM's own process.
+   *
+   * @param remittance the remittance about to be processed
+   */
+  static void disableAutomaticSettlement(Remittance remittance) {
+    if (Boolean.TRUE.equals(remittance.isETARAutomaticprocess())) {
+      remittance.setETARAutomaticprocess(false);
+      OBDal.getInstance().save(remittance);
+      OBDal.getInstance().flush();
+    }
   }
 
   private static NeoResponse runAndAnswer(Remittance remittance, String actionCode,
       String failureKey) throws JSONException {
     OBError result = run(remittance.getId(), actionCode);
-    if (result == null || "error".equalsIgnoreCase(result.getType())) {
-      String text = result != null ? StringUtils.defaultIfBlank(result.getMessage(),
-          result.getTitle()) : null;
-      log.warn("{} refused for remittance {}: {}", actionCode, remittance.getId(), text);
-      String translated = StringUtils.defaultIfBlank(
-          com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation(text), "-");
-      // REM can catch an OBException after creating payments and only set the error, so what it
-      // wrote must not commit with our 422. Translated first: the rollback closes the session.
-      rollback();
-      return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, failureKey, translated);
+    NeoResponse refusal = refusalOf(result, remittance.getId(), actionCode, failureKey);
+    if (refusal != null) {
+      return refusal;
     }
     Remittance reloaded = OBDal.getInstance().get(Remittance.class, remittance.getId());
     JSONObject body = new JSONObject();
     body.put("status", reloaded != null
-        ? reloaded.get(org.openbravo.module.remittance.utility.RemittanceStatusUtil
-            .PROPERTY_REMITTANCE_STATUS)
+        ? reloaded.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)
         : JSONObject.NULL);
     body.put("message", StringUtils.defaultString(
         com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation(result.getMessage())));
     return NeoResponse.ok(body);
+  }
+
+  /**
+   * The 422 for a REM run that did not succeed, after rolling back what it wrote; {@code null} when
+   * it succeeded. Shared with «Confirmar» ({@link RemittanceFileAction}).
+   *
+   * @param result       REM's result, {@code null} when the run gave none
+   * @param remittanceId the remittance, for the log
+   * @param actionCode   REM's action code, for the log
+   * @param failureKey   the message key of the refusal; its {@code {0}} is REM's text
+   * @return the refusal, or {@code null}
+   */
+  static NeoResponse refusalOf(OBError result, String remittanceId, String actionCode,
+      String failureKey) {
+    if (result != null && !"error".equalsIgnoreCase(result.getType())) {
+      return null;
+    }
+    String text = result != null ? StringUtils.defaultIfBlank(result.getMessage(),
+        result.getTitle()) : null;
+    log.warn("{} refused for remittance {}: {}", actionCode, remittanceId, text);
+    String translated = StringUtils.defaultIfBlank(
+        com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation(text), "-");
+    // REM can catch an OBException after creating payments and only set the error, so what it
+    // wrote must not commit with our 422. Translated first: the rollback closes the session.
+    rollback();
+    return NeoMessageText.error(NeoActionContract.SC_UNPROCESSABLE, failureKey, translated);
   }
 
   /**

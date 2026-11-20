@@ -67,7 +67,7 @@ class RemittanceSepaFileDataTest {
     List<String> optional = new ArrayList<>();
     contract.getParams().forEach(p -> (p.isRequired() ? required : optional).add(p.getName()));
     assertEquals(List.of("accountId"), required);
-    assertEquals(List.of("organizationId"), optional);
+    assertEquals(List.of("organizationId", "remittanceId"), optional);
     assertTrue(RemittanceSepaFileData.serves("sepaFileData"));
     assertFalse(RemittanceSepaFileData.serves("process"));
     assertFalse(RemittanceSepaFileData.serves(null));
@@ -122,6 +122,166 @@ class RemittanceSepaFileDataTest {
     assertEquals(List.of("creditorBusinessCode"), missing(body));
   }
 
+  // ---------------------------------------------------------------- creditor id on the account
+
+  private static final String STORED = "ES82000B87654323";
+
+  @Test
+  void theActionsAreTheReadAndTheCreditorIdWrite() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    RemittanceSepaFileData.addContract(contracts);
+
+    NeoActionContract save = contracts.get("saveCreditorId");
+    assertTrue(save.isMutating());
+    List<String> required = new ArrayList<>();
+    save.getParams().forEach(p -> {
+      if (p.isRequired()) {
+        required.add(p.getName());
+      }
+    });
+    assertEquals(List.of("accountId", "creditorId"), required);
+    assertTrue(RemittanceSepaFileData.serves("saveCreditorId"));
+    List<String> optional = new ArrayList<>();
+    save.getParams().forEach(p -> {
+      if (!p.isRequired()) {
+        optional.add(p.getName());
+      }
+    });
+    assertEquals(List.of("remittanceId", "saveToAccount", "organizationId"), optional);
+    List<String> readOptional = new ArrayList<>();
+    contracts.get("sepaFileData").getParams().forEach(p -> {
+      if (!p.isRequired()) {
+        readOptional.add(p.getName());
+      }
+    });
+    assertEquals(List.of("organizationId", "remittanceId"), readOptional);
+  }
+
+  @Test
+  void aSavedValidIdIsTheEffectiveOneAndTheSuggestedStaysAvailable() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(account("ES9121000418450200051332"), true,
+        "ORG-1", "ES", TAX_ID, null, STORED);
+
+    assertEquals(STORED, body.getString("storedCreditorId"));
+    assertTrue(body.getBoolean("storedCreditorIdValid"));
+    assertEquals(SepaCreditorId.build("ES", "000", TAX_ID), body.getString("suggestedCreditorId"));
+    assertEquals(STORED, body.getString("creditorId"));
+    assertEquals("account", body.getString("creditorIdSource"));
+    assertEquals(STORED, body.getString("accountCreditorId"));
+    assertTrue(body.isNull("remittanceCreditorId"));
+    assertTrue(body.getBoolean("creditorIdAvailable"));
+  }
+
+  @Test
+  void withNothingSavedTheComputedOneIsSuggestedOrTheIdIsMissing() throws Exception {
+    JSONObject suggested = build(true, "ES", TAX_ID, null);
+    assertTrue(suggested.isNull("storedCreditorId"));
+    assertTrue(suggested.isNull("storedCreditorIdValid"));
+    assertEquals("suggested", suggested.getString("creditorIdSource"));
+
+    JSONObject missing = build(true, null, TAX_ID, null);
+    assertEquals("missing", missing.getString("creditorIdSource"));
+    assertTrue(missing.isNull("creditorId"));
+    assertFalse(missing.getBoolean("creditorIdAvailable"));
+  }
+
+  /** An invalid saved value is reported as such and never used. */
+  @Test
+  void anInvalidSavedValueIsNotUsed() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(account("ES9121000418450200051332"), true,
+        "ORG-1", "ES", TAX_ID, null, "ES00000B87654323");
+
+    assertTrue(body.isNull("storedCreditorId"));
+    assertFalse(body.getBoolean("storedCreditorIdValid"));
+    assertEquals("suggested", body.getString("creditorIdSource"));
+  }
+
+  private static final String COPY = "ES97000B12345678";
+
+  /** The remittance's own copy is the effective one, whatever the account holds. */
+  @Test
+  void theRemittanceCopyWinsOverTheAccountDefault() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(inputs(account("ES9121000418450200051332"), true)
+        .accountCreditorId(STORED).remittanceCreditorId(COPY));
+
+    assertEquals(COPY, body.getString("remittanceCreditorId"));
+    assertEquals(STORED, body.getString("accountCreditorId"));
+    assertEquals(COPY, body.getString("creditorId"));
+    assertEquals("remittance", body.getString("creditorIdSource"));
+    assertTrue(body.getBoolean("remittanceCreditorIdValid"));
+  }
+
+  /** A present but invalid copy is NOT replaced by the account's: the file would be refused. */
+  @Test
+  void anInvalidRemittanceCopyIsNotReplacedByTheAccountDefault() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(inputs(account("ES9121000418450200051332"), true)
+        .accountCreditorId(STORED).remittanceCreditorId("ES00000B87654323"));
+
+    assertTrue(body.isNull("remittanceCreditorId"));
+    assertFalse(body.getBoolean("remittanceCreditorIdValid"));
+    assertEquals("suggested", body.getString("creditorIdSource"));
+    assertEquals(SepaCreditorId.build("ES", "000", TAX_ID), body.getString("creditorId"));
+  }
+
+  private static final String ACC_IBAN = "ES9121000418450200051332";
+  private static final String REM_IBAN = "DE89370400440532013000";
+
+  @Test
+  void theRemittanceIbanWinsAndTheAccountsIsReportedApart() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(ACC_IBAN), true)
+        .remittanceIban(REM_IBAN));
+
+    assertEquals(REM_IBAN, body.getString("iban"));
+    assertEquals(REM_IBAN, body.getString("remittanceIban"));
+    assertEquals(ACC_IBAN, body.getString("accountIban"));
+    assertEquals("remittance", body.getString("ibanSource"));
+    assertEquals(0, body.getJSONArray("missing").length());
+  }
+
+  /** The account's invalid IBAN does not block a remittance that has its own valid one. */
+  @Test
+  void aValidRemittanceIbanCoversAnAccountWithoutOne() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(null), false)
+        .remittanceIban(REM_IBAN));
+
+    assertTrue(body.getBoolean("ibanValid"));
+    assertFalse(body.getBoolean("accountIbanValid"));
+    assertEquals(0, body.getJSONArray("missing").length());
+  }
+
+  /** A present but invalid copy is not replaced by the account's: the file would be refused. */
+  @Test
+  void anInvalidRemittanceIbanIsMissingNotReplaced() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(ACC_IBAN), true)
+        .remittanceIban("ES0021000418450200051332"));
+
+    assertTrue(body.isNull("remittanceIban"));
+    assertFalse(body.getBoolean("remittanceIbanValid"));
+    assertEquals("missing", body.getString("ibanSource"));
+    assertFalse(body.getBoolean("ibanValid"));
+    assertEquals(List.of("iban"), missing(body));
+  }
+
+  @Test
+  void withNoCopyTheAccountsIbanIsTheSource() throws Exception {
+    JSONObject body = build(true, "ES", TAX_ID, null);
+
+    assertEquals("account", body.getString("ibanSource"));
+    assertTrue(body.isNull("remittanceIban"));
+    assertEquals("missing", build(false, "ES", TAX_ID, null).getString("ibanSource"));
+  }
+
+  /** A saved id covers an organization whose own data cannot form one, but the file still needs its data. */
+  @Test
+  void aSavedIdIsStoredEvenWhenTheOrganizationCannotComputeOne() throws Exception {
+    JSONObject body = RemittanceSepaFileData.build(account("ES9121000418450200051332"), true,
+        "ORG-1", null, null, null, STORED);
+
+    assertEquals("account", body.getString("creditorIdSource"));
+    assertTrue(body.isNull("suggestedCreditorId"));
+    assertEquals(STORED, body.getString("creditorId"));
+  }
+
   /** The stored IBAN is shown trimmed; a blank one is null, and the organization may be unknown. */
   @Test
   void theIbanIsShownTrimmedAndBlankIsNull() throws Exception {
@@ -139,6 +299,12 @@ class RemittanceSepaFileDataTest {
       String businessCode) throws Exception {
     return RemittanceSepaFileData.build(account("ES9121000418450200051332"), ibanValid, "ORG-1",
         country, taxId, businessCode);
+  }
+
+  /** The inputs of a Spanish organization with {@code TAX_ID} and no business code. */
+  private static RemittanceSepaFileData.Inputs inputs(FIN_FinancialAccount account,
+      boolean ibanValid) {
+    return new RemittanceSepaFileData.Inputs(account, ibanValid, "ORG-1", "ES", TAX_ID, null);
   }
 
   private static FIN_FinancialAccount account(String iban) {
