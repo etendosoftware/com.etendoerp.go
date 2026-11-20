@@ -28,7 +28,6 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -196,7 +195,7 @@ public class NeoFallbackOrganizationTest {
   }
 
   /** Organization default of a new record in a tab of {@code tabLevel}, created under {@code P1}. */
-  private static Object organizationDefault(long tabLevel, String defaultExpr, String parentId)
+  private static String organizationDefault(long tabLevel, String defaultExpr, String parentId)
       throws Exception {
     Column orgColumn = mock(Column.class);
     when(orgColumn.getDBColumnName()).thenReturn(AD_ORG_ID);
@@ -204,16 +203,11 @@ public class NeoFallbackOrganizationTest {
     when(tab.getTabLevel()).thenReturn(tabLevel);
     NeoContext ctx = ctx(null, null, "SESSION");
     when(ctx.getAdTab()).thenReturn(tab);
-    NeoDefaultsService.FieldDefaultRequest request = new NeoDefaultsService.FieldDefaultRequest(
-        orgColumn, parentId, null, null, null, ctx);
-    Method method = NeoDefaultsService.class.getDeclaredMethod("resolveParentOrganizationDefault",
-        NeoDefaultsService.FieldDefaultRequest.class, String.class);
-    method.setAccessible(true);
     try (MockedStatic<SelectorContextResolver> resolver =
         Mockito.mockStatic(SelectorContextResolver.class)) {
       resolver.when(() -> SelectorContextResolver.resolveOrgFromParentRecord(CHILD_ENTITY, "P1"))
           .thenReturn("PARENT_ORG");
-      return method.invoke(null, request, defaultExpr);
+      return OrgPreference.parentOrganizationDefault(orgColumn, defaultExpr, parentId, ctx);
     }
   }
 

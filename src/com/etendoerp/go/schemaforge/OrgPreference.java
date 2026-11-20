@@ -25,6 +25,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
@@ -49,6 +51,8 @@ final class OrgPreference {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String PROP_ORGANIZATION = "organization";
   private static final String ORG_STAR = "0";
+  /** Window-level organization default, inherited from the parent record in a child tab. */
+  private static final String PARENT_ORG_DEFAULT = "@AD_Org_ID@";
   private static final String ORDER_BY = " ORDER BY ";
 
   private OrgPreference() {
@@ -100,6 +104,29 @@ final class OrgPreference {
     OBContext obContext = ctx.getObContext() != null ? ctx.getObContext() : OBContext.getOBContext();
     Organization sessionOrg = obContext != null ? obContext.getCurrentOrganization() : null;
     return sessionOrg != null ? sessionOrg.getId() : null;
+  }
+
+  /**
+   * In a child tab, the window-level {@code @AD_Org_ID@} default of the record's organization
+   * resolves to the parent record's organization, as in Classic, where the form initialization
+   * stores the parent's {@code AD_Org_ID} as the window's session value before computing the
+   * child's defaults. Only the window-level token qualifies; {@code @#AD_Org_ID@} is the session
+   * organization in Classic too and keeps resolving to it.
+   *
+   * @return the parent record's organization, or {@code null} when the rule does not apply
+   */
+  static String parentOrganizationDefault(Column column, String defaultExpr, String parentId,
+      NeoContext ctx) {
+    if (defaultExpr == null || !PARENT_ORG_DEFAULT.equalsIgnoreCase(defaultExpr.trim())
+        || !PARAM_AD_ORG_ID.equalsIgnoreCase(column.getDBColumnName())
+        || StringUtils.isBlank(parentId) || ctx == null) {
+      return null;
+    }
+    Tab tab = ctx.getAdTab();
+    if (tab == null || tab.getTabLevel() == null || tab.getTabLevel() <= 0) {
+      return null;
+    }
+    return SelectorContextResolver.resolveOrgFromParentRecord(ctx.getSfEntity(), parentId);
   }
 
   /**

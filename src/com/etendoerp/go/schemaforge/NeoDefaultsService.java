@@ -44,7 +44,6 @@ import org.openbravo.service.db.DalConnectionProvider;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
@@ -807,7 +806,8 @@ public class NeoDefaultsService {
         && !request.sfFieldDefault.trim().isEmpty())
         ? request.sfFieldDefault.trim()
         : adColumn.getDefaultValue();
-    String parentOrganization = resolveParentOrganizationDefault(request, defaultExpr);
+    String parentOrganization = OrgPreference.parentOrganizationDefault(adColumn, defaultExpr,
+        request.parentId, request.ctx);
     if (parentOrganization != null) {
       return parentOrganization;
     }
@@ -837,30 +837,6 @@ public class NeoDefaultsService {
     }
 
     return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
-  }
-
-  /**
-   * ETP-5086: in a child tab, the window-level {@code @AD_Org_ID@} default resolves to the parent
-   * record's organization, as in Classic, where the form initialization stores the parent's
-   * {@code AD_Org_ID} as the window's session value before computing the child's defaults. Only
-   * the window-level token qualifies; {@code @#AD_Org_ID@} is the session organization in Classic
-   * too and keeps resolving to it.
-   *
-   * @return the parent record's organization, or {@code null} when the rule does not apply
-   */
-  private static String resolveParentOrganizationDefault(FieldDefaultRequest request,
-      String defaultExpr) {
-    if (defaultExpr == null || !PARENT_ORG_DEFAULT.equalsIgnoreCase(defaultExpr.trim())
-        || !COLUMN_AD_ORG_ID.equalsIgnoreCase(request.adColumn.getDBColumnName())
-        || StringUtils.isBlank(request.parentId) || request.ctx == null) {
-      return null;
-    }
-    Tab tab = request.ctx.getAdTab();
-    if (tab == null || tab.getTabLevel() == null || tab.getTabLevel() <= 0) {
-      return null;
-    }
-    return SelectorContextResolver.resolveOrgFromParentRecord(request.ctx.getSfEntity(),
-        request.parentId);
   }
 
   /**
@@ -1147,11 +1123,6 @@ public class NeoDefaultsService {
 
   /** DB table name (as returned by {@code Table.getDBTableName()}) the deny-list above applies to. */
   private static final String TABLE_AD_USER = "AD_USER";
-
-  /** The organization column every org-enabled table has. */
-  private static final String COLUMN_AD_ORG_ID = "AD_Org_ID";
-  /** Window-level organization default, inherited from the parent record in a child tab. */
-  private static final String PARENT_ORG_DEFAULT = "@AD_Org_ID@";
 
   /**
    * True when {@code adColumn} is one of the 4 {@code AD_User} columns ETP-5277 excludes from

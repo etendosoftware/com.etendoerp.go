@@ -837,7 +837,7 @@ each call site, so every current and future caller is covered by construction:
   closeness to it (the org, its ancestors, other orgs of the tree, then `*`) before the display
   name (`OrgPreference`). Organization `*` adds no restriction, as in Classic. In a child tab the
   record's own `@AD_Org_ID@` default also resolves to the parent record's organization, as Classic's
-  form initialization does (`NeoDefaultsService.resolveParentOrganizationDefault`); `@#AD_Org_ID@`
+  form initialization does (`OrgPreference.parentOrganizationDefault`); `@#AD_Org_ID@`
   stays the session organization. So the record and its fallback combos share one organization.
 - `NeoDefaultsService.resolveFromPrefsOrDocType(...)` — the `Utility.getPreference` session/prefs
   fallback used when no `AD_Preference` row exists for the column.
