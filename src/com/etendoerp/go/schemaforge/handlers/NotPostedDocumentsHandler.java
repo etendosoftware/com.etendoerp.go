@@ -322,7 +322,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     if (!isAccessibleForCurrentRole()) {
       return NeoResponse.error(403, "Access denied");
     }
+    String operation = "unknown";
     try {
+      operation = describeOperation(context);
       if (context.getEndpointType() == NeoEndpointType.ACTION) {
         return handleAction(context);
       }
@@ -331,9 +333,22 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       }
       return null;
     } catch (Exception e) {
-      log.error("NotPostedDocumentsHandler error", e);
+      log.error("NotPostedDocumentsHandler error during {}", operation, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /** Short description of the request (endpoint type and operation) for error logs. */
+  private static String describeOperation(NeoContext context) {
+    if (context.getEndpointType() == NeoEndpointType.ACTION) {
+      return "ACTION " + context.getFieldName();
+    }
+    if (context.getEndpointType() == NeoEndpointType.CRUD) {
+      Map<String, String> params = context.getQueryParams();
+      boolean filterOptions = params != null && "filter-options".equals(params.get("_mode"));
+      return "CRUD " + (filterOptions ? "filter-options" : "grid");
+    }
+    return String.valueOf(context.getEndpointType());
   }
 
   // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -418,7 +433,15 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   private NeoResponse buildDocumentGrid(Map<String, String> params) throws Exception {
     Map<String, String> dsParams = buildDsParams(params);
-    List<Map<String, Object>> rows = new AccessibleDS().fetchAll(dsParams);
+    List<Map<String, Object>> rows;
+    try {
+      rows = new AccessibleDS().fetchAll(dsParams);
+    } catch (Exception e) {
+      log.error("NotPostedDocumentsHandler error fetching grid (document={}, statuses={}, dateFrom={}, dateTo={})",
+          dsParams.get("document"), dsParams.get("accounting_status"), dsParams.get("DateFrom"),
+          dsParams.get("DateTo"), e);
+      throw e;
+    }
 
     List<JSONObject> built = new ArrayList<>();
     for (Map<String, Object> row : rows) {
@@ -618,6 +641,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     String action = context.getFieldName();
     JSONObject requestBody = context.getRequestBody();
 
+    if (requestBody == null) {
+      return NeoResponse.error(400, "Request body is required");
+    }
     if ("post".equals(action)) {
       return handleSinglePost(requestBody);
     }
@@ -627,9 +653,16 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     return null;
   }
 
+  private static boolean isBlank(String value) {
+    return value == null || value.isEmpty();
+  }
+
   private NeoResponse handleSinglePost(JSONObject body) throws Exception {
-    String tableId = body.getString(KEY_TABLE_ID);
-    String recordId = body.getString(KEY_RECORD_ID);
+    String tableId = body.optString(KEY_TABLE_ID, null);
+    String recordId = body.optString(KEY_RECORD_ID, null);
+    if (isBlank(tableId) || isBlank(recordId)) {
+      return NeoResponse.error(400, "post requires tableId and recordId");
+    }
     DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
     JSONObject resp = new JSONObject();
     resp.put(KEY_SUCCESS, result.ok());
@@ -645,25 +678,44 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   }
 
   private NeoResponse handleBulkPost(JSONObject body) throws Exception {
-    JSONArray rows = body.getJSONArray("rows");
+    JSONArray rows = body.optJSONArray("rows");
+    if (rows == null) {
+      return NeoResponse.error(400, "bulk-post requires a rows array");
+    }
     JSONArray results = new JSONArray();
     int ok = 0;
     int total = rows.length();
 
     for (int i = 0; i < total; i++) {
-      JSONObject row = rows.getJSONObject(i);
-      String tableId = row.getString(KEY_TABLE_ID);
-      String recordId = row.getString(KEY_RECORD_ID);
-      DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
-      if (result.ok()) {
-        ok++;
-      }
+      JSONObject row = rows.optJSONObject(i);
+      String tableId = row == null ? null : row.optString(KEY_TABLE_ID, null);
+      String recordId = row == null ? null : row.optString(KEY_RECORD_ID, null);
       JSONObject rowResult = new JSONObject();
-      rowResult.put(KEY_RECORD_ID, recordId);
-      rowResult.put(KEY_TABLE_ID, tableId);
-      rowResult.put(KEY_SUCCESS, result.ok());
-      rowResult.put("message", result.message());
-      DocumentPostingService.putMessageIdentity(rowResult, result);
+      if (!isBlank(tableId)) {
+        rowResult.put(KEY_TABLE_ID, tableId);
+      }
+      if (!isBlank(recordId)) {
+        rowResult.put(KEY_RECORD_ID, recordId);
+      }
+      if (isBlank(tableId) || isBlank(recordId)) {
+        rowResult.put(KEY_SUCCESS, false);
+        rowResult.put("message", "Row requires tableId and recordId");
+        results.put(rowResult);
+        continue;
+      }
+      try {
+        DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
+        if (result.ok()) {
+          ok++;
+        }
+        rowResult.put(KEY_SUCCESS, result.ok());
+        rowResult.put("message", result.message());
+        DocumentPostingService.putMessageIdentity(rowResult, result);
+      } catch (Exception e) {
+        log.error("Bulk post failed for table {} record {}", tableId, recordId, e);
+        rowResult.put(KEY_SUCCESS, false);
+        rowResult.put("message", e.getMessage());
+      }
       results.put(rowResult);
     }
 
