@@ -397,7 +397,8 @@ public class McpToolRouter {
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Context7DocsException e) {
-      log.warn("Context7 docs lookup failed for topic '{}' status={} authenticated={} session={}: {}",
+      log.log(docsFailureLogLevel(e.getStatusCode()),
+          "Context7 docs lookup failed for topic '{}' status={} authenticated={} session={}: {}",
           topic, e.getStatusCode(), apiKey != null, McpUsageTelemetry.sessionForLog(),
           e.getMessage());
       return wrapAsErrorContent(docsFailureMessage(e));
@@ -406,6 +407,18 @@ public class McpToolRouter {
           McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
     }
+  }
+
+  /**
+   * Log level for a failed Context7 lookup: persistent configuration faults (401/403) stay at
+   * ERROR so they remain in the error stream; transient failures are WARN.
+   *
+   * @param status the HTTP status, or -1 when there was no response
+   * @return the level to log at
+   */
+  static org.apache.logging.log4j.Level docsFailureLogLevel(int status) {
+    return status == 401 || status == 403
+        ? org.apache.logging.log4j.Level.ERROR : org.apache.logging.log4j.Level.WARN;
   }
 
   /**
@@ -420,12 +433,12 @@ public class McpToolRouter {
       case 401:
       case 403:
         return "Context7 rejected the request (status " + status
-            + "): check the ETGO_Context7Token preference.";
+            + "): check the " + PREF_CONTEXT7_TOKEN + " preference.";
       case 429:
         return "Context7 rate limit reached (status 429); retry later or configure the "
-            + "ETGO_Context7Token preference.";
+            + PREF_CONTEXT7_TOKEN + " preference.";
       case 404:
-        return "The Context7 docs library was not found (status 404).";
+        return "Context7 docs library or URL not found (status 404).";
       default:
         return "The documentation service (Context7) is unavailable right now; retry later. "
             + e.getMessage();

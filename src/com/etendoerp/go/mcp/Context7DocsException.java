@@ -34,6 +34,28 @@ class Context7DocsException extends McpToolException {
   }
 
   /**
+   * Describe a throwable and its causes as {@code Class: message -> Class: message ...} down to
+   * the root cause. A blank message becomes "no detail"; cause cycles are cut.
+   *
+   * @param t the outermost throwable
+   * @return the compact cause chain
+   */
+  static String describeCauseChain(Throwable t) {
+    StringBuilder sb = new StringBuilder();
+    java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(
+        new java.util.IdentityHashMap<>());
+    for (Throwable cur = t; cur != null && seen.add(cur); cur = cur.getCause()) {
+      if (sb.length() > 0) {
+        sb.append(" -> ");
+      }
+      String msg = cur.getMessage();
+      sb.append(cur.getClass().getSimpleName()).append(": ")
+          .append(msg == null || msg.isBlank() ? "no detail" : msg);
+    }
+    return sb.toString();
+  }
+
+  /**
    * @return the HTTP status returned by Context7, or {@link #NO_STATUS} when none was received
    */
   int getStatusCode() {

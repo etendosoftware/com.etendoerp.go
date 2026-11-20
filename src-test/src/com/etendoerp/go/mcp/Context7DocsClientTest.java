@@ -314,7 +314,7 @@ class Context7DocsClientTest {
     }
 
     @Test
-    @DisplayName("404 status throws McpToolException with the status code in the message")
+    @DisplayName("404 status throws Context7DocsException with the status code")
     void notFoundThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(404);
       when(mockResponse.body()).thenReturn("not found");
@@ -329,7 +329,7 @@ class Context7DocsClientTest {
     }
 
     @Test
-    @DisplayName("429 status throws McpToolException with the status code in the message")
+    @DisplayName("429 status throws Context7DocsException with the status code")
     void tooManyRequestsThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(429);
       when(mockResponse.body()).thenReturn("rate limited");
@@ -344,7 +344,7 @@ class Context7DocsClientTest {
     }
 
     @Test
-    @DisplayName("500 status throws McpToolException with the status code in the message")
+    @DisplayName("500 status throws Context7DocsException with the status code")
     void serverErrorThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(500);
       when(mockResponse.body()).thenReturn("server error");
@@ -373,6 +373,61 @@ class Context7DocsClientTest {
           "Message should contain the underlying cause, was: " + ex.getMessage());
       assertTrue(ex.getMessage().contains("IOException"),
           "Message should contain the exception class, was: " + ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("nested causes appear in the message down to the root cause")
+    void nestedCauseChainInMessage() throws Exception {
+      java.io.IOException io = new java.io.IOException("connect failed",
+          new java.net.UnknownHostException("context7.com"));
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(io);
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt"));
+      assertTrue(ex.getMessage().contains("IOException: connect failed -> UnknownHostException: context7.com"),
+          ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("describeCauseChain defaults blank messages and survives cycles")
+    void causeChainHelper() {
+      assertEquals("ConnectException: no detail",
+          Context7DocsException.describeCauseChain(new java.net.ConnectException()));
+      RuntimeException a = new RuntimeException("a");
+      RuntimeException b = new RuntimeException("b", a);
+      a.initCause(b);
+      assertEquals("RuntimeException: b -> RuntimeException: a",
+          Context7DocsException.describeCauseChain(b));
+    }
+
+    @Test
+    @DisplayName("interrupted fetch restores the interrupt flag and throws Context7DocsException")
+    void interruptedRestoresFlag() throws Exception {
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(new InterruptedException("stop"));
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      try {
+        Context7DocsException ex = assertThrows(Context7DocsException.class,
+            () -> client.fetchDocs("finance", 5000, "txt"));
+        assertEquals(-1, ex.getStatusCode());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+    }
+
+    @Test
+    @DisplayName("API key never appears in the exception message of an authenticated failure")
+    void apiKeyNotLeaked() throws Exception {
+      when(mockResponse.statusCode()).thenReturn(401);
+      when(mockResponse.body()).thenReturn("unauthorized");
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenReturn(mockResponse);
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt", "secret-token"));
+      assertFalse(ex.getMessage().contains("secret-token"), ex.getMessage());
     }
 
     @Test

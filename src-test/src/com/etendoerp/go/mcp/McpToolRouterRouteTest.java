@@ -2820,6 +2820,31 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("docs failure log level: 401/403 ERROR, others WARN")
+    void docsFailureLogLevelByStatus() {
+      assertEquals(org.apache.logging.log4j.Level.ERROR, McpToolRouter.docsFailureLogLevel(401));
+      assertEquals(org.apache.logging.log4j.Level.ERROR, McpToolRouter.docsFailureLogLevel(403));
+      for (int status : new int[] { 404, 429, 500, 503, -1 }) {
+        assertEquals(org.apache.logging.log4j.Level.WARN, McpToolRouter.docsFailureLogLevel(status));
+      }
+    }
+
+    @Test
+    @DisplayName("docsFailureMessage covers 403 and 404 and keeps the cause chain for -1")
+    void docsFailureMessageCases() {
+      assertTrue(McpToolRouter.docsFailureMessage(new Context7DocsException("x", 403, null))
+          .contains("ETGO_Context7Token"));
+      assertTrue(McpToolRouter.docsFailureMessage(new Context7DocsException("x", 404, null))
+          .contains("library or URL not found (status 404)"));
+      String text = McpToolRouter.docsFailureMessage(new Context7DocsException(
+          "Context7 request failed: "
+              + Context7DocsException.describeCauseChain(new java.net.ConnectException("c",
+                  new java.net.UnknownHostException("context7.com"))),
+          -1, null));
+      assertTrue(text.contains("UnknownHostException: context7.com"), text);
+    }
+
+    @Test
     @DisplayName("docs unexpected exception keeps the generic error message")
     void docsUnexpectedExceptionKeepsGenericPath() throws Exception {
       String text = errorText(docsFailure(new IllegalStateException("boom")));

@@ -167,8 +167,7 @@ class Context7DocsClient {
       throw new Context7DocsException("Context7 request was interrupted",
           Context7DocsException.NO_STATUS, e);
     } catch (IOException e) {
-      throw new Context7DocsException("Context7 request failed (" + e.getClass().getSimpleName()
-          + "): " + StringUtils.defaultIfBlank(e.getMessage(), "no detail"),
+      throw new Context7DocsException("Context7 request failed: " + Context7DocsException.describeCauseChain(e),
           Context7DocsException.NO_STATUS, e);
     }
   }
