@@ -216,7 +216,9 @@ public final class NeoAttachmentAuthorizer {
    * ({@code EntityAccessChecker} "does not take into account admin mode"), so the surrounding
    * {@code NeoServlet} admin mode cannot weaken the decision (ADR-0003 D3). A table with no DAL
    * entity has no record to judge (the platform's own attach manager skips it too), so it is
-   * allowed here and left to the window tier; the decision is pinned by a test.
+   * allowed here. WRITE operations are then still subject to the window tier
+   * ({@link #checkWrite}); READ operations have no further check for such a table. The decision
+   * is pinned by a test.
    */
   static boolean canAccessParent(String tableId, String recordId, Access access) {
     Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);

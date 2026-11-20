@@ -67,8 +67,10 @@ Collected with read-only requests on 2026-07-30.
   **Declared coverage limit (no silent caps):** scenarios S2–S5 are proven collectively rather than
   individually, because the code never inspects caller context — that collapse is the finding.
   Separating S2/S3/S4/S5 by real role and organization data, plus S8 (legitimate multi-org access),
-  requires `OBBaseTest` fixtures and remains an external dependency below. `handleList`,
-  `handleUpload` and `handleDownloadAll` are not covered, so S7 belongs to ETP-4570.
+  requires `OBBaseTest` fixtures and remains an external dependency below. (Update, ETP-4570: list,
+  upload, zip and all other routes are now guarded and tested through the handler in
+  `NeoBuiltInEndpointHandlerTest`, and S7 is tested in `NeoAttachmentParentAuthorizationTest`; S2, S3 and S8 on real data are
+  still not covered, see the integration test's Javadoc.)
 
 ## Residual risks and accountable follow-ups
 
@@ -77,7 +79,7 @@ Collected with read-only requests on 2026-07-30.
 | SEC-10 remains exposed until both in-progress tasks are deployed and legacy Bearer is disabled | Román Magnoli — ETP-4575/4576 |
 | SEC-04/08/09/09b/11b/12/13/14 implementation tasks have no assignee | Epic owner / reporter Sebastian Barrozo |
 | HSTS `includeSubDomains; preload` is already live without a repository inventory or rollback record | ETP-4574 owner |
-| The attachment matrix is automated only to the depth mocks allow; per-scenario role/org separation (S2–S5), S8 and the client-supplied-parent cases (S7) need seeded `OBBaseTest` fixtures, and the black-box confirmation needs provisioned low-privilege accounts | ETP-4570 owner plus staging administrator |
+| ETP-4570 matrix is mock-based plus an `OBBaseTest` class that has not been run; same-org role without table access (S2), a second organization (S3) and a multi-org administrator (S8) have no real-data fixture, and the black-box confirmation needs provisioned low-privilege accounts | ETP-4570 owner plus staging administrator |
 | Serialized telemetry envelopes were not captured with authenticated staging traffic | ETP-4577/4578 owner plus Security/Privacy |
 | Blanket admin mode may expose built-in operations beyond attachments. Confirmed 2026-10-22 on the generic CRUD write path (cross-tenant DELETE), see threat model TM-05 | ETP-5880 (generic CRUD record guard); handler sweeps ETP-5793 and ETP-5794 (done) |
 

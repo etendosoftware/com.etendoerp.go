@@ -35,6 +35,7 @@ import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.ActiveEnabled;
@@ -191,6 +192,11 @@ public class NeoAttachmentParentAuthorizationTest {
 
   // ── admin mode parity, entity-less tables ──────────────────────────────────
 
+  /**
+   * Mock-level only: it stubs {@code isInAdministratorMode} and the entity-access seam, so it cannot
+   * detect a real admin-mode dependency. The real parity proof is
+   * {@code NeoAttachmentAuthorizationIntegrationTest}, which runs with and without admin mode.
+   */
   @Test
   public void decisionIsTheSameWithAdminModeOnAndOffAtEntry() {
     for (boolean adminMode : new boolean[] {true, false}) {
@@ -207,7 +213,11 @@ public class NeoAttachmentParentAuthorizationTest {
     }
   }
 
-  /** A table with no DAL entity has no record to judge: allowed here, left to the window tier. */
+  /**
+   * A table with no DAL entity has no record to judge, so it is allowed here. WRITE is then still
+   * subject to the window tier; READ (list, count, main, zip, download) has no further check for
+   * such a table. Accepted: the platform's attach manager does not handle entity-less tables.
+   */
   @Test
   public void tableWithoutDalEntityIsLeftToTheWindowTier() {
     try (Env env = new Env(null)) {
@@ -220,6 +230,9 @@ public class NeoAttachmentParentAuthorizationTest {
   @Test
   public void blankOrUnknownTableIsLeftToTheOperation() {
     try (Env env = new Env(null)) {
+      env.helper.when(() -> NeoAttachmentsHelper.resolveTableId("No_Such_Table"))
+          .thenThrow(new OBException("Unknown table"));
+      assertTrue(NeoAttachmentAuthorizer.authorizeByRecord("No_Such_Table", RECORD_ID, Access.READ));
       assertTrue(NeoAttachmentAuthorizer.authorizeByRecord("", RECORD_ID, Access.READ));
       assertTrue(NeoAttachmentAuthorizer.authorizeByRecord(TABLE_NAME, "", Access.READ));
     }
@@ -227,7 +240,7 @@ public class NeoAttachmentParentAuthorizationTest {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  private static BaseOBObject parent(String clientId, String orgId, boolean active) {
+  static BaseOBObject parent(String clientId, String orgId, boolean active) {
     BaseOBObject row = mock(BaseOBObject.class, withSettings()
         .extraInterfaces(ClientEnabled.class, OrganizationEnabled.class, ActiveEnabled.class));
     Client client = mock(Client.class);
@@ -241,7 +254,7 @@ public class NeoAttachmentParentAuthorizationTest {
   }
 
   /** Mocks the DAL, model and session for one scenario. */
-  private static final class Env implements AutoCloseable {
+  static final class Env implements AutoCloseable {
     final MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
     final MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
     final MockedStatic<ModelProvider> model = mockStatic(ModelProvider.class);

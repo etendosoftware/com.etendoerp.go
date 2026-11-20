@@ -29,32 +29,41 @@ import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.test.base.OBBaseTest;
 
 import com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer.Access;
 
 /**
- * ETP-4570 — SEC-11b authorization matrix against a real database (ADR-0003 S1, S4, S5, S6, S7,
- * S8 with the sample data's F&amp;B and QA Testing clients).
+ * ETP-4570 — SEC-11b authorization against a real database, with the sample data's F&amp;B and QA
+ * Testing clients. Attachments are created inside the session, which is rolled back.
  *
  * <p><b>Written, not run locally:</b> it needs a provisioned DB, so CI or a reviewer with a
- * database runs it. Scenarios that need seeded fixtures the sample data lacks (same-org user
- * without table access, a second organization of the same client) are skipped through
- * {@code assumeNotNull} and are NOT covered by this class.</p>
+ * database runs it.</p>
  *
- * <p>Every call runs inside admin mode — the mode {@code NeoServlet} opens — and again without
- * it, because the decision must be the same either way.</p>
+ * <p><b>Covered:</b> S1 (own-client parent and attachment, by record and by bare id, with and
+ * without admin mode), S4 (foreign-client record and attachment, with and without admin mode on
+ * the record route), S5 (inactive parent), S6 (missing record, missing attachment), S7 (supplied
+ * table or record that does not match the attachment's real parent).</p>
+ *
+ * <p><b>Not covered:</b> S2 (same-org role without table access), S3 (a second organization of the
+ * same client) and S8 (a multi-org administrator role): the sample data offers no role or second
+ * organization fixture, and none is created here. They stay covered only by the mock-based
+ * {@code NeoAttachmentParentAuthorizationTest}. The OCR consumer's own call path is not exercised.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer
  */
 public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
 
   private static final String ORDER_TABLE = "C_Order";
+  private static final String C_ORDER_TABLE_ID = "259";
   private static final String MISSING_ID = "00000000000000000000000000000000";
 
   private String ownOrderId;
@@ -112,12 +121,40 @@ public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
     assertFalse(NeoAttachmentAuthorizer.authorizeByRecord(ORDER_TABLE, MISSING_ID, Access.READ));
   }
 
-  /** S6 / S7 — an unknown attachment id, and a bare id never resolves a foreign parent. */
+  /** S6 — an unknown attachment id is refused. */
   @Test
   public void unknownAttachmentIdIsRefused() {
     assertNull(NeoAttachmentAuthorizer.authorizeById(MISSING_ID, Access.READ));
-    assertNull(NeoAttachmentAuthorizer.authorizeById(MISSING_ID, ORDER_TABLE, ownOrderId,
-        Access.READ));
+  }
+
+  /** S1 — an attachment of an own-client order is authorized by bare id, with and without admin mode. */
+  @Test
+  public void ownAttachmentIsAuthorizedByBareId() {
+    String id = createAttachment(ownOrderId);
+    assertNotNull(NeoAttachmentAuthorizer.authorizeById(id, Access.READ));
+    OBContext.setAdminMode(true);
+    try {
+      assertNotNull(NeoAttachmentAuthorizer.authorizeById(id, Access.READ));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** S7 — a supplied table or record that does not match the real parent is refused. */
+  @Test
+  public void suppliedContextNotMatchingTheRealParentIsRefused() {
+    String id = createAttachment(ownOrderId);
+    assertNotNull(NeoAttachmentAuthorizer.authorizeById(id, ORDER_TABLE, ownOrderId, Access.READ));
+    assertNull(NeoAttachmentAuthorizer.authorizeById(id, ORDER_TABLE, foreignOrderId, Access.READ));
+    assertNull(NeoAttachmentAuthorizer.authorizeById(id, "AD_User", ownOrderId, Access.READ));
+  }
+
+  /** S4 — an attachment hanging off another client's order is refused by bare id. */
+  @Test
+  public void foreignClientAttachmentIsRefusedByBareId() {
+    String id = createAttachment(foreignOrderId);
+    assertNull(NeoAttachmentAuthorizer.authorizeById(id, Access.READ));
+    assertNull(NeoAttachmentAuthorizer.authorizeById(id, Access.WRITE));
   }
 
   /** S5 — an inactive parent is refused (the order is deactivated inside the rolled-back session). */
@@ -131,6 +168,27 @@ public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
       OBDal.getInstance().save(order);
       OBDal.getInstance().flush();
       assertFalse(NeoAttachmentAuthorizer.authorizeByRecord(ORDER_TABLE, ownOrderId, Access.READ));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Creates (inside the rolled-back session) an attachment bound to the given order. */
+  private static String createAttachment(String orderId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order order = OBDal.getInstance().get(Order.class, orderId);
+      Attachment attachment = OBProvider.getInstance().get(Attachment.class);
+      attachment.setClient(order.getClient());
+      attachment.setOrganization(order.getOrganization());
+      attachment.setTable(OBDal.getInstance().get(Table.class, C_ORDER_TABLE_ID));
+      attachment.setRecord(orderId);
+      attachment.setName("etp4570.txt");
+      attachment.setPath("etp4570");
+      attachment.setSequenceNumber(10L);
+      OBDal.getInstance().save(attachment);
+      OBDal.getInstance().flush();
+      return attachment.getId();
     } finally {
       OBContext.restorePreviousMode();
     }
