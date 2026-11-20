@@ -251,6 +251,55 @@ class McpSessionManagerTest {
   }
 
   @Nested
+  @DisplayName("Request language (ETP-6401)")
+  class RequestLanguage {
+
+    @Test
+    @DisplayName("applies the request language before the request code is captured")
+    void appliesTheLanguageBeforeCapture() throws Exception {
+      try (MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class)) {
+        lang.when(NeoLanguage::captureRequestCode).thenReturn("prev");
+
+        McpSessionManager.executeInContext(
+            USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, "en_US", () -> "ok");
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(NeoLanguage.class);
+        order.verify(lang, () -> NeoLanguage.applyToContext("en_US"));
+        order.verify(lang, NeoLanguage::captureRequestCode);
+        lang.verify(() -> NeoLanguage.restoreRequestCode("prev"));
+      }
+    }
+
+    @Test
+    @DisplayName("null or blank language keeps the user's default language")
+    void nullOrBlankLanguageIsNotApplied() throws Exception {
+      try (MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class)) {
+        McpSessionManager.executeInContext(
+            USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, null, () -> "ok");
+        McpSessionManager.executeInContext(
+            USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, " ", () -> "ok");
+
+        lang.verify(() -> NeoLanguage.applyToContext(any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("restores the previous request code when the callable throws")
+    void restoresOnFailure() {
+      try (MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class)) {
+        lang.when(NeoLanguage::captureRequestCode).thenReturn("prev");
+
+        assertThrows(IllegalStateException.class, () -> McpSessionManager.executeInContext(
+            USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID, "en_US", () -> {
+              throw new IllegalStateException("boom");
+            }));
+
+        lang.verify(() -> NeoLanguage.restoreRequestCode("prev"));
+      }
+    }
+  }
+
+  @Nested
   @DisplayName("Telemetry tenant binding (ETP-5594)")
   class TelemetryTenantBinding {
 

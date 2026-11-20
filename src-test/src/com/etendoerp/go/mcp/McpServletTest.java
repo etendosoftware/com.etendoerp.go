@@ -1234,10 +1234,29 @@ public class McpServletTest {
   }
 
   @Test
+  public void normalizeLanguageReducesAcceptLanguageToAnEtendoCode() {
+    assertEquals("en_US", McpServlet.normalizeLanguage("en-US"));
+    assertEquals("en_US", McpServlet.normalizeLanguage("en_US"));
+    assertEquals("en_US", McpServlet.normalizeLanguage("en-US,en;q=0.9"));
+    assertEquals("es_ES", McpServlet.normalizeLanguage(" es-ES ;q=0.8"));
+    assertNull(McpServlet.normalizeLanguage(null));
+    assertNull(McpServlet.normalizeLanguage("  "));
+  }
+
+  @Test
+  public void authIdentityKeepsItsLanguageWhenTheClientIsResolved() {
+    McpServlet.AuthIdentity identity = new McpServlet.AuthIdentity("u", "r", "0", "o", "s")
+        .withLanguage("en_US");
+    assertEquals("en_US", identity.language);
+    assertEquals("en_US", identity.withClientId("c1").language);
+  }
+
+  @Test
   public void modernToolsListIsServedWithoutInitialize() throws Exception {
     try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
           .thenReturn(new JSONObject().put("tools", new JSONArray()));
 
@@ -1263,6 +1282,7 @@ public class McpServletTest {
     try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
           .thenReturn(new JSONObject().put("tools", new JSONArray()));
 
@@ -1288,8 +1308,9 @@ public class McpServletTest {
                      "Access denied to spec 'secret'")))) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
-          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(5)).call());
+          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(6)).call());
 
       try (LogCapture logs = LogCapture.of(McpServlet.class)) {
         servlet.doPost(request, response);
@@ -1327,8 +1348,9 @@ public class McpServletTest {
                      java.util.List.of("header"))))) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
-          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(5)).call());
+          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(6)).call());
 
       try (LogCapture logs = LogCapture.of(McpServlet.class)) {
         servlet.doPost(request, response);
@@ -1675,6 +1697,7 @@ public class McpServletTest {
       sessionMock.when(() -> McpSessionManager.executeInContext(
           eq("user1"), eq("role1"), eq("client1"), eq("org1"),
           org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
           .thenReturn(new JSONObject().put("tools", new org.codehaus.jettison.json.JSONArray()));
 
@@ -1683,6 +1706,7 @@ public class McpServletTest {
       sessionMock.verify(() -> McpSessionManager.executeInContext(
           eq("user1"), eq("role1"), eq("client1"), eq("org1"),
           org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()));
     }
   }
@@ -2312,6 +2336,7 @@ public class McpServletTest {
     try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
           .thenThrow(new org.openbravo.base.exception.OBSecurityException("Write access denied"));
 
@@ -2336,6 +2361,7 @@ public class McpServletTest {
     try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.any(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
           .thenThrow(new IllegalStateException("db down"));
 
