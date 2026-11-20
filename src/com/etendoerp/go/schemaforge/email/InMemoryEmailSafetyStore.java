@@ -203,7 +203,7 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
     auditRecords.add(auditRecord);
     if (TransactionalEmailService.STATUS_SENT.equals(auditRecord.getStatus())
         && auditRecord.getIdempotencyKey() != null) {
-      sentByIdempotencyKey.putIfAbsent(idempotencyIndexKey(auditRecord), auditRecord);
+      sentByIdempotencyKey.put(idempotencyIndexKey(auditRecord), auditRecord);
     }
   }
 

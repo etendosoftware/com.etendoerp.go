@@ -796,7 +796,7 @@ public class NeoProcessService {
   }
 
   /**
-   * ETP-5669 — a classic bundle with a {@code ProcessContext} and a connection: many
+   * ETP-5669/ETP-5809 — a classic or scheduling bundle with a {@code ProcessContext} and a connection: many
    * {@code DalBaseProcess}es call {@code bundle.getContext()} / {@code getConnection()} and NPE'd
    * on the bare map-built bundle. {@code init} resets the params, so they are set after it.
    * Package-private seam for unit tests.
@@ -826,13 +826,10 @@ public class NeoProcessService {
           "Process class does not implement org.openbravo.scheduling.Process: "
           + processClass.getName());
     }
-    // Use the VariablesSecureApp constructor so ProcessBundle.getContext() is non-null.
-    // Scheduling processes (e.g. InventoryCountProcess) call getContext().getLanguage()
-    // internally; the Map-based constructor leaves context null.
-    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
-        OBContext.getOBContext());
-    ProcessBundle bundle = new ProcessBundle(adProcess.getId(), vars);
-    bundle.setParams(buildBundleParams(params));
+    // ETP-5809 — same bundle as the classic path: context and connection, params kept after init.
+    // Scheduling processes (e.g. InventoryCountProcess, RMCreateInvoice) call getContext() and
+    // getConnection() internally.
+    ProcessBundle bundle = newClassicBundle(adProcess.getId(), buildBundleParams(params));
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, adProcess);

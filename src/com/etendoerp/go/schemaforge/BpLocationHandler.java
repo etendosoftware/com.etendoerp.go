@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 
@@ -26,7 +27,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Location;
 
@@ -574,6 +577,11 @@ public class BpLocationHandler implements NeoHandler {
       geoLoc.setOBSEPABuildingName(pendingBuildingName);
       geoLoc.setAddressLine1(pendingAddress1);
       geoLoc.setAddressLine2(pendingAddress2);
+      // ETP-5806 CP-12c (QA finding, persists) — see syncLinkedContactNames' own javadoc: this
+      // handler writes only C_Location's own columns, so without this call the Contacts window's
+      // "Dirección" column and `_identifier` (both sourced from C_BPartner_Location.Name) kept
+      // showing the pre-edit value after an edit made through bp-location.
+      syncLinkedContactNames(geoLoc);
       OBDal.getInstance().flush();
     } finally {
       OBContext.restorePreviousMode();
@@ -650,6 +658,54 @@ public class BpLocationHandler implements NeoHandler {
       return OBDal.getInstance().get(Location.class, recordId);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Re-syncs the display {@code Name} (and so the Contacts list's {@code _identifier}) of every
+   * {@code C_BPartner_Location} linked to {@code geoLoc}, right after this handler has changed its
+   * structured address fields (ETP-5806 CP-12c, QA finding, persists).
+   *
+   * <p>Editing the exact same {@code C_Location} through {@code contacts/locationAddress} already
+   * keeps the contact's own name current — {@code ContactsLocationAddressHandler#handleUpdate}
+   * calls {@link ContactAddressName#forUpdate} on the one {@code C_BPartner_Location} row it is
+   * editing, every time. This handler never touches that row at all: it writes only
+   * {@code C_Location}'s own columns ({@link #persistPendingFields}), so without this call the
+   * Contacts window's "Dirección" column and {@code _identifier} — both sourced from
+   * {@code C_BPartner_Location.Name} — kept showing the value from before the edit when the SAME
+   * address was instead edited through {@code bp-location}.
+   *
+   * <p>Reuses {@link ContactsLocationAddressHandler#buildDisplayName} rather than a third private
+   * copy of the same algorithm — {@code WarehouseLocationHandler} already keeps its own copy, for
+   * a {@code C_Location} that never has a business-partner link to sync (a Warehouse's address).
+   * Capped at {@link ContactAddressName#NAME_MAX_LENGTH} the same way every other write path caps
+   * it, via {@link ContactAddressName#capped}.
+   *
+   * <p>A single {@code C_Location} may be linked from more than one {@code C_BPartner_Location} —
+   * the "reuse an existing address" create mode (see
+   * {@code ContactsLocationAddressHandler#handleCreate}) lets several contacts' addresses point at
+   * the same row — so every linked row is re-synced, not just one.
+   *
+   * @param geoLoc the {@code C_Location} this handler just edited, with its new field values
+   *               already set but not yet flushed
+   */
+  private static void syncLinkedContactNames(Location geoLoc) {
+    String computed = ContactsLocationAddressHandler.buildDisplayName(geoLoc);
+    if (computed == null) {
+      return;
+    }
+    String name = ContactAddressName.capped(computed);
+    OBCriteria<org.openbravo.model.common.businesspartner.Location> criteria = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.common.businesspartner.Location.class);
+    criteria.add(Restrictions.eq(
+        org.openbravo.model.common.businesspartner.Location.PROPERTY_LOCATIONADDRESS, geoLoc));
+    for (org.openbravo.model.common.businesspartner.Location bpLoc : criteria.list()) {
+      bpLoc.setName(name);
+      // The address lives in C_Location, so editing it through bp-location would otherwise leave
+      // this row's own `updated` (the ETag) unchanged — same reasoning as
+      // ContactsLocationAddressHandler#handleUpdate's own bpLoc.setUpdated(new Date()) call.
+      bpLoc.setUpdated(new Date());
+      OBDal.getInstance().save(bpLoc);
     }
   }
 

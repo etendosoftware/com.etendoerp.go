@@ -45,6 +45,20 @@ Current constants:
 - `backend_portal_document_downloaded` (ETP-6209)
 - `backend_quotation_decided` (ETP-6209)
 
+### When the backend emits to Mixpanel (ETP-5466)
+
+`MixpanelNeoTelemetrySink` submits only when `MixpanelNeoTelemetryConfig.isConfigured()`: the
+switch **and** a token. The switch, `etendo.go.mixpanel.enabled` (JVM / `Openbravo.properties`)
+or `ETGO_MIXPANEL_ENABLED`, defaults to **`false`**; only `true` / `Y` turn it on. A developer
+machine with a token in `Openbravo.properties` / `gradle.properties` therefore sends nothing:
+before ETP-5466 it defaulted to `true` and local traffic landed in the production project.
+
+Every environment that must emit (production, and staging/experimental if wanted) sets
+`ETGO_MIXPANEL_ENABLED=true` in its deployment, plus the token and its own
+`etendo.go.mixpanel.distinctId` / `ETGO_MIXPANEL_DISTINCT_ID` (a local validation uses
+`neo-backend-localhost`), so backend events of each environment are told apart. The browser side
+follows the same rule by host: see schema_forge `docs/ops/app-shell-observability.md`.
+
 ### Added to every event by the Mixpanel sink (ETP-5581)
 
 `MixpanelNeoTelemetrySink` adds two properties to **every** backend event it submits, after the

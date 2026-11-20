@@ -1882,11 +1882,11 @@ Classic processes return OBError results, translated to:
 
 Errors from either type return HTTP 400 with `"status": "error"`.
 
-**Bundle context (ETP-5669).** For a `DalBaseProcess`, `NeoProcessService.newClassicBundle` builds the
-`ProcessBundle` with a `ProcessContext` taken from `OBContext` and calls
-`init(new DalConnectionProvider(false))`, then sets the parameters (`init` resets them). The
-`org.openbravo.scheduling.Process` path (`executeSchedulingProcess`) is unchanged: its bundle has no
-`init`, so `getConnection()` is `null` there — a known limitation.
+**Bundle context (ETP-5669, ETP-5809).** Both a `DalBaseProcess` and an
+`org.openbravo.scheduling.Process` (`executeSchedulingProcess`) get their `ProcessBundle` from
+`NeoProcessService.newClassicBundle`: a `ProcessContext` taken from `OBContext` and
+`init(new DalConnectionProvider(false))`, then the parameters are set (`init` resets them). So
+`getContext()` and `getConnection()` are non-null on both paths.
 
 ### 4.6a Attachments Endpoint (ETP-4315)
 
@@ -10323,7 +10323,12 @@ Three conventions this follows, all shared with the `SFListMenu`/`SFWindowAccess
 1. **The role is resolved BEFORE `OBContext.setAdminMode(true)`.** Admin mode exists to bypass
    row-level security on the widget's query, never to decide access.
 2. **Denied means an empty payload, not `403`.** A restricted role gets a smaller dashboard, never
-   an error toast. `WidgetQueryHelper.buildEmptyDataResponse()` is the single way to say it.
+   an error toast. `WidgetQueryHelper.buildEmptyDataResponse()` is the single way to say it. The
+   payload carries `restricted: true` (`WidgetAccessPolicy.KEY_RESTRICTED`, ETP-5850), which the
+   dashboard ignores (it never requests a hidden widget) and the MCP's `etendo_widget` turns into
+   the same `403 forbidden` as a spec the role cannot reach (`McpWidgetHandler.refusalIfRestricted`):
+   to an agent an empty list reads "no data in the period", and an Inventory-role agent answered a
+   quarter's result from revenue widgets that had only been denied to it.
 3. **Unknown means denied.** A widget row whose window cannot be resolved is dropped, so a new,
    unmapped kind of row disappears rather than leaking.
 

@@ -340,8 +340,10 @@ class StructuredAddressComposerTest {
 
     @Test
     void nothingTooLongWhenAllAtOrBelowTheirLimit() {
+      // CP-6 (QA Pasada 2): Street Name's own limit is 60, tighter than the EM_OBSEPA_StrtNm
+      // column's 70 — see StructuredAddressComposer#STREET_NAME_MAX_LENGTH.
       List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-          StringUtils.repeat('A', 70), StringUtils.repeat('B', 16), StringUtils.repeat('C', 35));
+          StringUtils.repeat('A', 60), StringUtils.repeat('B', 16), StringUtils.repeat('C', 35));
       assertTrue(tooLong.isEmpty());
     }
 
@@ -352,9 +354,22 @@ class StructuredAddressComposerTest {
     }
 
     @Test
-    void streetNameOneCharOverTheSeventyLimitIsFlagged() {
+    void streetNameOneCharOverTheSixtyLimitIsFlagged() {
+      // CP-6 (QA Pasada 2, persiste): a street between 61 and 70 chars used to pass this check
+      // (the old 70-char cap matched the SEPA column) and then get silently truncated mid-word by
+      // composeAddressLines, since it could not fit the 60-char Address1/Address2 line. It must
+      // now be reported as exceeding, not accepted.
       List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-          StringUtils.repeat('A', 71), null, null);
+          StringUtils.repeat('A', 61), null, null);
+      assertEquals(List.of("streetName"), tooLong);
+    }
+
+    @Test
+    void streetNameInTheOldSeventyCharWindowIsNowFlaggedNotAccepted() {
+      // CP-6 — the specific regression QA found: a 70-char street (the old, now-removed ceiling)
+      // must be rejected cleanly instead of silently truncated when composed.
+      List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+          StringUtils.repeat('A', 70), null, null);
       assertEquals(List.of("streetName"), tooLong);
     }
 
@@ -375,7 +390,7 @@ class StructuredAddressComposerTest {
     @Test
     void allThreeOverTheirLimitAreReportedInStableOrder() {
       List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-          StringUtils.repeat('A', 71), StringUtils.repeat('B', 17), StringUtils.repeat('C', 36));
+          StringUtils.repeat('A', 61), StringUtils.repeat('B', 17), StringUtils.repeat('C', 36));
       assertEquals(List.of("streetName", "buildingNumber", "buildingName"), tooLong);
     }
   }
