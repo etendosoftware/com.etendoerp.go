@@ -396,10 +396,39 @@ public class McpToolRouter {
       // came here without reading etendo_schema. One constant, declared once per response, instead
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
+    } catch (Context7DocsException e) {
+      log.warn("Context7 docs lookup failed for topic '{}' status={} authenticated={} session={}: {}",
+          topic, e.getStatusCode(), apiKey != null, McpUsageTelemetry.sessionForLog(),
+          e.getMessage());
+      return wrapAsErrorContent(docsFailureMessage(e));
     } catch (Exception e) {
       log.error("Error fetching docs for topic '{}' session={}", topic,
           McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Build the agent-facing text for a failed Context7 lookup, depending on the HTTP status.
+   *
+   * @param e the Context7 failure
+   * @return an actionable message for the agent
+   */
+  static String docsFailureMessage(Context7DocsException e) {
+    int status = e.getStatusCode();
+    switch (status) {
+      case 401:
+      case 403:
+        return "Context7 rejected the request (status " + status
+            + "): check the ETGO_Context7Token preference.";
+      case 429:
+        return "Context7 rate limit reached (status 429); retry later or configure the "
+            + "ETGO_Context7Token preference.";
+      case 404:
+        return "The Context7 docs library was not found (status 404).";
+      default:
+        return "The documentation service (Context7) is unavailable right now; retry later. "
+            + e.getMessage();
     }
   }
 

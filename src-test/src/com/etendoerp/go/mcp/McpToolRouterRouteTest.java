@@ -2775,6 +2775,57 @@ class McpToolRouterRouteTest {
       assertTrue(text.contains("topic"));
     }
 
+    private JSONObject docsFailure(Throwable failure) {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any())).thenThrow((RuntimeException) failure);
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+      return docsRouter.handleDocs(args, mockClient);
+    }
+
+    private String errorText(JSONObject result) throws Exception {
+      assertTrue(result.getBoolean("isError"));
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    @Test
+    @DisplayName("docs 401 points the agent to the ETGO_Context7Token preference")
+    void docsUnauthorizedMentionsToken() throws Exception {
+      String text = errorText(docsFailure(new Context7DocsException("status 401", 401, null)));
+      assertTrue(text.contains("ETGO_Context7Token"), text);
+    }
+
+    @Test
+    @DisplayName("docs 429 mentions the rate limit and the token")
+    void docsRateLimitMentionsToken() throws Exception {
+      String text = errorText(docsFailure(new Context7DocsException("status 429", 429, null)));
+      assertTrue(text.contains("rate limit"), text);
+      assertTrue(text.contains("ETGO_Context7Token"), text);
+    }
+
+    @Test
+    @DisplayName("docs 503 and network failures tell the agent to retry later")
+    void docsUnavailableMentionsRetry() throws Exception {
+      assertTrue(errorText(docsFailure(new Context7DocsException("status 503", 503, null)))
+          .contains("retry later"));
+      assertTrue(errorText(docsFailure(new Context7DocsException("timeout", -1, null)))
+          .contains("retry later"));
+    }
+
+    @Test
+    @DisplayName("docs unexpected exception keeps the generic error message")
+    void docsUnexpectedExceptionKeepsGenericPath() throws Exception {
+      String text = errorText(docsFailure(new IllegalStateException("boom")));
+      assertTrue(text.startsWith("Error fetching docs:"), text);
+    }
+
     @Test
     @DisplayName("handleDocs success path returns the docs body via injected client")
     void docsSuccessReturnsBody() throws Exception {
