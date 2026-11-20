@@ -151,6 +151,45 @@ public final class DocumentDownloadTokenService {
     }
   }
 
+  /**
+   * Signs a value for a purpose other than a document download, from the same email signing secret
+   * (ETP-6209: the public logo reference of the portal emails, the KPI third-party pseudonym), so no
+   * second secret has to be configured.
+   *
+   * <p><b>Separated at the key, not at the message.</b> Each purpose signs with its own key,
+   * {@code HMAC(secret, "detached:" + purpose)}, never with the secret itself, which only download
+   * tokens use. A detached signature therefore cannot validate as a download token (nor one purpose
+   * as another) whatever the two messages look like — it does not rely on how either is encoded.
+   * Download tokens are signed exactly as before, so links already sent keep working.</p>
+   *
+   * @param purpose a fixed label naming what the signature is for, such as {@code portal-logo:v1}
+   * @param value the value to sign
+   * @return the base64url signature, or empty when the secret is not configured or an argument is
+   *     blank
+   */
+  public static Optional<String> signDetached(String purpose, String value) {
+    String secret = readConfig(PROP_TOKEN_SECRET, ENV_TOKEN_SECRET);
+    if (StringUtils.isAnyBlank(secret, purpose, value)) {
+      return Optional.empty();
+    }
+    byte[] purposeKey = mac(secret.getBytes(StandardCharsets.UTF_8), "detached:" + purpose);
+    return Optional.of(base64Url(mac(purposeKey, value)));
+  }
+
+  /**
+   * Checks a signature made by {@link #signDetached}, in constant time.
+   *
+   * @param purpose the label the value was signed for
+   * @param value the signed value
+   * @param signature the signature to check
+   * @return {@code true} only when the signature is that value's, for that purpose
+   */
+  public static boolean verifyDetached(String purpose, String value, String signature) {
+    Optional<String> expected = signDetached(purpose, value);
+    return expected.isPresent() && StringUtils.isNotBlank(signature)
+        && constantTimeEquals(expected.get(), signature);
+  }
+
   static String createToken(String contractName, String specName, String recordId,
       String clientId, String idempotencyKey, long expiresAtSeconds) {
     return createToken(contractName, specName, recordId, clientId, idempotencyKey,
@@ -226,10 +265,14 @@ public final class DocumentDownloadTokenService {
   }
 
   private static String sign(String payloadPart, String secret) {
+    return base64Url(mac(secret.getBytes(StandardCharsets.UTF_8), payloadPart));
+  }
+
+  private static byte[] mac(byte[] key, String data) {
     try {
       Mac mac = Mac.getInstance(HMAC_ALGORITHM);
-      mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM));
-      return base64Url(mac.doFinal(payloadPart.getBytes(StandardCharsets.UTF_8)));
+      mac.init(new SecretKeySpec(key, HMAC_ALGORITHM));
+      return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     } catch (Exception e) {
       throw new OBException("Could not sign document download token", e);
     }

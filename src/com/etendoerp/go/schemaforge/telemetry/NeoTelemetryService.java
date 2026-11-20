@@ -129,6 +129,16 @@ public class NeoTelemetryService {
   private static final String PROP_PAIRS_SENT_TO_PANEL = "pairs_sent_to_panel";
   private static final String PROP_PRESELECTION_CHANGED = "preselection_changed";
   private static final String PROP_ADJUSTED = "adjusted";
+  /**
+   * Customer portal KPI property keys (ETP-6209, {@code PortalKpiTelemetry}). Shape only:
+   * {@code third_party} is a keyed HMAC pseudonym of the customer (never its id or name), the rest
+   * are fixed vocabularies — the document type, the link's origin, the email piece.
+   */
+  private static final String PROP_THIRD_PARTY = "third_party";
+  private static final String PROP_ENTRY_DOC_TYPE = "entry_doc_type";
+  private static final String PROP_ORIGIN = "origin";
+  private static final String PROP_PIECE = "piece";
+  private static final String PROP_DOC_TYPE = "doc_type";
   /** ETP-6247 — the remittance SEPA file event ({@code backend_remittance_file_generated}). */
   private static final String PROP_DIRECTION = "direction";
   private static final String PROP_INVOICE_COUNT = "invoice_count";
@@ -195,6 +205,11 @@ public class NeoTelemetryService {
       PROP_IS_REGENERATION,
       PROP_ROLE_GROUPS,
       PROP_ADJUSTED,
+      PROP_THIRD_PARTY,
+      PROP_ENTRY_DOC_TYPE,
+      PROP_ORIGIN,
+      PROP_PIECE,
+      PROP_DOC_TYPE,
       "category",
       "channel",
       "count",
