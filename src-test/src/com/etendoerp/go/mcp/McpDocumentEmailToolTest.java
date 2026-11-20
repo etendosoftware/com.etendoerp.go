@@ -534,7 +534,9 @@ class McpDocumentEmailToolTest {
       JSONObject result = McpDocumentEmailTool.run(argsTo(BASE));
 
       assertNotSent(result, 409, "no_pdf");
-      assertTrue(result.getString("hint").contains("preview"), result.getString("hint"));
+      String hint = result.getString("hint");
+      assertTrue(hint.contains("etendo_feedback"), hint);
+      assertFalse(hint.toLowerCase().contains("preview"), hint);
     }
 
     @Test
