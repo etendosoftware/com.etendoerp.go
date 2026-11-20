@@ -47,54 +47,181 @@ final class RemittanceSepaFileDataAction {
   private static final Logger log = LogManager.getLogger(RemittanceSepaFileDataAction.class);
 
   private static final int SC_UNPROCESSABLE = 422;
+  /** Save on the account form without {@code saveToAccount}: there is nothing else to write. */
+  static final String MSG_NEEDS_ACCOUNT = "ETGO_RemittanceCreditorIdNeedsAccount";
+  /** Save for a remittance that is not a collection or is on another account. */
+  static final String MSG_NOT_APPLICABLE = "ETGO_RemittanceCreditorIdNotApplicable";
+  /** Save to the account by a role without write access to the financial-account window. */
+  static final String MSG_ACCOUNT_WRITE_DENIED = "ETGO_RemittanceCreditorIdAccountWriteDenied";
 
   private RemittanceSepaFileDataAction() {
   }
 
   /**
    * «Datos para el fichero SEPA»: reads the account named by the {@code accountId} parameter,
-   * never the remittance, so it answers for a remittance that is not saved yet (record id
+   * and reads a matching saved remittance for its snapshot. It also answers for a remittance that is not saved yet (record id
    * {@code new}). 404 for an account or organization the tenant does not own; 422 with the
    * account's refusal when it is not a Bank account with the remittance payment methods. An
    * account without a valid IBAN is answered, with {@code iban} in {@code missing}: the block is
    * where the user gives it one.
+   *
+   * <p>{@value RemittanceSepaFileData#ACTION_SAVE_CREDITOR_ID} with {@code saveToAccount} (the only
+   * way to write the account default, and the only way to save without a remittance) also needs
+   * write access to the {@code financial-account} spec's window
+   * ({@link RemittanceHeaderHandler#canWriteFinancialAccount}): 403
+   * {@value #MSG_ACCOUNT_WRITE_DENIED} otherwise, before any record is loaded, locked or written.
    *
    * @param handler the remittance header customization (its seams)
    * @param context the action request
    * @return the answer
    */
   static NeoResponse handle(RemittanceHeaderHandler handler, NeoContext context) {
+    String action = context.getFieldName();
+    boolean save = RemittanceSepaFileData.ACTION_SAVE_CREDITOR_ID.equals(action);
+    if (save && !"POST".equals(context.getHttpMethod())) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          action + " only supports POST");
+    }
     OBContext.setAdminMode(true);
     try {
       JSONObject params = context.getRequestBody() != null ? context.getRequestBody()
           : paramsFromQuery(RemittanceRequestParams.of(context, handler::currentRequest,
-              RemittanceSepaFileData.P_ACCOUNT_ID, RemittanceSepaFileData.P_ORGANIZATION_ID));
-      NeoResponse invalid = NeoActionContract.validate(handler.actionContracts(),
-          RemittanceSepaFileData.ACTION, params);
+              RemittanceSepaFileData.P_ACCOUNT_ID, RemittanceSepaFileData.P_ORGANIZATION_ID,
+              RemittanceSepaFileData.P_REMITTANCE_ID));
+      NeoResponse invalid = NeoActionContract.validate(handler.actionContracts(), action, params);
       if (invalid != null) {
         return invalid;
       }
-      FIN_FinancialAccount account =
-          handler.loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
-      if (account == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Financial account not found");
-      }
-      String refusal = handler.eligibilityRefusal(account);
-      if (refusal != null) {
-        return NeoMessageText.error(SC_UNPROCESSABLE, refusal);
-      }
-      OrganizationChoice choice = resolveOrganization(handler, context, params, account);
-      if (choice.unknown) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
-      }
-      return NeoResponse.ok(body(handler, account, choice.organization));
+      return answer(handler, context, params, save);
     } catch (JSONException | RuntimeException e) {
-      log.error("remittance action {} failed for account", RemittanceSepaFileData.ACTION, e);
+      log.error("remittance action {} failed for account", action, e);
+      if (save) {
+        NeoErrorResponses.rollbackUnlessBatchOwned();
+      }
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not run " + RemittanceSepaFileData.ACTION + ". Please check logs for details.");
+          "Could not run " + action + ". Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The answer of a validated call: the write-access check of {@code saveToAccount}, the account
+   * and its eligibility, the remittance, the save refusals, the organization, the save itself and
+   * the {@code sepaFileData} body. Runs in the caller's admin mode and error handling.
+   */
+  private static NeoResponse answer(RemittanceHeaderHandler handler, NeoContext context,
+      JSONObject params, boolean save) throws JSONException {
+    boolean saveToAccount = params.optBoolean(RemittanceSepaFileData.P_SAVE_TO_ACCOUNT, false);
+    if (save && saveToAccount && !handler.canWriteFinancialAccount()) {
+      // The account default is a write on FIN_FINANCIAL_ACCOUNT, done in admin mode: the
+      // remittance spec's access is not enough, the role must be able to edit accounts.
+      return NeoMessageText.error(HttpServletResponse.SC_FORBIDDEN, MSG_ACCOUNT_WRITE_DENIED);
+    }
+    FIN_FinancialAccount account =
+        handler.loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Financial account not found");
+    }
+    String refusal = handler.eligibilityRefusal(account);
+    if (refusal != null) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, refusal);
+    }
+    String remittanceRef = remittanceRef(context, params);
+    Remittance remittance = remittanceRef != null ? handler.loadRemittance(remittanceRef) : null;
+    if (save) {
+      NeoResponse refusal2 = saveRefusal(handler, remittanceRef, remittance, account,
+          saveToAccount);
+      if (refusal2 != null) {
+        return refusal2;
+      }
+    }
+    // The remittance's own copy only means something on the account it is on.
+    boolean sameAccount = remittance != null && account.getId().equals(
+        RemittanceHeaderHandler.idOf(remittance.getFinancialAccount()));
+    OrganizationChoice choice = resolveOrganization(handler, remittance, params, account);
+    if (choice.unknown) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
+    }
+    if (save) {
+      NeoResponse refused = saveCreditorId(handler, remittance, account, saveToAccount,
+          params.optString(RemittanceSepaFileData.P_CREDITOR_ID, null));
+      if (refused != null) {
+        return refused;
+      }
+    }
+    return NeoResponse.ok(body(handler, account, choice.organization, remittance, sameAccount));
+  }
+
+  /**
+   * The saved remittance a call is about: the {@code remittanceId} parameter, else the record id
+   * unless it is the {@code new} sentinel; {@code null} for none.
+   */
+  private static String remittanceRef(NeoContext context, JSONObject params) {
+    String ref = StringUtils.trimToNull(
+        params.optString(RemittanceSepaFileData.P_REMITTANCE_ID, null));
+    if (ref != null) {
+      return ref;
+    }
+    String recordId = StringUtils.trimToNull(context.getRecordId());
+    return recordId == null || RemittanceHeaderHandler.NEW_RECORD_ID.equals(recordId) ? null
+        : recordId;
+  }
+
+  /**
+   * The refusal of a {@value RemittanceSepaFileData#ACTION_SAVE_CREDITOR_ID} before anything is
+   * written, or {@code null}. Without a remittance (the account form) the write is the account's
+   * and must be asked for ({@code saveToAccount}); with one, it must exist (404), be a collection
+   * still not processed (its file and regenerations use the saved copy) and be on that account.
+   * The row is locked first so the check and the write see the same remittance.
+   */
+  private static NeoResponse saveRefusal(RemittanceHeaderHandler handler, String remittanceRef,
+      Remittance remittance, FIN_FinancialAccount account, boolean saveToAccount) {
+    if (remittanceRef == null) {
+      return saveToAccount ? null
+          : NeoMessageText.error(SC_UNPROCESSABLE, MSG_NEEDS_ACCOUNT);
+    }
+    if (remittance == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Remittance not found");
+    }
+    handler.lockRemittance(remittance);
+    if (Boolean.TRUE.equals(remittance.isProcessed())) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, RemittanceHeaderHandler.MSG_PROCESSED);
+    }
+    boolean sameAccount = account.getId().equals(
+        RemittanceHeaderHandler.idOf(remittance.getFinancialAccount()));
+    return sameAccount && isCollection(remittance) ? null
+        : NeoMessageText.error(SC_UNPROCESSABLE, MSG_NOT_APPLICABLE);
+  }
+
+  /**
+   * ETP-6247 — {@value RemittanceSepaFileData#ACTION_SAVE_CREDITOR_ID}: validates the identifier
+   * ({@link SepaCreditorId#validate}: upper-cased, separators removed, country + two mod-97 check
+   * digits + three-character business code + national identifier, at most 35 characters) and saves
+   * it on the remittance and, on explicit request, the account.
+   *
+   * @return the 422 refusal, or {@code null} once saved
+   */
+  private static NeoResponse saveCreditorId(RemittanceHeaderHandler handler,
+      Remittance remittance, FIN_FinancialAccount account, boolean saveToAccount, String raw) throws JSONException {
+    SepaCreditorId.Result result = SepaCreditorId.validate(raw);
+    if (!result.isValid()) {
+      NeoResponse refusal = NeoMessageText.error(SC_UNPROCESSABLE,
+          result.getReason().getMessageKey());
+      JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error")
+          : null;
+      if (error != null && result.getExpectedCheckDigits() != null) {
+        error.put("expectedCheckDigits", result.getExpectedCheckDigits());
+      }
+      return refusal;
+    }
+    if (remittance != null) {
+      handler.storeRemittanceCreditorId(remittance, result.getNormalized());
+    }
+    if (saveToAccount || remittance == null) {
+      handler.storeCreditorId(account, result.getNormalized());
+    }
+    return null;
   }
 
   /**
@@ -103,7 +230,7 @@ final class RemittanceSepaFileDataAction {
    * saved remittance's, otherwise the account's.
    */
   private static OrganizationChoice resolveOrganization(RemittanceHeaderHandler handler,
-      NeoContext context, JSONObject params, FIN_FinancialAccount account) {
+      Remittance stored, JSONObject params, FIN_FinancialAccount account) {
     String orgId = StringUtils.trimToNull(
         params.optString(RemittanceSepaFileData.P_ORGANIZATION_ID, null));
     if (orgId != null) {
@@ -111,29 +238,41 @@ final class RemittanceSepaFileDataAction {
       return organization != null ? new OrganizationChoice(organization, false)
           : new OrganizationChoice(null, true);
     }
-    // The SPA sends the sentinel id "new" for a remittance that is not saved yet.
-    Remittance stored = RemittanceHeaderHandler.NEW_RECORD_ID.equals(context.getRecordId())
-        ? null
-        : handler.loadRemittance(context.getRecordId());
     return new OrganizationChoice(
         stored != null ? stored.getOrganization() : account.getOrganization(), false);
   }
 
   /** The answer for {@code account} and {@code organization} (may be null). */
   private static JSONObject body(RemittanceHeaderHandler handler, FIN_FinancialAccount account,
-      Organization organization) throws JSONException {
+      Organization organization, Remittance remittance, boolean sameAccount) throws JSONException {
     OrganizationInformation info = organization != null
         ? handler.loadOrganizationInfo(organization)
         : null;
-    return RemittanceSepaFileData.build(account, RemittanceHeaderHandler.hasValidIban(account),
+    JSONObject response = RemittanceSepaFileData.build(new RemittanceSepaFileData.Inputs(account,
+        RemittanceHeaderHandler.hasValidIban(account),
         organization != null ? organization.getId() : null, countryIsoOf(info),
-        info != null ? info.getTaxID() : null, handler.creditorBusinessCode(account));
+        info != null ? info.getTaxID() : null, handler.creditorBusinessCode(account))
+        .accountCreditorId(handler.storedCreditorId(account))
+        .remittanceCreditorId(sameAccount ? RemittanceCreditorId.snapshot(remittance) : null)
+        .remittanceIban(sameAccount ? RemittanceIban.stored(remittance) : null));
+    response.put("collection", remittance == null ? JSONObject.NULL : isCollection(remittance));
+    boolean collection = remittance != null && isCollection(remittance);
+    response.put(RemittanceHeaderHandler.FIELD_SCHEME,
+        collection ? RemittanceSepaOptions.scheme(remittance) : JSONObject.NULL);
+    response.put(RemittanceHeaderHandler.FIELD_FINANCED,
+        collection && RemittanceSepaOptions.financed(remittance));
+    return response;
+  }
+
+  private static boolean isCollection(Remittance remittance) {
+    return RemittanceSepaProvisioning.SCHEME_CORE.equals(
+        RemittanceSepaFileSetup.schemeOf(remittance.getRemittanceType()));
   }
 
   private static JSONObject paramsFromQuery(Map<String, String> query) throws JSONException {
     JSONObject params = new JSONObject();
     for (String key : List.of(RemittanceSepaFileData.P_ACCOUNT_ID,
-        RemittanceSepaFileData.P_ORGANIZATION_ID)) {
+        RemittanceSepaFileData.P_ORGANIZATION_ID, RemittanceSepaFileData.P_REMITTANCE_ID)) {
       String value = query != null ? StringUtils.trimToNull(query.get(key)) : null;
       if (value != null) {
         params.put(key, value);

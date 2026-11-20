@@ -83,6 +83,30 @@ class MixpanelNeoTelemetrySinkTest {
   }
 
   /**
+   * ETP-6247: a list property (role_groups) travels as a JSON array, never as the list's
+   * toString() ({@code "[finance, sales]"}).
+   *
+   * @throws Exception when the body cannot be built
+   */
+  @Test
+  void buildRequestBodySendsAListPropertyAsAJsonArray() throws Exception {
+    MixpanelNeoTelemetrySink sink = new MixpanelNeoTelemetrySink(
+        new MixpanelNeoTelemetryConfig(true, "token-123", null, null, 1000));
+    Map<String, Object> properties = new LinkedHashMap<>();
+    properties.put("role_groups", java.util.List.of("finance", "sales"));
+    properties.put("direction", "AR");
+    NeoTelemetryEvent event = new NeoTelemetryEvent(
+        NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED, properties, Instant.now());
+
+    String decoded = URLDecoder.decode(sink.buildRequestBody(event).substring("data=".length()),
+        StandardCharsets.UTF_8.name());
+
+    assertTrue(decoded.contains("\"role_groups\":[\"finance\",\"sales\"]"), decoded);
+    assertFalse(decoded.contains("[finance, sales]"), decoded);
+    assertTrue(decoded.contains("\"direction\":\"AR\""), decoded);
+  }
+
+  /**
    * ETP-5581: every event carries the deployment environment and a random {@code $insert_id},
    * which a caller property cannot replace.
    *

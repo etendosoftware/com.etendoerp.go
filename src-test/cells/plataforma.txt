@@ -534,6 +534,7 @@ com.etendoerp.go.schemaforge.selector.policy.OrgTreeWhereSelectorPolicyTest
 com.etendoerp.go.schemaforge.selector.policy.ReferenceOverrideSelectorPolicyTest
 com.etendoerp.go.schemaforge.selector.policy.SupportUserSelectorPolicyTest
 com.etendoerp.go.schemaforge.telemetry.MixpanelNeoTelemetrySinkTest
+com.etendoerp.go.schemaforge.telemetry.NeoRoleGroupsTest
 com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentityTest
 com.etendoerp.go.schemaforge.telemetry.NeoTelemetryServiceTest
 com.etendoerp.go.schemaforge.util.NeoAccessHelperTest

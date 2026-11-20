@@ -607,8 +607,10 @@ public class NeoProcessService {
 
   /**
    * Pushes a VariablesSecureApp into RequestContext and restores the previous one on close.
+   * Package-private since ETP-6247: the remittance returns call Classic helpers that read
+   * {@code RequestContext.get().getVariablesSecureApp()} ({@code TransactionRemovalUtil}).
    */
-  private static RequestContextScope pushRequestContextVars() {
+  static RequestContextScope pushRequestContextVars() {
     VariablesSecureApp previous = null;
     try {
       previous = RequestContext.get().getVariablesSecureApp();
@@ -958,7 +960,7 @@ public class NeoProcessService {
   }
 
 
-  private static final class RequestContextScope implements AutoCloseable {
+  static final class RequestContextScope implements AutoCloseable {
     private final VariablesSecureApp previous;
 
     private RequestContextScope(VariablesSecureApp previous) {
