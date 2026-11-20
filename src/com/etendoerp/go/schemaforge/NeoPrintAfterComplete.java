@@ -38,6 +38,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.DalThreadCleaner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Table;
 
@@ -495,7 +496,7 @@ public final class NeoPrintAfterComplete {
     return created;
   }
 
-  /** The worker side: never throws, always leaves the session closed and the context clean. */
+  /** The worker side: never throws, always leaves every session of the thread closed and the context clean. */
   static NeoPrintableRenderer.Outcome run(Job job) {
     NeoPrintableRenderer.Outcome outcome = NeoPrintableRenderer.Outcome.FAILED;
     try {
@@ -620,6 +621,20 @@ public final class NeoPrintAfterComplete {
       DalThreadCleaner.getInstance().cleanWithRollback();
     } catch (RuntimeException e) {
       log.debug("[print] could not clean the worker thread: {}", e.getClass().getSimpleName());
+      // The cleaner may have failed before dropping the handler and the context (a rollback on a
+      // closed connection): the reused thread must not keep either.
+      try {
+        SessionHandler.deleteSessionHandler();
+      } catch (RuntimeException inner) {
+        log.debug("[print] could not drop the worker session handler: {}",
+            inner.getClass().getSimpleName());
+      }
+      try {
+        OBContext.setOBContext((OBContext) null);
+      } catch (RuntimeException inner) {
+        log.debug("[print] could not clear the worker context: {}",
+            inner.getClass().getSimpleName());
+      }
     } finally {
       OBContext.clearAdminModeStack();
     }
