@@ -411,7 +411,6 @@ public class NotPostedDocumentsHandlerTest {
     }
   }
 
-
   @Test
   public void handleReturns400WhenActionBodyIsNull() throws Exception {
     try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {

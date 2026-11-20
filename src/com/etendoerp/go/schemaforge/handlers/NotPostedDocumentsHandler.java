@@ -171,6 +171,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static final String KEY_RECORD_ID = "recordId";
   private static final String KEY_SUCCESS = "success";
   private static final String KEY_MESSAGE = "message";
+  private static final String KEY_DOCUMENT = "document";
+  private static final String KEY_DATE_FROM = "dateFrom";
+  private static final String KEY_DATE_TO = "dateTo";
+  private static final String KEY_MODE = "_mode";
+  private static final String MODE_FILTER_OPTIONS = "filter-options";
   private static final String KEY_VALUE = "value";
   private static final String KEY_LABEL = "label";
   private static final String KEY_DOCUMENT_ID = "documentId";
@@ -349,8 +354,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       String action = context.getFieldName();
       JSONObject body = context.getRequestBody();
       if ("post".equals(action) && body != null) {
-        return "ACTION post table=" + body.optString(KEY_TABLE_ID, null) + " record="
-            + body.optString(KEY_RECORD_ID, null);
+        return "ACTION post table=" + optId(body, KEY_TABLE_ID) + " record=" + optId(body, KEY_RECORD_ID);
       }
       if ("bulk-post".equals(action) && body != null) {
         JSONArray rows = body.optJSONArray("rows");
@@ -363,21 +367,30 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       if (params == null) {
         return "CRUD grid";
       }
-      if ("filter-options".equals(params.get("_mode"))) {
-        return "CRUD filter-options document=" + params.get("document");
+      boolean filterOptions = MODE_FILTER_OPTIONS.equals(params.get(KEY_MODE));
+      StringBuilder sb = new StringBuilder(filterOptions ? "CRUD filter-options" : "CRUD grid");
+      appendFilter(sb, KEY_DOCUMENT, params.get(KEY_DOCUMENT));
+      if (!filterOptions) {
+        appendFilter(sb, KEY_ACCOUNTING_STATUS, params.get(KEY_ACCOUNTING_STATUS));
+        appendFilter(sb, KEY_DATE_FROM, params.get(KEY_DATE_FROM));
+        appendFilter(sb, KEY_DATE_TO, params.get(KEY_DATE_TO));
       }
-      return "CRUD grid document=" + params.get("document") + " accountingStatus="
-          + params.get(KEY_ACCOUNTING_STATUS) + " dateFrom=" + params.get("dateFrom") + " dateTo="
-          + params.get("dateTo");
+      return sb.toString();
     }
     return String.valueOf(type);
+  }
+
+  private static void appendFilter(StringBuilder sb, String name, String value) {
+    if (value != null && !value.isEmpty()) {
+      sb.append(' ').append(name).append('=').append(value);
+    }
   }
 
   // ── CRUD ─────────────────────────────────────────────────────────────────────
 
   private NeoResponse handleCrud(NeoContext context) throws Exception {
     Map<String, String> params = context.getQueryParams();
-    if ("filter-options".equals(params.get("_mode"))) {
+    if (MODE_FILTER_OPTIONS.equals(params.get(KEY_MODE))) {
       return buildFilterOptions();
     }
     return buildDocumentGrid(params);
@@ -615,9 +628,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     Map<String, String> dsParams = new HashMap<>();
     dsParams.put("_org", OBContext.getOBContext().getCurrentOrganization().getId());
 
-    String document = params.get("document");
+    String document = params.get(KEY_DOCUMENT);
     if (document != null && !document.isEmpty()) {
-      dsParams.put("document", document);
+      dsParams.put(KEY_DOCUMENT, document);
     }
 
     String accountingStatus = params.get(KEY_ACCOUNTING_STATUS);
@@ -636,12 +649,12 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       dsParams.put("accounting_status", arr.toString());
     }
 
-    String dateFrom = params.get("dateFrom");
+    String dateFrom = params.get(KEY_DATE_FROM);
     if (dateFrom != null && !dateFrom.isEmpty()) {
       dsParams.put("DateFrom", dateFrom);
     }
 
-    String dateTo = params.get("dateTo");
+    String dateTo = params.get(KEY_DATE_TO);
     if (dateTo != null && !dateTo.isEmpty()) {
       dsParams.put("DateTo", dateTo);
     }
