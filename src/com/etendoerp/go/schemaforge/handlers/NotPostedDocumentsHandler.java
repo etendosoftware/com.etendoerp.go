@@ -351,33 +351,40 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static String describeOperation(NeoContext context) {
     NeoEndpointType type = context.getEndpointType();
     if (type == NeoEndpointType.ACTION) {
-      String action = context.getFieldName();
-      JSONObject body = context.getRequestBody();
-      if ("post".equals(action) && body != null) {
-        return "ACTION post table=" + optId(body, KEY_TABLE_ID) + " record=" + optId(body, KEY_RECORD_ID);
-      }
-      if ("bulk-post".equals(action) && body != null) {
-        JSONArray rows = body.optJSONArray("rows");
-        return "ACTION bulk-post rows=" + (rows == null ? 0 : rows.length());
-      }
-      return "ACTION " + action;
+      return describeAction(context);
     }
     if (type == NeoEndpointType.CRUD) {
-      Map<String, String> params = context.getQueryParams();
-      if (params == null) {
-        return "CRUD grid";
-      }
-      boolean filterOptions = MODE_FILTER_OPTIONS.equals(params.get(KEY_MODE));
-      StringBuilder sb = new StringBuilder(filterOptions ? "CRUD filter-options" : "CRUD grid");
-      appendFilter(sb, KEY_DOCUMENT, params.get(KEY_DOCUMENT));
-      if (!filterOptions) {
-        appendFilter(sb, KEY_ACCOUNTING_STATUS, params.get(KEY_ACCOUNTING_STATUS));
-        appendFilter(sb, KEY_DATE_FROM, params.get(KEY_DATE_FROM));
-        appendFilter(sb, KEY_DATE_TO, params.get(KEY_DATE_TO));
-      }
-      return sb.toString();
+      return describeCrud(context.getQueryParams());
     }
     return String.valueOf(type);
+  }
+
+  private static String describeAction(NeoContext context) {
+    String action = context.getFieldName();
+    JSONObject body = context.getRequestBody();
+    if (body != null && "post".equals(action)) {
+      return "ACTION post table=" + optId(body, KEY_TABLE_ID) + " record=" + optId(body, KEY_RECORD_ID);
+    }
+    if (body != null && "bulk-post".equals(action)) {
+      JSONArray rows = body.optJSONArray("rows");
+      return "ACTION bulk-post rows=" + (rows == null ? 0 : rows.length());
+    }
+    return "ACTION " + action;
+  }
+
+  private static String describeCrud(Map<String, String> params) {
+    if (params == null) {
+      return "CRUD grid";
+    }
+    boolean filterOptions = MODE_FILTER_OPTIONS.equals(params.get(KEY_MODE));
+    StringBuilder sb = new StringBuilder(filterOptions ? "CRUD filter-options" : "CRUD grid");
+    appendFilter(sb, KEY_DOCUMENT, params.get(KEY_DOCUMENT));
+    if (!filterOptions) {
+      appendFilter(sb, KEY_ACCOUNTING_STATUS, params.get(KEY_ACCOUNTING_STATUS));
+      appendFilter(sb, KEY_DATE_FROM, params.get(KEY_DATE_FROM));
+      appendFilter(sb, KEY_DATE_TO, params.get(KEY_DATE_TO));
+    }
+    return sb.toString();
   }
 
   private static void appendFilter(StringBuilder sb, String name, String value) {
