@@ -102,6 +102,9 @@ public class PortalKpiTelemetryTest {
   private static final String KEY_DECISION = "decision";
   private static final String KEY_SOURCE = "source";
   private static final String KEY_THIRD_PARTY = "third_party";
+  private static final String DECISION_ID = "DEC-1";
+  private static final String EMAILED_SQL = "SELECT count(*)";
+  private static final String FIRST_DECISION_SQL = "SELECT etgo_portal_decision_id";
   private static final String KEY_PIECE = "piece";
 
   private MockedStatic<OBDal> obDalStatic;
@@ -116,6 +119,10 @@ public class PortalKpiTelemetryTest {
   private long earlierSends;
   /** What the first-download stamp answers: rows updated, or a failure to throw. */
   private Object stampAnswer = 1;
+  /** The quotation's first confirmed decision id, or {@code null} when none is confirmed. */
+  private String firstConfirmed;
+  /** A failure every read ({@code list}) throws, or {@code null}. */
+  private RuntimeException readFailure;
   /** The parameters each native statement was given, by SQL. */
   private final Map<String, Map<String, Object>> statements = new HashMap<>();
 
@@ -355,6 +362,81 @@ public class PortalKpiTelemetryTest {
     assertFalse(decided.containsValue(QUOTATION_ID));
   }
 
+  // ── ETP-6209: the portal decision KPI gate ──────────────────────────────────
+
+  /** {@code earlierSends} is what the "emailed with a confirmed SEND link" count answers. */
+  @Test
+  public void theFirstConfirmedDecisionOfAnEmailedQuotationIsCountedOnce() {
+    earlierSends = 1;
+    firstConfirmed = DECISION_ID;
+    Object[][] cases = { { true, PortalKpiTelemetry.DECISION_ACCEPTED },
+        { false, PortalKpiTelemetry.DECISION_REJECTED } };
+    for (Object[] c : cases) {
+      NeoTelemetryService captured = mock(NeoTelemetryService.class);
+      PortalKpiTelemetry.setTelemetryService(captured);
+
+      PortalKpiTelemetry.portalQuotationConfirmed((Boolean) c[0], CLIENT_ID, DECISION_ID,
+          QUOTATION_ID);
+
+      Map<String, Object> properties = awaitEvent(captured,
+          NeoTelemetryEvents.BACKEND_QUOTATION_DECIDED);
+      assertEquals(c[1], properties.get(KEY_DECISION));
+      assertEquals(PortalKpiTelemetry.SOURCE_PORTAL, properties.get(KEY_SOURCE));
+    }
+    for (String prefix : new String[] { EMAILED_SQL, FIRST_DECISION_SQL }) {
+      Map<String, Object> params = onlyStatement(prefix);
+      assertEquals(prefix, CLIENT_ID, params.get("client"));
+      assertEquals(prefix, QUOTATION_ID, params.get("record"));
+    }
+  }
+
+  @Test
+  public void aDecisionIsNotCountedWithoutAnEmailedLinkOrWhenAnotherDecisionWasFirst() {
+    // No confirmed SEND link: only a SHARED one, or a send whose email never left (sent_at null).
+    earlierSends = 0;
+    firstConfirmed = DECISION_ID;
+    PortalKpiTelemetry.portalQuotationConfirmed(true, CLIENT_ID, DECISION_ID, QUOTATION_ID);
+    String emailedSql = statements.keySet().stream().filter(sql -> sql.startsWith(EMAILED_SQL))
+        .findFirst().orElse("");
+    assertTrue(emailedSql, emailedSql.contains("link_origin = '" + PortalLink.ORIGIN_SEND + "'")
+        && emailedSql.contains("sent_at IS NOT NULL"));
+    assertFalse("the first-decision read is skipped", statements.keySet().stream()
+        .anyMatch(sql -> sql.startsWith(FIRST_DECISION_SQL)));
+    // A re-opened quotation decided again: another decision was the first confirmed one.
+    earlierSends = 1;
+    firstConfirmed = "DEC-0";
+    PortalKpiTelemetry.portalQuotationConfirmed(true, CLIENT_ID, DECISION_ID, QUOTATION_ID);
+    // No confirmed decision found at all.
+    firstConfirmed = null;
+    PortalKpiTelemetry.portalQuotationConfirmed(false, CLIENT_ID, DECISION_ID, QUOTATION_ID);
+
+    assertNothingEmittedBeforeTheSentinel();
+  }
+
+  @Test
+  public void aBlankIdIsNotCountedAndRunsNoQuery() {
+    earlierSends = 1;
+    firstConfirmed = DECISION_ID;
+    String[][] cases = { { null, DECISION_ID, QUOTATION_ID }, { CLIENT_ID, " ", QUOTATION_ID },
+        { CLIENT_ID, DECISION_ID, "" } };
+    for (String[] c : cases) {
+      PortalKpiTelemetry.portalQuotationConfirmed(true, c[0], c[1], c[2]);
+    }
+
+    assertTrue(statements.keySet().toString(), statements.isEmpty());
+    assertNothingEmittedBeforeTheSentinel();
+  }
+
+  @Test
+  public void aFailedCheckCountsNothingNeverThrowsAndDiscardsTheReadSession() {
+    readFailure = new IllegalStateException("connection lost");
+
+    PortalKpiTelemetry.portalQuotationConfirmed(true, CLIENT_ID, DECISION_ID, QUOTATION_ID);
+
+    verify(obDal).rollbackAndClose();
+    assertNothingEmittedBeforeTheSentinel();
+  }
+
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   // ── ETP-6209: portal visits and portal emails ─────────────────────────────
@@ -590,6 +672,13 @@ public class PortalKpiTelemetryTest {
         return inv.getMock();
       }
       if ("list".equals(method)) {
+        if (readFailure != null) {
+          throw readFailure;
+        }
+        if (sql.startsWith(FIRST_DECISION_SQL)) {
+          return firstConfirmed == null ? Collections.emptyList()
+              : Collections.singletonList(firstConfirmed);
+        }
         return Collections.singletonList(earlierSends);
       }
       if ("executeUpdate".equals(method)) {

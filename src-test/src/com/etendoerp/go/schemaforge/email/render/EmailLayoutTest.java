@@ -233,8 +233,7 @@ public class EmailLayoutTest {
 
   /**
    * No piece carries a tracking query yet, so every footer link is the bare URL, never with a
-   * dangling {@code ?} or {@code &}. The {@code ?}/{@code &} choice itself is not reachable until a
-   * piece has a query (the query is a private enum field).
+   * dangling {@code ?} or {@code &}.
    */
   @Test
   public void footerLinksAreTheBareUrlsWhileNoPieceHasATrackingQuery() {
@@ -247,6 +246,21 @@ public class EmailLayoutTest {
           piece));
     }
     assertEquals("https://x.test/a", EmailFooter.link("https://x.test/a", (EmailFooter.Piece) null));
+  }
+
+  /** A tracking query follows {@code ?}, or {@code &} when the link already has a query. */
+  @Test
+  public void aTrackingQueryIsAppendedWithTheRightSeparator() {
+    // Columns: base, tracking query, expected link.
+    String[][] cases = {
+        { "https://x.test/a", null, "https://x.test/a" },
+        { "https://x.test/a", " ", "https://x.test/a" },
+        { "https://x.test/a", "utm_source=email", "https://x.test/a?utm_source=email" },
+        { "https://x.test/a?b=1", "utm_source=email", "https://x.test/a?b=1&utm_source=email" },
+    };
+    for (String[] c : cases) {
+      assertEquals(c[0] + " + " + c[1], c[2], EmailFooter.link(c[0], c[1]));
+    }
   }
 
   @Test

@@ -540,6 +540,8 @@ public class PortalDecisionServiceTest {
 
     assertTrue(statements.stream().noneMatch(s -> ((String) s[0]).contains("FOR UPDATE")));
     verify(quotation, never()).setDocumentStatus(anyString());
+    // Nothing was applied, so nothing reaches the KPI gate.
+    kpi.verifyNoInteractions();
   }
 
   // ── markSent (ETP-6209: the decision email KPI) ─────────────────────────────
