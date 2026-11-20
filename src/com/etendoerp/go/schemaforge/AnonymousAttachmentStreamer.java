@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,7 +56,6 @@ public final class AnonymousAttachmentStreamer {
 
   private static final Logger log = LogManager.getLogger(AnonymousAttachmentStreamer.class);
   private static final String DEFAULT_FILE_NAME = "document.pdf";
-  private static final String APPLICATION_PDF = "application/pdf";
   private static final int MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024;
   private static final String DEFAULT_ATTACH_METHOD = "Default";
   private static final String ERR_INVALID_FILE = "Stored document file is invalid";
@@ -143,9 +141,8 @@ public final class AnonymousAttachmentStreamer {
       }
       byte[] fileData = Files.readAllBytes(file.toPath());
       response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(StringUtils.defaultIfBlank(attachment.getDataType(),
-          APPLICATION_PDF));
-      response.setHeader("Content-Disposition", contentDisposition(attachment.getName()));
+      NeoDownloadHeaders.apply(response,
+          StringUtils.defaultIfBlank(attachment.getName(), DEFAULT_FILE_NAME));
       response.setContentLength(fileData.length);
       response.getOutputStream().write(fileData);
       response.getOutputStream().flush();
@@ -243,20 +240,6 @@ public final class AnonymousAttachmentStreamer {
     } catch (IOException e) {
       log.warn("Could not delete temporary attachment directory {}: {}", parent, e.getMessage());
     }
-  }
-
-  static String contentDisposition(String fileName) {
-    String sanitized = sanitizeFileName(fileName);
-    String encoded = URLEncoder.encode(sanitized, StandardCharsets.UTF_8).replace("+", "%20");
-    return "attachment; filename=\"" + sanitized + "\"; filename*=UTF-8''" + encoded;
-  }
-
-  static String sanitizeFileName(String fileName) {
-    String normalized = StringUtils.trimToNull(fileName);
-    if (normalized == null) {
-      return DEFAULT_FILE_NAME;
-    }
-    return normalized.replaceAll("[\\\\/:*?\"<>|\\r\\n]", "_");
   }
 
   static void writePlainError(HttpServletResponse response, int status, String message)

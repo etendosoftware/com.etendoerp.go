@@ -16,6 +16,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer.Access;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -486,11 +487,18 @@ class NeoBuiltInEndpointHandler {
     }
 
     if ("GET".equals(method)) {
+      if (isParentDenied(tableName, recordId, Access.READ, response)) {
+        return;
+      }
       servlet.writeResponse(response, NeoAttachmentsHelper.handleList(tableName, recordId));
       return;
     }
     if ("POST".equals(method)) {
-      // ETP-5205 — write-tier check before the multipart is touched.
+      // ETP-4570 — the parent record is authorized (and its existence hidden) before the multipart
+      // is touched; ETP-5205 — then the write tier.
+      if (isParentDenied(tableName, recordId, Access.WRITE, response)) {
+        return;
+      }
       NeoResponse denied = NeoAttachmentAuthorizer.checkWriteOnTable(tableName);
       if (denied != null) {
         servlet.writeResponse(response, denied);
@@ -535,6 +543,9 @@ class NeoBuiltInEndpointHandler {
           "Attachments " + subresource + " endpoint only supports GET");
       return;
     }
+    if (isParentDenied(tableName, recordId, Access.READ, response)) {
+      return;
+    }
     if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
       NeoAttachmentsDownloader.handleDownloadAll(tableName, recordId,
           request.getParameter(ATTACHMENT_IDS_PARAM), response);
@@ -566,6 +577,10 @@ class NeoBuiltInEndpointHandler {
     }
 
     if ("GET".equals(method)) {
+      if (NeoAttachmentAuthorizer.authorizeById(attachmentId, Access.READ) == null) {
+        servlet.writeResponse(response, NeoAttachmentAuthorizer.notFound());
+        return;
+      }
       NeoAttachmentsDownloader.handleDownload(attachmentId, response);
       return;
     }
@@ -617,6 +632,20 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
+   * ETP-4570 — parent-record authorization for an operation addressed by table and record.
+   *
+   * @return {@code true} when the uniform 404 was already written and the caller must stop
+   */
+  private boolean isParentDenied(String tableName, String recordId, Access access,
+      HttpServletResponse response) throws IOException {
+    if (NeoAttachmentAuthorizer.authorizeByRecord(tableName, recordId, access)) {
+      return false;
+    }
+    servlet.writeResponse(response, NeoAttachmentAuthorizer.notFound());
+    return true;
+  }
+
+  /**
    * ETP-5205 — write-tier check for an attachment addressed by id ({@link NeoAttachmentAuthorizer}).
    * Only DELETE and PATCH are checked; any other verb falls through to the caller's own 405.
    *
@@ -626,6 +655,12 @@ class NeoBuiltInEndpointHandler {
       HttpServletResponse response) throws IOException {
     if (!METHOD_DELETE.equals(method) && !METHOD_PATCH.equals(method)) {
       return false;
+    }
+    // ETP-4570 — parent-record authorization first, so a foreign id answers the same 404 as a
+    // missing one; the 403 write tier is only ever revealed for an attachment the caller can reach.
+    if (NeoAttachmentAuthorizer.authorizeById(attachmentId, Access.WRITE) == null) {
+      servlet.writeResponse(response, NeoAttachmentAuthorizer.notFound());
+      return true;
     }
     NeoResponse denied = NeoAttachmentAuthorizer.checkWriteOnAttachment(attachmentId);
     if (denied == null) {
