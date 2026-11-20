@@ -33,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -531,16 +532,16 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     if (TAX_ID_KEY_NIF.equals(taxIdKey)) {
       switch (SpanishTaxIdValidator.validate(taxId)) {
         case BAD_FORMAT:
-          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_FORMAT);
+          return fieldError(FIELD_TAX_ID, SpanishTaxIdValidator.ERR_FORMAT);
         case BAD_CHECK_DIGIT:
-          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_CHECK_DIGIT);
+          return fieldError(FIELD_TAX_ID, SpanishTaxIdValidator.ERR_CHECK_DIGIT);
         default:
           return null;
       }
     }
     if (TAX_ID_KEY_PASSPORT.equals(taxIdKey)) {
       String normalized = taxId.toUpperCase();
-      return PASSPORT_PATTERN.matcher(normalized).matches() ? null : NeoResponse.error(400, ERR_PASSPORT_FORMAT);
+      return PASSPORT_PATTERN.matcher(normalized).matches() ? null : fieldError(FIELD_TAX_ID, ERR_PASSPORT_FORMAT);
     }
     return null;
   }
@@ -627,7 +628,25 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     if (value.equals(StringUtils.trimToNull(persistedValue))) {
       return null;
     }
-    return isValid.test(value) ? null : NeoResponse.error(400, errorMessage);
+    return isValid.test(value) ? null : fieldError(field, errorMessage);
+  }
+
+  /**
+   * A 400 keyed by field (ETP-6225): the standard {@code response.errors} map the client maps onto
+   * the field's column, next to the usual {@code error.message} so anything reading the plain
+   * message still works.
+   */
+  static NeoResponse fieldError(String field, String message) {
+    try {
+      JSONObject body = new JSONObject()
+          .put("error", new JSONObject().put("message", message).put("status", 400))
+          .put(RESPONSE_KEY, new JSONObject()
+              .put("status", -4)
+              .put("errors", new JSONObject().put(field, message)));
+      return NeoResponse.error(400, body);
+    } catch (JSONException e) {
+      return NeoResponse.error(400, message);
+    }
   }
 
   /**
