@@ -238,10 +238,9 @@ class McpDocumentPdfToolTest {
       assertEquals("This document has no PDF yet.", result.getString("detail"));
       String hint = result.getString("hint");
       assertTrue(hint.contains("ask again in a few seconds"), hint);
-      assertTrue(hint.contains("server could not generate it"), "the app comes last: " + hint);
-      assertTrue(hint.contains("document's preview in the application"), hint);
-      assertTrue(hint.contains("by email from there"), "a return receipt's preview stores nothing: "
-          + hint);
+      assertTrue(hint.contains("server could not generate it"), "the report comes last: " + hint);
+      assertTrue(hint.contains("etendo_feedback"), hint);
+      assertFalse(hint.contains("preview"), hint);
       assertTrue(hint.contains("draft"), "a draft never has a PDF: " + hint);
       assertFalse(hint.contains("supplier"), "no supplier talk on a rendered document: " + hint);
     }
@@ -285,11 +284,12 @@ class McpDocumentPdfToolTest {
       assertEquals("pdf_stale", result.getString("error"));
       assertFalse(result.has("downloadUrl"));
       assertEquals(McpDocumentPdfTool.STALE_HINT, result.getString("hint"));
-      // ETP-6013: a reactivated document is completed again; the application only as a last resort.
+      // ETP-6013: a reactivated document is completed again; reporting only as a last resort.
       assertTrue(result.getString("hint").startsWith("If the document was reactivated, complete it "
           + "again"), result.getString("hint"));
-      assertTrue(result.getString("hint").contains("server could not generate it: ask the user to "
-          + "open the document's preview in the application"), result.getString("hint"));
+      assertTrue(result.getString("hint").contains("server could not generate it"),
+          result.getString("hint"));
+      assertFalse(result.getString("hint").contains("preview"), result.getString("hint"));
     }
 
     @Test
@@ -440,10 +440,9 @@ class McpDocumentPdfToolTest {
       assertTrue(completed.contains("this call asked for more than "
           + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents"), completed);
       assertTrue(completed.startsWith(McpDocumentPdfTool.RETRY_HINT
-          + "Otherwise the server could not generate it: ask the user to open the document's "
-          + "preview in the application, or to send the document by email from there"), completed);
+          + "Otherwise " + McpDocumentPdfTool.SERVER_FALLBACK), completed);
       assertFalse(completed.contains("draft"), completed);
-      assertTrue(completed.contains("a return receipt's preview stores nothing"), completed);
+      assertFalse(completed.contains("preview"), completed);
       assertTrue(unknown.startsWith(McpDocumentPdfTool.UNKNOWN_STATUS_DRAFT_REMARK), unknown);
     }
 
@@ -550,6 +549,7 @@ class McpDocumentPdfToolTest {
     assertFalse(description.contains("never generates"), description);
     assertTrue(description.contains("ask again in a few seconds"), description);
     assertTrue(description.contains("supplier"), description);
+    assertFalse(description.contains("preview in the application"), description);
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
     assertTrue(props.toString().contains("ids"), props.toString());
     assertTrue(props.toString().contains("spec"), props.toString());

@@ -37,9 +37,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * as metadata plus a short-lived signed link — what "download the PDF" does in the app, for one
  * document or for up to {@value #MAX_DOCUMENTS}.
  *
- * <p><b>What it renders (ETP-6013).</b> The application produces a document's PDF in the browser when
- * its preview is opened and stores it as the record's main attachment; the MCP hands out that file.
- * For a document whose entity declares a printable ({@code MCP_CONFIG.pdf.print}) the server also
+ * <p><b>What it renders (ETP-6013).</b> The PDF is the record's main attachment; the MCP hands out
+ * that file. For a document whose entity declares a printable ({@code MCP_CONFIG.pdf.print}) the server also
  * renders it — right after an MCP Complete, and here, when the stored one is missing or stale
  * ({@link NeoDocumentPdf#resolve}); only when that is not possible does it say there is none. {@link NeoDocumentPdf} decides which file and whether it is still current; the
  * document is authorized, per id, by {@link NeoAttachmentTarget} (read tier: the role's access to the
@@ -263,23 +262,22 @@ final class McpDocumentPdfTool {
       + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents";
 
   /**
-   * The last resort of the PDF tool's hints (ETP-6013): the application, ONLY for what the server
-   * could not render (no printable declared, a read-only role, a person's own main file, no
-   * jsreport, a failed render). "From there" matters: through this MCP the email tool would hit the
-   * same verdict. A return receipt's preview stores nothing, so for it only a send does.
+   * The last resort of the PDF tool's hints (ETP-6013): what the server could not render (no
+   * printable declared, a read-only role, a person's own main file, no jsreport, a failed render).
+   * Asking again or completing the document again does not fix it, so the agent reports it.
    */
-  private static final String APP_FALLBACK = "the server could not generate it: ask the user to "
-      + "open the document's preview in the application, or to send the document by email from "
-      + "there (a return receipt's preview stores nothing), then ask again.";
+  static final String SERVER_FALLBACK = "the server could not generate it: asking again or "
+      + "completing the document again will not produce it. Tell the user the PDF could not be "
+      + "generated and report it with etendo_feedback.";
 
   /**
    * The stale advice (ETP-6013): a reactivated document is a draft again and gets no PDF until it
    * is completed again; a document completed a moment ago gets its PDF regenerated on the server,
-   * so asking again shortly comes next; the application only where the server cannot.
+   * so asking again shortly comes next; reporting it only where the server cannot.
    */
   static final String STALE_HINT = "If the document was reactivated, complete it again, then ask "
       + "again. If it was just completed, " + OVER_BUDGET + ", its PDF is being regenerated: ask "
-      + "again in a few seconds. Otherwise " + APP_FALLBACK;
+      + "again in a few seconds. Otherwise " + SERVER_FALLBACK;
 
   /**
    * The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint.
@@ -319,14 +317,14 @@ final class McpDocumentPdfTool {
 
   /**
    * The advice for a document with no PDF, by what is known of its state: a draft gets only the
-   * draft sentence; a document of a known other status gets the retry and, last, the application;
+   * draft sentence; a document of a known other status gets the retry and, last, the report;
    * an unknown status (no {@code documentStatus} property) also gets the draft remark first.
    */
   private static String missingHint(NeoDocumentPdf.Result result) {
     if (result.isDraft()) {
       return DRAFT_HINT;
     }
-    String advice = RETRY_HINT + "Otherwise " + APP_FALLBACK;
+    String advice = RETRY_HINT + "Otherwise " + SERVER_FALLBACK;
     return result.getDocumentStatus() == null ? UNKNOWN_STATUS_DRAFT_REMARK + advice : advice;
   }
 

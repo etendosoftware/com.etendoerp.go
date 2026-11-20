@@ -742,6 +742,16 @@ class McpConfigSourcedataTest {
     }
   }
 
+  /** ETP-6398: no agent prompt says a window's preview stores nothing: the server renders it. */
+  @Test
+  @DisplayName("no agent prompt says a preview stores nothing or sends the user to the preview")
+  void promptsDoNotSendTheUserToThePreview() throws IOException {
+    String xml = new String(Files.readAllBytes(sourcedataDir().resolve("ETGO_SF_SPEC.xml")),
+        StandardCharsets.UTF_8);
+    assertFalse(xml.contains("preview stores nothing"));
+    assertFalse(xml.contains("only a send from the application"));
+  }
+
   /**
    * ETP-6108: the app offers no Close on an order and the pre-hook refuses it, so no order agent
    * prompt may recommend {@code documentAction CL} — the lines entities used to say "close the
