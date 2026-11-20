@@ -33,7 +33,7 @@ Status meanings:
 | **SEC-09 — hardening headers** | **Partially corrected** | Production and staging return HSTS, `nosniff`, Referrer-Policy and Permissions-Policy, but use `X-Frame-Options: SAMEORIGIN`; experimental returns none of them. The representative backend `401` response also lacks them. No repository-owned policy explains the drift. | ETP-4573/4574, unassigned / `TBD` |
 | **SEC-09b — NEO JSON cache control** | **Reproduced** | `NeoServlet.writeResponse()` copies opt-in response headers but sets no default `Cache-Control`. Public `GET /etendo/sws/neo/session` returned `401 application/json` without `Cache-Control`. Authenticated `/session` still requires a credentialed confirmation after the fix lands. | ETP-4571, unassigned / `TBD` |
 | **SEC-10 — browser-readable session token** | **Reproduced** | The deployed staging bundle contains `sf_auth_token`, `sf_platform_token` and many `Authorization: Bearer` construction sites. `app-shell-core/src/auth/session.js` defaults to `window.localStorage`. ETP-4575/4576 are in progress but are not deployed closure evidence. | Román Magnoli, ETP-4575/4576 |
-| **SEC-11b — attachment IDOR** | **Reproduced — automated** | `NeoServlet.processRequest()` enables admin mode for the built-in dispatch. List disables readable-org filtering; download/delete/description load an attachment by bare ID; upload/download-all trust supplied parent context. No centralized parent-record authorization exists. Reproduced executably by `NeoAttachmentAuthorizationMatrixTest` (see Automated evidence). The black-box confirmation is still pending provisioned low-privilege accounts. | ETP-4570, unassigned / `TBD` |
+| **SEC-11b — attachment IDOR** | **Corrected in source (ETP-4570), pending real-data evidence** | Every attachment route is now authorized on the parent record by `NeoAttachmentAuthorizer` (role entity access, readable/writable client+org, record exists and active), with one uniform 404. Reproduced before the fix by `NeoAttachmentAuthorizationMatrixTest` (helper level). **Still open:** the `OBBaseTest` run (`NeoAttachmentAuthorizationIntegrationTest`, written, not run locally), the black-box confirmation with low-privilege accounts, and the bounded-admin-mode item, deferred to the `NeoServlet` admin-mode follow-up (ticket not yet created). | ETP-4570 (implemented: `NeoAttachmentAuthorizer.authorizeById/authorizeByRecord`, uniform 404, wired in `NeoBuiltInEndpointHandler`) |
 | **SEC-12 — attachment response/upload hardening** | **Partially corrected** | `Content-Disposition` is set. Single download still echoes stored MIME via `resolveContentType`, neither single nor zip download sets `nosniff`, and upload only validates the outer multipart type before materializing the file. | ETP-4571, unassigned / `TBD` |
 | **SEC-13 — mixed content** | **Partially corrected / no active violation reproduced** | All three public entry points are HTTPS and no active HTTP request was executed by this static probe. The deployed staging bundle still contains literal localhost HTTP endpoints, and there is no CI guard or enforced `upgrade-insecure-requests` CSP. Browser-flow verification remains required. | ETP-4572/4574, unassigned / `TBD` |
 | **SEC-14 — telemetry egress governance** | **Reproduced** | Sentry, AWS RUM and Mixpanel adapters remain in the functional host. The KPI/property sanitizer does not cover Sentry errors, breadcrumbs, context, SDK-generated URLs/headers or final provider envelopes. `VITE_SENTRY_SEND_DEFAULT_PII` can still enable PII at build time. Core observability remains a context/no-op rather than a deny-by-default gateway. | ETP-4577/4578, unassigned / `TBD` |
@@ -57,17 +57,36 @@ Collected with read-only requests on 2026-07-30.
 - `./gradlew test --tests com.etendoerp.go.schemaforge.NeoCsvExportServiceTest` — passed on 2026-07-30. This verifies the existing ETP-4560 classic-trigger mitigation; it does not close the remaining SEC-04 paths.
 - `node --test packages/app-shell-core/src/lib/csv/__tests__/csvSerializer.test.js` — 23 tests passed on 2026-07-30. The standalone control/full-width fixtures remain red requirements for ETP-4568.
 - `./gradlew test --tests com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationMatrixTest` —
-  9 tests, 5 passed, 4 skipped, 0 failures on 2026-07-30. This is the **E5 deliverable**: the five
+  5 tests pass (the 4 formerly skipped target-contract tests were removed by ETP-4570 and replaced by
+  `NeoAttachmentParentAuthorizationTest` and `NeoBuiltInEndpointHandlerTest`). Originally 9 tests, 5 passed, 4 skipped, 0 failures on 2026-07-30. This is the **E5 deliverable**: the five
   passing tests reproduce SEC-11b by pinning the current insecure contract (a foreign attachment is
   streamed, deleted and re-described with no authorization primitive consulted; stored MIME echoed
-  without `nosniff`; missing distinguishable from unauthorized). The four skipped tests express the
-  ADR-0003 target contract and stay disabled until ETP-4570 lands.
+  without `nosniff`; missing distinguishable from unauthorized). The four skipped tests expressed the
+  ADR-0003 target contract; ETP-4570 implemented it elsewhere.
+
+- ETP-4570 red→green evidence. Gradle does not build in this environment, so the tests were compiled with `javac -proc:none`
+  and run with `java -cp <out>:<build/classes>:<WebContent/WEB-INF/lib/*>:<junit, mockito jars> org.junit.runner.JUnitCore <classes>`.
+  - **Red:** `NeoBuiltInEndpointHandlerTest` (ETP-4570 version) run against the origin/develop `NeoBuiltInEndpointHandler` plus the new
+    authorizer: 9 of 85 failed on assertions — `missingAndForeignIdsAreAnsweredIdenticallyByTheRoutes`,
+    `handleAttachmentsRoutesAnswerUniformNotFoundWhenParentIsNotAuthorized`, `authorizedRecordRoutesReturnTheHelperResponseUnchanged`,
+    `handleAttachmentsFileGetDoesNotConsultTheWriteAuthorizer`, `bareIdDownloadAfterContextualListStillWorksForAuthorizedCaller`,
+    `authorizedUploadRunsTheHelperAndWritesItsAnswer`, `authorizedDeleteRunsTheHelperAndWritesItsAnswer`,
+    `authorizedDescriptionUpdateRunsTheHelperAndWritesItsAnswer`, `authorizedMarkMainRunsTheHelperAndWritesItsAnswer`. The first two are
+    the abuse cases (a foreign-client attachment is not answered like a missing one; denied routes still reach the helpers). The others
+    fail because the old handler never asks the authorizer.
+  - **Green:** with the ETP-4570 handler, `NeoAttachmentParentAuthorizationTest`, `NeoBuiltInEndpointHandlerTest`,
+    `NeoAttachmentAuthorizerTest` and `NeoAttachmentAuthorizationMatrixTest`: 117 tests, 0 failures.
+  - **Not performed:** the literal "a foreign attachment's download returns 200 with its bytes" run against the old handler. The
+    helper-level reproduction of that remains group A of `NeoAttachmentAuthorizationMatrixTest`.
+  - `NeoAttachmentAuthorizationIntegrationTest` (`OBBaseTest`, real data) compiles but has NOT been run: it needs a provisioned DB.
 
   **Declared coverage limit (no silent caps):** scenarios S2–S5 are proven collectively rather than
   individually, because the code never inspects caller context — that collapse is the finding.
   Separating S2/S3/S4/S5 by real role and organization data, plus S8 (legitimate multi-org access),
-  requires `OBBaseTest` fixtures and remains an external dependency below. `handleList`,
-  `handleUpload` and `handleDownloadAll` are not covered, so S7 belongs to ETP-4570.
+  requires `OBBaseTest` fixtures and remains an external dependency below. (Update, ETP-4570: list,
+  upload, zip and all other routes are now guarded and tested through the handler in
+  `NeoBuiltInEndpointHandlerTest`, and S7 is tested in `NeoAttachmentParentAuthorizationTest`; S2, S3 and S8 on real data are
+  still not covered, see the integration test's Javadoc.)
 
 ## Residual risks and accountable follow-ups
 
@@ -76,7 +95,7 @@ Collected with read-only requests on 2026-07-30.
 | SEC-10 remains exposed until both in-progress tasks are deployed and legacy Bearer is disabled | Román Magnoli — ETP-4575/4576 |
 | SEC-04/08/09/09b/11b/12/13/14 implementation tasks have no assignee | Epic owner / reporter Sebastian Barrozo |
 | HSTS `includeSubDomains; preload` is already live without a repository inventory or rollback record | ETP-4574 owner |
-| The attachment matrix is automated only to the depth mocks allow; per-scenario role/org separation (S2–S5), S8 and the client-supplied-parent cases (S7) need seeded `OBBaseTest` fixtures, and the black-box confirmation needs provisioned low-privilege accounts | ETP-4570 owner plus staging administrator |
+| ETP-4570 matrix is mock-based plus an `OBBaseTest` class that has not been run; same-org role without table access (S2), a second organization (S3) and a multi-org administrator (S8) have no real-data fixture, and the black-box confirmation needs provisioned low-privilege accounts | ETP-4570 owner plus staging administrator |
 | Serialized telemetry envelopes were not captured with authenticated staging traffic | ETP-4577/4578 owner plus Security/Privacy |
 | Blanket admin mode may expose built-in operations beyond attachments. Confirmed 2026-10-22 on the generic CRUD write path (cross-tenant DELETE), see threat model TM-05 | ETP-5880 (generic CRUD record guard); handler sweeps ETP-5793 and ETP-5794 (done) |
 

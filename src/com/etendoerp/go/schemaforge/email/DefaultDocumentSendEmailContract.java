@@ -35,6 +35,7 @@ import com.etendoerp.go.portal.PortalLinkService;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+import com.etendoerp.go.schemaforge.email.render.EmailFooter;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -676,6 +677,12 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       content.note(EmailMessages.get("document.replyNote", language));
     } else {
       content.signature(EmailMessages.get("signature", language));
+    }
+    // ETP-6209 — the "Creado con Etendo" footer goes only on an email that reaches the customer
+    // through the portal. No portal link (flag off, or a contract with no portal kind): no footer,
+    // so those emails are byte-identical to before.
+    if (cta.isPortal()) {
+      content.footer(EmailFooter.etendo(EmailFooter.Piece.DOCUMENT_SEND, language));
     }
     return content.build();
   }

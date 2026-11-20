@@ -124,6 +124,17 @@ public final class NeoTelemetryEvents {
       "backend_bank_bounce_suggestions_applied";
 
   /**
+   * ETP-6247 — a remittance's SEPA file was generated and stored («Confirmar», or «Regenerar
+   * fichero» with {@code is_regeneration}). Emitted by {@code RemittanceFileTelemetry}, flag
+   * {@code sepa-remittances} on only, once the action has succeeded (inside a batch, after the
+   * batch commits). Carries the direction ({@code AR}
+   * collection, {@code AP} payment), the number of distinct invoices, the channel and the role
+   * groups. Never a record identifier, amount or name.
+   */
+  public static final String BACKEND_REMITTANCE_FILE_GENERATED =
+      "backend_remittance_file_generated";
+
+  /**
    * ETP-6209 — the first portal link of a document was emailed (renewals, decision links and
    * re-sends excluded). Emitted by {@code PortalKpiTelemetry}; properties {@code account_id},
    * {@code type} (the portal document kind). Never a record identifier.
@@ -144,6 +155,22 @@ public final class NeoTelemetryEvents {
    * ({@code accepted|rejected}), {@code source} ({@code portal|app}). Never a record identifier.
    */
   public static final String BACKEND_QUOTATION_DECIDED = "backend_quotation_decided";
+
+  /**
+   * ETP-6209 — a customer portal visit opened from a link (the first valid {@code /me} of a link
+   * after 30 minutes without one). Emitted by {@code PortalKpiTelemetry}; properties
+   * {@code account_id}, {@code third_party} (keyed pseudonym of the customer),
+   * {@code entry_doc_type}, {@code origin}. Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_OPENED = "backend_portal_opened";
+
+  /**
+   * ETP-6209 — a portal-related email left: {@code piece} {@code document_send} (with
+   * {@code doc_type}), {@code link_renewal}, {@code decision_accept} or {@code decision_reject}.
+   * Emitted by {@code PortalKpiTelemetry}; properties {@code account_id}, {@code piece},
+   * {@code doc_type}. Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_EMAIL_SENT = "backend_portal_email_sent";
 
   /**
    * ETP-6230 — a productive tenant finished onboarding (emitted after the onboarding commit).

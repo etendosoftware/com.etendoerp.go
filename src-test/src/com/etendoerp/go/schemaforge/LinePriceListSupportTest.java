@@ -192,4 +192,59 @@ public class LinePriceListSupportTest {
 
     assertEquals(5, priced.getInt(UNIT));
   }
+
+  @Test
+  public void applyCatalogPriceAmountsOverloadWritesTheGivenAmounts() throws Exception {
+    JSONObject body = new JSONObject();
+
+    assertTrue(LinePriceListSupport.applyCatalogPrice(body, new BigDecimal("11.76"),
+        new BigDecimal("14.70"), UNIT, LIST));
+
+    assertEquals(0, new BigDecimal("11.76").compareTo(new BigDecimal(body.get(UNIT).toString())));
+    assertEquals(0, new BigDecimal("14.70").compareTo(new BigDecimal(body.get(LIST).toString())));
+  }
+
+  @Test
+  public void applyCatalogPriceAmountsOverloadKeepsTheListPriceAlreadyInTheBody() throws Exception {
+    JSONObject body = new JSONObject("{\"listPrice\":20}");
+
+    assertTrue(LinePriceListSupport.applyCatalogPrice(body, new BigDecimal("8"),
+        new BigDecimal("10"), UNIT, LIST));
+
+    assertEquals(20, body.getInt(LIST));
+  }
+
+  @Test
+  public void applyCatalogPriceAmountsOverloadSkipsAZeroOrNullListAmount() throws Exception {
+    JSONObject zeroList = new JSONObject();
+    JSONObject nullList = new JSONObject();
+
+    assertTrue(LinePriceListSupport.applyCatalogPrice(zeroList, new BigDecimal("8"),
+        BigDecimal.ZERO, UNIT, LIST));
+    assertTrue(LinePriceListSupport.applyCatalogPrice(nullList, new BigDecimal("8"), null, UNIT,
+        LIST));
+
+    assertFalse(zeroList.has(LIST));
+    assertFalse(nullList.has(LIST));
+  }
+
+  @Test
+  public void applyCatalogPriceAmountsOverloadAbstainsOnANullOrZeroStandardOrAPricedBody()
+      throws Exception {
+    JSONObject nullStandard = new JSONObject();
+    JSONObject zeroStandard = new JSONObject();
+    JSONObject priced = new JSONObject("{\"unitPrice\":5}");
+
+    assertFalse(LinePriceListSupport.applyCatalogPrice(nullStandard, null, new BigDecimal("10"),
+        UNIT, LIST));
+    assertFalse(LinePriceListSupport.applyCatalogPrice(zeroStandard, BigDecimal.ZERO,
+        new BigDecimal("10"), UNIT, LIST));
+    assertFalse(LinePriceListSupport.applyCatalogPrice(priced, new BigDecimal("8"),
+        new BigDecimal("10"), UNIT, LIST));
+
+    assertFalse(nullStandard.has(UNIT));
+    assertFalse(zeroStandard.has(UNIT));
+    assertEquals(5, priced.getInt(UNIT));
+    assertFalse(priced.has(LIST));
+  }
 }

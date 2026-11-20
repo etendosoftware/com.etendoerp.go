@@ -857,4 +857,37 @@ public class NeoProcessServiceTest {
       verifyNoInteractions(ctx);
     }
   }
+
+  // ETP-5809: the scheduling path gets the same bundle: context, connection, params kept after init.
+  @Test
+  public void schedulingProcessBundleHasContextAndConnectionAndKeepsParams() throws Exception {
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    org.openbravo.scheduling.Process instance = mock(org.openbravo.scheduling.Process.class);
+    org.openbravo.model.ad.ui.Process adProcess = mock(org.openbravo.model.ad.ui.Process.class);
+    when(adProcess.getId()).thenReturn("P1");
+    org.codehaus.jettison.json.JSONObject params = new org.codehaus.jettison.json.JSONObject();
+    try (MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
+        MockedStatic<org.openbravo.base.weld.WeldUtils> weldMock =
+            mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedConstruction<DalConnectionProvider> connMock = mockConstruction(DalConnectionProvider.class);
+        MockedConstruction<ProcessBundle> bundleMock = mockConstruction(ProcessBundle.class,
+            (b, c) -> when(b.init(any())).thenReturn(b))) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> org.openbravo.base.weld.WeldUtils.getInstanceFromStaticBeanManager(any()))
+          .thenReturn(instance);
+
+      java.lang.reflect.Method m = NeoProcessService.class.getDeclaredMethod(
+          "executeSchedulingProcess", org.openbravo.model.ad.ui.Process.class, Class.class,
+          org.codehaus.jettison.json.JSONObject.class);
+      m.setAccessible(true);
+      m.invoke(null, adProcess, instance.getClass(), params);
+
+      ProcessBundle built = bundleMock.constructed().get(0);
+      InOrder order = inOrder(built, instance);
+      order.verify(built).init(connMock.constructed().get(0));
+      order.verify(built).setParams(any());
+      order.verify(instance).execute(built);
+    }
+  }
 }

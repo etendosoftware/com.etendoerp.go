@@ -333,6 +333,8 @@ public class PortalLinkServiceTest {
     events.verify(() -> PortalUsageEvents.sent(confirmed, "LOG-1", 3));
     // The sent KPI is offered the confirmed link, after the commit; it decides whether it counts.
     kpi.verify(() -> PortalKpiTelemetry.linkSent(confirmed));
+    // And the portal email KPI (ETP-6209), for every confirmed link email.
+    kpi.verify(() -> PortalKpiTelemetry.linkEmailSent(confirmed));
   }
 
   @Test
@@ -359,6 +361,8 @@ public class PortalLinkServiceTest {
 
     verify(obDal).rollbackAndClose();
     verify(sessionHandler, never()).commitAndStart();
+    // A link whose confirmation was rolled back never counts as a portal email.
+    kpi.verifyNoInteractions();
   }
 
   // ── renew ───────────────────────────────────────────────────────────────────

@@ -28,6 +28,12 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.structure.ActiveEnabled;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Table;
@@ -87,7 +93,193 @@ public final class NeoAttachmentAuthorizer {
   static final Map<String, List<String>> PROXY_WINDOWS_BY_TABLE =
       Map.of(FISCAL_DECL_TABLE_ID, List.of(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID));
 
+  /** What an operation needs on the attachment's parent business record. */
+  public enum Access {
+    READ, WRITE
+  }
+
   private NeoAttachmentAuthorizer() {
+  }
+
+  /**
+   * The one answer for a nonexistent attachment and for one the caller may not reach (ADR-0003 D5):
+   * same status, same body, so an id cannot be probed for existence.
+   *
+   * @return a {@code 404 Attachment not found} response
+   */
+  public static NeoResponse notFound() {
+    return NeoResponse.error(404, NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND);
+  }
+
+  /**
+   * Parent-record authorization for an operation addressed by attachment id (ETP-4570, SEC-11b).
+   * The table and record are read off the stored attachment row.
+   *
+   * @param attachmentId the {@code C_File_ID} taken from the request
+   * @param access       whether the operation reads or writes the parent record
+   * @return the attachment, or {@code null} when it does not exist or the caller may not reach its
+   *         parent record; the caller answers {@link #notFound()} for both
+   */
+  public static Attachment authorizeById(String attachmentId, Access access) {
+    return authorizeById(attachmentId, null, null, access);
+  }
+
+  /**
+   * Same as {@link #authorizeById(String, Access)}, additionally rejecting a client-supplied
+   * {@code tableName}/{@code recordId} that disagrees with the attachment's real parent. The
+   * supplied values never decide anything: a mismatch is a rejection, not a fallback.
+   *
+   * @param attachmentId      the {@code C_File_ID} taken from the request
+   * @param suppliedTableName the table name the client sent, or {@code null} when none
+   * @param suppliedRecordId  the record id the client sent, or {@code null} when none
+   * @param access            whether the operation reads or writes the parent record
+   * @return the attachment, or {@code null} when it does not exist, the caller may not reach its
+   *         parent record, or the supplied context does not match it
+   */
+  public static Attachment authorizeById(String attachmentId, String suppliedTableName,
+      String suppliedRecordId, Access access) {
+    if (StringUtils.isBlank(attachmentId)) {
+      return null;
+    }
+    AttachmentParent found = loadAttachment(attachmentId);
+    if (found == null) {
+      return null;
+    }
+    String tableId = found.tableId;
+    String recordId = found.recordId;
+    if (StringUtils.isNotEmpty(suppliedTableName) && !isSameTable(suppliedTableName, tableId)) {
+      return null;
+    }
+    if (StringUtils.isNotEmpty(suppliedRecordId) && !suppliedRecordId.equals(recordId)) {
+      return null;
+    }
+    return canAccessParent(tableId, recordId, access) ? found.attachment : null;
+  }
+
+  /**
+   * Parent-record authorization for an operation addressed by table and record (list, count, main,
+   * upload, download all).
+   *
+   * <p>Three cases are left to the operation instead of denied, and none discloses data: a blank
+   * table or record, and a table name that resolves to no table, are answered by the operation
+   * itself ({@code 400} / {@code 404 Unknown table}) before it reads any attachment; a table with no
+   * DAL entity is handled in {@link #canAccessParent}.</p>
+   *
+   * @param tableName the physical table name from the request path
+   * @param recordId  the record id from the request path
+   * @param access    whether the operation reads or writes the parent record
+   * @return {@code true} when the caller may perform {@code access} on that record
+   */
+  public static boolean authorizeByRecord(String tableName, String recordId, Access access) {
+    String tableId = StringUtils.isBlank(recordId) ? null : tableIdOrNull(tableName);
+    return tableId == null || canAccessParent(tableId, recordId, access);
+  }
+
+  /** An attachment with its parent's table and record id, read while the row was loaded. */
+  private static final class AttachmentParent {
+    final Attachment attachment;
+    final String tableId;
+    final String recordId;
+
+    AttachmentParent(Attachment attachment, String tableId, String recordId) {
+      this.attachment = attachment;
+      this.tableId = tableId;
+      this.recordId = recordId;
+    }
+  }
+
+  /**
+   * Loads the attachment row inside a narrow admin scope — reading the row, and its lazily loaded
+   * table reference, needs no entity access of the caller's role; the decision is taken afterwards
+   * on its parent — and keeps only a row of the caller's tenant. A security failure while loading
+   * reads as "not found".
+   *
+   * @return the attachment with its table id and record id, or {@code null}
+   */
+  private static AttachmentParent loadAttachment(String attachmentId) {
+    OBContext.setAdminMode(true);
+    try {
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
+      if (attachment == null || attachment.getTable() == null) {
+        return null;
+      }
+      return new AttachmentParent(attachment, attachment.getTable().getId(), attachment.getRecord());
+    } catch (OBSecurityException e) {
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The table id for a request's table name, or {@code null} when it is blank or unknown. */
+  private static String tableIdOrNull(String tableName) {
+    if (StringUtils.isBlank(tableName)) {
+      return null;
+    }
+    try {
+      return NeoAttachmentsHelper.resolveTableId(tableName);
+    } catch (OBException e) {
+      return null;
+    }
+  }
+
+  private static boolean isSameTable(String tableName, String tableId) {
+    try {
+      return tableId.equals(NeoAttachmentsHelper.resolveTableId(tableName));
+    } catch (OBException e) {
+      return false;
+    }
+  }
+
+  /** Role-level access to the entity; a seam, because {@code EntityAccessChecker} cannot be mocked. */
+  static boolean hasEntityAccess(OBContext context, Entity entity, Access access) {
+    try {
+      if (access == Access.WRITE) {
+        context.getEntityAccessChecker().checkWritableAccess(entity);
+      } else {
+        context.getEntityAccessChecker().checkReadableAccess(entity);
+      }
+      return true;
+    } catch (OBSecurityException e) {
+      return false;
+    }
+  }
+
+  /**
+   * Decides on the parent business record with the caller's real privileges: role access to the
+   * entity, then readable (or writable) client/organization of the row, and the row must exist and
+   * be active. Both primitives read the session's role data, which admin mode does not widen
+   * ({@code EntityAccessChecker} "does not take into account admin mode"), so the surrounding
+   * {@code NeoServlet} admin mode cannot weaken the decision (ADR-0003 D3). A table with no DAL
+   * entity has no record to judge (the platform's own attach manager skips it too), so it is
+   * allowed here. WRITE operations are then still subject to the window tier
+   * ({@link #checkWrite}); READ operations have no further check for such a table. The decision
+   * is pinned by a test.
+   */
+  static boolean canAccessParent(String tableId, String recordId, Access access) {
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    if (entity == null) {
+      return true;
+    }
+    OBContext context = OBContext.getOBContext();
+    if (context == null || StringUtils.isBlank(recordId)) {
+      return false;
+    }
+    if (!hasEntityAccess(context, entity, access)) {
+      return false;
+    }
+    try {
+      BaseOBObject parent = OBDal.getInstance().get(entity.getName(), recordId);
+      if (parent == null || (parent instanceof ActiveEnabled
+          && !Boolean.TRUE.equals(((ActiveEnabled) parent).isActive()))) {
+        return false;
+      }
+      return access == Access.WRITE ? TenantOwnership.isWritableByCurrentTenant(parent)
+          && TenantOwnership.isVisibleToCurrentTenant(parent)
+          : TenantOwnership.isVisibleToCurrentTenant(parent);
+    } catch (OBSecurityException e) {
+      return false;
+    }
   }
 
   /**
@@ -98,16 +290,8 @@ public final class NeoAttachmentAuthorizer {
    *         itself), otherwise a {@code 403} response
    */
   public static NeoResponse checkWriteOnTable(String tableName) {
-    if (StringUtils.isBlank(tableName)) {
-      return null;
-    }
-    String tableId;
-    try {
-      tableId = NeoAttachmentsHelper.resolveTableId(tableName);
-    } catch (OBException e) {
-      return null;
-    }
-    return checkWrite(tableId);
+    String tableId = tableIdOrNull(tableName);
+    return tableId == null ? null : checkWrite(tableId);
   }
 
   /**

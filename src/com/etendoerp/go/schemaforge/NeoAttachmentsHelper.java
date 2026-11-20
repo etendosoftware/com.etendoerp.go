@@ -251,7 +251,7 @@ public final class NeoAttachmentsHelper {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
       }
       if (isMain) {
-        markAsMain(attachment);
+        markAsMain(attachment, false);
       } else {
         setMainFlag(attachment.getId(), false);
       }
@@ -271,16 +271,34 @@ public final class NeoAttachmentsHelper {
   }
 
   /**
-   * Marks the given attachment as its record's main document, deleting any
-   * previously-marked attachment for that same (table, record) first — always
-   * exactly one "main" attachment per record, sidebar and preview never diverge.
+   * Marks the given attachment as its record's main document — always exactly one "main"
+   * attachment per record, so sidebar and preview never diverge. What happens to the previous main
+   * attachment of that same (table, record) depends on {@code keepPrevious}:
+   * <ul>
+   *   <li>{@code false}: it is deleted first (the preview/upload flows, where a new main document
+   *       replaces the old one);</li>
+   *   <li>{@code true} (ETP-6247): it only loses the flag and stays as an ordinary attachment — for
+   *       records whose earlier documents must be kept (a remittance keeps every SEPA file it
+   *       generated).</li>
+   * </ul>
+   *
+   * @param attachment   the attachment to mark
+   * @param keepPrevious whether the previous main attachment is kept instead of deleted
    */
-  static void markAsMain(Attachment attachment) {
+  static void markAsMain(Attachment attachment, boolean keepPrevious) {
     String tableId = attachment.getTable().getId();
     String recordId = attachment.getRecord();
-    Attachment previous = findMainAttachment(tableId, recordId);
-    if (previous != null && !previous.getId().equals(attachment.getId())) {
-      getAttachManager().delete(previous);
+    if (keepPrevious) {
+      for (String previousId : findMainAttachmentIds(tableId, recordId)) {
+        if (!previousId.equals(attachment.getId())) {
+          setMainFlag(previousId, false);
+        }
+      }
+    } else {
+      Attachment previous = findMainAttachment(tableId, recordId);
+      if (previous != null && !previous.getId().equals(attachment.getId())) {
+        getAttachManager().delete(previous);
+      }
     }
     setMainFlag(attachment.getId(), true);
   }

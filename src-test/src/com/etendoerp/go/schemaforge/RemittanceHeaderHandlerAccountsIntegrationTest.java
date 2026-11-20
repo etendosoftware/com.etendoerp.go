@@ -19,13 +19,17 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
@@ -37,14 +41,18 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.module.remittance.Remittance;
+import org.openbravo.module.remittance.RemittanceType;
 
 import com.etendoerp.go.mcp.McpToolRouterTestAccess;
 
@@ -63,6 +71,12 @@ import com.etendoerp.go.mcp.McpToolRouterTestAccess;
  *       unknown id) is a 404; without one, a remittance not saved yet ({@code new}) uses the
  *       account's organization; the MCP {@code etendo_action} call with id {@code new} reaches the
  *       action (its record guards let the sentinel id through) and answers the account.</li>
+ *   <li><b>Header writes (ETP-6247).</b> The database no longer copies the account's SEPA values
+ *       onto the remittance, the write customization does: a create with no IBAN, creditor
+ *       identifier or scheme gets the account's IBAN and creditor identifier (its real
+ *       {@code EM_REM_CreditorIdentifier} column) and {@code CORE}; an update that moves it to
+ *       another account gets that account's values. The hook is run directly: the generic write
+ *       behind it (the JSON data service) commits, which a rolled-back test must not do.</li>
  * </ul>
  *
  * <p>Fixtures are built through the DAL in the F&B sample client — the client setup
@@ -76,6 +90,7 @@ import com.etendoerp.go.mcp.McpToolRouterTestAccess;
  * mocked; {@code RemittanceDueItemsQueryIntegrationTest} is about the due items query.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.RemittanceHeaderWrites
  * @covers com.etendoerp.go.schemaforge.RemittanceSepaFileData
  * @covers com.etendoerp.go.schemaforge.RemittanceSepaProvisioning
  */
@@ -84,6 +99,10 @@ public class RemittanceHeaderHandlerAccountsIntegrationTest extends WeldBaseTest
   private static final String EURO_ID = "102";
   private static final String SPAIN_ID = "106";
   private static final String VALID_ES_IBAN = "ES9121000418450200051332";
+  private static final String OTHER_ES_IBAN = "ES7921000813610123456789";
+  private static final String CREDITOR_ID = "ES97000B12345678";
+  private static final String OTHER_CREDITOR_ID = "ES82000B87654323";
+  private static final String SPEC = "remittance";
 
   private MockedStatic<SepaRemittancesFlag> flag;
   private Client client;
@@ -217,6 +236,42 @@ public class RemittanceHeaderHandlerAccountsIntegrationTest extends WeldBaseTest
     assertTrue(result.toString(), result.toString().contains("creditorIdAvailable"));
   }
 
+  // ---------------------------------------------------------------- header writes
+
+  @Test
+  public void aCreateWithoutSepaValuesTakesTheAccountsIbanCreditorIdAndCore() throws Exception {
+    FIN_FinancialAccount account = sepaAccount("alta", VALID_ES_IBAN, CREDITOR_ID);
+    JSONObject body = new JSONObject()
+        .put(RemittanceHeaderHandler.FIELD_ACCOUNT, account.getId())
+        .put(RemittanceHeaderHandler.FIELD_TYPE, collectionType().getId())
+        .put("dueDate", LocalDate.now().plusDays(10).toString());
+
+    NeoResponse refusal = handler().handle(crud("POST", null, body));
+
+    assertEquals("the write goes on to the generic CRUD", null, refusal);
+    assertEquals(VALID_ES_IBAN, body.getString(RemittanceHeaderHandler.FIELD_IBAN));
+    assertEquals(CREDITOR_ID, body.getString(RemittanceHeaderHandler.FIELD_CREDITOR_ID));
+    assertEquals(RemittanceSepaProvisioning.SCHEME_CORE,
+        body.getString(RemittanceHeaderHandler.FIELD_SCHEME));
+  }
+
+  @Test
+  public void anUpdateThatChangesTheAccountTakesTheNewAccountsIbanAndCreditorId()
+      throws Exception {
+    FIN_FinancialAccount first = sepaAccount("primera", VALID_ES_IBAN, CREDITOR_ID);
+    FIN_FinancialAccount second = sepaAccount("segunda", OTHER_ES_IBAN, OTHER_CREDITOR_ID);
+    Remittance stored = storedCollection(first);
+    JSONObject body = new JSONObject().put(RemittanceHeaderHandler.FIELD_ACCOUNT, second.getId());
+
+    NeoResponse refusal = handler().handle(crud("PUT", stored.getId(), body));
+
+    assertEquals("the write goes on to the generic CRUD", null, refusal);
+    assertEquals(OTHER_ES_IBAN, body.getString(RemittanceHeaderHandler.FIELD_IBAN));
+    assertEquals(OTHER_CREDITOR_ID, body.getString(RemittanceHeaderHandler.FIELD_CREDITOR_ID));
+    assertFalse("the scheme is not the account's: an update leaves it alone",
+        body.has(RemittanceHeaderHandler.FIELD_SCHEME));
+  }
+
   // ---------------------------------------------------------------- helpers
 
   private RemittanceHeaderHandler handler() {
@@ -268,5 +323,69 @@ public class RemittanceHeaderHandlerAccountsIntegrationTest extends WeldBaseTest
     account.setIBAN(iban);
     OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
+  }
+
+  /** A linked Bank account with a valid IBAN and creditor identifier. */
+  private FIN_FinancialAccount sepaAccount(String name, String iban, String creditorId) {
+    FIN_FinancialAccount account = linkedBankAccount(name);
+    account.set(RemittanceCreditorId.PROPERTY, creditorId);
+    giveIban(account, iban);
+    return account;
+  }
+
+  private RemittanceType collectionType() {
+    RemittanceType type = RemittanceSepaProvisioning.findType(client,
+        RemittanceSepaProvisioning.SCHEME_CORE);
+    assertNotNull("the provisioned CORE type", type);
+    return type;
+  }
+
+  /**
+   * A not processed collection remittance of {@code account} with the account's SEPA values,
+   * saved through the DAL in the test transaction (the trigger copies nothing: they are set here).
+   */
+  private Remittance storedCollection(FIN_FinancialAccount account) {
+    Remittance remittance = OBProvider.getInstance().get(Remittance.class);
+    remittance.setClient(client);
+    remittance.setOrganization(account.getOrganization());
+    remittance.setFinancialAccount(account);
+    remittance.setRemittanceType(collectionType());
+    remittance.setDocumentType(remittanceDocumentType());
+    remittance.setDocumentNo(marker);
+    remittance.setName(marker);
+    remittance.setTransactionDate(day(LocalDate.now()));
+    remittance.setDueDate(day(LocalDate.now().plusDays(10)));
+    remittance.setProcessed(false);
+    remittance.set(RemittanceIban.PROPERTY, account.getIBAN());
+    remittance.set(RemittanceCreditorId.REMITTANCE_PROPERTY,
+        account.get(RemittanceCreditorId.PROPERTY));
+    remittance.set(RemittanceSepaOptions.PROPERTY_SCHEME, RemittanceSepaProvisioning.SCHEME_CORE);
+    OBDal.getInstance().save(remittance);
+    OBDal.getInstance().flush();
+    return remittance;
+  }
+
+  private DocumentType remittanceDocumentType() {
+    DocumentType docType = (DocumentType) OBDal.getInstance().getSession().createQuery(
+        "from DocumentType as d where d.client.id = :client and d.documentCategory = 'REM_REM'"
+            + " and d.active = true")
+        .setParameter("client", client.getId())
+        .setMaxResults(1)
+        .uniqueResult();
+    assertNotNull("the remittance document type", docType);
+    return docType;
+  }
+
+  private static Date day(LocalDate date) {
+    return Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /**
+   * A REST write of the remittance header as the customization sees it. The hook is run directly:
+   * the generic write behind it (the JSON data service) commits, so it is not run here.
+   */
+  private static NeoContext crud(String method, String id, JSONObject body) {
+    return NeoContext.builder().specName(SPEC).entityName(SPEC).httpMethod(method)
+        .endpointType(NeoEndpointType.CRUD).recordId(id).requestBody(body).build();
   }
 }
