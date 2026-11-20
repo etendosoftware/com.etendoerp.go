@@ -9946,7 +9946,12 @@ Three conventions this follows, all shared with the `SFListMenu`/`SFWindowAccess
 1. **The role is resolved BEFORE `OBContext.setAdminMode(true)`.** Admin mode exists to bypass
    row-level security on the widget's query, never to decide access.
 2. **Denied means an empty payload, not `403`.** A restricted role gets a smaller dashboard, never
-   an error toast. `WidgetQueryHelper.buildEmptyDataResponse()` is the single way to say it.
+   an error toast. `WidgetQueryHelper.buildEmptyDataResponse()` is the single way to say it. The
+   payload carries `restricted: true` (`WidgetAccessPolicy.KEY_RESTRICTED`, ETP-5850), which the
+   dashboard ignores (it never requests a hidden widget) and the MCP's `etendo_widget` turns into
+   the same `403 forbidden` as a spec the role cannot reach (`McpWidgetHandler.refusalIfRestricted`):
+   to an agent an empty list reads "no data in the period", and an Inventory-role agent answered a
+   quarter's result from revenue widgets that had only been denied to it.
 3. **Unknown means denied.** A widget row whose window cannot be resolved is dropped, so a new,
    unmapped kind of row disappears rather than leaking.
 
