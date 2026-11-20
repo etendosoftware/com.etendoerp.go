@@ -219,7 +219,7 @@ public class NeoAttachmentParentAuthorizationTest {
    * such a table. Accepted: the platform's attach manager does not handle entity-less tables.
    */
   @Test
-  public void tableWithoutDalEntityIsLeftToTheWindowTier() {
+  public void tableWithoutDalEntityIsAllowedByTheParentCheck() {
     try (Env env = new Env(null)) {
       when(ModelProvider.getInstance().getEntityByTableId(TABLE_ID)).thenReturn(null);
       assertTrue(NeoAttachmentAuthorizer.authorizeByRecord(TABLE_NAME, RECORD_ID, Access.READ));

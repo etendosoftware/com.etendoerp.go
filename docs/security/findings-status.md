@@ -64,6 +64,22 @@ Collected with read-only requests on 2026-07-30.
   without `nosniff`; missing distinguishable from unauthorized). The four skipped tests expressed the
   ADR-0003 target contract; ETP-4570 implemented it elsewhere.
 
+- ETP-4570 red→green evidence. Gradle does not build in this environment, so the tests were compiled with `javac -proc:none`
+  and run with `java -cp <out>:<build/classes>:<WebContent/WEB-INF/lib/*>:<junit, mockito jars> org.junit.runner.JUnitCore <classes>`.
+  - **Red:** `NeoBuiltInEndpointHandlerTest` (ETP-4570 version) run against the origin/develop `NeoBuiltInEndpointHandler` plus the new
+    authorizer: 9 of 85 failed on assertions — `missingAndForeignIdsAreAnsweredIdenticallyByTheRoutes`,
+    `handleAttachmentsRoutesAnswerUniformNotFoundWhenParentIsNotAuthorized`, `authorizedRecordRoutesReturnTheHelperResponseUnchanged`,
+    `handleAttachmentsFileGetDoesNotConsultTheWriteAuthorizer`, `bareIdDownloadAfterContextualListStillWorksForAuthorizedCaller`,
+    `authorizedUploadRunsTheHelperAndWritesItsAnswer`, `authorizedDeleteRunsTheHelperAndWritesItsAnswer`,
+    `authorizedDescriptionUpdateRunsTheHelperAndWritesItsAnswer`, `authorizedMarkMainRunsTheHelperAndWritesItsAnswer`. The first two are
+    the abuse cases (a foreign-client attachment is not answered like a missing one; denied routes still reach the helpers). The others
+    fail because the old handler never asks the authorizer.
+  - **Green:** with the ETP-4570 handler, `NeoAttachmentParentAuthorizationTest`, `NeoBuiltInEndpointHandlerTest`,
+    `NeoAttachmentAuthorizerTest` and `NeoAttachmentAuthorizationMatrixTest`: 117 tests, 0 failures.
+  - **Not performed:** the literal "a foreign attachment's download returns 200 with its bytes" run against the old handler. The
+    helper-level reproduction of that remains group A of `NeoAttachmentAuthorizationMatrixTest`.
+  - `NeoAttachmentAuthorizationIntegrationTest` (`OBBaseTest`, real data) compiles but has NOT been run: it needs a provisioned DB.
+
   **Declared coverage limit (no silent caps):** scenarios S2–S5 are proven collectively rather than
   individually, because the code never inspects caller context — that collapse is the finding.
   Separating S2/S3/S4/S5 by real role and organization data, plus S8 (legitimate multi-org access),

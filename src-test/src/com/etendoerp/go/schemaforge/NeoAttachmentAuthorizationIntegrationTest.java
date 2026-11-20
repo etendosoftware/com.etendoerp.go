@@ -53,9 +53,11 @@ import com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer.Access;
  * the record route), S5 (inactive parent), S6 (missing record, missing attachment), S7 (supplied
  * table or record that does not match the attachment's real parent).</p>
  *
- * <p><b>Not covered:</b> S2 (same-org role without table access), S3 (a second organization of the
- * same client) and S8 (a multi-org administrator role): the sample data offers no role or second
- * organization fixture, and none is created here. They stay covered only by the mock-based
+ * <p>S3 (an order of the F&amp;B client in an organization the test role cannot read) is covered
+ * when the sample data has one; otherwise that test is skipped through {@code assumeNotNull}.</p>
+ *
+ * <p><b>Not covered:</b> S2 (same-org role without table access) and S8 (a multi-org administrator
+ * role): the sample data offers no role fixture, and none is created here. They stay covered only by the mock-based
  * {@code NeoAttachmentParentAuthorizationTest}. The OCR consumer's own call path is not exercised.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer
@@ -113,6 +115,15 @@ public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** S3 — an own-client order in an organization the role cannot read is refused (skipped if none exists). */
+  @Test
+  public void ownClientRecordInNonReadableOrganizationIsRefused() {
+    String hiddenOrderId = firstUnreadableOrgOrderId();
+    assumeNotNull("the sample data has no F&B order in an organization the test role cannot read",
+        hiddenOrderId);
+    assertFalse(NeoAttachmentAuthorizer.authorizeByRecord(ORDER_TABLE, hiddenOrderId, Access.READ));
   }
 
   /** S6 — a record that does not exist is refused exactly like a foreign one. */
@@ -189,6 +200,23 @@ public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
       OBDal.getInstance().save(attachment);
       OBDal.getInstance().flush();
       return attachment.getId();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String firstUnreadableOrgOrderId() {
+    String[] readable = OBContext.getOBContext().getReadableOrganizations();
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<Order> criteria = OBDal.getInstance().createCriteria(Order.class);
+      criteria.setFilterOnReadableClients(false);
+      criteria.setFilterOnReadableOrganization(false);
+      criteria.add(Restrictions.eq("client.id", TEST_CLIENT_ID));
+      criteria.add(Restrictions.not(Restrictions.in("organization.id", readable)));
+      criteria.setMaxResults(1);
+      List<Order> rows = criteria.list();
+      return rows.isEmpty() ? null : (String) ((BaseOBObject) rows.get(0)).getId();
     } finally {
       OBContext.restorePreviousMode();
     }
