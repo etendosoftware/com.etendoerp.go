@@ -52,7 +52,7 @@ public final class CspReportSanitizer {
   private static final Set<String> KEYWORDS = Set.of("inline", "eval", "self", "wasm-eval",
       "trusted-types-policy", "trusted-types-sink");
   private static final Pattern TOKEN_SEGMENT = Pattern.compile(
-      "(?i)[0-9a-f-]{16,}|[A-Za-z0-9_+=.-]{24,}|[0-9]{6,}");
+      "[0-9a-fA-F-]{16,}|[\\w+=.-]{24,}|\\d{6,}");
 
   private CspReportSanitizer() {
   }

@@ -141,6 +141,7 @@ class CspReportCollectorTest {
 
       @Override
       public void close() {
+        // nothing to release: the reader never opens a resource
       }
     };
     c.collect("a", broken);

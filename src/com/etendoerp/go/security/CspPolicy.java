@@ -38,7 +38,7 @@ public final class CspPolicy {
   public static final String PERMISSIONS_POLICY_HEADER = "Permissions-Policy";
   public static final String PERMISSIONS_POLICY = "camera=(), geolocation=(), microphone=()";
   /** Same-origin path where {@code CspReportServlet} is mapped. */
-  public static final String REPORT_PATH = "/sws/go/csp-report";
+  public static final String REPORT_PATH = "/sws/go/csp-report"; // NOSONAR java:S1075 - fixed same-origin path of the servlet mapping
   /** Reporting API group named by {@code report-to} and {@code Reporting-Endpoints}. */
   public static final String REPORTING_GROUP = "csp-endpoint";
   /** Hardcoded AWS RUM data plane (app-shell {@code lib/rum.js}). */
@@ -50,7 +50,7 @@ public final class CspPolicy {
       "img-src 'self' blob: data:", "frame-src 'self' blob:");
 
   private static final Pattern HTTPS_ORIGIN = Pattern.compile(
-      "https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?");
+      "https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\\d{1,5})?");
   private static final Pattern REPORT_URI = Pattern.compile("/?[A-Za-z0-9._~/-]+");
 
   private CspPolicy() {
