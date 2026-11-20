@@ -68,6 +68,9 @@ final class EmailCardLayout {
   private static final String DIV_CLOSE = "</div>";
   private static final String TAG_END = "\">";
   private static final int AVATAR_SIZE = 52;
+  private static final String BORDER_ATTR = ";border:";
+  private static final String FULL_WIDTH = " width=\"100%\" style=\"width:100%;\">";
+  private static final String HEIGHT_ATTR = "\" height=\"";
   /** Diagonal of a fitted logo: inside the 50px inner circle with a little air around it. */
   private static final int LOGO_DIAGONAL = 44;
 
@@ -76,7 +79,7 @@ final class EmailCardLayout {
 
   static String render(EmailContent content) {
     StringBuilder html = new StringBuilder(8192);
-    openDocument(html);
+    openDocument(html, htmlLang(content.getLanguage()));
     boolean first = appendIssuer(html, content, true);
     first = appendTexts(html, content, first);
     first = appendSummary(html, content, first);
@@ -92,9 +95,19 @@ final class EmailCardLayout {
     return html.toString();
   }
 
-  private static void openDocument(StringBuilder html) {
+  /**
+   * The {@code lang} attribute for the email's language: its primary subtag ({@code es_ES} →
+   * {@code es}), Spanish when absent, as the catalogs fall back.
+   */
+  static String htmlLang(String language) {
+    String primary = StringUtils.substringBefore(StringUtils.defaultString(language), "_");
+    primary = StringUtils.substringBefore(primary, "-").toLowerCase(Locale.ROOT);
+    return StringUtils.isAlpha(primary) ? primary : "es";
+  }
+
+  private static void openDocument(StringBuilder html, String lang) {
     html.append("<!DOCTYPE html>\n")
-        .append("<html lang=\"es\"><head>")
+        .append("<html lang=\"").append(lang).append("\"><head>")
         .append("<meta charset=\"utf-8\">")
         .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
         .append("<meta name=\"color-scheme\" content=\"light\">")
@@ -112,10 +125,10 @@ final class EmailCardLayout {
         .append(CENTERED_ROW_OPEN).append(" style=\"padding:24px 12px;\">")
         .append(PRESENTATION_TABLE).append(" class=\"sf-card\" width=\"").append(CARD_WIDTH)
         .append("\" style=\"width:").append(CARD_WIDTH).append("px;max-width:100%;background:")
-        .append(WHITE).append(";border:").append(BORDER_1PX)
+        .append(WHITE).append(BORDER_ATTR).append(BORDER_1PX)
         .append(";border-radius:12px;border-collapse:separate;\">")
         .append("<tr><td style=\"padding:20px;\">")
-        .append(PRESENTATION_TABLE).append(" width=\"100%\" style=\"width:100%;\">");
+        .append(PRESENTATION_TABLE).append(FULL_WIDTH);
   }
 
   /** Opens one block of the card; blocks are 12px apart. */
@@ -158,13 +171,13 @@ final class EmailCardLayout {
     if (content.getIssuerLogoUrl() != null) {
       int[] fitted = fitInAvatar(content.getIssuerLogoWidth(), content.getIssuerLogoHeight());
       html.append(PRESENTATION_TABLE).append(" align=\"center\"><tr><td width=\"").append(AVATAR_SIZE)
-          .append("\" height=\"").append(AVATAR_SIZE).append("\" align=\"center\" valign=\"middle\" ")
+          .append(HEIGHT_ATTR).append(AVATAR_SIZE).append("\" align=\"center\" valign=\"middle\" ")
           .append("bgcolor=\"").append(WHITE).append("\" style=\"width:").append(size)
           .append(";height:").append(size).append(";background:").append(WHITE)
-          .append(";border:").append(BORDER_1PX)
+          .append(BORDER_ATTR).append(BORDER_1PX)
           .append(";border-radius:50%;font-size:0;line-height:0;\"><img src=\"")
           .append(escape(content.getIssuerLogoUrl())).append("\" width=\"").append(fitted[0])
-          .append("\" height=\"").append(fitted[1]).append("\" alt=\"")
+          .append(HEIGHT_ATTR).append(fitted[1]).append("\" alt=\"")
           .append(escape(StringUtils.defaultString(content.getIssuerName())))
           .append("\" style=\"display:block;margin:0 auto;width:").append(fitted[0])
           .append("px;height:").append(fitted[1]).append("px;border:0;\">").append(ROW_CLOSE)
@@ -172,10 +185,10 @@ final class EmailCardLayout {
       return;
     }
     html.append(PRESENTATION_TABLE).append(" align=\"center\"><tr><td width=\"").append(AVATAR_SIZE)
-        .append("\" height=\"").append(AVATAR_SIZE).append("\" align=\"center\" valign=\"middle\" ")
+        .append(HEIGHT_ATTR).append(AVATAR_SIZE).append("\" align=\"center\" valign=\"middle\" ")
         .append("bgcolor=\"").append(SUMMARY_BACKGROUND).append("\" style=\"").append(FONT)
         .append("width:").append(size).append(";height:").append(size).append(";background:")
-        .append(SUMMARY_BACKGROUND).append(";border:").append(BORDER_1PX)
+        .append(SUMMARY_BACKGROUND).append(BORDER_ATTR).append(BORDER_1PX)
         .append(";border-radius:50%;font-size:18px;line-height:").append(size)
         .append(";font-weight:600;color:").append(AVATAR_TEXT).append(";").append(TEXT_CENTER)
         .append(TAG_END).append(escape(initials(content.getIssuerName()))).append(ROW_CLOSE)
@@ -245,7 +258,7 @@ final class EmailCardLayout {
     html.append(PRESENTATION_TABLE).append(" width=\"100%\" bgcolor=\"").append(SUMMARY_BACKGROUND)
         .append("\" style=\"width:100%;background:").append(SUMMARY_BACKGROUND)
         .append(";border-radius:8px;border-collapse:separate;\"><tr><td style=\"padding:4px;\">")
-        .append(PRESENTATION_TABLE).append(" width=\"100%\" style=\"width:100%;\">");
+        .append(PRESENTATION_TABLE).append(FULL_WIDTH);
     if (content.getSummaryTitle() != null) {
       html.append("<tr>").append(TD_STYLE_OPEN).append(FONT)
           .append("padding:0 8px;font-size:12px;line-height:24px;font-weight:500;color:")
@@ -254,7 +267,7 @@ final class EmailCardLayout {
     }
     html.append("<tr><td>").append(PRESENTATION_TABLE).append(" width=\"100%\" bgcolor=\"")
         .append(WHITE).append("\" style=\"width:100%;background:").append(WHITE)
-        .append(";border:").append(BORDER_1PX)
+        .append(BORDER_ATTR).append(BORDER_1PX)
         .append(";border-radius:8px;border-collapse:separate;table-layout:fixed;\"><tr>");
     int width = 100 / details.size();
     for (int i = 0; i < details.size(); i++) {
@@ -294,7 +307,7 @@ final class EmailCardLayout {
           .append(';').append(TEXT_CENTER).append(TAG_END).append(escape(content.getCtaNote()))
           .append(P_CLOSE);
     }
-    html.append(PRESENTATION_TABLE).append(" width=\"100%\" style=\"width:100%;\">")
+    html.append(PRESENTATION_TABLE).append(FULL_WIDTH)
         .append(CENTERED_ROW_OPEN).append(" bgcolor=\"").append(BUTTON_BACKGROUND)
         .append("\" style=\"background:").append(BUTTON_BACKGROUND).append(";border-radius:8px;\">")
         .append("<!--[if mso]><v:roundrect xmlns:v=\"urn:schemas-microsoft-com:vml\" href=\"")

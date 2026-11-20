@@ -115,10 +115,11 @@ use a token-free URL built by `PortalLogoReference`:
   no signing secret: the email shows the company's initials instead.
 - **Reference:** `base64url(clientId + "|" + orgId) + "." + HMAC-SHA256`. The MAC is
   `DocumentDownloadTokenService#signDetached("portal-logo:v1", payload)`, keyed by the existing
-  `etendo.go.email.documentDownloadTokenSecret` (no new secret). Domain-separated: the MAC covers
-  `"portal-logo:v1:" + payload`, and a download token's MAC covers a base64url payload with no
-  `:`, so neither can validate as the other. Stable per tenant and never expiring (an email is
-  opened long after it was sent).
+  `etendo.go.email.documentDownloadTokenSecret` (no new secret). Separated at the key: a detached
+  signature uses the per-purpose key `HMAC(secret, "detached:" + purpose)`, never the secret,
+  which only download tokens sign with — so a logo reference can never validate as a download
+  token (or another purpose), however either is encoded. Download tokens are signed exactly as
+  before. Stable per tenant and never expiring (an email is opened long after it was sent).
 - **What it grants:** the bytes of that one tenant's document logo (`CompanyLogoResolver`, the
   same image `/logo` serves) and nothing else — no data, no session, no other tenant; it cannot be
   forged without the secret. The payload carries the tenant's internal ids, which grant nothing.

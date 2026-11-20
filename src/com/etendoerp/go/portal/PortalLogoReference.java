@@ -48,8 +48,9 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
  * email signing secret the document emails already use, so no new secret exists. It never expires
  * (an email is opened long after it was sent) and it is stable per tenant, so image proxies cache
  * it. It cannot be forged without the secret, it names no document, no customer and no session, and
- * it can never validate as a download token (domain-separated MAC). It carries the tenant's internal
- * ids, which grant nothing on their own.</p>
+ * it can never validate as a download token: detached signatures use a per-purpose key derived from
+ * the secret, never the secret itself. It carries the tenant's internal ids, which grant nothing on
+ * their own.</p>
  *
  * <p>Only PNG and JPEG are ever served, typed from the bytes themselves: a stored SVG or anything
  * else answers 404, so this public URL can never serve active content.</p>

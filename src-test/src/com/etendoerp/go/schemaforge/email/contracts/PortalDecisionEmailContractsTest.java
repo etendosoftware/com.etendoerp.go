@@ -48,6 +48,7 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.common.NeoCurrencyFormatConfig;
 import com.etendoerp.go.portal.PortalDecisionService;
 import com.etendoerp.go.portal.PortalLink;
 import com.etendoerp.go.portal.PortalLinkService;
@@ -240,7 +241,7 @@ public class PortalDecisionEmailContractsTest {
     assertTrue(body, body.contains(">Acme<"));
     assertTrue(body, body.contains(">PR-7<"));
     assertTrue(body, body.contains("Importe total"));
-    // As the app shows it (instance separators, default "." and ","; symbol on its side).
+    // As the app shows it (the pinned "." and "," separators; symbol on its side).
     assertTrue(body, body.contains(">2.450,00\u00A0€<"));
     assertFalse(body, body.contains(">Motivo<"));
     // The Etendo footer closes the card.
@@ -308,7 +309,9 @@ public class PortalDecisionEmailContractsTest {
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   private PortalDecisionConfirmEmailContract confirm() {
-    return new PortalDecisionConfirmEmailContract(linkService, decisionService, () -> true);
+    // Separators and logo pinned: the test must not depend on Openbravo.properties or the DAL.
+    return new PortalDecisionConfirmEmailContract(linkService, decisionService, () -> true,
+        () -> new NeoCurrencyFormatConfig(".", ","), (clientId, orgId) -> Optional.empty());
   }
 
   private PortalDecisionNoticeEmailContract notice() {

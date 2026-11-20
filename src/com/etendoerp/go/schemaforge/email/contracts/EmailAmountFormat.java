@@ -33,7 +33,7 @@ import com.etendoerp.go.common.NeoCurrencyFormatConfig;
  * symbol and its side come from {@code C_Currency} ({@code Symbol},
  * {@code IsSymbolRightSide}, the flag the SPA's {@code symbolRightSide} map also reads): on the
  * right after a non-breaking space, on the left glued to the number. A currency without a symbol
- * shows its ISO code after the number. Rounded half-up to the currency's standard precision.</p>
+ * shows its ISO code after the number, also after a non-breaking space. Rounded half-up to the currency's standard precision.</p>
  *
  * <p>Deliberately <b>not</b> {@code DalEmailContractDataResolver.formatAmount}: that plain
  * "2450.00 EUR" stays in the document emails, which this change does not touch.</p>
@@ -41,7 +41,7 @@ import com.etendoerp.go.common.NeoCurrencyFormatConfig;
 final class EmailAmountFormat {
 
   /** Keeps "2.450,00" and "€" on one line. */
-  static final String NBSP = " ";
+  static final String NBSP = "\u00A0";
   private static final int DEFAULT_PRECISION = 2;
   private static final int MAX_PRECISION = 6;
   private static final int GROUP = 3;
@@ -50,16 +50,14 @@ final class EmailAmountFormat {
   }
 
   /**
-   * Formats an amount with the instance separators.
+   * Formats an amount with the given instance separators (the caller passes
+   * {@code NeoCurrencyFormatConfig.fromRuntime()}; a test passes its own).
    *
    * @param amount the amount, may be {@code null}
    * @param currency its currency, may be {@code null}
+   * @param separators the instance-wide separators
    * @return the formatted amount, or {@code null} when there is no amount
    */
-  static String format(BigDecimal amount, Currency currency) {
-    return format(amount, currency, NeoCurrencyFormatConfig.fromRuntime());
-  }
-
   static String format(BigDecimal amount, Currency currency, NeoCurrencyFormatConfig separators) {
     if (amount == null) {
       return null;
@@ -71,7 +69,7 @@ final class EmailAmountFormat {
     String symbol = currency == null ? null : StringUtils.trimToNull(currency.getSymbol());
     if (symbol == null) {
       String isoCode = currency == null ? null : StringUtils.trimToNull(currency.getISOCode());
-      return sign + number + (isoCode == null ? "" : " " + isoCode);
+      return sign + number + (isoCode == null ? "" : NBSP + isoCode);
     }
     boolean right = !Boolean.FALSE.equals(currency.isCurrencySymbolAtTheRight());
     return right ? sign + number + NBSP + symbol : sign + symbol + number;

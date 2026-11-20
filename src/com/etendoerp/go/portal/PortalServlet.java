@@ -151,6 +151,7 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String PARAM_OFFSET = "offset";
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
+  private static final String HEADER_CACHE_CONTROL = "Cache-Control";
   /** The portal token's own header, independent of the app's session credential scheme. */
   static final String HEADER_PORTAL_TOKEN = "X-Portal-Token";
   private static final String BEARER_PREFIX = "Bearer ";
@@ -196,11 +197,14 @@ public class PortalServlet extends HttpBaseServlet {
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    // Set before dispatch so no endpoint can ship without it, and before anything can commit the
-    // response. Invariant 5.
-    response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
-    response.setHeader("Pragma", "no-cache");
     String path = StringUtils.defaultString(request.getPathInfo());
+    // Set before dispatch so no endpoint can ship without it, and before anything can commit the
+    // response. Invariant 5. The one exception is the public logo of the emails (ETP-6209): a
+    // public, token-free image that sets its own cacheable headers, with no Pragma: no-cache.
+    if (!path.startsWith(PortalLogoReference.PATH)) {
+      response.setHeader(HEADER_CACHE_CONTROL, "no-store, no-cache, must-revalidate, private");
+      response.setHeader("Pragma", "no-cache");
+    }
     // The writes: the renewal and, Part C, a decision request and its confirmation.
     if ("POST".equalsIgnoreCase(request.getMethod()) && (path.equals(PATH_RENEW)
         || path.equals(PATH_DECISION_CONFIRM)
@@ -452,12 +456,14 @@ public class PortalServlet extends HttpBaseServlet {
     byte[] bytes = logo == null ? null : logo.getBindaryData();
     String mimeType = PortalLogoReference.servableMimeType(bytes);
     if (mimeType == null) {
+      // Not cacheable: a tenant that uploads its logo later must not stay on a cached 404.
+      response.setHeader(HEADER_CACHE_CONTROL, "no-store");
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       return;
     }
     response.setStatus(HttpServletResponse.SC_OK);
-    // Replaces the portal-wide no-store set in service(): a logo is public and changes rarely.
-    response.setHeader("Cache-Control", "public, max-age=86400");
+    // service() skips the portal-wide no-store for this route: a logo is public and changes rarely.
+    response.setHeader(HEADER_CACHE_CONTROL, "public, max-age=86400");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Content-Security-Policy", "default-src 'none'");
     response.setContentType(mimeType);

@@ -152,13 +152,15 @@ public final class DocumentDownloadTokenService {
   }
 
   /**
-   * Signs a value for a purpose other than a document download, with the same email signing secret
-   * (ETP-6209: the public logo reference of the portal emails), so no second secret has to be
-   * configured.
+   * Signs a value for a purpose other than a document download, from the same email signing secret
+   * (ETP-6209: the public logo reference of the portal emails, the KPI third-party pseudonym), so no
+   * second secret has to be configured.
    *
-   * <p><b>Domain-separated:</b> the MAC covers {@code purpose + ":" + value}. A download token's MAC
-   * covers a base64url JSON payload, an alphabet with no {@code ':'}, so a detached signature can
-   * never validate as a download token and the other way round.</p>
+   * <p><b>Separated at the key, not at the message.</b> Each purpose signs with its own key,
+   * {@code HMAC(secret, "detached:" + purpose)}, never with the secret itself, which only download
+   * tokens use. A detached signature therefore cannot validate as a download token (nor one purpose
+   * as another) whatever the two messages look like — it does not rely on how either is encoded.
+   * Download tokens are signed exactly as before, so links already sent keep working.</p>
    *
    * @param purpose a fixed label naming what the signature is for, such as {@code portal-logo:v1}
    * @param value the value to sign
@@ -170,7 +172,8 @@ public final class DocumentDownloadTokenService {
     if (StringUtils.isAnyBlank(secret, purpose, value)) {
       return Optional.empty();
     }
-    return Optional.of(sign(purpose + ":" + value, secret));
+    byte[] purposeKey = mac(secret.getBytes(StandardCharsets.UTF_8), "detached:" + purpose);
+    return Optional.of(base64Url(mac(purposeKey, value)));
   }
 
   /**
@@ -262,10 +265,14 @@ public final class DocumentDownloadTokenService {
   }
 
   private static String sign(String payloadPart, String secret) {
+    return base64Url(mac(secret.getBytes(StandardCharsets.UTF_8), payloadPart));
+  }
+
+  private static byte[] mac(byte[] key, String data) {
     try {
       Mac mac = Mac.getInstance(HMAC_ALGORITHM);
-      mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM));
-      return base64Url(mac.doFinal(payloadPart.getBytes(StandardCharsets.UTF_8)));
+      mac.init(new SecretKeySpec(key, HMAC_ALGORITHM));
+      return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     } catch (Exception e) {
       throw new OBException("Could not sign document download token", e);
     }

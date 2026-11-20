@@ -198,9 +198,9 @@ public final class EmailLayout {
           .append(EmailPalette.LIGHT_DIVIDER).append(";font-family:").append(FONT_STACK)
           .append(";font-size:14px;line-height:20px;font-weight:600;text-align:right;color:")
           .append(EmailPalette.LIGHT_TEXT_STRONG).append(";\">").append(escape(detail.getValue()))
-          .append("</td></tr>");
+          .append(ROW_CLOSE);
     }
-    html.append("</table>");
+    html.append(TABLE_CLOSE);
   }
 
   private static void appendCta(StringBuilder html, EmailContent content) {
@@ -226,7 +226,7 @@ public final class EmailLayout {
         .append(FONT_STACK).append(";font-size:14px;line-height:24px;font-weight:500;color:")
         .append(EmailPalette.LIGHT_CTA_LABEL).append(";text-decoration:none;\">")
         .append(escape(content.getCtaLabel())).append("</a><!--<![endif]-->")
-        .append("</td></tr></table>");
+        .append(ROW_CLOSE).append(TABLE_CLOSE);
     appendLinkFallback(html, content.getLinkFallbackText(), url);
   }
 

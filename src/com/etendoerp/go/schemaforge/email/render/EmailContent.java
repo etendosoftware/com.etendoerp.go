@@ -54,6 +54,7 @@ public final class EmailContent {
   private final String ctaNote;
   private final String warningTitle;
   private final String warningText;
+  private final String language;
 
   private EmailContent(Builder builder) {
     this.greeting = builder.greeting;
@@ -77,6 +78,7 @@ public final class EmailContent {
     this.ctaNote = builder.ctaNote;
     this.warningTitle = builder.warningTitle;
     this.warningText = builder.warningText;
+    this.language = builder.language;
   }
 
   /**
@@ -289,6 +291,15 @@ public final class EmailContent {
   }
 
   /**
+   * Language of the email, for the card document's {@code lang} attribute.
+   *
+   * @return a code such as {@code es_ES}, or {@code null}
+   */
+  public String getLanguage() {
+    return language;
+  }
+
+  /**
    * Indicates whether the layout should render the call-to-action button and its link fallback.
    *
    * @return {@code true} when both a label and a URL are present
@@ -394,6 +405,7 @@ public final class EmailContent {
     private String ctaNote;
     private String warningTitle;
     private String warningText;
+    private String language;
 
     /**
      * Sets the greeting line.
@@ -618,6 +630,18 @@ public final class EmailContent {
     public Builder warning(String heading, String text) {
       this.warningTitle = StringUtils.trimToNull(heading);
       this.warningText = StringUtils.trimToNull(text);
+      return this;
+    }
+
+    /**
+     * Sets the email's language. Read by the card design only, for its {@code lang} attribute;
+     * the standard letter's output does not change.
+     *
+     * @param value a code such as {@code es_ES}
+     * @return this builder
+     */
+    public Builder language(String value) {
+      this.language = StringUtils.trimToNull(value);
       return this;
     }
 

@@ -17,7 +17,9 @@
 package com.etendoerp.go.schemaforge.email.contracts;
 
 import java.util.Optional;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -27,6 +29,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.common.NeoCurrencyFormatConfig;
 import com.etendoerp.go.portal.PortalDecisionScope;
 import com.etendoerp.go.portal.PortalDecisionService;
 import com.etendoerp.go.portal.PortalDocumentKind;
@@ -83,6 +86,8 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
   private final PortalLinkService linkService;
   private final PortalDecisionService decisionService;
   private final BooleanSupplier portalCaller;
+  private final Supplier<NeoCurrencyFormatConfig> separators;
+  private final BiFunction<String, String, Optional<PortalLogoReference.PublicLogo>> logoFinder;
 
   PortalDecisionConfirmEmailContract() {
     this(new PortalLinkService(), new PortalDecisionService(), PortalDecisionScope::isActive);
@@ -90,9 +95,26 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
 
   PortalDecisionConfirmEmailContract(PortalLinkService linkService,
       PortalDecisionService decisionService, BooleanSupplier portalCaller) {
+    this(linkService, decisionService, portalCaller, NeoCurrencyFormatConfig::fromRuntime,
+        PortalLogoReference::find);
+  }
+
+  /**
+   * Full constructor: the instance separators and the public logo lookup are seams, so a test
+   * pins them instead of depending on runtime configuration or the DAL.
+   *
+   * @param separators the instance-wide amount separators
+   * @param logoFinder the tenant's public logo, by client id and organization id
+   */
+  PortalDecisionConfirmEmailContract(PortalLinkService linkService,
+      PortalDecisionService decisionService, BooleanSupplier portalCaller,
+      Supplier<NeoCurrencyFormatConfig> separators,
+      BiFunction<String, String, Optional<PortalLogoReference.PublicLogo>> logoFinder) {
     this.linkService = linkService;
     this.decisionService = decisionService;
     this.portalCaller = portalCaller;
+    this.separators = separators;
+    this.logoFinder = logoFinder;
   }
 
   @Override
@@ -168,7 +190,7 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
           "A decision link could not be built: the app base URL may not be configured");
     }
     String tenantName = StringUtils.defaultString(session.getClientName());
-    QuotationFacts quotation = quotationFacts(quotationId);
+    QuotationFacts quotation = quotationFacts(quotationId, separators.get());
     EmailContent content = buildContent(decision, language, tenantName,
         issuer(session, tenantName), quotation, reasonValue(reasonCode, reasonText, language),
         minted.get().getUrl());
@@ -247,7 +269,8 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
     }
     // The button names the decision ("Confirmar rechazo"): one click on it applies it (the
     // landing auto-submits the confirmation; a bare GET of the link applies nothing).
-    return content.ctaNote(EmailMessages.get(CONFIRM_PREFIX + "note." + decision, language))
+    return content.language(language)
+        .ctaNote(EmailMessages.get(CONFIRM_PREFIX + "note." + decision, language))
         .cta(EmailMessages.get(CONFIRM_PREFIX + "cta." + decision, language), url)
         .linkFallbackText(EmailMessages.get(CONFIRM_PREFIX + "fallback", language))
         .warning(EmailMessages.get(CONFIRM_PREFIX + "warning.title", language),
@@ -262,9 +285,9 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
    * its token-free public URL ({@link PortalLogoReference}) — never the portal's own
    * {@code /logo}, whose token must not travel in an image request. No logo: the initials.
    */
-  private static EmailContent.Builder issuer(PortalLink session, String tenantName) {
+  private EmailContent.Builder issuer(PortalLink session, String tenantName) {
     EmailContent.Builder content = EmailContent.builder();
-    Optional<PortalLogoReference.PublicLogo> logo = PortalLogoReference.find(
+    Optional<PortalLogoReference.PublicLogo> logo = logoFinder.apply(
         session.getClientId(), session.getOrganizationId());
     if (logo.isPresent()) {
       content.issuer(tenantName, logo.get().getUrl())
@@ -278,7 +301,7 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
   /**
    * The Motivo column: the customer's portal reason in the email's language — never the tenant's
    * internal reject reason. For "Otros" it is the text the customer typed (whitespace collapsed,
-   * cut to {@value #MAX_REASON_TEXT_CHARS} characters with an ellipsis; the layout escapes it),
+   * cut to {@value #MAX_REASON_TEXT_CHARS} code points with an ellipsis; the layout escapes it),
    * falling back to the "Otros" label when that text is empty.
    *
    * @param reasonCode the portal reason code, or {@code null} (accept)
@@ -292,16 +315,28 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
     }
     String text = StringUtils.trimToNull(StringUtils.normalizeSpace(reasonText));
     if (PortalDecisionService.REASON_OTHER.equals(reasonCode) && text != null) {
-      return StringUtils.abbreviate(text, ELLIPSIS, MAX_REASON_TEXT_CHARS);
+      return truncate(text);
     }
     return EmailMessages.get(KEY_PREFIX + "reason." + reasonCode, language);
+  }
+
+  /**
+   * Cuts a text to {@link #MAX_REASON_TEXT_CHARS} code points, the ellipsis included, never
+   * splitting a surrogate pair (an emoji cut in half renders as a broken glyph).
+   */
+  static String truncate(String text) {
+    int codePoints = text.codePointCount(0, text.length());
+    if (codePoints <= MAX_REASON_TEXT_CHARS) {
+      return text;
+    }
+    return text.substring(0, text.offsetByCodePoints(0, MAX_REASON_TEXT_CHARS - 1)) + ELLIPSIS;
   }
 
   /**
    * The quotation's number and total, read in admin mode (the portal has no Etendo session). The
    * total is formatted as the app shows it ("2.450,00 €", {@link EmailAmountFormat}).
    */
-  static QuotationFacts quotationFacts(String quotationId) {
+  static QuotationFacts quotationFacts(String quotationId, NeoCurrencyFormatConfig separators) {
     OBContext.setAdminMode(true);
     try {
       Order quotation = OBDal.getInstance().get(Order.class, quotationId);
@@ -309,7 +344,8 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
         return new QuotationFacts("", null);
       }
       return new QuotationFacts(StringUtils.defaultString(quotation.getDocumentNo()),
-          EmailAmountFormat.format(quotation.getGrandTotalAmount(), quotation.getCurrency()));
+          EmailAmountFormat.format(quotation.getGrandTotalAmount(), quotation.getCurrency(),
+              separators));
     } finally {
       OBContext.restorePreviousMode();
     }
