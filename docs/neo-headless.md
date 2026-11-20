@@ -1882,11 +1882,11 @@ Classic processes return OBError results, translated to:
 
 Errors from either type return HTTP 400 with `"status": "error"`.
 
-**Bundle context (ETP-5669).** For a `DalBaseProcess`, `NeoProcessService.newClassicBundle` builds the
-`ProcessBundle` with a `ProcessContext` taken from `OBContext` and calls
-`init(new DalConnectionProvider(false))`, then sets the parameters (`init` resets them). The
-`org.openbravo.scheduling.Process` path (`executeSchedulingProcess`) is unchanged: its bundle has no
-`init`, so `getConnection()` is `null` there — a known limitation.
+**Bundle context (ETP-5669, ETP-5809).** Both a `DalBaseProcess` and an
+`org.openbravo.scheduling.Process` (`executeSchedulingProcess`) get their `ProcessBundle` from
+`NeoProcessService.newClassicBundle`: a `ProcessContext` taken from `OBContext` and
+`init(new DalConnectionProvider(false))`, then the parameters are set (`init` resets them). So
+`getContext()` and `getConnection()` are non-null on both paths.
 
 ### 4.6a Attachments Endpoint (ETP-4315)
 
