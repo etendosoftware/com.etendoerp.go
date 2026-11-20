@@ -1,0 +1,250 @@
+{
+  "_source": {
+    "file": "schema_forge_core/cli/test/fixtures/property-name-contract.json",
+    "note": "Single source of truth for the ETP-5811 contract. Re-copy into com.etendoerp.go (src-test resources, property-name-contract.json) when it changes; the Java test checks this header.",
+    "expectedFrom": "DAL property names from the generated entities (src-gen javadoc: Property <name> stored in column <col> in table <tbl>); inputs from AD_COLUMN sourcedata (Name, ColumnName, IsKey, module).",
+    "consumers": [
+      "schema_forge_core/cli/test/property-name-contract.test.js (toPropertyName)",
+      "com.etendoerp.go NeoButtonActionHelperTest (propertyNameOf)"
+    ],
+    "vendoredFrom": "schema_forge_core @ afc098f36 cli/test/fixtures/property-name-contract.json"
+  },
+  "cases": [
+    {
+      "table": "gl_journal",
+      "columnName": "DocAction",
+      "name": "Document Action",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "documentAction",
+      "category": "ETP-5669 button (Simple G/L Journal Document Action)"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "GL_Journal_ID",
+      "name": "Journal Entry",
+      "isKey": true,
+      "isCoreModule": true,
+      "expected": "id",
+      "category": "primary key"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "IsActive",
+      "name": "Active",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "active",
+      "category": "Name differs from ColumnName (Active)"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "AD_Client_ID",
+      "name": "Client",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "client",
+      "category": "FK, Name differs from _ID column"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "C_DocType_ID",
+      "name": "Document Type",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "documentType",
+      "category": "FK, Name differs from _ID column"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "C_Period_ID",
+      "name": "Period",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "period",
+      "category": "FK, Name differs from _ID column"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "DocumentNo",
+      "name": "Document No.",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "documentNo",
+      "category": "punctuation (trailing dot)"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "Posted",
+      "name": "Posted",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "posted",
+      "category": "plain name"
+    },
+    {
+      "table": "gl_journal",
+      "columnName": "Processed",
+      "name": "Processed",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "processed",
+      "category": "plain name"
+    },
+    {
+      "table": "c_order",
+      "columnName": "AD_OrgTrx_ID",
+      "name": "Trx Organization",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "trxOrganization",
+      "category": "FK, multi-word Name"
+    },
+    {
+      "table": "c_order",
+      "columnName": "A_Asset_ID",
+      "name": "Asset",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "asset",
+      "category": "FK, single-letter prefix in ColumnName"
+    },
+    {
+      "table": "a_amortizationline",
+      "columnName": "Line",
+      "name": "Line No.",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "lineNo",
+      "category": "punctuation (trailing dot)"
+    },
+    {
+      "table": "a_asset",
+      "columnName": "AD_User_ID",
+      "name": "User/Contact",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "userContact",
+      "category": "punctuation (slash)"
+    },
+    {
+      "table": "a_asset",
+      "columnName": "Amortizationvalueamt",
+      "name": "Depreciation Amt.",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "depreciationAmt",
+      "category": "punctuation (trailing dot and spaces)"
+    },
+    {
+      "table": "a_asset",
+      "columnName": "Annualamortizationpercentage",
+      "name": "Annual Depreciation %",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "annualDepreciation",
+      "category": "punctuation (percent sign)"
+    },
+    {
+      "table": "a_asset",
+      "columnName": "Is30DayMonth",
+      "name": "Every Month is 30 Days",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "everyMonthIs30Days",
+      "category": "digits inside the name"
+    },
+    {
+      "table": "ad_client",
+      "columnName": "User1_Acctdim_Breakdown",
+      "name": "User1_Acctdim_Breakdown",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "user1AcctdimBreakdown",
+      "category": "underscore Name with digit, no spaces"
+    },
+    {
+      "table": "c_element",
+      "columnName": "Add1Tree_ID",
+      "name": "Additional Tree (1)",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "additionalTree1",
+      "category": "parentheses and digit in Name"
+    },
+    {
+      "table": "ad_module",
+      "columnName": "IsDefault",
+      "name": "Default",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "default",
+      "category": "Java reserved word as property (default)"
+    },
+    {
+      "table": "ad_createfact_template",
+      "columnName": "AD_Table_ID",
+      "name": "AD_Table_ID",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "table",
+      "category": "Name equal to ColumnName: _ID and AD_ prefix stripped"
+    },
+    {
+      "table": "a_asset",
+      "columnName": "EM_Etgo_Amortization_Status",
+      "name": "EM_Etgo_Amortization Status",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "etgoAmortizationStatus",
+      "category": "module column (EM_ prefix): extractor passes isCoreModule=true because AD_Column.AD_Module_ID != 0, so the EM_ prefix is stripped"
+    },
+    {
+      "table": "ad_client",
+      "columnName": "EM_Psd2_Api_Key",
+      "name": "EM_Psd2_Api Key",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "psd2ApiKey",
+      "category": "module column (EM_ prefix): extractor passes isCoreModule=true because AD_Column.AD_Module_ID != 0, so the EM_ prefix is stripped"
+    },
+    {
+      "table": "ad_org",
+      "columnName": "EM_Etsg_Add_Certificate",
+      "name": "EM_Etsg_Add Certificate",
+      "isKey": false,
+      "isCoreModule": true,
+      "expected": "etsgAddCertificate",
+      "category": "module column (EM_ prefix): extractor passes isCoreModule=true because AD_Column.AD_Module_ID != 0, so the EM_ prefix is stripped"
+    },
+    {
+      "table": "etgo_incoming_document",
+      "columnName": "Etgo_Incoming_Document_ID",
+      "name": "Etgo_Incoming_Document_ID",
+      "isKey": true,
+      "isCoreModule": true,
+      "expected": "id",
+      "category": "primary key of a module-owned table"
+    },
+    {
+      "table": "ad_clientinfo",
+      "columnName": "AD_Client_ID",
+      "name": "Client",
+      "isKey": true,
+      "isCoreModule": true,
+      "expected": "client",
+      "category": "KEY column that is also an FK: DAL keeps the FK property",
+      "knownLimitation": "toPropertyName maps every IsKey column to 'id', but the DAL keeps the FK property when the key column is also a foreign key (the extractor could detect this from the column AD reference, but the fix would change generated keys; deferred to a follow-up issue (to be opened, not yet referenced here))"
+    },
+    {
+      "table": "s_timeexpenseline_v",
+      "columnName": "S_TimeExpenseLine_ID",
+      "name": "Expense Line",
+      "isKey": true,
+      "isCoreModule": true,
+      "expected": "sheetLine",
+      "category": "KEY column that is also an FK: DAL keeps the FK property",
+      "knownLimitation": "toPropertyName maps every IsKey column to 'id', but the DAL keeps the FK property when the key column is also a foreign key (the extractor could detect this from the column AD reference, but the fix would change generated keys; deferred to a follow-up issue (to be opened, not yet referenced here))"
+    }
+  ]
+}
