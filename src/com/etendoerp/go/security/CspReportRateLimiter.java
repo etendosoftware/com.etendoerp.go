@@ -56,11 +56,10 @@ final class CspReportRateLimiter {
     if (globalCount >= globalLimit) {
       return false;
     }
-    if (perClient.containsKey(client) || perClient.size() < MAX_TRACKED_CLIENTS) {
-      if (perClient.merge(client, 1, Integer::sum) > perClientLimit) {
-        perClient.merge(client, -1, Integer::sum);
-        return false;
-      }
+    boolean tracked = perClient.containsKey(client) || perClient.size() < MAX_TRACKED_CLIENTS;
+    if (tracked && perClient.merge(client, 1, Integer::sum) > perClientLimit) {
+      perClient.merge(client, -1, Integer::sum);
+      return false;
     }
     globalCount++;
     return true;
