@@ -54,7 +54,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 /**
  * Unit tests for {@link InvoiceLineLinker}.
  *
- * <p>Covers the link methods plus the null-safety fallback used when the
+ * <p>Covers the link methods, the undoing of one link (ETP-6002 CP-30), plus the null-safety
+ * fallback used when the
  * current {@link OBContext} has no user (background processes / system init), and the sales
  * "create invoice from order" planning: the shipment lines are planned before the invoice lines
  * exist, then each new line takes the oldest planned shipment line no line of the invoice holds.
@@ -267,6 +268,50 @@ public class InvoiceLineLinkerTest {
       assertTrue(insert, insert.startsWith("INSERT INTO " + table + " (" + table + "_id,"));
       assertTrue(insert, insert.contains("NOT EXISTS (SELECT 1 FROM " + table + " mt"));
       assertFalse(insert, insert.contains(other));
+    }
+  }
+
+  // ── unlinkInvoiceLineFromInOutLine (ETP-6002 CP-30) ─────────────────────
+
+  /**
+   * Undoing the link of a shipment line removed for exceeding its invoice line clears the column
+   * ONLY when it points at that movement line — never the link of another movement — and deletes
+   * the pair's row from the direction's match table, not the other one.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void unlinkInvoiceLineFromInOutLineUndoesOnlyThatPairInTheColumnAndTheMatchTable() {
+    for (InOutInvoiceLinks.MatchTable matchTable : InOutInvoiceLinks.MatchTable.values()) {
+      String other = matchTable == InOutInvoiceLinks.MatchTable.SALES ? "m_matchinv" : "m_matchsi";
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+        OBDal dal = mock(OBDal.class);
+        Session session = mock(Session.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(session);
+        NativeQuery query = mock(NativeQuery.class);
+        when(session.createNativeQuery(anyString())).thenReturn(query);
+        when(query.setParameter(anyString(), any())).thenReturn(query);
+        obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+        InvoiceLineLinker.unlinkInvoiceLineFromInOutLine("il-1", "iol-1", matchTable);
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        verify(session, times(2)).createNativeQuery(sqlCaptor.capture());
+        String clear = sqlCaptor.getAllValues().get(0);
+        assertTrue(clear, clear.startsWith("UPDATE C_InvoiceLine SET M_InOutLine_ID = NULL"));
+        assertTrue(clear, clear.contains("C_InvoiceLine_ID = :invoiceLineId")
+            && clear.contains("AND M_InOutLine_ID = :inoutLineId"));
+        String delete = sqlCaptor.getAllValues().get(1);
+        assertTrue(delete, delete.startsWith("DELETE FROM " + matchTable.tableName() + " "));
+        assertTrue(delete, delete.contains("c_invoiceline_id = :invoiceLineId")
+            && delete.contains("m_inoutline_id = :inoutLineId"));
+        assertFalse(delete, delete.contains(other));
+        verify(query, times(2)).setParameter(eq("invoiceLineId"), eq("il-1"));
+        verify(query, times(2)).setParameter(eq("inoutLineId"), eq("iol-1"));
+        verify(query).setParameter(eq("userId"), eq(SYSTEM_USER_ID));
+        verify(query, times(2)).executeUpdate();
+      }
     }
   }
 

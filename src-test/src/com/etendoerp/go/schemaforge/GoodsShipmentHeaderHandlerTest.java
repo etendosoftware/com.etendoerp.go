@@ -1315,6 +1315,26 @@ public class GoodsShipmentHeaderHandlerTest {
         sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
   }
 
+  /**
+   * ETP-6002: two shipment lines of 1 linked to one invoice line of 2 (the column on the first,
+   * M_MatchSI on the second) plus a loose line of 5 read 43% instead of 29%: the direct arm gave
+   * the first line the whole invoice line. Each line's invoiced quantity is now capped at what it
+   * moved before it is summed.
+   */
+  @Test
+  public void buildInvoiceStatusSql_capsEachLineAtWhatItMoved() throws Exception {
+    Method m = GoodsShipmentHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = ((String) m.invoke(null, "iol.m_inout_id = ?")).replaceAll("\\s+", " ");
+
+    assertTrue("each line's GREATEST of the arms must be capped at its own moved quantity",
+        sql.contains("SUM(LEAST(GREATEST( COALESCE(msi_qty.qtymatched, 0), "
+            + "COALESCE(direct_qty.qtyinvoiced, 0), COALESCE(ol_qty.qtyinvoiced, 0) ), "
+            + "ABS(iol.movementqty)))"));
+    assertTrue("the percentage keeps its ceiling", sql.contains("LEAST(100, ROUND("));
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test

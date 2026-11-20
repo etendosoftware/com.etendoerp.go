@@ -109,8 +109,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     final boolean offersClassicPending;
     /**
      * Whether a line pends by its own movement links ({@link #byDirectLinks}, ETP-6002 CP-22)
-     * instead of by what its order line delivered. Such a policy also gives
-     * {@code availableInvoices} rows (with {@code detail}) their pending {@code amount}.
+     * instead of by what its order line delivered.
      */
     final boolean pendsByDirectLinks;
 
@@ -147,6 +146,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   }
 
   static final String PARAM_INVOICE_ID = "invoiceId";
+  /** {@code availableInvoices}: unit price x pending quantity over the invoice's pending lines. */
+  static final String KEY_AMOUNT = "amount";
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_INVOICES = 50;
   private static final String INVOICE = "Invoice";
@@ -187,26 +188,26 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         "Lists the completed " + invoice + "s of this " + doc + "'s business partner and "
             + "currency with a line still to " + (sales ? "ship" : "receive") + ": {data:[{id, "
             + "documentNo, date, businessPartner, businessPartner$_identifier, currency, "
-            + "pendingLines, order}], hasMore, limit, scanLimit}, newest created first; order is "
-            + "the invoice's order id or null." + which + " hasMore true means the list may be "
+            + "pendingLines, order, amount}], hasMore, limit, scanLimit}, newest created first; "
+            + "order is the invoice's order id or null; amount is unit price x pendingQuantity "
+            + "summed over the lines with a positive pending, at the invoice currency's precision "
+            + "(the import popup's row total)." + which + " hasMore true means the list may be "
             + "incomplete. limit (1 to " + ImportListing.MAX_LIMIT + "), offset and "
             + "includeCovered are optional; with limit or offset the answer adds offset and "
-            + "nextOffset (page on while hasMore); detail adds creationDate"
-            + (sales ? " and amount (unit price x pendingQuantity summed over the lines with a "
-                + "positive pending, at the invoice currency's precision: the import popup's row "
-                + "total)" : "")
-            + ". includeCovered also lists the invoices with nothing left, at pendingLines 0. "
+            + "nextOffset (page on while hasMore); detail adds creationDate. "
+            + "includeCovered also lists the invoices with nothing left, at pendingLines 0. "
             + "Step 1." + flow,
         ImportListing.listParams(MAX_INVOICES, "creationDate (ISO instant, UTC)"))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + invoice + " to " + (sales ? "ship" : "receive") + " here: "
             + "{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity, "
-            + "invoicedQuantity, orderLine, linked, inDraftDocuments"
-            + (sales ? ", unitPrice" : "") + "}], hasMore:false}, where "
+            + "invoicedQuantity, orderLine, linked, inDraftDocuments, unitPrice}], hasMore:false}, "
+            + "where unitPrice is the invoice line's net unit price and "
             + pendingRule + "; orderLine is that order line id or null, linked whether the invoice "
             + "line already points at a " + doc + " line, and inDraftDocuments the document "
-            + "numbers of the OTHER draft " + doc + "s holding its order line. Only the lines with "
+            + "numbers of the OTHER draft " + doc + "s holding its order line or that the line "
+            + "is linked to. Only the lines with "
             + "something pending are listed unless includeCovered is true. Step 2." + flow,
         ImportListing.linesParams(null,
             NeoActionContract.Param.required(PARAM_INVOICE_ID, NeoActionContract.TYPE_STRING,
@@ -279,9 +280,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         return null;
       }
       JSONObject row = availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
-      if (request.detail && policy.pendsByDirectLinks && !classic) {
-        row.put("amount", DirectLinkPending.pendingAmount(invoice, lines));
-      }
+      // ETP-5828 QA UI-9: both directions, with or without detail, the popup's row total.
+      row.put(KEY_AMOUNT, DirectLinkPending.pendingAmount(invoice, lines));
       return row;
     }, request);
   }
@@ -349,10 +349,9 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       ImportListing.putNullable(row, "orderLine", state.orderLineId);
       row.put("linked", line.getGoodsShipmentLine() != null);
       row.put("inDraftDocuments", new JSONArray(state.draftDocuments));
-      if (policy.pendsByDirectLinks && !classic) {
-        // ETP-6002 CP-27: the popup's row total follows the loaded lines, priced like an order's.
-        ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
-      }
+      // ETP-6002 CP-27, both directions since ETP-5828 QA UI-9: the popup's row total follows the
+      // loaded lines, priced like an order's.
+      ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
       rows.put(row);
     }
     return completePage(rows);
@@ -413,8 +412,9 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           ? draftTotals(target, orderLineIds, policy).others : Collections.emptyMap();
       PendingResolver.Source source = followUp != null ? followUp.get(invoice.getId())
           : loadFollowUpSources(List.of(invoice.getId()), isSales(target)).get(invoice.getId());
-      return DirectLinkPending.lineStates(lines, orderLineOf,
+      List<LineState> states = DirectLinkPending.lineStates(lines, orderLineOf,
           DirectLinkPending.pendingByLine(source), others);
+      return withDraftNotes ? withLinkedDrafts(target, states) : states;
     }
     DraftTotals drafts = draftTotals(target, orderLineIds, policy);
     List<LineState> states = new ArrayList<>();
@@ -425,7 +425,37 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           pending.max(BigDecimal.ZERO), orderLine == null ? Set.of()
               : drafts.others.getOrDefault(orderLine.getId(), Set.of())));
     }
-    return states;
+    return withDraftNotes ? withLinkedDrafts(target, states) : states;
+  }
+
+  /**
+   * {@code states} with each line's {@code inDraftDocuments} also naming the OTHER draft movement
+   * its own link ({@code C_InvoiceLine.M_InOutLine_ID}) points at (ETP-5828): a line without an
+   * order line, linked by «Añadir desde Factura» to another draft, otherwise came at 0 with no
+   * name. A link to a completed movement adds nothing: that quantity has moved.
+   */
+  private List<LineState> withLinkedDrafts(ShipmentInOut target, List<LineState> states) {
+    List<String> linkedIds = new ArrayList<>();
+    for (LineState state : states) {
+      if (state.line.getGoodsShipmentLine() != null) {
+        linkedIds.add(state.line.getId());
+      }
+    }
+    Map<String, String> linkedDraft = linkedIds.isEmpty() ? Collections.emptyMap()
+        : draftMovementsLinkedTo(linkedIds, target.getId());
+    if (linkedDraft.isEmpty()) {
+      return states;
+    }
+    List<LineState> merged = new ArrayList<>();
+    for (LineState state : states) {
+      String documentNo = linkedDraft.get(state.line.getId());
+      Set<String> names = new LinkedHashSet<>(state.draftDocuments);
+      if (documentNo != null) {
+        names.add(documentNo);
+      }
+      merged.add(new LineState(state.line, state.orderLineId, state.pending, names));
+    }
+    return merged;
   }
 
   /** The order line each of {@code lines} resolves to, keyed by invoice line id (none: absent). */
@@ -633,6 +663,36 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       query.setParameter("cur", currencyId);
     }
     return new ArrayList<>(query.list());
+  }
+
+  /**
+   * The HQL behind {@link #draftMovementsLinkedTo}: per invoice line, the document number of the
+   * active DRAFT shipment / receipt, other than the target, its {@code M_InOutLine_ID} points at,
+   * in the session's client and the role's readable organizations. Exposed so a test parses it
+   * against the real model.
+   */
+  static final String DRAFT_MOVEMENTS_LINKED_HQL = "select il.id, io.documentNo "
+      + "from InvoiceLine il join il.goodsShipmentLine ml join ml.shipmentReceipt io "
+      + "where il.id in (:ids) and ml.active = true and io.active = true "
+      + "and io.documentStatus = 'DR' and io.id <> :target and io.client.id = :client "
+      + "and io.organization.id in (:orgs)";
+
+  /**
+   * Seam: invoice line id to the document number of the OTHER draft shipment / receipt its own
+   * link points at; a line linked to none (or to a completed one) is absent.
+   */
+  protected Map<String, String> draftMovementsLinkedTo(Collection<String> invoiceLineIds,
+      String targetId) {
+    Map<String, String> linked = new HashMap<>();
+    for (Object[] row : OBDal.getInstance().getSession()
+        .createQuery(DRAFT_MOVEMENTS_LINKED_HQL, Object[].class)
+        .setParameterList("ids", invoiceLineIds).setParameter("target", targetId)
+        .setParameter("client", sessionClientId())
+        .setParameterList("orgs", Arrays.asList(OBContext.getOBContext().getReadableOrganizations()))
+        .list()) {
+      linked.put((String) row[0], (String) row[1]);
+    }
+    return linked;
   }
 
   /**

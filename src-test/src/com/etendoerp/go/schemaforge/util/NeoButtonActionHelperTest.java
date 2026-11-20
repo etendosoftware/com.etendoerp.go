@@ -31,6 +31,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -66,6 +67,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoServlet;
@@ -1131,6 +1133,63 @@ class NeoButtonActionHelperTest {
       when(tabEntity.getADTab()).thenReturn(null);
 
       assertEquals(0, invoke().length());
+    }
+  }
+
+  /**
+   * ETP-5811 contract: the same case table that pins schema_forge_core's toPropertyName
+   * (cli/test/fixtures/property-name-contract.json there; vendored here) is run through
+   * propertyNameOf. The expected names are real DAL property names. This harness has no
+   * booted DAL model, so the Entity/Property are mocked and the test only pins the lookup
+   * path (DBTableName + DBColumnName -> Property#getName, never derived from the AD Name);
+   * the DAL-derived expected values are what the JS test enforces on the other half.
+   */
+  @Nested
+  @DisplayName("propertyNameOf contract (ETP-5811)")
+  class PropertyNameContract {
+
+    private static final String FIXTURE = "property-name-contract.json";
+
+    private JSONObject fixture() throws Exception {
+      try (InputStream in = NeoButtonActionHelperTest.class.getResourceAsStream(FIXTURE)) {
+        assertNotNull(in, "vendored fixture missing: " + FIXTURE);
+        return new JSONObject(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+      }
+    }
+
+    @Test
+    void testFixtureNamesItsSource() throws Exception {
+      JSONObject source = fixture().getJSONObject("_source");
+
+      assertEquals("schema_forge_core/cli/test/fixtures/property-name-contract.json",
+          source.getString("file"));
+      assertTrue(source.getString("vendoredFrom").startsWith("schema_forge_core @ "));
+    }
+
+    @Test
+    void testPropertyNameOfReturnsTheDalNameForEveryCase() throws Exception {
+      JSONArray cases = fixture().getJSONArray("cases");
+      assertTrue(cases.length() > 0);
+      for (int i = 0; i < cases.length(); i++) {
+        JSONObject c = cases.getJSONObject(i);
+        String tableName = c.getString("table");
+        String columnName = c.getString("columnName");
+
+        Entity dalEntity = mock(Entity.class);
+        Property property = mock(Property.class);
+        when(property.getName()).thenReturn(c.getString("expected"));
+        when(ModelProvider.getInstance().getEntityByTableName(tableName)).thenReturn(dalEntity);
+        when(dalEntity.getPropertyByColumnName(columnName)).thenReturn(property);
+        Table adTable = mock(Table.class);
+        when(adTable.getDBTableName()).thenReturn(tableName);
+        Column column = mock(Column.class);
+        when(column.getTable()).thenReturn(adTable);
+        when(column.getDBColumnName()).thenReturn(columnName);
+
+        // ModelProvider is already statically mocked by the outer setUp.
+        assertEquals(c.getString("expected"), NeoButtonActionHelper.propertyNameOf(column),
+            tableName + "." + columnName);
+      }
     }
   }
 }

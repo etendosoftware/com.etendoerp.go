@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -67,8 +66,6 @@ public final class NeoAttachmentsDownloader {
 
   private static final Logger log = LogManager.getLogger(NeoAttachmentsDownloader.class);
 
-  private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
-  private static final String ZIP_CONTENT_TYPE = "application/zip";
   private static final String ERR_IDS_REQUIRED = "ids must name at least one attachment";
 
   private NeoAttachmentsDownloader() {
@@ -105,9 +102,7 @@ public final class NeoAttachmentsDownloader {
       aim.download(attachmentId, buffer);
 
       response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(resolveContentType(attachment.getDataType()));
-      response.setHeader(NeoAttachmentsHelper.CONTENT_DISPOSITION,
-          buildContentDisposition(attachment.getName()));
+      NeoDownloadHeaders.apply(response, attachment.getName());
       byte[] bytes = buffer.toByteArray();
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
@@ -211,9 +206,7 @@ public final class NeoAttachmentsDownloader {
       byte[] bytes = buildAttachmentsZip(recordAttachments, requestedIds);
 
       response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(ZIP_CONTENT_TYPE);
-      response.setHeader(NeoAttachmentsHelper.CONTENT_DISPOSITION,
-          buildContentDisposition("attachments_" + recordId + ".zip"));
+      NeoDownloadHeaders.apply(response, "attachments_" + recordId + ".zip");
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
         out.write(bytes);
@@ -319,25 +312,6 @@ public final class NeoAttachmentsDownloader {
 
   // ── HTTP plumbing (used only by the streaming methods above) ────────────────
 
-  private static String resolveContentType(String dataType) {
-    return StringUtils.isBlank(dataType) ? DEFAULT_CONTENT_TYPE : dataType;
-  }
-
-  /**
-   * Builds an RFC 5987 compliant {@code Content-Disposition} header so that
-   * UTF-8 filenames survive across browsers.
-   */
-  private static String buildContentDisposition(String fileName) {
-    String safe = fileName == null ? "download" : fileName.replace("\"", "_");
-    String encoded;
-    try {
-      encoded = URLEncoder.encode(safe, StandardCharsets.UTF_8.name()).replace("+", "%20");
-    } catch (java.io.UnsupportedEncodingException e) {
-      encoded = safe;
-    }
-    return "attachment; filename=\"" + safe + "\"; filename*=UTF-8''" + encoded;
-  }
-
   /**
    * Writes a NEO-style JSON error directly to the response. Used by the
    * streaming endpoints, which cannot return a {@link NeoResponse}.
@@ -347,6 +321,7 @@ public final class NeoAttachmentsDownloader {
     NeoResponse error = NeoResponse.error(status, message);
     response.setStatus(error.getHttpStatus());
     if (error.getBody() != null) {
+      NeoDownloadHeaders.markPrivateJson(response);
       response.setContentType("application/json");
       response.setCharacterEncoding(StandardCharsets.UTF_8.name());
       response.getWriter().write(error.getBody().toString());
