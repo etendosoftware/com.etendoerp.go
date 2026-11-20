@@ -21,6 +21,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.concurrent.Callable;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
@@ -78,6 +79,30 @@ public class McpSessionManager {
   public static <T> T executeInContext(String userId, String roleId,
       String clientId, String orgId, String warehouseId,
       Callable<T> callable) throws Exception {
+    return executeInContext(userId, roleId, clientId, orgId, warehouseId, null, callable);
+  }
+
+  /**
+   * Same as the overload without a language, answering in {@code requestLanguage} (the
+   * {@code Accept-Language} of the call) when it is a valid active language; otherwise in the
+   * user's default language. Applied before the request language is captured, so validation
+   * messages remapped from Classic use it too.
+   *
+   * @param userId          Etendo AD_User_ID (from OAuth2 token)
+   * @param roleId          Etendo AD_Role_ID (from OAuth2 token)
+   * @param clientId        Etendo AD_Client_ID (from OAuth2 token)
+   * @param orgId           Etendo AD_Org_ID (defaults to "0" if null)
+   * @param warehouseId     Etendo M_Warehouse_ID (can be null)
+   * @param requestLanguage Etendo language code such as {@code en_US}; null or blank keeps the
+   *                        user's default language
+   * @param callable        the work to execute
+   * @param <T>             return type
+   * @return the result of the callable
+   * @throws Exception if the callable throws
+   */
+  public static <T> T executeInContext(String userId, String roleId,
+      String clientId, String orgId, String warehouseId, String requestLanguage,
+      Callable<T> callable) throws Exception {
 
     OBContext previousContext = OBContext.getOBContext();
     String previousLanguage = null;
@@ -112,6 +137,9 @@ public class McpSessionManager {
       OBContext.setOBContext(context);
       telemetryClient = effectiveClient;
       contextEntered = true;
+      if (StringUtils.isNotBlank(requestLanguage)) {
+        NeoLanguage.applyToContext(requestLanguage);
+      }
       // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
       previousLanguage = NeoLanguage.captureRequestCode();
       languageCaptured = true;

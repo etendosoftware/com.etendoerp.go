@@ -93,6 +93,8 @@ public class McpServlet extends HttpServlet {
   private static final String UNKNOWN_CLIENT = "unknown";
   /** Message prefix of a JSON-RPC "method not found". */
   private static final String METHOD_NOT_FOUND_PREFIX = "Method not found: ";
+  /** Request header naming the language the call's messages are answered in. */
+  private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";
   /** The legacy-era liveness method, removed by MCP 2026-07-28. */
   private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
@@ -175,6 +177,8 @@ public class McpServlet extends HttpServlet {
           ENVIRONMENT_UNVERIFIED);
       return;
     }
+    identity = identity.withLanguage(
+        AuthIdentity.normalizeLanguage(request.getHeader(HEADER_ACCEPT_LANGUAGE)));
     boolean accessAllowed;
     try {
       accessAllowed = isEnvironmentAccessAllowed(response, identity);
@@ -912,7 +916,7 @@ public class McpServlet extends HttpServlet {
   private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
     return McpSessionManager.executeInContext(
         identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
+        identity.orgId, null, identity.language, () -> {
           OBContext.setAdminMode(true);
           try {
             ToolRegistry registry = new ToolRegistry();
@@ -964,7 +968,7 @@ public class McpServlet extends HttpServlet {
     try {
       return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
           identity.userId, identity.roleId, identity.clientId,
-          identity.orgId, null, () -> {
+          identity.orgId, null, identity.language, () -> {
             OBContext.setAdminMode(true);
             try {
               McpToolRouter router = new McpToolRouter();
@@ -990,7 +994,7 @@ public class McpServlet extends HttpServlet {
     McpAuthorizationService.authorizeResourceRead(scopes);
     return McpSessionManager.executeInContext(
         identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
+        identity.orgId, null, identity.language, () -> {
           OBContext.setAdminMode(true);
           try {
             McpResourceProvider provider = new McpResourceProvider();
@@ -1019,7 +1023,7 @@ public class McpServlet extends HttpServlet {
     McpAuthorizationService.authorizeResourceRead(scopes);
     return McpSessionManager.executeInContext(
         identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
+        identity.orgId, null, identity.language, () -> {
           OBContext.setAdminMode(true);
           try {
             McpResourceProvider provider = new McpResourceProvider();
@@ -1134,19 +1138,49 @@ public class McpServlet extends HttpServlet {
     final String clientId;
     final String orgId;
     final String scopes;
+    /** Request language ({@code xx_YY}) from {@code Accept-Language}; {@code null} when absent. */
+    final String language;
 
     AuthIdentity(String userId, String roleId, String clientId, String orgId, String scopes) {
+      this(userId, roleId, clientId, orgId, scopes, null);
+    }
+
+    AuthIdentity(String userId, String roleId, String clientId, String orgId, String scopes,
+        String language) {
       this.userId = userId;
       this.roleId = roleId;
       this.clientId = clientId;
       this.orgId = orgId;
       this.scopes = scopes;
+      this.language = language;
     }
 
     /** The same identity acting on {@code effectiveClientId}; {@code this} when it is unchanged. */
     AuthIdentity withClientId(String effectiveClientId) {
       return StringUtils.equals(clientId, effectiveClientId) ? this
-          : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes);
+          : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes, language);
+    }
+
+    /**
+     * Reduces an {@code Accept-Language} header to a single Etendo language code: the first entry,
+     * without its quality value, with {@code -} turned into {@code _} ({@code en-US,en;q=0.9} gives
+     * {@code en_US}). Validity is left to {@code NeoLanguage}.
+     *
+     * @param header the raw {@code Accept-Language} value
+     * @return the code, or {@code null} when the header is absent or blank
+     */
+    static String normalizeLanguage(String header) {
+      if (StringUtils.isBlank(header)) {
+        return null;
+      }
+      String first = StringUtils.substringBefore(StringUtils.substringBefore(header, ","), ";");
+      return StringUtils.trimToNull(first.replace('-', '_'));
+    }
+
+    /** The same identity answering in {@code requestLanguage}; {@code this} when it is unchanged. */
+    AuthIdentity withLanguage(String requestLanguage) {
+      return StringUtils.equals(language, requestLanguage) ? this
+          : new AuthIdentity(userId, roleId, clientId, orgId, scopes, requestLanguage);
     }
   }
 
