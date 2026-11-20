@@ -177,7 +177,8 @@ public class McpServlet extends HttpServlet {
           ENVIRONMENT_UNVERIFIED);
       return;
     }
-    identity = identity.withLanguage(normalizeLanguage(request.getHeader(HEADER_ACCEPT_LANGUAGE)));
+    identity = identity.withLanguage(
+        AuthIdentity.normalizeLanguage(request.getHeader(HEADER_ACCEPT_LANGUAGE)));
     boolean accessAllowed;
     try {
       accessAllowed = isEnvironmentAccessAllowed(response, identity);
@@ -1126,22 +1127,6 @@ public class McpServlet extends HttpServlet {
     return array;
   }
 
-  /**
-   * Reduces an {@code Accept-Language} header to a single Etendo language code: the first entry,
-   * without its quality value, with {@code -} turned into {@code _} ({@code en-US,en;q=0.9} gives
-   * {@code en_US}). Validity is left to {@code NeoLanguage}.
-   *
-   * @param header the raw {@code Accept-Language} value
-   * @return the code, or {@code null} when the header is absent or blank
-   */
-  static String normalizeLanguage(String header) {
-    if (StringUtils.isBlank(header)) {
-      return null;
-    }
-    String first = StringUtils.substringBefore(StringUtils.substringBefore(header, ","), ";");
-    return StringUtils.trimToNull(first.replace('-', '_'));
-  }
-
   // ── Auth identity holder ───────────────────────────────────────────────
 
   /**
@@ -1174,6 +1159,22 @@ public class McpServlet extends HttpServlet {
     AuthIdentity withClientId(String effectiveClientId) {
       return StringUtils.equals(clientId, effectiveClientId) ? this
           : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes, language);
+    }
+
+    /**
+     * Reduces an {@code Accept-Language} header to a single Etendo language code: the first entry,
+     * without its quality value, with {@code -} turned into {@code _} ({@code en-US,en;q=0.9} gives
+     * {@code en_US}). Validity is left to {@code NeoLanguage}.
+     *
+     * @param header the raw {@code Accept-Language} value
+     * @return the code, or {@code null} when the header is absent or blank
+     */
+    static String normalizeLanguage(String header) {
+      if (StringUtils.isBlank(header)) {
+        return null;
+      }
+      String first = StringUtils.substringBefore(StringUtils.substringBefore(header, ","), ";");
+      return StringUtils.trimToNull(first.replace('-', '_'));
     }
 
     /** The same identity answering in {@code requestLanguage}; {@code this} when it is unchanged. */

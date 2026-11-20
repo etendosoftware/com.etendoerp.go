@@ -1235,12 +1235,12 @@ public class McpServletTest {
 
   @Test
   public void normalizeLanguageReducesAcceptLanguageToAnEtendoCode() {
-    assertEquals("en_US", McpServlet.normalizeLanguage("en-US"));
-    assertEquals("en_US", McpServlet.normalizeLanguage("en_US"));
-    assertEquals("en_US", McpServlet.normalizeLanguage("en-US,en;q=0.9"));
-    assertEquals("es_ES", McpServlet.normalizeLanguage(" es-ES ;q=0.8"));
-    assertNull(McpServlet.normalizeLanguage(null));
-    assertNull(McpServlet.normalizeLanguage("  "));
+    assertEquals("en_US", McpServlet.AuthIdentity.normalizeLanguage("en-US"));
+    assertEquals("en_US", McpServlet.AuthIdentity.normalizeLanguage("en_US"));
+    assertEquals("en_US", McpServlet.AuthIdentity.normalizeLanguage("en-US,en;q=0.9"));
+    assertEquals("es_ES", McpServlet.AuthIdentity.normalizeLanguage(" es-ES ;q=0.8"));
+    assertNull(McpServlet.AuthIdentity.normalizeLanguage(null));
+    assertNull(McpServlet.AuthIdentity.normalizeLanguage("  "));
   }
 
   @Test
