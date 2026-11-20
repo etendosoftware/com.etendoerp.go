@@ -2775,7 +2775,7 @@ class McpToolRouterRouteTest {
       assertTrue(text.contains("topic"));
     }
 
-    private JSONObject docsFailure(Throwable failure) {
+    private JSONObject docsFailure(Throwable failure) throws Exception {
       Context7DocsClient mockClient = mock(Context7DocsClient.class);
       when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
           anyString(), org.mockito.ArgumentMatchers.any())).thenThrow((RuntimeException) failure);
