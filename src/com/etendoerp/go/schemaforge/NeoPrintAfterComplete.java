@@ -36,6 +36,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.dal.core.DalThreadCleaner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Table;
@@ -87,8 +88,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *   <li><b>Bounded.</b> {@value #THREADS} daemon threads and a queue of {@value #QUEUE_CAPACITY}; a
  *       burst beyond it is dropped with one log line and the document gets its PDF on a later
  *       request.</li>
- *   <li><b>Never throws into the caller</b>, and every worker run ends with its session rolled back
- *       or committed and closed, and its context cleared.</li>
+ *   <li><b>Never throws into the caller</b>, and every worker run ends with every session of its
+ *       thread (the read-only pool's included) closed, and its context cleared.</li>
  *   <li><b>As the caller.</b> The worker runs under the caller's user, role, client and
  *       organization. The renderer refuses to store for a role without write access to the
  *       document's attachments (D23). The customer portal, which has no session, passes the identity
@@ -511,13 +512,10 @@ public final class NeoPrintAfterComplete {
           causeChain(e));
       outcome = NeoPrintableRenderer.Outcome.FAILED;
     } finally {
-      // Whatever path ended the render (an early return included), its session ends here.
-      rollbackQuietly();
-      try {
-        OBContext.setOBContext((OBContext) null);
-      } catch (RuntimeException e) {
-        log.debug("[print] could not clear the worker context: {}", e.getClass().getSimpleName());
-      }
+      // Whatever path ended the render (an early return included), every session of the thread
+      // ends here: the read-only pool's too, or the reused worker would find it, and its stale
+      // connection, in the next job.
+      cleanThreadQuietly();
     }
     return outcome;
   }
@@ -617,11 +615,13 @@ public final class NeoPrintAfterComplete {
     }
   }
 
-  private static void rollbackQuietly() {
+  private static void cleanThreadQuietly() {
     try {
-      OBDal.getInstance().rollbackAndClose();
+      DalThreadCleaner.getInstance().cleanWithRollback();
     } catch (RuntimeException e) {
-      log.debug("[print] nothing to roll back: {}", e.getMessage());
+      log.debug("[print] could not clean the worker thread: {}", e.getClass().getSimpleName());
+    } finally {
+      OBContext.clearAdminModeStack();
     }
   }
 
