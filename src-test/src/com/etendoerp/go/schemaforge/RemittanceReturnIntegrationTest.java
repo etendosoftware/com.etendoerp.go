@@ -66,7 +66,7 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
 
 /**
  * Real-database acceptance of the step flow of a remittance and of the returns of a collected one
- * (ETP-6247): a collection remittance of GOClient is built, confirmed ({@code PR}: payments
+ * (ETP-6247): a collection remittance of the F&B sample client is built, confirmed ({@code PR}: payments
  * remitted, invoices unpaid, file attached), marked sent ({@code SB}), marked collected (settled on
  * its due date, {@code CT}) and then returned through {@link RemittanceReturnAction}, all inside
  * the test transaction, rolled back after each test. The step tests also pin the reactivation
@@ -90,9 +90,11 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  *       NULL one gets the copy the file used.</li>
  * </ul>
  *
- * <p>The sample data: GOClient's sales dues FV1000045 and FV1000046 (EUR 40.91 each, the same
- * partner and due date, so {@code GGPD} merges them), remitted from «Cuenta Remesa ETP-6148»; the
- * test runs as GOClient's admin role. The same database the SEPA file integration test uses.
+ * <p>The data ({@link RemittanceSampleDataFixtures}): the F&B sample client of every fresh install,
+ * provisioned for SEPA in the test transaction; its EUR «Cuenta de Banco» given an IBAN; and one
+ * new sales invoice per due, completed in the transaction (EUR 40.91 each, the same partner and
+ * due date, so {@code GGPD} merges them). The test runs as the F&B admin role. Nothing depends on
+ * a hand-made tenant, so it runs the same on a developer database and on CI.
  *
  * <p>A class of its own: {@code RemittanceReturnActionTest} mocks the module's return and
  * {@code RemittanceFileGeneratorIntegrationTest} is about the SEPA file.
@@ -111,14 +113,15 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   private static final String PARTNER_IBAN = "ES7921000813610123456789";
   private static final String SPAIN_ID = "106";
 
-  private static final String GO_CLIENT_ID = "802509E12436405C86BA1FD5B1DF508C";
-  private static final String GO_ORG_ID = "61849243BE89460EB70866880A545D50";
-  private static final String GO_ADMIN_ROLE_ID = "9B8D736190724807AB256DC95F20EC5E";
-  private static final String GO_ACCOUNT_ID = "1728F0AC26EF478287FE8F9210052AC8";
-  /** FV1000045 and FV1000046: same partner, same due date, EUR 40.91 each. */
-  private static final String DUE_A_DETAIL_ID = "A2324465AF674B82AD63A43AA0703A25";
-  private static final String DUE_B_DETAIL_ID = "48B9DA0B195244EDA1D75BA5706052E6";
-  private static final BigDecimal DUE_AMOUNT = new BigDecimal("40.91");
+  /**
+   * The labels of the dues a test remits: {@link #built} creates one open sales due per label, all
+   * of the same partner and due date, EUR 40.91 each.
+   */
+  private static final String DUE_A = "A";
+  private static final String DUE_B = "B";
+  private static final BigDecimal DUE_AMOUNT = RemittanceSampleDataFixtures.SALES_DUE_AMOUNT;
+  /** The IBAN the F&B EUR bank account is given. */
+  private static final String ACCOUNT_IBAN = "ES9121000418450200051332";
   /** A valid IBAN and creditor identifier written on the remittance (not the account's). */
   private static final String REMITTANCE_IBAN = "ES9121000418450200051332";
   private static final String CREDITOR_ID = "ES97000B12345678";
@@ -153,7 +156,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   @Test
   public void aSettledLineIsReturnableAndItsReturnRestoresTheDue() throws Exception {
-    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     String remittanceId = remittance.getId();
     String lineId = lineIds(remittance).get(0);
     String scheduleId = scheduleIdOf(lineId);
@@ -235,7 +238,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   @Test
   public void aReconciledSettlementIsRefusedAndNothingChanges() throws Exception {
-    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     String lineId = lineIds(remittance).get(0);
     String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
         .getString("paymentId");
@@ -271,7 +274,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   @Test
   public void aGroupedPaymentIsReturnedWholeNeverByOneOfItsLines() throws Exception {
     Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_BP_DUE_DATE,
-        DUE_A_DETAIL_ID, DUE_B_DETAIL_ID);
+        DUE_A, DUE_B);
     List<String> ids = lineIds(remittance);
     JSONObject first = lineOf(RemittanceReturnAction.state(remittance), ids.get(0));
     JSONObject second = lineOf(RemittanceReturnAction.state(remittance), ids.get(1));
@@ -321,7 +324,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   @Test
   public void confirmProcessesWithoutSettlingAttachesTheFileAndLeavesTheRemittanceInPr()
       throws Exception {
-    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     String remittanceId = remittance.getId();
 
     NeoResponse response = RemittanceFileAction.confirm(remittance, new JSONObject());
@@ -362,7 +365,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   @Test
   public void markSentIsInformationalAndOnlyFromPr() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     String lineId = lineIds(remittance).get(0);
     String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
         .getString("paymentId");
@@ -391,13 +394,13 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   @Test
   public void markCollectedFromPrSettlesOnTheRemittanceDueDate() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     assertCollectedOnTheDueDate(remittance);
   }
 
   @Test
   public void markCollectedFromSbSettlesTheSame() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     assertEquals(200, RemittanceStatusAction.markSent(remittance).getHttpStatus());
     assertCollectedOnTheDueDate(remittance);
   }
@@ -412,7 +415,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
    */
   @Test
   public void theWholeStepFlowEndsInAReturn() throws Exception {
-    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = built(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     assertSepaValues(remittance, null, null, null);
     String accountIban = RemittanceIban.normalize(remittance.getFinancialAccount().getIBAN());
 
@@ -433,7 +436,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   @Test
   public void theWholeStepFlowWithSepaValuesKeepsThemToTheReturn() throws Exception {
     Remittance remittance = withSepaValues(
-        built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID));
+        built(RemittanceProcessAction.GROUPING_NONE, DUE_A));
 
     Remittance returned = wholeStepFlow(remittance);
 
@@ -444,7 +447,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   @Test
   public void reactivateWithSepaValuesKeepsThem() throws Exception {
     Remittance remittance = withSepaValues(
-        built(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID));
+        built(RemittanceProcessAction.GROUPING_NONE, DUE_A));
     NeoResponse processed = RemittanceProcessAction.process(remittance,
         new JSONObject().put(RemittanceProcessAction.P_GROUPING,
             RemittanceProcessAction.GROUPING_NONE));
@@ -484,20 +487,20 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   @Test
   public void reactivateIsAllowedOnPrAndRemovesThePayments() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     assertReactivated(remittance);
   }
 
   @Test
   public void reactivateIsAllowedOnSbToo() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     assertEquals(200, RemittanceStatusAction.markSent(remittance).getHttpStatus());
     assertReactivated(remittance);
   }
 
   @Test
   public void reactivateIsRefusedOnceCollectedPaidPartialOrVoided() throws Exception {
-    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
+    Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A);
     String id = remittance.getId();
     assertReactivationRefused(remittance, "CT");
     for (String status : new String[] {"PT", "CP", "PP", "AN"}) {
@@ -555,8 +558,8 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   /** Two payments (one per line); the second already has a bank transaction, REM refuses it. */
   private Remittance twoPaymentsOneWithABankTransaction() throws Exception {
-    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID,
-        DUE_B_DETAIL_ID);
+    Remittance remittance = processed(RemittanceProcessAction.GROUPING_NONE, DUE_A,
+        DUE_B);
     List<String> ids = lineIds(remittance);
     assertEquals(2, ids.size());
     FIN_Payment second = OBDal.getInstance().get(FIN_Payment.class,
@@ -636,9 +639,9 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
 
   // ---------------------------------------------------------------- fixtures
 
-  /** A GOClient collection remittance with one line per due, processed by REM and collected. */
-  private Remittance confirmed(String grouping, String... dueDetailIds) throws Exception {
-    Remittance remittance = processed(grouping, dueDetailIds);
+  /** A collection remittance with one line per due, processed by REM and collected. */
+  private Remittance confirmed(String grouping, String... dues) throws Exception {
+    Remittance remittance = processed(grouping, dues);
     collect(remittance);
     return OBDal.getInstance().get(Remittance.class, remittance.getId());
   }
@@ -651,11 +654,11 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
   }
 
   /**
-   * A GOClient collection remittance with one line per due, processed by REM without the
-   * automatic settlement (status {@code PR}): payments remitted, invoices still unpaid.
+   * A collection remittance with one line per due, processed by REM without the automatic
+   * settlement (status {@code PR}): payments remitted, invoices still unpaid.
    */
-  private Remittance processed(String grouping, String... dueDetailIds) throws Exception {
-    Remittance remittance = built(grouping, dueDetailIds);
+  private Remittance processed(String grouping, String... dues) throws Exception {
+    Remittance remittance = built(grouping, dues);
     NeoResponse processed = RemittanceProcessAction.process(remittance,
         new JSONObject().put(RemittanceProcessAction.P_GROUPING, grouping));
     assertEquals(String.valueOf(processed.getBody()), 200, processed.getHttpStatus());
@@ -666,18 +669,18 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     return remittance;
   }
 
-  /** A GOClient collection remittance with one line per due, not processed yet. */
-  private Remittance built(String grouping, String... dueDetailIds) throws Exception {
-    OBContext.setOBContext("100", GO_ADMIN_ROLE_ID, GO_CLIENT_ID, GO_ORG_ID);
-    OBContext.setAdminMode(true);
+  /**
+   * A collection remittance of the F&B sample client with one line per label in {@code dues} (a
+   * new open sales due each), not processed yet.
+   */
+  private Remittance built(String grouping, String... dues) throws Exception {
+    RemittanceSampleDataFixtures.asSampleAdmin(RemittanceSampleDataFixtures.SPAIN_ORG_ID);
     // No request context is set up here on purpose: the bank transaction removal reads the
     // request's variables, and the action must provide them itself (it did not, and failed with
     // "No request object set").
-    Client client = OBDal.getInstance().get(Client.class, GO_CLIENT_ID);
+    Client client = RemittanceSampleDataFixtures.client();
     RemittanceSepaProvisioning.ensureClient(client);
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class,
-        GO_ACCOUNT_ID);
-    assertNotNull("GOClient's remittance account", account);
+    FIN_FinancialAccount account = RemittanceSampleDataFixtures.eurBankAccount(ACCOUNT_IBAN);
     RemittanceSepaProvisioning.ensureAccountLinks(account);
     completeOrganization(account.getOrganization());
     RemittanceType type = RemittanceSepaProvisioning.findType(client,
@@ -700,10 +703,10 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().save(remittance);
     long lineNo = 10L;
     Set<String> bankAccountGiven = new HashSet<>();
-    for (String dueId : dueDetailIds) {
-      FIN_PaymentScheduleDetail due = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class,
-          dueId);
-      assertNotNull("GOClient's sales due " + dueId, due);
+    LocalDate invoiceDate = LocalDate.now().minusDays(40);
+    for (int i = 0; i < dues.length; i++) {
+      FIN_PaymentScheduleDetail due = RemittanceSampleDataFixtures.openSalesDue(account,
+          invoiceDate);
       BusinessPartner partner = due.getInvoicePaymentSchedule().getInvoice().getBusinessPartner();
       if (partner.getObsepadMandateIdentifier() == null) {
         partner.setObsepadMandateIdentifier("MANDATE-IT-1");

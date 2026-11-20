@@ -83,15 +83,16 @@ import org.openbravo.module.remittance.utility.REM_RemittanceCreateFile;
  * JDK's own schema validator, and GO's {@link RemittanceFileGenerator#generate}, which validates
  * the file itself.
  *
- * <p><b>Fixtures.</b> The local database has no partner bank account and the F&B sample client no
- * open sales due, so:
+ * <p><b>Fixtures.</b> Only the F&B sample client of every fresh install
+ * ({@link RemittanceSampleDataFixtures}), provisioned for SEPA in the test transaction, so the class
+ * runs the same on a developer database and on CI. The sample data has no partner bank account
+ * and no open sales due, so:
  * <ul>
- *   <li><b>payment (SCT)</b> — F&B sample client: purchase invoice 10001723's due (EUR 133.10,
- *       partner «SI Rapid, SA»), remitted from F&B España's EUR «Cuenta de Banco», given a valid
- *       IBAN here;</li>
- *   <li><b>collection (CORE)</b> — GOClient (the Etendo GO tenant of the local database, already
- *       provisioned): sales invoice FV1000045's due (EUR 40.91, «Laura Morat», who has a mandate),
- *       remitted from «Cuenta Remesa ETP-6148»; the test runs as GOClient's admin role;</li>
+ *   <li><b>payment (SCT)</b> — purchase invoice 10001723's due (EUR 133.10, partner «SI Rapid,
+ *       SA»), remitted from F&B España's EUR «Cuenta de Banco», given a valid IBAN here;</li>
+ *   <li><b>collection (CORE)</b> — one new sales invoice per due, completed here (EUR 40.91 each,
+ *       «Restaurantes Luna Llena, S.A.», given a mandate here), remitted from the same account;
+ *       the collection runs as the F&B admin role;</li>
  *   <li>both: the partner gets an IBAN bank account and the organization a structured address,
  *       created or completed here.</li>
  * </ul>
@@ -124,18 +125,15 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   private static final String OWN_CREDITOR_ID = "ES97000B12345678";
   private static final String ACCOUNT_CREDITOR_ID = "ES39001B87654321";
 
-  // Payment (SCT): F&B sample client.
-  private static final String FB_EUR_ACCOUNT_ID = "DEDDE613C5314ACD8DCC60C474D1A107";
+  // Payment (SCT): the F&B sample purchase due of invoice 10001723.
   private static final String FB_PURCHASE_DUE_DETAIL_ID = "99EE208461314B4EAB1DDFC2D014816A";
 
-  // Collection (CORE): GOClient.
-  private static final String GO_CLIENT_ID = "802509E12436405C86BA1FD5B1DF508C";
-  private static final String GO_ORG_ID = "61849243BE89460EB70866880A545D50";
-  private static final String GO_ADMIN_ROLE_ID = "9B8D736190724807AB256DC95F20EC5E";
-  private static final String GO_ACCOUNT_ID = "1728F0AC26EF478287FE8F9210052AC8";
-  private static final String GO_SALES_DUE_DETAIL_ID = "A2324465AF674B82AD63A43AA0703A25";
-  /** FV1000046: same partner and due date as FV1000045. */
-  private static final String GO_SALES_DUE_DETAIL_B_ID = "48B9DA0B195244EDA1D75BA5706052E6";
+  /**
+   * Collection (CORE): the labels of the dues a test remits; {@link #processedCollection} creates
+   * one open sales due per label, all of the same partner and due date.
+   */
+  private static final String SALES_DUE_A = "A";
+  private static final String SALES_DUE_B = "B";
 
   @Override
   protected boolean shouldMockServletContext() {
@@ -240,7 +238,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   @Test
   public void goGeneratesAndValidatesThePain008File() throws Exception {
     Remittance remittance = processedCollection(r -> r.getFinancialAccount().setSwiftCode("CAIXESBBXXX"),
-        RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+        RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     Location location = remittance.getOrganization().getOrganizationInformationList().get(0)
         .getLocationAddress();
     location.setOBSEPAStreetName(" Calle  Mayor ");
@@ -267,7 +265,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.setIBAN(OWN_IBAN);
       r.setDirectDebitScheme(RemittanceSepaOptions.SCHEME_B2B);
       r.setFinanced(true);
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
 
     String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
 
@@ -300,8 +298,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.setIBAN(OWN_IBAN);
       r.setDirectDebitScheme(RemittanceSepaOptions.SCHEME_B2B);
       r.setFinanced(true);
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID,
-        GO_SALES_DUE_DETAIL_B_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A,
+        SALES_DUE_B);
     // The generator opens a new PmtInf block when the collection date changes.
     List<Instruction> instructions = new ArrayList<>(remittance.getREMInstructionList());
     assertTrue("two instructions", instructions.size() >= 2);
@@ -344,8 +342,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.setCreditorIdentifier(OWN_CREDITOR_ID);
       r.setIBAN(OWN_IBAN);
       r.setDirectDebitScheme(RemittanceSepaOptions.SCHEME_B2B);
-    }, RemittanceProcessAction.GROUPING_BP_DUE_DATE, GO_SALES_DUE_DETAIL_ID,
-        GO_SALES_DUE_DETAIL_B_ID);
+    }, RemittanceProcessAction.GROUPING_BP_DUE_DATE, SALES_DUE_A,
+        SALES_DUE_B);
 
     String xml = new String(goFile(remittance), StandardCharsets.UTF_8);
 
@@ -369,8 +367,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       differentAccountValues(r);
       r.setCreditorIdentifier(OWN_CREDITOR_ID);
       r.setIBAN(OWN_IBAN);
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID,
-        GO_SALES_DUE_DETAIL_B_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A,
+        SALES_DUE_B);
     List<Instruction> instructions = new ArrayList<>(remittance.getREMInstructionList());
     assertTrue("two instructions", instructions.size() >= 2);
     instructions.get(instructions.size() - 1).setDueDate(day(LocalDate.now().plusDays(11)));
@@ -403,7 +401,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       differentAccountValues(r);
       r.setCreditorIdentifier(OWN_CREDITOR_ID);
       r.setIBAN(OWN_IBAN);
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     assertEquals("a collection without a stored scheme is CORE", "CORE",
         RemittanceSepaOptions.scheme(remittance));
     assertFalse(remittance.isFinanced());
@@ -449,9 +447,8 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
 
   @Test
   public void editingTheAccountAfterProcessingDoesNotChangeARegeneratedFile() throws Exception {
-    goContext();
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class,
-        GO_ACCOUNT_ID);
+    collectionContext();
+    FIN_FinancialAccount account = RemittanceSampleDataFixtures.eurBankAccount(COMPANY_IBAN);
     account.set(RemittanceCreditorId.PROPERTY, ACCOUNT_CREDITOR_ID);
     OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
@@ -531,7 +528,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     Remittance remittance = processedCollection(r -> {
       r.getFinancialAccount().set(RemittanceCreditorId.PROPERTY, ACCOUNT_CREDITOR_ID);
       r.setCreditorIdentifier("ES00000B12345678"); // wrong check digits
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     assertEquals("a provided value is kept", "ES00000B12345678",
         remittance.getCreditorIdentifier());
 
@@ -553,7 +550,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   @Test
   public void theIbanStandInLeavesTheAccountWithoutIbanAndNothingIsWritten() throws Exception {
     Remittance remittance = processedCollection(r -> r.setIBAN(OWN_IBAN),
-        RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+        RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     FIN_FinancialAccount account = remittance.getFinancialAccount();
     account.setIBAN(null);
     OBDal.getInstance().save(account);
@@ -578,7 +575,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   @Test
   public void aFlushInsideTheGenerationDoesNotLeaveTheStandInIbanOnTheAccount() throws Exception {
     Remittance remittance = processedCollection(r -> r.setIBAN(OWN_IBAN),
-        RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+        RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     FIN_FinancialAccount account = remittance.getFinancialAccount();
     account.setIBAN(null);
     OBDal.getInstance().save(account);
@@ -608,7 +605,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
       r.setCreditorIdentifier(OWN_CREDITOR_ID);
       r.setIBAN(OWN_IBAN);
       r.setDirectDebitScheme(RemittanceSepaOptions.SCHEME_B2B);
-    }, RemittanceProcessAction.GROUPING_NONE, GO_SALES_DUE_DETAIL_ID);
+    }, RemittanceProcessAction.GROUPING_NONE, SALES_DUE_A);
     Location location = remittance.getOrganization().getOrganizationInformationList().get(0)
         .getLocationAddress();
     location.setOBSEPAStreetName(" Calle  Mayor ");
@@ -651,9 +648,7 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   private Remittance processedPayment(Consumer<Remittance> customize) throws Exception {
     Client client = OBDal.getInstance().get(Client.class, TEST_CLIENT_ID);
     RemittanceSepaProvisioning.ensureClient(client);
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class,
-        FB_EUR_ACCOUNT_ID);
-    giveIban(account);
+    FIN_FinancialAccount account = RemittanceSampleDataFixtures.eurBankAccount(COMPANY_IBAN);
     RemittanceSepaProvisioning.ensureAccountLinks(account);
     FIN_PaymentScheduleDetail due = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class,
         FB_PURCHASE_DUE_DETAIL_ID);
@@ -664,22 +659,24 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
 
   private Remittance processedCollection() throws Exception {
     return processedCollection(r -> { }, RemittanceProcessAction.GROUPING_NONE,
-        GO_SALES_DUE_DETAIL_ID);
+        SALES_DUE_A);
   }
 
+  /**
+   * A collection of the F&B sample client with one line per label in {@code dueLabels}, each a new
+   * open sales due (same partner and due date), processed by REM.
+   */
   private Remittance processedCollection(Consumer<Remittance> customize, String grouping,
-      String... dueDetailIds) throws Exception {
-    goContext();
-    Client client = OBDal.getInstance().get(Client.class, GO_CLIENT_ID);
+      String... dueLabels) throws Exception {
+    collectionContext();
+    Client client = RemittanceSampleDataFixtures.client();
     RemittanceSepaProvisioning.ensureClient(client);
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class,
-        GO_ACCOUNT_ID);
-    assertNotNull("GOClient's remittance account", account);
+    FIN_FinancialAccount account = RemittanceSampleDataFixtures.eurBankAccount(COMPANY_IBAN);
     RemittanceSepaProvisioning.ensureAccountLinks(account);
-    FIN_PaymentScheduleDetail[] dues = new FIN_PaymentScheduleDetail[dueDetailIds.length];
-    for (int i = 0; i < dueDetailIds.length; i++) {
-      dues[i] = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, dueDetailIds[i]);
-      assertNotNull("GOClient's sales due " + dueDetailIds[i], dues[i]);
+    LocalDate invoiceDate = LocalDate.now().minusDays(40);
+    FIN_PaymentScheduleDetail[] dues = new FIN_PaymentScheduleDetail[dueLabels.length];
+    for (int i = 0; i < dueLabels.length; i++) {
+      dues[i] = RemittanceSampleDataFixtures.openSalesDue(account, invoiceDate);
       BusinessPartner partner = dues[i].getInvoicePaymentSchedule().getInvoice()
           .getBusinessPartner();
       if (partner.getObsepadMandateIdentifier() == null) {
@@ -700,9 +697,9 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
         due);
   }
 
-  private static void goContext() {
-    OBContext.setOBContext("100", GO_ADMIN_ROLE_ID, GO_CLIENT_ID, GO_ORG_ID);
-    OBContext.setAdminMode(true);
+  /** The collection runs as the F&B admin role on the organization of the bank account. */
+  private static void collectionContext() {
+    RemittanceSampleDataFixtures.asSampleAdmin(RemittanceSampleDataFixtures.SPAIN_ORG_ID);
   }
 
   /**
@@ -790,13 +787,6 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
     location.setOBSEPABuildingNumber("1");
     OBDal.getInstance().save(location);
     OBDal.getInstance().save(info);
-    OBDal.getInstance().flush();
-  }
-
-  private static void giveIban(FIN_FinancialAccount account) {
-    account.setCountry(OBDal.getInstance().get(Country.class, SPAIN_ID));
-    account.setIBAN(COMPANY_IBAN);
-    OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
   }
 

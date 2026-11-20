@@ -65,9 +65,11 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  *       without SEPA values (a remittance from before they existed has them all NULL).</li>
  * </ul>
  *
- * <p>Data: GOClient's remittance types (several collection types, one SEPA payment type) and two of
- * its bank accounts with an IBAN. A class of its own: the behavior belongs to the database, which
- * none of the mocked remittance tests runs.
+ * <p>Data: the F&B sample client of every fresh install ({@link RemittanceSampleDataFixtures}),
+ * provisioned for SEPA in the test transaction ({@link RemittanceSepaProvisioning#ensureClient}:
+ * a collection type and a payment type), its EUR bank account given an IBAN and a second bank
+ * account copied from it. Nothing depends on a hand-made tenant. A class of its own: the behavior
+ * belongs to the database, which none of the mocked remittance tests runs.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceIban
  * @covers com.etendoerp.go.schemaforge.RemittanceCreditorId
@@ -75,26 +77,23 @@ import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
  */
 public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
-  private static final String GO_CLIENT_ID = "802509E12436405C86BA1FD5B1DF508C";
-  private static final String GO_ORG_ID = "61849243BE89460EB70866880A545D50";
-  private static final String GO_ADMIN_ROLE_ID = "9B8D736190724807AB256DC95F20EC5E";
-
-  /** «Cuenta Remesa Tests», IBAN ES91 2100 0418 4502 0005 1332. */
-  private static final String ACCOUNT_A_ID = "1728F0AC26EF478287FE8F9210052AC8";
+  /** The F&B EUR bank account, given IBAN ES91 2100 0418 4502 0005 1332 here. */
   private static final String ACCOUNT_A_IBAN = "ES9121000418450200051332";
   private static final String ACCOUNT_A_CREDITOR_ID = "ES39001B87654321";
-  /** The BBVA sandbox account, IBAN ES84 0182 6450 0002 0150 0191. */
-  private static final String ACCOUNT_B_ID = "23341D8933D9408E9BB048B2930C2CFB";
+  /** A second bank account created here, IBAN ES84 0182 6450 0002 0150 0191. */
+  private static final String ACCOUNT_B_IBAN = "ES8401826450000201500191";
   private static final String ACCOUNT_B_CREDITOR_ID = "ES97000B12345678";
-
-  /** A collection type (pay-in) and a payment type (pay-out only). */
-  private static final String COLLECTION_TYPE_ID = "A0AA4E4F8FA94E6CB3C4E9F306979447";
-  private static final String PAYMENT_TYPE_ID = "F3A00FA0887246D88F53B164957D985D";
 
   private static final String TYPED_IBAN = "ES6000491500051234567892";
   private static final String TYPED_CREDITOR_ID = "ES86000A39200019";
 
   private int sequence;
+
+  private String accountAId;
+  private String accountBId;
+  /** The provisioned collection type (pay-in) and payment type (pay-out only). */
+  private String collectionTypeId;
+  private String paymentTypeId;
 
   @Override
   protected boolean shouldMockServletContext() {
@@ -106,10 +105,15 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     setTestAdminContext();
     SessionHandler.getInstance().setDoRollback(true);
     OBContext.setAdminMode(true);
-    OBContext.setOBContext("100", GO_ADMIN_ROLE_ID, GO_CLIENT_ID, GO_ORG_ID);
-    OBContext.setAdminMode(true);
-    account(ACCOUNT_A_ID, ACCOUNT_A_CREDITOR_ID);
-    account(ACCOUNT_B_ID, ACCOUNT_B_CREDITOR_ID);
+    RemittanceSampleDataFixtures.asSampleAdmin(RemittanceSampleDataFixtures.SPAIN_ORG_ID);
+    Client client = RemittanceSampleDataFixtures.client();
+    RemittanceSepaProvisioning.ensureClient(client);
+    collectionTypeId = type(client, RemittanceSepaProvisioning.SCHEME_CORE);
+    paymentTypeId = type(client, RemittanceSepaProvisioning.SCHEME_SCT);
+    FIN_FinancialAccount accountA = RemittanceSampleDataFixtures.eurBankAccount(ACCOUNT_A_IBAN);
+    accountAId = withCreditorId(accountA, ACCOUNT_A_CREDITOR_ID).getId();
+    accountBId = withCreditorId(RemittanceSampleDataFixtures.anotherBankAccount(accountA,
+        "SF TRG IT second account", ACCOUNT_B_IBAN), ACCOUNT_B_CREDITOR_ID).getId();
   }
 
   @After
@@ -128,8 +132,8 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   @Test
   public void theTriggerNoLongerCopiesNorDefaultsAnythingOnInsert() {
-    Remittance collection = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
-    Remittance payment = insert(PAYMENT_TYPE_ID, ACCOUNT_A_ID, r -> { });
+    Remittance collection = insert(collectionTypeId, accountAId, r -> { });
+    Remittance payment = insert(paymentTypeId, accountAId, r -> { });
 
     for (Remittance remittance : new Remittance[] { collection, payment }) {
       assertNull(remittance.getIBAN());
@@ -142,7 +146,7 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   @Test
   public void aProvidedIbanCreditorIdAndSchemeAreKeptOnInsert() {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
+    Remittance remittance = insert(collectionTypeId, accountAId, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
       r.setDirectDebitScheme("B2B");
@@ -159,13 +163,13 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   @Test
   public void changingTheAccountDoesNotOverwriteTheTypedIbanNorCreditorId() {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
+    Remittance remittance = insert(collectionTypeId, accountAId, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
     });
 
     remittance.setFinancialAccount(OBDal.getInstance().get(FIN_FinancialAccount.class,
-        ACCOUNT_B_ID));
+        accountBId));
     update(remittance);
 
     assertEquals("the callout and the GO write path propose the new account's IBAN, not the trigger",
@@ -175,12 +179,12 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   @Test
   public void changingTheTypeDoesNotOverwriteTheTypedValues() {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
+    Remittance remittance = insert(collectionTypeId, accountAId, r -> {
       r.setIBAN(TYPED_IBAN);
       r.setCreditorIdentifier(TYPED_CREDITOR_ID);
     });
 
-    remittance.setRemittanceType(OBDal.getInstance().get(RemittanceType.class, PAYMENT_TYPE_ID));
+    remittance.setRemittanceType(OBDal.getInstance().get(RemittanceType.class, paymentTypeId));
     update(remittance);
 
     assertEquals(TYPED_IBAN, remittance.getIBAN());
@@ -206,7 +210,7 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     assertRefused("update rem_remittance set dd_scheme = ? where rem_remittance_id = ?", "B2B", id);
     assertRefused("update rem_remittance set isfinanced = 'Y' where rem_remittance_id = ?", id);
     assertRefused("update rem_remittance set fin_financial_account_id = ?"
-        + " where rem_remittance_id = ?", ACCOUNT_B_ID, id);
+        + " where rem_remittance_id = ?", accountBId, id);
     // Nothing else of the SEPA values changed, so an update that leaves them is accepted.
     execute("update rem_remittance set name = ? where rem_remittance_id = ?", "renamed", id);
     OBDal.getInstance().refresh(remittance);
@@ -223,9 +227,9 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
     execute("update rem_remittance set processed = 'Y' where rem_remittance_id = ?", id);
 
     assertRefused("update rem_remittance set rem_remittance_type_id = ?"
-        + " where rem_remittance_id = ?", PAYMENT_TYPE_ID, id);
+        + " where rem_remittance_id = ?", paymentTypeId, id);
     OBDal.getInstance().refresh(remittance);
-    assertEquals(COLLECTION_TYPE_ID, remittance.getRemittanceType().getId());
+    assertEquals(collectionTypeId, remittance.getRemittanceType().getId());
     assertEquals(ACCOUNT_A_CREDITOR_ID, remittance.getCreditorIdentifier());
   }
 
@@ -238,7 +242,7 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
   public void aProcessedRemittanceAcceptsTheUpdatesRemMakesWithOrWithoutSepaValues()
       throws Exception {
     Remittance withValues = insertWithSepaValues();
-    Remittance legacy = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+    Remittance legacy = insert(collectionTypeId, accountAId, r -> { });
 
     for (Remittance remittance : new Remittance[] { withValues, legacy }) {
       String id = remittance.getId();
@@ -270,7 +274,7 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   @Test
   public void theSchemeOnlyAcceptsCoreAndB2b() throws Exception {
-    Remittance remittance = insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> { });
+    Remittance remittance = insert(collectionTypeId, accountAId, r -> { });
     String id = remittance.getId();
 
     assertRefused("update rem_remittance set dd_scheme = ? where rem_remittance_id = ?",
@@ -284,16 +288,21 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   /** An unprocessed collection that already carries the account's SEPA values, as GO writes them. */
   private Remittance insertWithSepaValues() {
-    return insert(COLLECTION_TYPE_ID, ACCOUNT_A_ID, r -> {
+    return insert(collectionTypeId, accountAId, r -> {
       r.setIBAN(ACCOUNT_A_IBAN);
       r.setCreditorIdentifier(ACCOUNT_A_CREDITOR_ID);
       r.setDirectDebitScheme("CORE");
     });
   }
 
-  private static FIN_FinancialAccount account(String id, String creditorId) {
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, id);
-    assertNotNull("the bank account " + id, account);
+  private static String type(Client client, String scheme) {
+    RemittanceType type = RemittanceSepaProvisioning.findType(client, scheme);
+    assertNotNull("ensureClient provisions the " + scheme + " type", type);
+    return type.getId();
+  }
+
+  private static FIN_FinancialAccount withCreditorId(FIN_FinancialAccount account,
+      String creditorId) {
     account.set(RemittanceCreditorId.PROPERTY, creditorId);
     OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
@@ -302,7 +311,7 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
 
   /** An unprocessed remittance without lines, inserted and read back with the trigger's values. */
   private Remittance insert(String typeId, String accountId, Consumer<Remittance> customize) {
-    Client client = OBDal.getInstance().get(Client.class, GO_CLIENT_ID);
+    Client client = RemittanceSampleDataFixtures.client();
     FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
     Remittance remittance = OBProvider.getInstance().get(Remittance.class);
     remittance.setClient(client);
