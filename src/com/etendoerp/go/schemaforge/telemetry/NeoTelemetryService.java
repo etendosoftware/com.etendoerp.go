@@ -19,12 +19,16 @@ package com.etendoerp.go.schemaforge.telemetry;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -135,6 +139,27 @@ public class NeoTelemetryService {
   private static final String PROP_ORIGIN = "origin";
   private static final String PROP_PIECE = "piece";
   private static final String PROP_DOC_TYPE = "doc_type";
+  /** ETP-6247 — the remittance SEPA file event ({@code backend_remittance_file_generated}). */
+  private static final String PROP_DIRECTION = "direction";
+  private static final String PROP_INVOICE_COUNT = "invoice_count";
+  private static final String PROP_IS_REGENERATION = "is_regeneration";
+  /**
+   * ETP-6247 — the coarse functional areas of the user's active role, a list (the SPA's
+   * {@code role_groups}, ETP-6043). Only the values of {@link #ROLE_GROUP_VALUES} survive.
+   */
+  static final String PROP_ROLE_GROUPS = "role_groups";
+
+  /** Every value {@value #PROP_ROLE_GROUPS} may carry: the SPA's {@code ROLE_GROUP_VALUES}. */
+  static final Set<String> ROLE_GROUP_VALUES = Collections.unmodifiableSet(new HashSet<>(
+      Arrays.asList("warehouse", "sales", "purchasing", "finance", "admin", "other")));
+
+  /** Directions of {@value #PROP_DIRECTION}: AR collects, AP pays. */
+  private static final Set<String> DIRECTION_VALUES = new HashSet<>(Arrays.asList("AR", "AP"));
+
+  /** List-valued keys and the only values their elements may take. */
+  private static final Map<String, Set<String>> LIST_PROPERTY_VALUES =
+      Collections.singletonMap(PROP_ROLE_GROUPS, ROLE_GROUP_VALUES);
+
   /** Upper bound of the per-call bounce-pair counters: far above any real statement. */
   private static final double MAX_PAIRS = 1000000;
 
@@ -175,6 +200,10 @@ public class NeoTelemetryService {
       PROP_PAIRS_UNCHECKED,
       PROP_PAIRS_SENT_TO_PANEL,
       PROP_PRESELECTION_CHANGED,
+      PROP_DIRECTION,
+      PROP_INVOICE_COUNT,
+      PROP_IS_REGENERATION,
+      PROP_ROLE_GROUPS,
       PROP_ADJUSTED,
       PROP_THIRD_PARTY,
       PROP_ENTRY_DOC_TYPE,
@@ -219,6 +248,7 @@ public class NeoTelemetryService {
       PROP_PRESELECTED,
       PROP_CHOSEN_AMONG_ALTERNATIVES,
       PROP_PRESELECTION_CHANGED,
+      PROP_IS_REGENERATION,
       PROP_ADJUSTED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
@@ -443,12 +473,26 @@ public class NeoTelemetryService {
         || value == null) {
       return null;
     }
+    if (LIST_PROPERTY_VALUES.containsKey(key)) {
+      return sanitizeList(value, LIST_PROPERTY_VALUES.get(key));
+    }
+    if (PROP_DIRECTION.equals(key)) {
+      return DIRECTION_VALUES.contains(value) ? value : null;
+    }
     if (NUMERIC_PROPERTY_BOUNDS.containsKey(key)) {
       return isSafeNumber(key, value) ? value : null;
     }
     if (BOOLEAN_PROPERTY_KEYS.contains(key)) {
       return value instanceof Boolean ? value : null;
     }
+    return sanitizeScalar(key, value);
+  }
+
+  /**
+   * A safe key with no specific rule: a number within its bounds, a string or a boolean; any
+   * other value drops the property.
+   */
+  private static Object sanitizeScalar(String key, Object value) {
     if (value instanceof Number) {
       return isSafeNumber(key, value) ? value : null;
     }
@@ -456,6 +500,25 @@ public class NeoTelemetryService {
       return value;
     }
     return null;
+  }
+
+  /**
+   * ETP-6247 — a list property: a collection whose elements are all allowed strings, copied
+   * sorted and deduplicated; anything else (not a collection, an empty one, an unknown element)
+   * drops the property, so a list can never smuggle a free-text value.
+   */
+  private static Object sanitizeList(Object value, Set<String> allowed) {
+    if (!(value instanceof Collection) || ((Collection<?>) value).isEmpty()) {
+      return null;
+    }
+    TreeSet<String> elements = new TreeSet<>();
+    for (Object element : (Collection<?>) value) {
+      if (!(element instanceof String) || !allowed.contains(element)) {
+        return null;
+      }
+      elements.add((String) element);
+    }
+    return Collections.unmodifiableList(new ArrayList<>(elements));
   }
 
   private static boolean isSafeNumber(String key, Object value) {
@@ -486,6 +549,8 @@ public class NeoTelemetryService {
     bounds.put(PROP_PAIRS_DISCARDED, new NumericBounds(0, MAX_PAIRS));
     bounds.put(PROP_PAIRS_UNCHECKED, new NumericBounds(0, MAX_PAIRS));
     bounds.put(PROP_PAIRS_SENT_TO_PANEL, new NumericBounds(0, MAX_PAIRS));
+    // ETP-6247: distinct invoices of one remittance.
+    bounds.put(PROP_INVOICE_COUNT, new NumericBounds(0, 1000000));
     bounds.put(PROP_HTTP_STATUS, new NumericBounds(100, 599));
     bounds.put("position", new NumericBounds(0, 1000000));
     bounds.put(PROP_REQ_BYTES, new NumericBounds(0, 1000000000));

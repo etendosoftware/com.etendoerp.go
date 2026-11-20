@@ -124,6 +124,17 @@ public final class NeoTelemetryEvents {
       "backend_bank_bounce_suggestions_applied";
 
   /**
+   * ETP-6247 — a remittance's SEPA file was generated and stored («Confirmar», or «Regenerar
+   * fichero» with {@code is_regeneration}). Emitted by {@code RemittanceFileTelemetry}, flag
+   * {@code sepa-remittances} on only, once the action has succeeded (inside a batch, after the
+   * batch commits). Carries the direction ({@code AR}
+   * collection, {@code AP} payment), the number of distinct invoices, the channel and the role
+   * groups. Never a record identifier, amount or name.
+   */
+  public static final String BACKEND_REMITTANCE_FILE_GENERATED =
+      "backend_remittance_file_generated";
+
+  /**
    * ETP-6209 — the first portal link of a document was emailed (renewals, decision links and
    * re-sends excluded). Emitted by {@code PortalKpiTelemetry}; properties {@code account_id},
    * {@code type} (the portal document kind). Never a record identifier.

@@ -209,18 +209,20 @@ class SelectorValidationResolverTest {
       Map<String, String> params = new HashMap<>();
       params.put("IsSOTrx", "Y");
       String clause = "C_DocType.IsSOTrx='@IsSOTrx@'";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("C_DocType.IsSOTrx='Y'", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("C_DocType.IsSOTrx=:valParam0", result.getHql());
+      assertEquals("Y", result.getParams().get("valParam0"));
     }
 
     @Test
     void unresolvedQuotedParamBecomesNull() throws Exception {
       Map<String, String> params = new HashMap<>();
       String clause = "field='@Unknown@'";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("field=NULL", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("field=NULL", result.getHql());
+      assertTrue(result.getParams().isEmpty());
     }
 
     @Test
@@ -228,40 +230,43 @@ class SelectorValidationResolverTest {
       Map<String, String> params = new HashMap<>();
       params.put("AD_Org_ID", "org123");
       String clause = "table.ad_org_id = @AD_Org_ID@";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("table.ad_org_id = 'org123'", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("table.ad_org_id = :valParam0", result.getHql());
+      assertEquals("org123", result.getParams().get("valParam0"));
     }
 
     @Test
     void unresolvedBareParamBecomesNull() throws Exception {
       Map<String, String> params = new HashMap<>();
       String clause = "table.col = @Missing@";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("table.col = NULL", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("table.col = NULL", result.getHql());
+      assertTrue(result.getParams().isEmpty());
     }
 
     @Test
     void preQuotedValueIsEmittedRawWithoutExtraQuotes() throws Exception {
-      // Verifies that values already containing single quotes (like CSV session vars)
-      // are emitted raw, without additional quoting. Uses a bare @param@ (no #) to
-      // avoid regex group capture complexity with the # prefix.
+      // Verifies that trusted session variables already containing single quotes (like CSV session vars)
+      // are emitted raw, without additional quoting. Uses a bare @param@ to verify list syntax.
       Map<String, String> params = new HashMap<>();
       params.put("UserClient", "'0','1000000'");
       String clause = "ad_client_id IN (@UserClient@)";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("ad_client_id IN ('0','1000000')", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("ad_client_id IN ('0','1000000')", result.getHql());
+      assertTrue(result.getParams().isEmpty());
     }
 
     @Test
     void noParamsReturnsClauseUnchanged() throws Exception {
       Map<String, String> params = new HashMap<>();
       String clause = "isactive = 'Y'";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("isactive = 'Y'", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("isactive = 'Y'", result.getHql());
+      assertTrue(result.getParams().isEmpty());
     }
 
     @Test
@@ -270,9 +275,11 @@ class SelectorValidationResolverTest {
       params.put("A", "valA");
       params.put("B", "valB");
       String clause = "col1 = @A@ AND col2 = @B@";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("col1 = 'valA' AND col2 = 'valB'", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("col1 = :valParam0 AND col2 = :valParam1", result.getHql());
+      assertEquals("valA", result.getParams().get("valParam0"));
+      assertEquals("valB", result.getParams().get("valParam1"));
     }
   }
 
@@ -288,11 +295,10 @@ class SelectorValidationResolverTest {
    *     AND C_BPartner_Location.IsActive='Y'
    * </pre>
    *
-   * <p>When the businessPartner is present the placeholder resolves to the partner id, so the
-   * selector returns only that partner's bill-to locations. When it is absent the placeholder
-   * degrades to the SQL literal {@code NULL} — the documented behavior that makes the dependent
-   * selector return an empty set instead of silently relaxing the filter. These tests lock in
-   * both branches and guard against regressions on the ETP-4286 acceptance criterion.</p>
+   * <p>When the businessPartner is present the placeholder resolves to a named bind parameter,
+   * so the selector returns only that partner's bill-to locations. When it is absent the
+   * placeholder degrades to the SQL literal {@code NULL} — the documented behavior that makes
+   * the dependent selector return an empty set instead of silently relaxing the filter.</p>
    */
   @Nested
   @DisplayName("substituteValidationParams — ETP-4286 BP-location dependent selector")
@@ -304,59 +310,55 @@ class SelectorValidationResolverTest {
             + " AND C_BPartner_Location.IsActive='Y'";
 
     @Test
-    @DisplayName("substitutes the businessPartner id when C_BPartner_ID is present in context")
+    @DisplayName("substitutes the businessPartner id as named param when C_BPartner_ID is present in context")
     void substitutesBusinessPartnerIdWhenPresent() throws Exception {
       Map<String, String> params = new HashMap<>();
       params.put("C_BPartner_ID", "ABC123");
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
 
-      // The dependent FK placeholder resolves to the supplied partner id (SQL-quoted)...
-      assertTrue(result.contains("'ABC123'"),
-          "Expected substituted partner id 'ABC123' in: " + result);
-      assertEquals("C_BPartner_Location.C_BPartner_ID='ABC123'"
+      // The dependent FK placeholder binds as a named query parameter
+      assertEquals("C_BPartner_Location.C_BPartner_ID=:valParam0"
               + " AND C_BPartner_Location.IsBillTo='Y'"
               + " AND C_BPartner_Location.IsActive='Y'",
-          result);
+          result.getHql());
+      assertEquals("ABC123", result.getParams().get("valParam0"));
       // ...and the filter is NOT degraded to a permanently-empty NULL comparison.
-      assertFalse(result.contains("C_BPartner_ID=NULL"),
-          "Partner-id filter must not degrade to NULL when context is present: " + result);
+      assertFalse(result.getHql().contains("C_BPartner_ID=NULL"),
+          "Partner-id filter must not degrade to NULL when context is present: " + result.getHql());
       // Static clauses survive the substitution untouched.
-      assertTrue(result.contains("C_BPartner_Location.IsBillTo='Y'"),
-          "IsBillTo='Y' static clause must be preserved: " + result);
-      assertTrue(result.contains("C_BPartner_Location.IsActive='Y'"),
-          "IsActive='Y' static clause must be preserved: " + result);
+      assertTrue(result.getHql().contains("C_BPartner_Location.IsBillTo='Y'"),
+          "IsBillTo='Y' static clause must be preserved: " + result.getHql());
+      assertTrue(result.getHql().contains("C_BPartner_Location.IsActive='Y'"),
+          "IsActive='Y' static clause must be preserved: " + result.getHql());
     }
 
     @Test
-    @DisplayName("only the bare partner-id placeholder is substituted, scalar value gets quoted")
+    @DisplayName("only the bare partner-id placeholder is substituted, scalar value gets bound")
     void substitutesOnlyPartnerIdPlaceholder() throws Exception {
       Map<String, String> params = new HashMap<>();
       params.put("C_BPartner_ID", "ABC123");
       String clause = "C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@";
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, clause, params);
-      assertEquals("C_BPartner_Location.C_BPartner_ID='ABC123'", result);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("C_BPartner_Location.C_BPartner_ID=:valParam0", result.getHql());
+      assertEquals("ABC123", result.getParams().get("valParam0"));
     }
 
     @Test
     @DisplayName("degrades the partner-id placeholder to NULL when businessPartner is missing")
     void degradesToNullWhenBusinessPartnerMissing() throws Exception {
       Map<String, String> params = new HashMap<>();
-      // No C_BPartner_ID — mirrors an MCP recordContext without a businessPartner.
-      String result = (String) invokeStatic("substituteValidationParams",
-          new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
 
-      // Documented degradation: the dependent filter becomes a NULL comparison (empty result).
-      assertTrue(result.contains("C_BPartner_Location.C_BPartner_ID=NULL"),
-          "Expected partner-id filter to degrade to NULL when context is absent: " + result);
-      assertFalse(result.contains("'ABC123'"),
-          "No partner id must leak when businessPartner is absent: " + result);
-      // The static bill-to / active clauses are still applied.
-      assertTrue(result.contains("C_BPartner_Location.IsBillTo='Y'"),
-          "IsBillTo='Y' static clause must be preserved: " + result);
-      assertTrue(result.contains("C_BPartner_Location.IsActive='Y'"),
-          "IsActive='Y' static clause must be preserved: " + result);
+      assertTrue(result.getHql().contains("C_BPartner_Location.C_BPartner_ID=NULL"),
+          "Expected partner-id filter to degrade to NULL when context is absent: " + result.getHql());
+      assertTrue(result.getParams().isEmpty());
+      assertTrue(result.getHql().contains("C_BPartner_Location.IsBillTo='Y'"),
+          "IsBillTo='Y' static clause must be preserved: " + result.getHql());
+      assertTrue(result.getHql().contains("C_BPartner_Location.IsActive='Y'"),
+          "IsActive='Y' static clause must be preserved: " + result.getHql());
     }
   }
 
@@ -465,7 +467,8 @@ class SelectorValidationResolverTest {
           MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
         mp.when(ModelProvider::getInstance).thenReturn(modelProvider);
         ctx.when(OBContext::getOBContext).thenReturn(mock(OBContext.class, RETURNS_DEEP_STUBS));
-        return SelectorValidationResolver.resolveValidationFilter(column, "Project", contextParams);
+        SelectorQueryBuilder.HqlWithParams result = SelectorValidationResolver.resolveValidationFilter(column, "Project", contextParams);
+        return result != null ? result.getHql() : null;
       }
     }
 
@@ -510,7 +513,7 @@ class SelectorValidationResolverTest {
       String filter = resolve(PROJECT_RULE, Collections.singletonMap("IsSOTrx", "N"));
 
       assertTrue(isOneParenthesizedGroup(filter), "Rule must be one group: " + filter);
-      assertTrue(filter.contains("'N'='N'"), "IsSOTrx must be substituted: " + filter);
+      assertTrue(filter.contains(":valParam"), "IsSOTrx must be bound as param: " + filter);
     }
 
     @Test
@@ -543,6 +546,103 @@ class SelectorValidationResolverTest {
           + " AND ((upper(COALESCE(cast(e.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.name as string), '')) LIKE :search))", where);
       assertFalse(hasTopLevelOr(where.substring("as e where ".length())),
           "An OR outside parentheses would let rows skip the search: " + where);
+    }
+  }
+
+  @Nested
+  @DisplayName("HQL Injection Prevention (ETP-6021)")
+  class HqlInjectionPrevention {
+
+    @Test
+    @DisplayName("quote injection payload is safely bound as a named parameter")
+    void quoteInjectionPayloadIsBound() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      String payload = "foo' OR '1'='1";
+      params.put("C_BPartner_ID", payload);
+      String clause = "C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@";
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+
+      assertEquals("C_BPartner_Location.C_BPartner_ID=:valParam0", result.getHql());
+      assertEquals(payload, result.getParams().get("valParam0"));
+      assertFalse(result.getHql().contains("'1'='1'"));
+    }
+
+    @Test
+    @DisplayName("comment injection payload is safely bound as a named parameter")
+    void commentInjectionPayloadIsBound() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      String payload = "1' -- comment";
+      params.put("C_BPartner_ID", payload);
+      String clause = "C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@";
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+
+      assertEquals("C_BPartner_Location.C_BPartner_ID=:valParam0", result.getHql());
+      assertEquals(payload, result.getParams().get("valParam0"));
+      assertFalse(result.getHql().contains("--"));
+    }
+
+    @Test
+    @DisplayName("boolean injection payload is safely bound as a named parameter")
+    void booleanInjectionPayloadIsBound() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      String payload = "' or 1=1 or ''='";
+      params.put("IsSOTrx", payload);
+      String clause = "C_DocType.IsSOTrx='@IsSOTrx@'";
+      SelectorQueryBuilder.HqlWithParams result = (SelectorQueryBuilder.HqlWithParams) invokeStatic(
+          "substituteValidationParams", new Class<?>[]{ String.class, Map.class }, clause, params);
+
+      assertEquals("C_DocType.IsSOTrx=:valParam0", result.getHql());
+      assertEquals(payload, result.getParams().get("valParam0"));
+      assertFalse(result.getHql().contains("1=1"));
+    }
+
+    @Test
+    @DisplayName("request context params cannot override reserved session keys case-insensitively")
+    void disallowsReservedSessionKeyOverrides() throws Exception {
+      Map<String, String> contextParams = new HashMap<>();
+      contextParams.put("AD_Org_ID", "injected_org");
+      contextParams.put("ad_client_id", "injected_client");
+      contextParams.put("#User_Client", "'injected_user_client'");
+      contextParams.put("user_org", "'injected_user_org'");
+      contextParams.put("customParam", "validValue");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+        OBContext ctx = mock(OBContext.class, RETURNS_DEEP_STUBS);
+        when(ctx.getCurrentOrganization().getId()).thenReturn("trusted_org");
+        when(ctx.getCurrentClient().getId()).thenReturn("trusted_client");
+        when(ctx.getReadableClients()).thenReturn(new String[]{"0"});
+        when(ctx.getReadableOrganizations()).thenReturn(new String[]{"0"});
+        ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> paramMap = (Map<String, String>) invokeStatic(
+            "buildValidationParamMap", new Class<?>[]{ String.class, Map.class },
+            "x = '@customParam@' AND y = @AD_Org_ID@", contextParams);
+
+        assertEquals("trusted_org", paramMap.get("AD_Org_ID"));
+        assertEquals("trusted_client", paramMap.get("AD_Client_ID"));
+        assertEquals("'0'", paramMap.get("#User_Client"));
+        assertEquals("'0'", paramMap.get("#User_Org"));
+        assertEquals("validValue", paramMap.get("customParam"));
+      }
+    }
+
+    @Test
+    @DisplayName("isReservedSessionKey identifies reserved session keys with or without hash and casing")
+    void isReservedSessionKeyCheck() throws Exception {
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "AD_Org_ID"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "ad_org_id"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "#AD_Org_ID"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "#User_Client"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "User_Client"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "UserClient"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "#UserClient"));
+      assertTrue((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "ad_client_id"));
+      assertFalse((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "C_BPartner_ID"));
+      assertFalse((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, "IsSOTrx"));
+      assertFalse((Boolean) invokeStatic("isReservedSessionKey", new Class<?>[]{ String.class }, (Object) null));
     }
   }
 }

@@ -182,6 +182,58 @@ class NeoCsvExportServiceTest {
     }
   }
 
+  // ── contact phone column (ETP-6225) ─────────────────────────────────────────
+
+  private static String phoneCsv(String phone) throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put("id", "b1").put("etgoPhone", phone));
+    NeoCsvExportService.tryExport(flatEnvelope(rows),
+        params("export", "csv", "columns", "etgoPhone:Phone"), cap.response);
+    String[] lines = cap.sw.toString().split(CRLF_SEPARATOR);
+    return lines[1];
+  }
+
+  @Test
+  void writesAPhoneWithoutSpacesAndWithoutTheFormulaApostrophe() throws Exception {
+    assertEquals("\"+34910565400\"", phoneCsv("+34 910 565 400"));
+    assertEquals("\"912345678\"", phoneCsv("912 345 678"));
+    assertEquals("\"653120012\"", phoneCsv("653120012"));
+    assertEquals("\"+34(910)565-400\"", phoneCsv("+34 (910) 565-400"));
+  }
+
+  /** CP11: what the export writes passes the import's phone rule unchanged. */
+  @Test
+  void exportedPhoneSatisfiesTheImportRule() throws Exception {
+    String cell = phoneCsv("+34 910 565 400").replace("\"", "");
+    assertTrue(cell.matches("[0-9+()\\-.]+") && cell.length() <= 15);
+  }
+
+  @Test
+  void stillNeutralizesAMaliciousValueInThePhoneColumn() throws Exception {
+    assertEquals("\"'=cmd|' /C calc'!A0\"", phoneCsv("=cmd|' /C calc'!A0"));
+    assertEquals("\"'+SUM(A1:A2)\"", phoneCsv("+SUM(A1:A2)"));
+    assertEquals("\"'@SUM(A1)\"", phoneCsv("@SUM(A1)"));
+  }
+
+  @Test
+  void keepsNeutralizingOtherColumnsThatLookLikeAPhone() throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put("id", "b1").put("note", "+34 910 565 400"));
+    NeoCsvExportService.tryExport(flatEnvelope(rows),
+        params("export", "csv", "columns", "note:Note"), cap.response);
+    assertEquals("\"'+34 910 565 400\"", cap.sw.toString().split(CRLF_SEPARATOR)[1]);
+  }
+
+  @Test
+  void stripsPhoneSpacesInAnXlsxExportToo() throws Exception {
+    CapturingBinaryResponse cap = new CapturingBinaryResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put("id", "b1").put("etgoPhone", "+34 910 565 400"));
+    NeoCsvExportService.tryExport(flatEnvelope(rows),
+        params("export", "xlsx", "columns", "etgoPhone:Phone"), cap.response);
+    assertEquals("+34910565400", cap.sheetRows().get(1).get(0));
+    assertEquals(CellType.STRING, cap.cellTypes(1).get(0));
+  }
+
   // ── export=xlsx (ETP-4997) ──────────────────────────────────────────────────
 
   @Test

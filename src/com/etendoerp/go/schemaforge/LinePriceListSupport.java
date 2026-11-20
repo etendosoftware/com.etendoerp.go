@@ -92,15 +92,25 @@ final class LinePriceListSupport {
    */
   static boolean applyCatalogPrice(JSONObject body, ProductPrice catalog, String unitPriceKey,
       String listPriceKey) throws JSONException {
-    if (catalog == null || !hasNoPrice(body, unitPriceKey)) {
+    if (catalog == null) {
       return false;
     }
-    BigDecimal standard = catalog.getStandardPrice();
-    if (standard == null || standard.signum() == 0) {
+    return applyCatalogPrice(body, catalog.getStandardPrice(), catalog.getListPrice(),
+        unitPriceKey, listPriceKey);
+  }
+
+  /**
+   * {@link #applyCatalogPrice(JSONObject, ProductPrice, String, String)} from the catalog's two
+   * amounts, for a caller that has already turned them into the document's currency (ETP-6177).
+   *
+   * @return {@code true} when the unit price was written
+   */
+  static boolean applyCatalogPrice(JSONObject body, BigDecimal standard, BigDecimal list,
+      String unitPriceKey, String listPriceKey) throws JSONException {
+    if (!hasNoPrice(body, unitPriceKey) || standard == null || standard.signum() == 0) {
       return false;
     }
     body.put(unitPriceKey, standard);
-    BigDecimal list = catalog.getListPrice();
     if (list != null && list.signum() != 0 && LineAmountSupport.isZero(body.opt(listPriceKey))) {
       body.put(listPriceKey, list);
     }
