@@ -18,6 +18,7 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -313,57 +314,145 @@ class Context7DocsClientTest {
     }
 
     @Test
-    @DisplayName("404 status throws McpToolException with the status code in the message")
+    @DisplayName("404 status throws Context7DocsException with the status code")
     void notFoundThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(404);
       when(mockResponse.body()).thenReturn("not found");
       when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenReturn(mockResponse);
 
       Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
-      McpToolException ex = assertThrows(McpToolException.class,
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
           () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(404, ex.getStatusCode());
       assertTrue(ex.getMessage().contains("404"),
           "Message should contain the status code, was: " + ex.getMessage());
     }
 
     @Test
-    @DisplayName("429 status throws McpToolException with the status code in the message")
+    @DisplayName("429 status throws Context7DocsException with the status code")
     void tooManyRequestsThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(429);
       when(mockResponse.body()).thenReturn("rate limited");
       when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenReturn(mockResponse);
 
       Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
-      McpToolException ex = assertThrows(McpToolException.class,
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
           () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(429, ex.getStatusCode());
       assertTrue(ex.getMessage().contains("429"),
           "Message should contain the status code, was: " + ex.getMessage());
     }
 
     @Test
-    @DisplayName("500 status throws McpToolException with the status code in the message")
+    @DisplayName("500 status throws Context7DocsException with the status code")
     void serverErrorThrows() throws Exception {
       when(mockResponse.statusCode()).thenReturn(500);
       when(mockResponse.body()).thenReturn("server error");
       when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenReturn(mockResponse);
 
       Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
-      McpToolException ex = assertThrows(McpToolException.class,
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
           () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(500, ex.getStatusCode());
       assertTrue(ex.getMessage().contains("500"),
           "Message should contain the status code, was: " + ex.getMessage());
     }
 
     @Test
-    @DisplayName("IOException from the client is wrapped as McpToolException")
+    @DisplayName("IOException from the client is wrapped as Context7DocsException with no status")
     void ioExceptionWrapped() throws Exception {
-      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(new java.io.IOException("connection refused"));
+      java.io.IOException cause = new java.io.IOException("connection refused");
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(cause);
 
       Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
-      McpToolException ex = assertThrows(McpToolException.class,
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
           () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(-1, ex.getStatusCode());
+      assertSame(cause, ex.getCause());
       assertTrue(ex.getMessage().contains("connection refused"),
           "Message should contain the underlying cause, was: " + ex.getMessage());
+      assertTrue(ex.getMessage().contains("IOException"),
+          "Message should contain the exception class, was: " + ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("nested causes appear in the message down to the root cause")
+    void nestedCauseChainInMessage() throws Exception {
+      java.io.IOException io = new java.io.IOException("connect failed",
+          new java.net.UnknownHostException("context7.com"));
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(io);
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt"));
+      assertTrue(ex.getMessage().contains("IOException: connect failed -> UnknownHostException: context7.com"),
+          ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("describeCauseChain defaults blank messages and survives cycles")
+    void causeChainHelper() {
+      assertEquals("ConnectException: no detail",
+          Context7DocsException.describeCauseChain(new java.net.ConnectException()));
+      RuntimeException a = new RuntimeException("a");
+      RuntimeException b = new RuntimeException("b", a);
+      a.initCause(b);
+      assertEquals("RuntimeException: b -> RuntimeException: a",
+          Context7DocsException.describeCauseChain(b));
+    }
+
+    @Test
+    @DisplayName("interrupted fetch restores the interrupt flag and throws Context7DocsException")
+    void interruptedRestoresFlag() throws Exception {
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(new InterruptedException("stop"));
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      try {
+        Context7DocsException ex = assertThrows(Context7DocsException.class,
+            () -> client.fetchDocs("finance", 5000, "txt"));
+        assertEquals(-1, ex.getStatusCode());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+    }
+
+    @Test
+    @DisplayName("API key never appears in the exception message of an authenticated failure")
+    void apiKeyNotLeaked() throws Exception {
+      when(mockResponse.statusCode()).thenReturn(401);
+      when(mockResponse.body()).thenReturn("unauthorized");
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenReturn(mockResponse);
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt", "secret-token"));
+      assertFalse(ex.getMessage().contains("secret-token"), ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("IOException with null message never yields 'null' in the message")
+    void ioExceptionWithoutMessage() throws Exception {
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(new java.net.ConnectException());
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(-1, ex.getStatusCode());
+      assertTrue(ex.getMessage().contains("ConnectException"));
+      assertFalse(ex.getMessage().contains("null"), ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("HttpTimeoutException is reported with status -1")
+    void timeoutWrapped() throws Exception {
+      when(mockHttpClient.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any())).thenThrow(new java.net.http.HttpTimeoutException("request timed out"));
+
+      Context7DocsClient client = new Context7DocsClient(mockHttpClient, BASE);
+      Context7DocsException ex = assertThrows(Context7DocsException.class,
+          () -> client.fetchDocs("finance", 5000, "txt"));
+      assertEquals(-1, ex.getStatusCode());
+      assertTrue(ex.getMessage().contains("HttpTimeoutException"));
     }
   }
 }

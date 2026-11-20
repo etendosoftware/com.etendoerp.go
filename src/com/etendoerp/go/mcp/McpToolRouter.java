@@ -396,6 +396,12 @@ public class McpToolRouter {
       // came here without reading etendo_schema. One constant, declared once per response, instead
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
+    } catch (Context7DocsException e) {
+      log.log(Context7DocsException.logLevel(e.getStatusCode()),
+          "Context7 docs lookup failed for topic '{}' status={} authenticated={} session={}: {}",
+          topic, e.getStatusCode(), apiKey != null, McpUsageTelemetry.sessionForLog(),
+          e.getMessage());
+      return wrapAsErrorContent(e.agentMessage());
     } catch (Exception e) {
       log.error("Error fetching docs for topic '{}' session={}", topic,
           McpUsageTelemetry.sessionForLog(), e);

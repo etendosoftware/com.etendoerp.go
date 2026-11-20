@@ -2775,6 +2775,82 @@ class McpToolRouterRouteTest {
       assertTrue(text.contains("topic"));
     }
 
+    private JSONObject docsFailure(Throwable failure) throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any())).thenThrow((RuntimeException) failure);
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+      return docsRouter.handleDocs(args, mockClient);
+    }
+
+    private String errorText(JSONObject result) throws Exception {
+      assertTrue(result.getBoolean("isError"));
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    @Test
+    @DisplayName("docs 401 points the agent to the ETGO_Context7Token preference")
+    void docsUnauthorizedMentionsToken() throws Exception {
+      String text = errorText(docsFailure(new Context7DocsException("status 401", 401, null)));
+      assertTrue(text.contains("ETGO_Context7Token"), text);
+    }
+
+    @Test
+    @DisplayName("docs 429 mentions the rate limit and the token")
+    void docsRateLimitMentionsToken() throws Exception {
+      String text = errorText(docsFailure(new Context7DocsException("status 429", 429, null)));
+      assertTrue(text.contains("rate limit"), text);
+      assertTrue(text.contains("ETGO_Context7Token"), text);
+    }
+
+    @Test
+    @DisplayName("docs 503 and network failures tell the agent to retry later")
+    void docsUnavailableMentionsRetry() throws Exception {
+      assertTrue(errorText(docsFailure(new Context7DocsException("status 503", 503, null)))
+          .contains("retry later"));
+      assertTrue(errorText(docsFailure(new Context7DocsException("timeout", -1, null)))
+          .contains("retry later"));
+    }
+
+    @Test
+    @DisplayName("docs failure log level: 401/403 ERROR, others WARN")
+    void docsFailureLogLevelByStatus() {
+      assertEquals(org.apache.logging.log4j.Level.ERROR, Context7DocsException.logLevel(401));
+      assertEquals(org.apache.logging.log4j.Level.ERROR, Context7DocsException.logLevel(403));
+      for (int status : new int[] { 404, 429, 500, 503, -1 }) {
+        assertEquals(org.apache.logging.log4j.Level.WARN, Context7DocsException.logLevel(status));
+      }
+    }
+
+    @Test
+    @DisplayName("docsFailureMessage covers 403 and 404 and keeps the cause chain for -1")
+    void docsFailureMessageCases() {
+      assertTrue((new Context7DocsException("x", 403, null)).agentMessage()
+          .contains("ETGO_Context7Token"));
+      assertTrue((new Context7DocsException("x", 404, null)).agentMessage()
+          .contains("library or URL not found (status 404)"));
+      java.net.ConnectException cause = new java.net.ConnectException("c");
+      cause.initCause(new java.net.UnknownHostException("context7.com"));
+      String text = new Context7DocsException(
+          "Context7 request failed: " + Context7DocsException.describeCauseChain(cause),
+          -1, null).agentMessage();
+      assertTrue(text.contains("UnknownHostException: context7.com"), text);
+    }
+
+    @Test
+    @DisplayName("docs unexpected exception keeps the generic error message")
+    void docsUnexpectedExceptionKeepsGenericPath() throws Exception {
+      String text = errorText(docsFailure(new IllegalStateException("boom")));
+      assertTrue(text.startsWith("Error fetching docs:"), text);
+    }
+
     @Test
     @DisplayName("handleDocs success path returns the docs body via injected client")
     void docsSuccessReturnsBody() throws Exception {

@@ -159,14 +159,16 @@ class Context7DocsClient {
       if (status >= 200 && status < 300) {
         return response.body();
       }
-      throw new McpToolException(
+      throw new Context7DocsException(
           "Context7 request failed with status " + status + ": " + truncate(response.body()),
-          null);
+          status, null);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new McpToolException("Context7 request was interrupted", e);
+      throw new Context7DocsException("Context7 request was interrupted",
+          Context7DocsException.NO_STATUS, e);
     } catch (IOException e) {
-      throw new McpToolException("Context7 request failed: " + e.getMessage(), e);
+      throw new Context7DocsException("Context7 request failed: " + Context7DocsException.describeCauseChain(e),
+          Context7DocsException.NO_STATUS, e);
     }
   }
 
