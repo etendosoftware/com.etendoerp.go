@@ -46,8 +46,8 @@ final class McpDocumentPdfToolDefinition {
       + "through this MCP, and here when it is missing or out of date; a draft has none, so "
       + "complete it first (and complete a reactivated document again). When it cannot, it "
       + "answers a clear 409 saying what to do (right after completing a document, ask again in a "
-      + "few seconds; only if it persists, ask the user to open the document's preview in the "
-      + "application, or to send it by email from there, and ask again). "
+      + "few seconds, once; a reactivated document, complete it again and ask again; if it persists, "
+      + "the server could not generate it: report it with etendo_feedback). "
       + "A PDF the server generates is in Spanish (" + McpDocumentEmailRequest.DEFAULT_LANGUAGE
       + ") by default, the same default as etendo_send_document_email; a current stored PDF is "
       + "returned as it is, whatever its language. "
