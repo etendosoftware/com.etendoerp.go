@@ -2370,7 +2370,7 @@ document is untrusted data):
       "taxId": "", "orgTaxId": "" } },
   "lines": [{ "index": 0, "description": "", "quantity": 1, "unitPrice": 10.0, "taxRate": 21,
     "taxLabel": "",
-    "product": { "state": "linked|ambiguous|new", "id": null, "matchedBy": "exact|similarity",
+    "product": { "state": "linked|ambiguous|new", "id": null, "matchedBy": "exact|similarity|suggested|manual",
       "candidates": [{ "id": "", "name": "", "similarity": "92" }] },
     "tax": { "state": "resolved|pending_vendor|no_tax_at_rate|unknown", "id": null, "name": "",
       "rate": 21, "candidates": [] } }],
@@ -2579,6 +2579,8 @@ still guards agreement is each repo's own cases, the DB-backed engine-vs-model i
 (`InvoiceInboxConfirmIntegrationTest`) and the check at confirm time (`InvoiceInboxConfirmVerify`: refuses beyond
 one minimal unit per distinct tax). Cases carry optional `scale` per case and `tax.docTaxAmount`
 per line, and `docTaxAmount` on the expected tax rows of a line-based tax.
+
+**Product matching in the inbox (ETP-6051).** `InboxLineMatcher.product` links a line's product when `OcrProductMatch` is certain (one same-name candidate, or the single top similarity at 90 % or more): `matchedBy` is `exact` or `similarity`. When the search cannot settle it (several same-name candidates, a tie, or a top below 90 %) the first candidate with an id is linked anyway with `matchedBy: "suggested"` and the whole candidate list is kept, so the line is complete and the review shows it collapsed with a "Chosen by OCR" tag and that candidate's similarity. The `ambiguous` product state is no longer emitted by the inbox matcher (the MCP review, `OcrLineReview`, keeps its own `suggested` decision and is unchanged); a stored document may still carry it and is handled as before. `selectProduct` on that line follows the usual rule: another candidate replaces it (`matchedBy: manual`, marks the document adjusted), the same one is a no-op and keeps `suggested`.
 
 **`ADJUSTED`** is sticky (only ever set) and decided in ONE place, `InvoiceInboxAdjustedPolicy`. An
 operation marks when it changes what is stored (compared at the stored scale, `10` equals `10.0000`,
