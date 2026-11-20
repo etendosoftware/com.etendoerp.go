@@ -62,6 +62,7 @@ import org.openbravo.base.structure.BaseOBObject;
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
  *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
+ *   <li>{@code siiRecordsPreview} (GET) → {@link PurchaseInvoiceSiiRecordsPreview} (ETP-6284)</li>
  *   <li>{@code createGoodsReceipt} → {@link FollowUpActionHandler} with a {@link FollowUpFlow}
  *       of {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code PURCHASE}): the
  *       draft goods receipt for the still-pending quantities (ETP-5576)</li>
@@ -168,6 +169,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // rectifies instead (the window's "Import from return" / "Import from source invoice").
     contracts.putAll(ImportInOutLinesIntoInvoiceHandler.returnContracts(false));
     contracts.putAll(ImportOriginInvoiceLinesHandler.contracts(false));
+    // ETP-6284: read-only preview of the SII records the send would produce.
+    contracts.put(PurchaseInvoiceSiiRecordsPreview.ACTION_NAME,
+        PurchaseInvoiceSiiRecordsPreview.CONTRACT);
     return contracts;
   }
 
@@ -200,6 +204,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    // ETP-6284: a read-only GET action, served before anything with side effects runs.
+    NeoResponse siiPreview = PurchaseInvoiceSiiRecordsPreview.handleIfPreview(context);
+    if (siiPreview != null) {
+      return siiPreview;
+    }
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
     if (paymentMethodSelector != null) {
