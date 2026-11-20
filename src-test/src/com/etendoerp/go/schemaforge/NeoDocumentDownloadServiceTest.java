@@ -67,6 +67,7 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.ad.utility.AttachmentConfig;
 import org.openbravo.model.ad.utility.AttachmentMethod;
 
+import com.etendoerp.go.schemaforge.email.DocShareLinkService;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService.Claims;
 
@@ -805,5 +806,90 @@ public class NeoDocumentDownloadServiceTest {
     } finally {
       System.clearProperty(property);
     }
+  }
+
+  /**
+   * A share code that does not resolve answers 404 without saying whether the record exists. The
+   * database query filters out expired and revoked rows, so those reach this same empty answer.
+   */
+  @Test
+  public void unknownShareCodeAnswers404WithoutLeaking() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    try (MockedStatic<DocShareLinkService> links = Mockito.mockStatic(DocShareLinkService.class)) {
+      links.when(() -> DocShareLinkService.isShareCode("aB3dE5gH7j")).thenReturn(true);
+      links.when(() -> DocShareLinkService.resolve("aB3dE5gH7j")).thenReturn(Optional.empty());
+
+      NeoDocumentDownloadService.handle("aB3dE5gH7j", response);
+
+      links.verify(() -> DocShareLinkService.recordOpen(anyString()), never());
+    }
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals("Document not found", sink.toString());
+  }
+
+  /** A live share code streams the document and counts exactly one open. */
+  @Test
+  public void validShareCodeStreamsTheFileAndRecordsOneOpen() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    ServletOutputStream sos = mock(ServletOutputStream.class);
+    when(response.getOutputStream()).thenReturn(sos);
+    Claims claims = stubClaims("sales-invoice", "REC1", "CLIENT1");
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1", "ATT1");
+    Attachment attachment = stubAttachment("ATT1", "invoice final.pdf", "application/pdf", "CLIENT1");
+    stubStorageLayout(attachment, NESTED_PATH, "TABLE1", "REC1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+    File attachRoot = tempFolder.newFolder("attachments");
+    writeStoredFile(attachRoot, NESTED_PATH, "invoice final.pdf", FILE_BYTES);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
+    OBPropertiesProvider attachProvider = stubAttachRoot(attachRoot.getAbsolutePath());
+
+    try (MockedStatic<DocShareLinkService> links = Mockito.mockStatic(DocShareLinkService.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBPropertiesProvider> propsMock =
+            Mockito.mockStatic(OBPropertiesProvider.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      links.when(() -> DocShareLinkService.isShareCode("aB3dE5gH7j")).thenReturn(true);
+      links.when(() -> DocShareLinkService.resolve("aB3dE5gH7j"))
+          .thenReturn(Optional.of(claims));
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      propsMock.when(OBPropertiesProvider::getInstance)
+          .thenReturn(attachProvider);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoDocumentDownloadService.handle("aB3dE5gH7j", response);
+
+      links.verify(() -> DocShareLinkService.recordOpen("aB3dE5gH7j"));
+    }
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    ArgumentCaptor<byte[]> bodyCaptor = ArgumentCaptor.forClass(byte[].class);
+    verify(sos).write(bodyCaptor.capture());
+    assertArrayEquals(FILE_BYTES, bodyCaptor.getValue());
+  }
+
+  /** A live code whose file is gone answers the same 404 as an unknown code and counts no open. */
+  @Test
+  public void validShareCodeWithoutAFileAnswersTheSame404AndRecordsNoOpen() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    Claims claims = stubClaims("sales-invoice", "REC1", "CLIENT1");
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    try (MockedStatic<DocShareLinkService> links = Mockito.mockStatic(DocShareLinkService.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      links.when(() -> DocShareLinkService.isShareCode("aB3dE5gH7j")).thenReturn(true);
+      links.when(() -> DocShareLinkService.resolve("aB3dE5gH7j"))
+          .thenReturn(Optional.of(claims));
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoDocumentDownloadService.handle("aB3dE5gH7j", response);
+
+      links.verify(() -> DocShareLinkService.recordOpen(anyString()), never());
+    }
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals("Document not found", sink.toString());
   }
 }

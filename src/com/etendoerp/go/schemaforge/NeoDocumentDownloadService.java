@@ -30,6 +30,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
 
+import com.etendoerp.go.schemaforge.email.DocShareLinkService;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService.Claims;
 
@@ -59,23 +60,51 @@ final class NeoDocumentDownloadService {
           + " AND e.isincluded = 'Y' AND tb.tablevel = 0"
           + " ORDER BY e.seqno LIMIT 1";
 
+  private static final String NOT_FOUND_MESSAGE = "Document not found";
+
   private NeoDocumentDownloadService() {
   }
 
   static void handle(String token, HttpServletResponse response) throws IOException {
-    Optional<Claims> claims = DocumentDownloadTokenService.validate(token);
+    // ETP-5035: a short share code is looked up in ETGO_Doc_Share_Link; anything else is a signed
+    // token from a link already in an inbox. An unknown, expired or revoked code answers the same
+    // 404 as a missing file, so the response does not tell whether the record exists.
+    boolean shareCode = DocShareLinkService.isShareCode(token);
+    Optional<Claims> claims = shareCode ? DocShareLinkService.resolve(token)
+        : DocumentDownloadTokenService.validate(token);
     if (!claims.isPresent()) {
-      writePlainError(response, HttpServletResponse.SC_FORBIDDEN, "Invalid or expired link");
+      if (shareCode) {
+        writePlainError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND_MESSAGE);
+      } else {
+        writePlainError(response, HttpServletResponse.SC_FORBIDDEN, "Invalid or expired link");
+      }
       return;
     }
     Claims validated = claims.get();
     Attachment attachment = resolveAttachment(validated);
     if (attachment == null) {
-      writePlainError(response, HttpServletResponse.SC_NOT_FOUND, "Document file not found");
+      writePlainError(response, HttpServletResponse.SC_NOT_FOUND,
+          shareCode ? NOT_FOUND_MESSAGE : "Document file not found");
       return;
+    }
+    if (shareCode) {
+      recordOpenQuietly(token);
     }
     AnonymousAttachmentStreamer.stream(attachment, response,
         "spec=" + validated.getSpecName() + " record=" + validated.getRecordId());
+  }
+
+  /**
+   * Counts an open of a share link without ever blocking the download: a failure is logged and the
+   * document is still served. The row is committed with the request's own transaction (the DAL
+   * request filter).
+   */
+  private static void recordOpenQuietly(String code) {
+    try {
+      DocShareLinkService.recordOpen(code);
+    } catch (RuntimeException e) {
+      log.warn("Could not record the open of document share link {}: {}", code, e.getMessage(), e);
+    }
   }
 
   /**

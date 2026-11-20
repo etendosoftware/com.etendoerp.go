@@ -24,6 +24,9 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -42,6 +45,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
@@ -276,6 +280,44 @@ public class EmailFrameworkValueObjectsTest {
           assertEquals("order-1", claims.getRecordId());
           assertEquals("tenant-1", claims.getClientId());
           assertEquals("sales-order-send:tenant-1:order-1:v1", claims.getIdempotencyKey());
+        });
+  }
+
+  @Test
+  public void createDownloadLinkReturnsTheShortShareCodeWhenTheRowIsStored() {
+    withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download/",
+        "download-secret", "300", () -> {
+          try (MockedStatic<DocShareLinkService> links =
+              Mockito.mockStatic(DocShareLinkService.class)) {
+            links.when(() -> DocShareLinkService.create(eq("sales-order-send"), eq("sales-order"),
+                eq("order-1"), eq("tenant-1"), eq("key"), anyLong())).thenReturn("aB3dE5gH7j");
+
+            String link = DocumentDownloadTokenService.createDownloadLink("sales-order-send",
+                "sales-order", "order-1", "tenant-1", "key").orElseThrow(AssertionError::new);
+
+            assertEquals("https://go.example.test/etendo/sws/neo/document-download/aB3dE5gH7j",
+                link);
+          }
+        });
+  }
+
+  @Test
+  public void createDownloadLinkFallsBackToTheSignedTokenWhenTheRowCannotBeStored() {
+    withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download",
+        "download-secret", "300", () -> {
+          try (MockedStatic<DocShareLinkService> links =
+              Mockito.mockStatic(DocShareLinkService.class)) {
+            links.when(() -> DocShareLinkService.create(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong())).thenThrow(new IllegalStateException("down"));
+
+            String link = DocumentDownloadTokenService.createDownloadLink("sales-order-send",
+                "sales-order", "order-1", "tenant-1", "key").orElseThrow(AssertionError::new);
+
+            String token = link.substring(link.lastIndexOf('/') + 1);
+            assertTrue(token.contains("."));
+            assertEquals("order-1", DocumentDownloadTokenService.validate(token)
+                .orElseThrow(AssertionError::new).getRecordId());
+          }
         });
   }
 

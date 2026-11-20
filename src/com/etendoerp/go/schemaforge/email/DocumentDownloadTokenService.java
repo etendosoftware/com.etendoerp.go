@@ -64,14 +64,16 @@ public final class DocumentDownloadTokenService {
   }
 
   /**
-   * Builds a public download link for one document send event.
+   * Builds a public download link for one document send event: {@code <baseUrl>/<shareCode>}
+   * (ETP-5035). Links already sent as signed tokens keep validating through {@link #validate}.
    *
    * @param contractName email contract name
    * @param specName NEO document spec name
    * @param recordId document record id
    * @param clientId client that owns the document
    * @param idempotencyKey send event idempotency key
-   * @return signed download link when configuration is complete
+   * @return short share link (signed token link when the row cannot be stored) when configuration
+   *         is complete
    */
   public static Optional<String> createDownloadLink(String contractName, String specName,
       String recordId, String clientId, String idempotencyKey) {
@@ -81,9 +83,19 @@ public final class DocumentDownloadTokenService {
         idempotencyKey)) {
       return Optional.empty();
     }
-    String token = createToken(contractName, specName, recordId, clientId, idempotencyKey,
-        currentTimeSeconds() + tokenTtlSeconds(), secret);
-    return Optional.of(StringUtils.removeEnd(baseUrl, "/") + "/" + token);
+    long expiresAtSeconds = currentTimeSeconds() + tokenTtlSeconds();
+    String suffix;
+    try {
+      suffix = DocShareLinkService.create(contractName, specName, recordId, clientId,
+          idempotencyKey, expiresAtSeconds * 1000L);
+    } catch (RuntimeException e) {
+      // The email must still go out: fall back to the signed token, which needs no row.
+      log.warn("Could not store the document share link, using a signed token: {}",
+          e.getMessage(), e);
+      suffix = createToken(contractName, specName, recordId, clientId, idempotencyKey,
+          expiresAtSeconds, secret);
+    }
+    return Optional.of(StringUtils.removeEnd(baseUrl, "/") + "/" + suffix);
   }
 
   /**
@@ -318,6 +330,13 @@ public final class DocumentDownloadTokenService {
       this.idempotencyKey = idempotencyKey;
       this.expiresAtSeconds = expiresAtSeconds;
       this.attachmentId = attachmentId;
+    }
+
+    /** Claims of a stored share link (ETP-5035); it never carries an attachment id. */
+    static Claims ofShareLink(String contractName, String specName, String recordId,
+        String clientId, String idempotencyKey, long expiresAtSeconds) {
+      return new Claims(TOKEN_VERSION, contractName, specName, recordId, clientId, idempotencyKey,
+          expiresAtSeconds, null);
     }
 
     private static Claims from(JSONObject payload) {
