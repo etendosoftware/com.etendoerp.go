@@ -827,10 +827,18 @@ open — returns `false` — on missing table/column metadata, so it can never a
 column it can't positively identify). It is checked inside the **primitives themselves**, not at
 each call site, so every current and future caller is covered by construction:
 
-- `NeoDefaultsService.resolveFirstComboOption(Column, NeoContext)` — the combo/selector
-  first-option fallback (an unscoped "first row of the table" query when no other default
+- `NeoDefaultsService.resolveFirstComboOption(Column, NeoContext, String parentId)` — the
+  combo/selector first-option fallback (the first row of the selector when no other default
   resolves). This is the primitive `resolveOrFirstComboOption`, `applyDefaultWithComboFallback`,
-  and `NeoMandatoryDefaultsService#tryInjectFirstFromLookup` all eventually reach.
+  and `NeoMandatoryDefaultsService#tryInjectFirstFromLookup` all eventually reach. Since ETP-5086 it
+  queries the selector with the record's organization, resolved as Classic resolves `AD_Org_ID`:
+  the `organization` sent for the record, else the parent record's (`parentId`), else the session
+  organization. Candidates are limited to that organization's natural tree and ranked by
+  closeness to it (the org, its ancestors, other orgs of the tree, then `*`) before the display
+  name (`OrgPreference`). Organization `*` adds no restriction, as in Classic. In a child tab the
+  record's own `@AD_Org_ID@` default also resolves to the parent record's organization, as Classic's
+  form initialization does (`NeoDefaultsService.resolveParentOrganizationDefault`); `@#AD_Org_ID@`
+  stays the session organization. So the record and its fallback combos share one organization.
 - `NeoDefaultsService.resolveFromPrefsOrDocType(...)` — the `Utility.getPreference` session/prefs
   fallback used when no `AD_Preference` row exists for the column.
 - `NeoMandatoryDefaultsService#tryInjectFromSession` — a structurally separate mechanism (reads

@@ -44,6 +44,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
@@ -166,7 +167,7 @@ public class NeoDefaultsService {
             // in a hidden/readonly field, so preselecting "the first row of the referenced
             // table" is always wrong for them (e.g. self-referential FKs like
             // Replacedorder_ID would silently mark every new document as a replacement).
-            applyDefaultWithComboFallback(ctx, sfField, resolvedValue, adColumn, defaults, propertyName, dalEntity);
+            applyDefaultWithComboFallback(fieldRequest, sfField, resolvedValue, defaults, propertyName, dalEntity);
             if (!defaults.has(propertyName)) {
               appendSqlDefaultNote(notes, propertyName, fieldRequest.getSqlOutcome());
             }
@@ -241,7 +242,7 @@ public class NeoDefaultsService {
                 .withDefaultResolver((column, parentValues) -> {
                   Object resolved = resolveFieldDefault(new FieldDefaultRequest(column, parentId,
                       vars, conn, windowId, ctx).withParentValues(parentValues));
-                  return resolveOrFirstComboOption(ctx, column, resolved);
+                  return resolveOrFirstComboOption(ctx, column, resolved, parentId);
                 })
                 .withIdentifierInjector(NeoDefaultsService::tryInjectIdentifier)
                 .withSfFieldColumns(sfFieldColumns));
@@ -321,7 +322,8 @@ public class NeoDefaultsService {
     return response;
   }
 
-  private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
+  private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved,
+      String parentId) {
     if (resolved != null) {
       return resolved;
     }
@@ -330,11 +332,12 @@ public class NeoDefaultsService {
     // isUserSessionFallbackExcludedColumn column unconditionally, so this call is already covered
     // regardless of whether NeoHiddenMandatoryDefaultsResolver's mandatory-only gating changes in
     // the future. The primitive-level guard is the authority; see its javadoc there.
-    return resolveFirstComboOption(column, ctx);
+    return resolveFirstComboOption(column, ctx, parentId);
   }
 
-  private static void applyDefaultWithComboFallback(NeoContext ctx, SFField sfField, Object resolvedValue,
-      Column adColumn, JSONObject defaults, String propertyName, Entity dalEntity) throws JSONException {
+  private static void applyDefaultWithComboFallback(FieldDefaultRequest request, SFField sfField,
+      Object resolvedValue, JSONObject defaults, String propertyName, Entity dalEntity) throws JSONException {
+    Column adColumn = request.adColumn;
     // ETP-5277: the combo-preselection fallback below runs under the admin-mode block that
     // wraps the whole of resolveDefaults (see its top-level OBContext.setAdminMode()), so its
     // OBCriteria query is NOT scoped by the caller's own client/org — it picks literally the
@@ -374,7 +377,7 @@ public class NeoDefaultsService {
     // receiving the first-option fallback, same as pre-ETP-5745.
     if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
         && (!isListReference(adColumn) || Boolean.TRUE.equals(adColumn.isMandatory()))) {
-      resolvedValue = resolveFirstComboOption(adColumn, ctx);
+      resolvedValue = resolveFirstComboOption(adColumn, request.ctx, request.parentId);
     }
     if (resolvedValue != null) {
       // Coerce "Y"/"N" string defaults to JSON boolean for Yes/No (boolean) properties.
@@ -804,6 +807,10 @@ public class NeoDefaultsService {
         && !request.sfFieldDefault.trim().isEmpty())
         ? request.sfFieldDefault.trim()
         : adColumn.getDefaultValue();
+    String parentOrganization = resolveParentOrganizationDefault(request, defaultExpr);
+    if (parentOrganization != null) {
+      return parentOrganization;
+    }
     if (defaultExpr == null || defaultExpr.trim().isEmpty()
         || isBlankQuotedLiteral(defaultExpr.trim())) {
       // ETP-5277: AD_User's Default_Ad_Role_ID/Default_Ad_Client_ID/Default_Ad_Org_ID/
@@ -830,6 +837,30 @@ public class NeoDefaultsService {
     }
 
     return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
+  }
+
+  /**
+   * ETP-5086: in a child tab, the window-level {@code @AD_Org_ID@} default resolves to the parent
+   * record's organization, as in Classic, where the form initialization stores the parent's
+   * {@code AD_Org_ID} as the window's session value before computing the child's defaults. Only
+   * the window-level token qualifies; {@code @#AD_Org_ID@} is the session organization in Classic
+   * too and keeps resolving to it.
+   *
+   * @return the parent record's organization, or {@code null} when the rule does not apply
+   */
+  private static String resolveParentOrganizationDefault(FieldDefaultRequest request,
+      String defaultExpr) {
+    if (defaultExpr == null || !PARENT_ORG_DEFAULT.equalsIgnoreCase(defaultExpr.trim())
+        || !COLUMN_AD_ORG_ID.equalsIgnoreCase(request.adColumn.getDBColumnName())
+        || StringUtils.isBlank(request.parentId) || request.ctx == null) {
+      return null;
+    }
+    Tab tab = request.ctx.getAdTab();
+    if (tab == null || tab.getTabLevel() == null || tab.getTabLevel() <= 0) {
+      return null;
+    }
+    return SelectorContextResolver.resolveOrgFromParentRecord(request.ctx.getSfEntity(),
+        request.parentId);
   }
 
   /**
@@ -1116,6 +1147,11 @@ public class NeoDefaultsService {
 
   /** DB table name (as returned by {@code Table.getDBTableName()}) the deny-list above applies to. */
   private static final String TABLE_AD_USER = "AD_USER";
+
+  /** The organization column every org-enabled table has. */
+  private static final String COLUMN_AD_ORG_ID = "AD_Org_ID";
+  /** Window-level organization default, inherited from the parent record in a child tab. */
+  private static final String PARENT_ORG_DEFAULT = "@AD_Org_ID@";
 
   /**
    * True when {@code adColumn} is one of the 4 {@code AD_User} columns ETP-5277 excludes from
@@ -1448,7 +1484,7 @@ public class NeoDefaultsService {
         || NeoSelectorService.REF_LIST.equals(baseRefId);
   }
 
-  private static Map<String, String> buildFICComboContextParams(NeoContext ctx) {
+  private static Map<String, String> buildFICComboContextParams(NeoContext ctx, String parentId) {
     Map<String, String> params = new java.util.HashMap<>();
     if (ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null
         && ctx.getAdTab().getWindow().isSalesTransaction() != null) {
@@ -1457,11 +1493,11 @@ public class NeoDefaultsService {
       params.put("IsSOTrx", soTrx);
       params.put("isSOTrx", soTrx);
     }
-    OrgPreference.putFallbackOrganization(params, ctx);
+    OrgPreference.putFallbackOrganization(params, ctx, parentId);
     return params;
   }
 
-  static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+  static Object resolveFirstComboOption(Column col, NeoContext ctx, String parentId) {
     // ETP-5277 (architectural consolidation): the exclusion now lives HERE, at the shared
     // primitive every combo first-option caller eventually reaches — resolveOrFirstComboOption,
     // applyDefaultWithComboFallback, and NeoMandatoryDefaultsService#tryInjectFirstFromLookup (the
@@ -1481,7 +1517,7 @@ public class NeoDefaultsService {
       if (NeoSelectorService.hasObuiselSelector(col)) {
         return null;
       }
-      Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      Map<String, String> contextParams = buildFICComboContextParams(ctx, parentId);
       NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
           col, col.getDBColumnName(), null, 1, 0, contextParams);
       if (selectorResp == null || selectorResp.getHttpStatus() != 200) {

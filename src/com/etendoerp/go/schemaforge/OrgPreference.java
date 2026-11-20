@@ -23,8 +23,11 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
@@ -44,41 +47,59 @@ final class OrgPreference {
   static final String PARAM_PREFER_ORG = "selectorPreferOrgId";
   private static final String PARAM_AD_ORG_ID = "AD_Org_ID";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String PROP_ORGANIZATION = "organization";
+  private static final String ORG_STAR = "0";
   private static final String ORDER_BY = " ORDER BY ";
 
   private OrgPreference() {
   }
 
   /**
-   * Gives the combo first-option fallback an organization context, so the selector restricts
-   * candidates to the target record's organization tree (plus {@code *}) and ranks them by closeness
-   * to that organization. The organization comes from the record being created (request body), else
-   * from the parent record (via {@code parentId}). Organization {@code 0} carries no preference.
-   * With neither source, nothing is added and the fallback behaves as before.
+   * Gives the combo first-option fallback the organization of the record being defaulted, so the
+   * selector restricts candidates to that organization's natural tree and ranks them by closeness
+   * to it. Mirrors Classic, where the record's {@code AD_Org_ID} is resolved before any combo and
+   * {@code ComboTableData} filters every combo by its natural tree:
+   * <ol>
+   * <li>the organization sent for the record (request body);</li>
+   * <li>else the parent record's organization ({@code parentId});</li>
+   * <li>else the session organization ({@code #AD_Org_ID}).</li>
+   * </ol>
+   * An organization {@code 0} ({@code *}) has every organization in its natural tree, so it adds
+   * no restriction, as in Classic. A caller-supplied {@code AD_Org_ID} is kept.
    */
-  static void putFallbackOrganization(Map<String, String> params, NeoContext ctx) {
-    if (ctx == null || params.containsKey(PARAM_AD_ORG_ID) || params.containsKey(PARAM_PARENT_ID)) {
+  static void putFallbackOrganization(Map<String, String> params, NeoContext ctx,
+      String parentId) {
+    if (ctx == null || params.containsKey(PARAM_AD_ORG_ID)) {
       return;
     }
-    String orgId = null;
-    JSONObject requestBody = ctx.getRequestBody();
-    if (requestBody != null) {
-      orgId = StringUtils.trimToNull(requestBody.optString("organization", null));
-    }
-    if ("0".equals(orgId)) {
-      orgId = null;
-    }
-    if (orgId != null) {
+    String orgId = resolveRecordOrganization(ctx, parentId);
+    if (orgId != null && !ORG_STAR.equals(orgId)) {
       params.put(PARAM_AD_ORG_ID, orgId);
       params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
-      return;
     }
-    Map<String, String> queryParams = ctx.getQueryParams();
-    String parentId = queryParams != null ? StringUtils.trimToNull(queryParams.get(PARAM_PARENT_ID)) : null;
-    if (parentId != null) {
-      params.put(PARAM_PARENT_ID, parentId);
-      params.put(PARAM_PREFER_CONTEXT_ORG, "Y");
+  }
+
+  private static String resolveRecordOrganization(NeoContext ctx, String parentId) {
+    JSONObject requestBody = ctx.getRequestBody();
+    String orgId = requestBody != null
+        ? StringUtils.trimToNull(requestBody.optString(PROP_ORGANIZATION, null)) : null;
+    if (orgId != null) {
+      return orgId;
     }
+    String effectiveParentId = StringUtils.trimToNull(parentId);
+    if (effectiveParentId == null && ctx.getQueryParams() != null) {
+      effectiveParentId = StringUtils.trimToNull(ctx.getQueryParams().get(PARAM_PARENT_ID));
+    }
+    if (effectiveParentId != null) {
+      orgId = SelectorContextResolver.resolveOrgFromParentRecord(ctx.getSfEntity(),
+          effectiveParentId);
+      if (orgId != null) {
+        return orgId;
+      }
+    }
+    OBContext obContext = ctx.getObContext() != null ? ctx.getObContext() : OBContext.getOBContext();
+    Organization sessionOrg = obContext != null ? obContext.getCurrentOrganization() : null;
+    return sessionOrg != null ? sessionOrg.getId() : null;
   }
 
   /**
