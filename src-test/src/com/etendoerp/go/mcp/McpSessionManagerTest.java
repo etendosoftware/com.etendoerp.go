@@ -251,8 +251,8 @@ class McpSessionManagerTest {
   }
 
   @Nested
-  @DisplayName("Request language (ETP-6401)")
-  class RequestLanguage {
+  @DisplayName("Accept-Language override (ETP-6401)")
+  class AcceptLanguageOverride {
 
     @Test
     @DisplayName("applies the request language before the request code is captured")

@@ -93,8 +93,9 @@ public class McpServlet extends HttpServlet {
   private static final String UNKNOWN_CLIENT = "unknown";
   /** Message prefix of a JSON-RPC "method not found". */
   private static final String METHOD_NOT_FOUND_PREFIX = "Method not found: ";
-  /** The legacy-era liveness method, removed by MCP 2026-07-28. */
+  /** Request header naming the language the call's messages are answered in. */
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";
+  /** The legacy-era liveness method, removed by MCP 2026-07-28. */
   private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
@@ -1130,6 +1131,7 @@ public class McpServlet extends HttpServlet {
    * without its quality value, with {@code -} turned into {@code _} ({@code en-US,en;q=0.9} gives
    * {@code en_US}). Validity is left to {@code NeoLanguage}.
    *
+   * @param header the raw {@code Accept-Language} value
    * @return the code, or {@code null} when the header is absent or blank
    */
   static String normalizeLanguage(String header) {
@@ -1160,12 +1162,12 @@ public class McpServlet extends HttpServlet {
 
     AuthIdentity(String userId, String roleId, String clientId, String orgId, String scopes,
         String language) {
-      this.language = language;
       this.userId = userId;
       this.roleId = roleId;
       this.clientId = clientId;
       this.orgId = orgId;
       this.scopes = scopes;
+      this.language = language;
     }
 
     /** The same identity acting on {@code effectiveClientId}; {@code this} when it is unchanged. */
