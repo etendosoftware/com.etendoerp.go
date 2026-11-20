@@ -61,4 +61,38 @@ class Context7DocsException extends McpToolException {
   int getStatusCode() {
     return statusCode;
   }
+
+  /**
+   * Log level for a failed Context7 lookup: persistent configuration faults (401/403) stay at
+   * ERROR so they remain in the error stream; transient failures are WARN.
+   *
+   * @param status the HTTP status, or {@link #NO_STATUS} when there was no response
+   * @return the level to log at
+   */
+  static org.apache.logging.log4j.Level logLevel(int status) {
+    return status == 401 || status == 403
+        ? org.apache.logging.log4j.Level.ERROR : org.apache.logging.log4j.Level.WARN;
+  }
+
+  /**
+   * Build the agent-facing text for this failure, depending on the HTTP status.
+   *
+   * @return an actionable message for the agent
+   */
+  String agentMessage() {
+    switch (statusCode) {
+      case 401:
+      case 403:
+        return "Context7 rejected the request (status " + statusCode
+            + "): check the " + McpToolRouter.PREF_CONTEXT7_TOKEN + " preference.";
+      case 429:
+        return "Context7 rate limit reached (status 429); retry later or configure the "
+            + McpToolRouter.PREF_CONTEXT7_TOKEN + " preference.";
+      case 404:
+        return "Context7 docs library or URL not found (status 404).";
+      default:
+        return "The documentation service (Context7) is unavailable right now; retry later. "
+            + getMessage();
+    }
+  }
 }

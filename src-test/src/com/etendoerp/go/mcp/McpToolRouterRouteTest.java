@@ -2822,25 +2822,25 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("docs failure log level: 401/403 ERROR, others WARN")
     void docsFailureLogLevelByStatus() {
-      assertEquals(org.apache.logging.log4j.Level.ERROR, McpToolRouter.docsFailureLogLevel(401));
-      assertEquals(org.apache.logging.log4j.Level.ERROR, McpToolRouter.docsFailureLogLevel(403));
+      assertEquals(org.apache.logging.log4j.Level.ERROR, Context7DocsException.logLevel(401));
+      assertEquals(org.apache.logging.log4j.Level.ERROR, Context7DocsException.logLevel(403));
       for (int status : new int[] { 404, 429, 500, 503, -1 }) {
-        assertEquals(org.apache.logging.log4j.Level.WARN, McpToolRouter.docsFailureLogLevel(status));
+        assertEquals(org.apache.logging.log4j.Level.WARN, Context7DocsException.logLevel(status));
       }
     }
 
     @Test
     @DisplayName("docsFailureMessage covers 403 and 404 and keeps the cause chain for -1")
     void docsFailureMessageCases() {
-      assertTrue(McpToolRouter.docsFailureMessage(new Context7DocsException("x", 403, null))
+      assertTrue((new Context7DocsException("x", 403, null)).agentMessage()
           .contains("ETGO_Context7Token"));
-      assertTrue(McpToolRouter.docsFailureMessage(new Context7DocsException("x", 404, null))
+      assertTrue((new Context7DocsException("x", 404, null)).agentMessage()
           .contains("library or URL not found (status 404)"));
-      String text = McpToolRouter.docsFailureMessage(new Context7DocsException(
-          "Context7 request failed: "
-              + Context7DocsException.describeCauseChain(new java.net.ConnectException("c",
-                  new java.net.UnknownHostException("context7.com"))),
-          -1, null));
+      java.net.ConnectException cause = new java.net.ConnectException("c");
+      cause.initCause(new java.net.UnknownHostException("context7.com"));
+      String text = new Context7DocsException(
+          "Context7 request failed: " + Context7DocsException.describeCauseChain(cause),
+          -1, null).agentMessage();
       assertTrue(text.contains("UnknownHostException: context7.com"), text);
     }
 

@@ -397,51 +397,15 @@ public class McpToolRouter {
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Context7DocsException e) {
-      log.log(docsFailureLogLevel(e.getStatusCode()),
+      log.log(Context7DocsException.logLevel(e.getStatusCode()),
           "Context7 docs lookup failed for topic '{}' status={} authenticated={} session={}: {}",
           topic, e.getStatusCode(), apiKey != null, McpUsageTelemetry.sessionForLog(),
           e.getMessage());
-      return wrapAsErrorContent(docsFailureMessage(e));
+      return wrapAsErrorContent(e.agentMessage());
     } catch (Exception e) {
       log.error("Error fetching docs for topic '{}' session={}", topic,
           McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Log level for a failed Context7 lookup: persistent configuration faults (401/403) stay at
-   * ERROR so they remain in the error stream; transient failures are WARN.
-   *
-   * @param status the HTTP status, or -1 when there was no response
-   * @return the level to log at
-   */
-  static org.apache.logging.log4j.Level docsFailureLogLevel(int status) {
-    return status == 401 || status == 403
-        ? org.apache.logging.log4j.Level.ERROR : org.apache.logging.log4j.Level.WARN;
-  }
-
-  /**
-   * Build the agent-facing text for a failed Context7 lookup, depending on the HTTP status.
-   *
-   * @param e the Context7 failure
-   * @return an actionable message for the agent
-   */
-  static String docsFailureMessage(Context7DocsException e) {
-    int status = e.getStatusCode();
-    switch (status) {
-      case 401:
-      case 403:
-        return "Context7 rejected the request (status " + status
-            + "): check the " + PREF_CONTEXT7_TOKEN + " preference.";
-      case 429:
-        return "Context7 rate limit reached (status 429); retry later or configure the "
-            + PREF_CONTEXT7_TOKEN + " preference.";
-      case 404:
-        return "Context7 docs library or URL not found (status 404).";
-      default:
-        return "The documentation service (Context7) is unavailable right now; retry later. "
-            + e.getMessage();
     }
   }
 
