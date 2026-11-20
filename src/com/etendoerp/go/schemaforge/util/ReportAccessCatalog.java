@@ -36,9 +36,9 @@ import org.openbravo.model.ad.ui.Window;
 /**
  * ETP-5402 — the "Informes" (Reports) subsection catalog: the exact 9 reports the real
  * `report-viewer` gallery shows (`ReportViewerPage.jsx`'s own `REPORT_PREVIEW_IMAGES` keys /
- * each report's `artifacts/&lt;id&gt;/report-contract.json` — 8 under Finance, 1 under
- * Inventory), and the shared tier-resolution logic for them, factored out so BOTH {@code
- * SFRolesOverview} ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User
+ * each report's `artifacts/&lt;id&gt;/report-contract.json` — 6 under Finance, 2 under
+ * Treasury, 1 under Inventory), and the shared tier-resolution logic for them, factored out so
+ * BOTH {@code SFRolesOverview} ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User
  * window's "Roles del usuario" tab matrix columns) resolve a role's Informes access identically
  * — the two webhooks must never drift on which anchor id/category/kind backs a given row.
  *
@@ -112,7 +112,10 @@ public final class ReportAccessCatalog {
     public final Kind kind;
     /** The anchor id in {@link #kind}'s own id-space (window/OBUIAPP-process/classic-process id). */
     public final String anchorId;
-    /** Hardcoded Informes category this row belongs to (see {@link #FINANCE_CATEGORY}/{@link #INVENTORY_CATEGORY}). */
+    /**
+     * Hardcoded Informes category this row belongs to (one of {@link #FINANCE_CATEGORY}, {@link
+     * #TREASURY_CATEGORY} or {@link #INVENTORY_CATEGORY}).
+     */
     public final String category;
 
     Row(String id, String name, Kind kind, String anchorId, String category) {
@@ -154,14 +157,21 @@ public final class ReportAccessCatalog {
   /** Hardcoded Informes category for the Inventory-family report rows. */
   public static final String INVENTORY_CATEGORY = "Inventory";
 
+  /**
+   * Hardcoded Informes category for the Treasury-family report rows (the two aging schedules).
+   * Must match the SPA's {@code menu.json} group name verbatim — it is also the i18n key the
+   * frontend translates the category heading with.
+   */
+  public static final String TREASURY_CATEGORY = "Treasury";
+
   /** The 9 Informes-subsection report rows, in declaration order. */
   public static final List<Row> ROWS = List.of(
       new Row("tax-report", "Tax Report",
           Kind.CLASSIC_PROCESS, TAX_REPORT_PROCESS_ID, FINANCE_CATEGORY),
       new Row("aging-receivable", "Aging Report (Receivables)",
-          Kind.OBUIAPP_PROCESS, AGING_RECEIVABLE_PROCESS_ID, FINANCE_CATEGORY),
+          Kind.OBUIAPP_PROCESS, AGING_RECEIVABLE_PROCESS_ID, TREASURY_CATEGORY),
       new Row("aging-payable", "Aging Report (Payables)",
-          Kind.OBUIAPP_PROCESS, AGING_PAYABLE_PROCESS_ID, FINANCE_CATEGORY),
+          Kind.OBUIAPP_PROCESS, AGING_PAYABLE_PROCESS_ID, TREASURY_CATEGORY),
       new Row("balance-sheet", "Balance Sheet",
           Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
       new Row("profit-loss", "Profit & Loss",
