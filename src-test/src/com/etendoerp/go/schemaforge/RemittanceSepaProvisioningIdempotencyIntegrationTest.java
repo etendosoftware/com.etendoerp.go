@@ -97,7 +97,8 @@ public class RemittanceSepaProvisioningIdempotencyIntegrationTest extends OBBase
 
       assertEquals("no payment method on the second run", methodsAfterFirst,
           count(FIN_PaymentMethod.class, "as m where m.client.id = :client"));
-      assertEquals(methodsBefore + 2, methodsAfterFirst);
+      // The two SEPA methods plus, since ETP-6247, the client's own «return» payment method.
+      assertEquals(methodsBefore + 3, methodsAfterFirst);
       assertEquals(processesAfterFirst, count(PaymentExecutionProcess.class,
           "as p where p.client.id = :client and p.javaClassName = '"
               + RemittanceSepaProvisioning.IN_REMITTANCE_CLASS + "'"));

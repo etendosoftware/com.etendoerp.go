@@ -87,10 +87,12 @@ final class OrderLineCreateDiscount {
 
   /**
    * Whether {@link #resetCascadeDiscount} applies to this pre-hook context: an MCP CRUD create that
-   * carries {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — set only by {@code etendo_create}, the
-   * one channel that fills defaults before the pre-hook; without it the body is what the caller
-   * sent (REST single and batch, {@code etendo_batch}, and so the form, which always sends
-   * {@code unitPrice} with {@code listPrice} anyway) — whose agent sent {@code listPrice} and none
+   * carries {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — {@code etendo_create}, the one MCP-origin
+   * channel that sets it, because it fills defaults before the pre-hook ({@code etendo_batch} also
+   * sets it through {@code BatchService.OperationContext#hookAttributes}, but on a context that is
+   * not MCP-origin, so {@link #agentSentKeys} ignores it there and the body is what the caller sent,
+   * as on REST single and batch and so the form, which always sends {@code unitPrice} with
+   * {@code listPrice} anyway) — whose agent sent {@code listPrice} and none
    * of {@code discount} (an explicit 100 % stays 100), {@code unitPrice} or {@code grossUnitPrice}
    * (a negotiated price keeps deriving its discount in {@link #derive}), and whose body has a
    * non-zero list price and no price yet ({@code unitPrice} absent or 0, the cascade's 0).
@@ -129,7 +131,7 @@ final class OrderLineCreateDiscount {
    *       instead, which would have applied 100 % or 67 %;</li>
    *   <li>or {@link #resetCascadeDiscount} reset the cascade's discount.</li>
    * </ul>
-   * MCP {@code etendo_create} only (it is the one that sets
+   * MCP {@code etendo_create} only (the one MCP-origin channel that sets
    * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}); {@code listPrice} is never governed here.
    */
   static boolean governsDiscountOnCreate(NeoContext ctx) {
@@ -140,10 +142,11 @@ final class OrderLineCreateDiscount {
   }
 
   /**
-   * The keys the agent itself sent on an MCP CRUD create
-   * ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, set only by {@code etendo_create}), or the
-   * empty set on any other request — where the body is what the caller sent (REST single and
-   * batch, {@code etendo_batch}, and so the form).
+   * The keys the agent itself sent on an MCP-origin CRUD create
+   * ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, set there by {@code etendo_create}), or the
+   * empty set on any other request: REST single and batch and the form, where the body is what the
+   * caller sent, and {@code etendo_batch}, whose op context carries the attribute (ETP-6177) but is
+   * not MCP-origin — the discount rules here keep reading its body, as before.
    */
   private static Collection<?> agentSentKeys(NeoContext ctx) {
     if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
@@ -152,6 +155,28 @@ final class OrderLineCreateDiscount {
     }
     Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
     return provided instanceof Collection ? (Collection<?>) provided : Collections.emptySet();
+  }
+
+  /**
+   * Whether an MCP agent left the price of the new line to the server: a create carrying
+   * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — set by {@code etendo_create} and, on a non-MCP
+   * context, by {@code etendo_batch}'s preprocessor; never by REST — whose agent sent none of
+   * {@code unitPrice}, {@code listPrice} or {@code grossUnitPrice}. The prices in such a body are
+   * the ones {@code McpLinePriceInjector} took from the price list, so
+   * {@link OrderLineCurrencyConversion} may convert them (ETP-6177). {@code false} on every other
+   * request — there the body is what the caller sent.
+   */
+  static boolean agentLeftPriceToServer(NeoContext ctx) {
+    Object provided = ctx == null ? null
+        : ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    if (!(provided instanceof Collection) || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+      return false;
+    }
+    Collection<?> sent = (Collection<?>) provided;
+    return !sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE);
   }
 
   /** The agent priced the line by its list price alone: no discount, net or gross price sent. */

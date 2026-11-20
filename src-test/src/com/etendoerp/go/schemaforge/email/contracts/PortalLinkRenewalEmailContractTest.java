@@ -187,6 +187,8 @@ public class PortalLinkRenewalEmailContractTest {
       assertTrue(c[0] + ": " + body, body.contains((String) c[1]));
       assertFalse(c[0] + ": " + body, body.contains("rectificativa"));
       assertTrue(body.contains(NEW_URL));
+      assertTrue("the renewal closes with the Etendo footer: " + body,
+          body.contains("Creado con Etendo"));
       assertEquals("onDelivered confirms the new link, not the expired one", NEW_ID,
           request.getSendCorrelationId());
     }

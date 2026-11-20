@@ -152,6 +152,10 @@ public class DocumentCurrencyRateTest {
       return ABSENT;
     }
     Object value = body.opt(RATE);
+    if ("".equals(value)) {
+      // Sentinel for a rate sent as "" (a form serializing an empty field), distinct from null.
+      return "<blank>";
+    }
     return value == null || value == JSONObject.NULL ? NULL
         : new BigDecimal(String.valueOf(value)).stripTrailingZeros().toPlainString();
   }
@@ -215,6 +219,37 @@ public class DocumentCurrencyRateTest {
             "usd", manual, false, DocumentRateMessages.CODE_MISSING_ON_COMPLETE, NULL },
         { "processed document untouched", DOC_ID, "{\"eTGOCurrencyRate\":null}", false,
             "usd", null, true, null, NULL },
+        // ETP-6177: the rate is locked on a processed document, as the window's rate picker is.
+        // Core's C_Order restriction trigger does not cover the column, so this is the refusal.
+        { "processed document refuses a new rate", DOC_ID, "{\"eTGOCurrencyRate\":\"2.5\"}",
+            false, "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2.5" },
+        { "processed document refuses clearing its rate", DOC_ID,
+            "{\"eTGOCurrencyRate\":null}", false, "usd", manual, true,
+            DocumentCurrencyRate.CODE_PROCESSED, NULL },
+        { "processed document accepts its stored rate re-sent", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"1.1\"}", false, "usd", manual, true, null, "1.1" },
+        { "processed document, write without a rate untouched", DOC_ID,
+            "{\"description\":\"x\"}", false, "usd", manual, true, null, ABSENT },
+        { "processed document accepts its stored rate at another scale", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"1.10\"}", false, "usd", new BigDecimal("1.1"), true, null,
+            "1.1" },
+        { "processed document refuses a numeric rate", DOC_ID, "{\"eTGOCurrencyRate\":2.5}",
+            false, "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2.5" },
+        { "processed document with a stored 0 accepts an empty rate re-sent", DOC_ID,
+            "{\"eTGOCurrencyRate\":null}", false, "usd", BigDecimal.ZERO, true, null, NULL },
+        { "completing a draft with a rate is not the processed lock", DOC_ID,
+            "{\"documentAction\":\"CO\",\"eTGOCurrencyRate\":\"1.5\"}", true,
+            "usd", manual, false, null, "1.5" },
+        { "reactivating with a different rate is refused", DOC_ID,
+            "{\"documentAction\":\"RE\",\"eTGOCurrencyRate\":\"2\"}", false,
+            "usd", manual, true, DocumentCurrencyRate.CODE_PROCESSED, "2" },
+        { "processed org-currency document refuses a rate too", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"0.5\"}", false, "eur", null, true,
+            DocumentCurrencyRate.CODE_PROCESSED, "0.5" },
+        { "processed document with no rate accepts an empty rate re-sent", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"\"}", false, "eur", null, true, null, "<blank>" },
+        { "processed org-currency document, write without a rate untouched", DOC_ID,
+            "{\"description\":\"x\"}", false, "eur", null, true, null, ABSENT },
         { "create computes from its reference date", null,
             "{\"currency\":\"usd\",\"orderDate\":\"2026-03-20\",\"organization\":\"org-1\"}", false,
             null, null, false, null, "1.3" },

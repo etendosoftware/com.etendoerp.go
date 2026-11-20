@@ -42,6 +42,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -49,6 +50,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
+import javax.servlet.ServletOutputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -62,9 +64,11 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.ad.utility.Image;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
 import com.etendoerp.go.schemaforge.AnonymousAttachmentStreamer;
+import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 
 /**
  * Unit tests for {@link PortalServlet}, the customer portal's session-less API: where the token is
@@ -87,6 +91,9 @@ public class PortalServletTest {
   private static final String INVALID_BODY = "{\"error\":\"This link is no longer valid\"}";
   private static final String[] DATA_PATHS = { "/home", "/search", "/documents",
       "/documents/INVOICE/INV-1", "/documents/INVOICE/INV-1/pdf" };
+  private static final byte[] PNG =
+      { (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01 };
+  private static final byte[] JPEG = { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0 };
 
   private MockedStatic<OBContext> obContext;
   private MockedStatic<CompanyLogoResolver> logos;
@@ -233,7 +240,77 @@ public class PortalServletTest {
       servlet.service(request(c[0], c[1]), call.response);
 
       verify(call.response).setHeader(eq("Cache-Control"), contains("no-store"));
+      verify(call.response).setHeader("Pragma", "no-cache");
     }
+  }
+
+  @Test
+  public void thePublicLogoIsServedWithoutATokenAsACacheableImageTypedFromItsBytes()
+      throws Exception {
+    Object[][] cases = { { PNG, "image/png" }, { JPEG, "image/jpeg" } };
+    withLogoSecret(() -> {
+      String path = PortalLogoReference.PATH
+          + PortalLogoReference.reference(CLIENT_ID, "ORG-1").orElse(null);
+      for (Object[] c : cases) {
+        byte[] bytes = (byte[]) c[0];
+        Image logo = mock(Image.class);
+        when(logo.getBindaryData()).thenReturn(bytes);
+        logos.when(() -> CompanyLogoResolver.resolve(CLIENT_ID, "ORG-1")).thenReturn(logo);
+        Call call = new Call();
+        ServletOutputStream out = mock(ServletOutputStream.class);
+        when(call.response.getOutputStream()).thenReturn(out);
+
+        servlet.service(request("GET", path), call.response);
+
+        assertEquals(HttpServletResponse.SC_OK, call.status());
+        verify(call.response).setContentType((String) c[1]);
+        verify(call.response).setHeader("Cache-Control", "public, max-age=86400");
+        verify(call.response).setHeader("X-Content-Type-Options", "nosniff");
+        verify(call.response).setHeader("Content-Security-Policy", "default-src 'none'");
+        verify(call.response, never()).setHeader(eq("Cache-Control"), contains("no-store"));
+        verify(call.response, never()).setHeader(eq("Pragma"), anyString());
+        verify(out).write(bytes);
+      }
+    });
+    // No portal token is read, and no portal limiter is consumed.
+    verifyNoInteractions(linkService, meLimiter, dataLimiter);
+  }
+
+  @Test
+  public void thePublicLogoAnswersAnUncacheable404ForAForgedReferenceNoLogoOrANonRasterImage()
+      throws Exception {
+    Image svg = mock(Image.class);
+    when(svg.getBindaryData()).thenReturn(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>".getBytes(StandardCharsets.UTF_8));
+    Image gif = mock(Image.class);
+    when(gif.getBindaryData()).thenReturn("GIF89a".getBytes(StandardCharsets.US_ASCII));
+    Image withoutBytes = mock(Image.class);
+    Image png = mock(Image.class);
+    when(png.getBindaryData()).thenReturn(PNG);
+    withLogoSecret(() -> {
+      String signed = PortalLogoReference.reference(CLIENT_ID, "ORG-1").orElse(null);
+      String forged = signed.substring(0, signed.lastIndexOf('.')) + ".forged";
+      // Columns: label, reference, the logo the tenant has.
+      Object[][] cases = {
+          { "forged reference", forged, png },
+          { "no logo", signed, null },
+          { "a logo row without bytes", signed, withoutBytes },
+          { "an SVG logo", signed, svg },
+          { "a GIF logo", signed, gif },
+      };
+      for (Object[] c : cases) {
+        Image logo = (Image) c[2];
+        logos.when(() -> CompanyLogoResolver.resolve(CLIENT_ID, "ORG-1")).thenReturn(logo);
+        Call call = new Call();
+
+        servlet.service(request("GET", PortalLogoReference.PATH + c[1]), call.response);
+
+        assertEquals((String) c[0], HttpServletResponse.SC_NOT_FOUND, call.status());
+        verify(call.response).setHeader("Cache-Control", "no-store");
+        verify(call.response, never()).setHeader("Cache-Control", "public, max-age=86400");
+        verify(call.response, never()).getOutputStream();
+      }
+    });
   }
 
   @Test
@@ -769,6 +846,26 @@ public class PortalServletTest {
     decision.quotationId = QUOTATION_ID;
     decision.action = "ACCEPT";
     return decision;
+  }
+
+  /** Runs with the email signing secret set, the one the public logo reference is signed with. */
+  private static void withLogoSecret(ThrowingRunnable body) throws Exception {
+    String previous = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, "logo-secret");
+    try {
+      body.run();
+    } finally {
+      if (previous == null) {
+        System.clearProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+      } else {
+        System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previous);
+      }
+    }
+  }
+
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws Exception;
   }
 
   private static MockedConstruction<PortalRateLimiter> allowingLimiters() {

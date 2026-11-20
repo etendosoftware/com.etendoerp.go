@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.email;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -27,14 +28,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
 
@@ -43,8 +52,15 @@ import org.openbravo.model.ad.system.Client;
  *
  * @covers com.etendoerp.go.schemaforge.email.EmailContractCommandSupport
  * @covers com.etendoerp.go.schemaforge.email.EmailSendContext
+ * @covers com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService
  */
 public class EmailFrameworkValueObjectsTest {
+
+  private static final String DOWNLOAD_BASE_URL =
+      "https://go.example.test/etendo/sws/neo/document-download";
+  private static final String TOKEN_SECRET = "download-secret";
+  private static final String LOGO_PURPOSE = "portal-logo:v1";
+  private static final String KPI_PURPOSE = "kpi-third-party:v1";
 
   @Test
   public void documentRecordNormalizesBlankFields() {
@@ -280,6 +296,78 @@ public class EmailFrameworkValueObjectsTest {
         });
   }
 
+  /**
+   * ETP-6209 signs other values (the portal logo reference, the KPI pseudonym) from the same
+   * secret: each purpose has its own key, so a detached signature never validates for another
+   * purpose, never equals the token signature over the same text and never seals a token.
+   */
+  @Test
+  public void aDetachedSignatureIsBoundToItsPurposeAndIsNeverADownloadTokenSignature() {
+    withDocumentDownloadProperties(DOWNLOAD_BASE_URL, TOKEN_SECRET, "300", () -> {
+      String token = DocumentDownloadTokenService.createToken("sales-order-send", "sales-order",
+          "order-1", "tenant-1", "sales-order-send:tenant-1:order-1:v1",
+          System.currentTimeMillis() / 1000L + 60L);
+      String payloadPart = token.substring(0, token.lastIndexOf('.'));
+      String tokenSignature = token.substring(token.lastIndexOf('.') + 1);
+      String logo = DocumentDownloadTokenService.signDetached(LOGO_PURPOSE, payloadPart)
+          .orElseThrow(() -> new AssertionError("a configured secret signs"));
+      String kpi = DocumentDownloadTokenService.signDetached(KPI_PURPOSE, payloadPart)
+          .orElseThrow(() -> new AssertionError("a configured secret signs"));
+
+      assertNotEquals(tokenSignature, logo);
+      assertNotEquals(logo, kpi);
+      assertEquals("stable for the same purpose and value", logo,
+          DocumentDownloadTokenService.signDetached(LOGO_PURPOSE, payloadPart).orElse(null));
+      assertTrue(DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, payloadPart, logo));
+      assertFalse(DocumentDownloadTokenService.verifyDetached(KPI_PURPOSE, payloadPart, logo));
+      assertFalse(DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, payloadPart + "x",
+          logo));
+      assertFalse(DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, payloadPart,
+          tokenSignature));
+      assertFalse(DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, payloadPart, ""));
+      assertFalse(DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, payloadPart, null));
+      assertFalse("a detached signature cannot seal a download token",
+          DocumentDownloadTokenService.validate(payloadPart + "." + logo).isPresent());
+      assertTrue(DocumentDownloadTokenService.validate(token).isPresent());
+    });
+  }
+
+  @Test
+  public void detachedSigningIsOffWithoutASecretOrForABlankPurposeOrValue() {
+    AtomicReference<String> signature = new AtomicReference<>();
+    withDocumentDownloadProperties(DOWNLOAD_BASE_URL, TOKEN_SECRET, "300", () -> {
+      signature.set(DocumentDownloadTokenService.signDetached(LOGO_PURPOSE, "value").orElse(null));
+      assertFalse(DocumentDownloadTokenService.signDetached(" ", "value").isPresent());
+      assertFalse(DocumentDownloadTokenService.signDetached(null, "value").isPresent());
+      assertFalse(DocumentDownloadTokenService.signDetached(LOGO_PURPOSE, " ").isPresent());
+    });
+
+    withoutTokenSecret(() -> {
+      assertFalse(DocumentDownloadTokenService.signDetached(LOGO_PURPOSE, "value").isPresent());
+      assertFalse("nothing verifies without the secret",
+          DocumentDownloadTokenService.verifyDetached(LOGO_PURPOSE, "value", signature.get()));
+    });
+  }
+
+  /**
+   * Backward compatibility: a token sealed the original way (HMAC of the payload with the secret
+   * itself) still validates, so the links already in customers' inboxes keep working.
+   */
+  @Test
+  public void aDownloadTokenSealedTheOriginalWayStillValidates() {
+    withDocumentDownloadProperties(DOWNLOAD_BASE_URL, TOKEN_SECRET, "300", () -> {
+      String payloadPart = base64Url(originalPayload().getBytes(StandardCharsets.UTF_8));
+      String token = payloadPart + "." + base64Url(hmacSha256(TOKEN_SECRET, payloadPart));
+
+      DocumentDownloadTokenService.Claims claims = DocumentDownloadTokenService.validate(token)
+          .orElseThrow(() -> new AssertionError("An originally sealed token must validate"));
+      assertEquals("sales-order-send", claims.getContractName());
+      assertEquals("order-1", claims.getRecordId());
+      assertEquals("tenant-1", claims.getClientId());
+      assertEquals("key-1", claims.getIdempotencyKey());
+    });
+  }
+
   @Test
   public void commandTextIsNullForAJsonNullAnAbsentOrABlankField() throws Exception {
     // jettison renders JSONObject.NULL as the string "null": it must never reach an email as text.
@@ -507,6 +595,48 @@ public class EmailFrameworkValueObjectsTest {
       restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
       restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS, previousTtl);
     }
+  }
+
+  /**
+   * Runs with no signing secret anywhere: the system property cleared and Openbravo.properties
+   * mocked empty. Environment variables cannot be set in-process and are assumed absent.
+   */
+  private static void withoutTokenSecret(Runnable runnable) {
+    String previousSecret = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+    when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+    try (MockedStatic<OBPropertiesProvider> properties = mockStatic(OBPropertiesProvider.class)) {
+      properties.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+      System.clearProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+      runnable.run();
+    } finally {
+      restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
+    }
+  }
+
+  /** The claims of a download token, written as they were before detached signing existed. */
+  private static String originalPayload() {
+    try {
+      return new JSONObject().put("v", "v1").put("contract", "sales-order-send")
+          .put("spec", "sales-order").put("record", "order-1").put("client", "tenant-1")
+          .put("send", "key-1").put("exp", System.currentTimeMillis() / 1000L + 60L).toString();
+    } catch (Exception e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  private static byte[] hmacSha256(String key, String data) {
+    try {
+      Mac mac = Mac.getInstance("HmacSHA256");
+      mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+      return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+    } catch (Exception e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  private static String base64Url(byte[] value) {
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(value);
   }
 
   private static void restoreProperty(String name, String value) {

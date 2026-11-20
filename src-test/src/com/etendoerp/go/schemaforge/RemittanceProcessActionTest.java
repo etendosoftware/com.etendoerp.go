@@ -162,6 +162,45 @@ class RemittanceProcessActionTest {
     actionStatic.verify(() -> RemittanceProcessAction.run(anyString(), anyString()), never());
   }
 
+  /** ETP-6247: a collected, paid, partially settled or voided remittance is never reactivated. */
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = { "CT", "PT", "CP", "PP", "AN" })
+  void reactivatingASettledOrVoidedRemittanceIsRefused422WithoutRunningClassic(String status)
+      throws Exception {
+    Remittance remittance = remittance(true);
+    when(remittance.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)).thenReturn(status);
+
+    NeoResponse response = RemittanceProcessAction.reactivate(remittance);
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("ETGO_RemittanceReactivateNotAllowed", messageKey(response));
+    actionStatic.verify(() -> RemittanceProcessAction.run(anyString(), anyString()), never());
+  }
+
+  /** PR and SB (processed, sent to the bank) are still reactivable. */
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = { "PR", "SB" })
+  void aProcessedOrSentRemittanceCanBeReactivated(String status) throws Exception {
+    stubRun(success("Remesa reactivada"));
+    reloaded("PE");
+    Remittance remittance = remittance(true);
+    when(remittance.get(RemittanceStatusUtil.PROPERTY_REMITTANCE_STATUS)).thenReturn(status);
+
+    assertEquals(200, RemittanceProcessAction.reactivate(remittance).getHttpStatus());
+  }
+
+  @Test
+  void processingResetsAnAutomaticRemittanceSoItIsNotSettled() throws Exception {
+    Remittance remittance = remittance(false);
+    when(remittance.isETARAutomaticprocess()).thenReturn(true);
+
+    RemittanceProcessAction.disableAutomaticSettlement(remittance);
+
+    verify(remittance).setETARAutomaticprocess(false);
+    verify(dal).save(remittance);
+    verify(dal).flush();
+  }
+
   @Test
   void aRefusalOfTheReactivationIsAnswered422WithRemsText() throws Exception {
     OBError refusal = new OBError();

@@ -104,6 +104,14 @@ public final class InboxDocument {
   /** {@code matchedBy} value of a vendor or product the user chose (ETP-6050). */
   public static final String MATCHED_MANUAL = "manual";
 
+  /**
+   * {@code matchedBy} value of a product the OCR picked as the best of several doubtful candidates
+   * (ETP-6051): it is linked, so the line is complete, but the user did not choose it. Choosing
+   * another candidate replaces it (and marks the document adjusted); choosing the same one changes
+   * nothing.
+   */
+  public static final String MATCHED_SUGGESTED = "suggested";
+
   /** Notice code: the document carries a number already in another inbox document. */
   public static final String N_DUPLICATE_IN_INBOX = "duplicate_in_inbox";
   /** Notice code: the duplicate lookup could not be made. */
