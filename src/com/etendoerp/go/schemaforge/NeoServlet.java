@@ -391,6 +391,13 @@ public class NeoServlet extends HttpBaseServlet {
       response.setHeader(header.getKey(), header.getValue());
     }
 
+    // ETP-4571 (SEC-12): NEO JSON is private to the caller; never cached, never sniffed. A
+    // handler that set its own Cache-Control on purpose keeps it.
+    if (!neoResponse.getHeaders().containsKey("Cache-Control")) {
+      NeoDownloadHeaders.markPrivateJson(response);
+    } else {
+      response.setHeader("X-Content-Type-Options", "nosniff");
+    }
     response.setStatus(neoResponse.getHttpStatus());
     // ETP-6230: period refusals, enqueue only.
     AccountingKpiTelemetry.observeRestResponse(neoResponse.getHttpStatus(), neoResponse.getBody());

@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.mock;
@@ -52,6 +53,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -71,6 +73,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.ProductMovementsPolicy;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -258,6 +261,57 @@ class GoodsShipmentTelemetryTest {
     }
 
     assertEquals(false, emitted().get("flag_enabled"));
+  }
+
+  // ── identity hand-off (ETP-6386) ─────────────────────────────────────────────────────────
+
+  /**
+   * The identity is captured on the calling (request) thread, and the sender thread emits with
+   * that same identity handed to it: the sender never resolves one itself.
+   */
+  @Test
+  void theEventCarriesTheIdentityCapturedOnTheCallingThread() throws Exception {
+    NeoIdentityProbe probe = new NeoIdentityProbe(telemetry);
+    NeoContext ctx = context(RECORD_ID, 200);
+    givenStoredStates(state("DR", "Y", "N"), state("CO", "Y", "N"));
+
+    try (MockedStatic<ProductMovementsPolicy> policy = mockStatic(ProductMovementsPolicy.class)) {
+      policy.when(ProductMovementsPolicy::isEnabled).thenReturn(true);
+      GoodsShipmentTelemetry.beforeAction(ctx);
+      GoodsShipmentTelemetry.afterAction(ctx);
+    }
+
+    probe.awaitEmit();
+    assertSame(Thread.currentThread(), probe.captureThread.get());
+    assertTrue(probe.emitThread.get() != Thread.currentThread());
+    assertSame(probe.identity, probe.handedOff.get());
+  }
+
+  /** Test double plumbing: records on which thread the identity is captured and emitted. */
+  static final class NeoIdentityProbe {
+    final NeoTelemetryIdentity identity = new NeoTelemetryIdentity("U1", CLIENT_ID, "OWNER-A",
+        "productive");
+    final AtomicReference<Thread> captureThread = new AtomicReference<>();
+    final AtomicReference<Thread> emitThread = new AtomicReference<>();
+    final AtomicReference<NeoTelemetryIdentity> handedOff = new AtomicReference<>();
+    private final CountDownLatch emitted = new CountDownLatch(1);
+
+    NeoIdentityProbe(NeoTelemetryService service) {
+      when(service.captureIdentity(any(), any())).thenAnswer(inv -> {
+        captureThread.set(Thread.currentThread());
+        return identity;
+      });
+      doAnswer(inv -> {
+        emitThread.set(Thread.currentThread());
+        handedOff.set(NeoTelemetryIdentity.handedOff());
+        emitted.countDown();
+        return null;
+      }).when(service).emit(anyString(), anyMap(), any());
+    }
+
+    void awaitEmit() throws InterruptedException {
+      assertTrue(emitted.await(WAIT_MS, TimeUnit.MILLISECONDS), "no event was emitted");
+    }
   }
 
   // ── batch scope ──────────────────────────────────────────────────────────────────────────

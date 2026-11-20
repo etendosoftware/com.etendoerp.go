@@ -200,6 +200,8 @@ class WidgetRevenueTrendHandlerTest {
       JSONObject data = response.getBody().getJSONObject("response");
       assertEquals(0, data.getJSONArray("data").length());
       assertEquals(0, data.getInt("count"));
+      // ETP-5850: flagged, so the MCP refuses it instead of answering "no data".
+      assertEquals(true, data.getBoolean(WidgetAccessPolicy.KEY_RESTRICTED));
       org.mockito.Mockito.verify(session, org.mockito.Mockito.never()).createNativeQuery(anyString());
     }
   }

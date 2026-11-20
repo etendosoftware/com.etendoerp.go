@@ -29,6 +29,7 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.WidgetAccessPolicy;
 import com.etendoerp.go.schemaforge.WidgetPeriod;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -139,8 +140,30 @@ final class McpWidgetHandler {
     if (response.getHttpStatus() >= 400) {
       return McpToolRouter.wrapAsErrorContent(body);
     }
+    JSONObject refusal = refusalIfRestricted(body, widget);
+    if (refusal != null) {
+      return McpToolRouter.wrapAsErrorContent(refusal);
+    }
     addPeriod(body, widget, asked);
     return McpToolRouter.wrapAsTextContent(body);
+  }
+
+  /**
+   * ETP-5850: a widget the role may not see answers an empty list flagged {@code restricted} (the
+   * dashboard's "deny silently"). Passed through, the empty list read as "no data in the period":
+   * an agent with the Inventory role answered the quarter's result from revenue widgets that had
+   * only been denied to it. The MCP answers the same 403 as a spec the role cannot reach.
+   *
+   * @return the forbidden body, or {@code null} when the widget was not denied
+   */
+  static JSONObject refusalIfRestricted(JSONObject body, String widget) {
+    JSONObject response = body == null ? null : body.optJSONObject("response");
+    if (response == null || !response.optBoolean(WidgetAccessPolicy.KEY_RESTRICTED, false)) {
+      return null;
+    }
+    return McpRouterErrorBodies.forbidden(McpConstants.TOOL_NEO_WIDGET, "Widget '" + widget
+        + "' is not available to the current role: its figures come from documents this role "
+        + "cannot read. It is not empty for lack of data.");
   }
 
   /**
