@@ -68,6 +68,8 @@ final class EmailCardLayout {
   private static final String DIV_CLOSE = "</div>";
   private static final String TAG_END = "\">";
   private static final int AVATAR_SIZE = 52;
+  /** Diagonal of a fitted logo: inside the 50px inner circle with a little air around it. */
+  private static final int LOGO_DIAGONAL = 44;
 
   private EmailCardLayout() {
   }
@@ -154,11 +156,19 @@ final class EmailCardLayout {
   private static void appendAvatar(StringBuilder html, EmailContent content) {
     String size = AVATAR_SIZE + "px";
     if (content.getIssuerLogoUrl() != null) {
-      html.append("<img src=\"").append(escape(content.getIssuerLogoUrl()))
-          .append("\" width=\"").append(AVATAR_SIZE).append("\" height=\"").append(AVATAR_SIZE)
-          .append("\" alt=\"").append(escape(StringUtils.defaultString(content.getIssuerName())))
-          .append("\" style=\"display:block;width:").append(size).append(";height:").append(size)
-          .append(";border:").append(BORDER_1PX).append(";border-radius:50%;\">");
+      int[] fitted = fitInAvatar(content.getIssuerLogoWidth(), content.getIssuerLogoHeight());
+      html.append(PRESENTATION_TABLE).append(" align=\"center\"><tr><td width=\"").append(AVATAR_SIZE)
+          .append("\" height=\"").append(AVATAR_SIZE).append("\" align=\"center\" valign=\"middle\" ")
+          .append("bgcolor=\"").append(WHITE).append("\" style=\"width:").append(size)
+          .append(";height:").append(size).append(";background:").append(WHITE)
+          .append(";border:").append(BORDER_1PX)
+          .append(";border-radius:50%;font-size:0;line-height:0;\"><img src=\"")
+          .append(escape(content.getIssuerLogoUrl())).append("\" width=\"").append(fitted[0])
+          .append("\" height=\"").append(fitted[1]).append("\" alt=\"")
+          .append(escape(StringUtils.defaultString(content.getIssuerName())))
+          .append("\" style=\"display:block;margin:0 auto;width:").append(fitted[0])
+          .append("px;height:").append(fitted[1]).append("px;border:0;\">").append(ROW_CLOSE)
+          .append(TABLE_CLOSE);
       return;
     }
     html.append(PRESENTATION_TABLE).append(" align=\"center\"><tr><td width=\"").append(AVATAR_SIZE)
@@ -170,6 +180,24 @@ final class EmailCardLayout {
         .append(";font-weight:600;color:").append(AVATAR_TEXT).append(";").append(TEXT_CENTER)
         .append(TAG_END).append(escape(initials(content.getIssuerName()))).append(ROW_CLOSE)
         .append(TABLE_CLOSE);
+  }
+
+  /**
+   * Fits a logo inside the round avatar without stretching it: scaled, aspect kept, so that its
+   * diagonal is {@value #LOGO_DIAGONAL}px — a rectangle of that diagonal always fits inside the
+   * 52px circle, whatever its proportions. Email clients ignore {@code object-fit}, so the fit is
+   * done here with a fixed width and height. An unknown size is treated as square.
+   *
+   * @param width the natural width, {@code 0} when unknown
+   * @param height the natural height, {@code 0} when unknown
+   * @return {@code [width, height]} to render, each at least 1
+   */
+  static int[] fitInAvatar(int width, int height) {
+    double w = width > 0 && height > 0 ? width : 1;
+    double h = width > 0 && height > 0 ? height : 1;
+    double scale = LOGO_DIAGONAL / Math.hypot(w, h);
+    return new int[] { (int) Math.max(1, Math.round(w * scale)),
+        (int) Math.max(1, Math.round(h * scale)) };
   }
 
   /**
@@ -282,12 +310,15 @@ final class EmailCardLayout {
         .append(label).append("</a><!--<![endif]-->").append(ROW_CLOSE).append(TABLE_CLOSE)
         .append(ROW_CLOSE);
     if (content.getLinkFallbackText() != null) {
-      html.append("<tr><td style=\"padding:12px 0 12px 0;\">")
+      // Centred, as the design's CTA block (ETP-6209 review); the warning below stays left.
+      html.append("<tr><td align=\"center\" style=\"padding:12px 0 12px 0;\">")
           .append("<p style=\"margin:0 0 4px 0;").append(FONT)
           .append("font-size:11px;line-height:16px;font-weight:400;color:").append(MUTED_TEXT)
-          .append(';').append(TAG_END).append(escape(content.getLinkFallbackText()))
+          .append(';').append(TEXT_CENTER).append(TAG_END)
+          .append(escape(content.getLinkFallbackText()))
           .append(P_CLOSE).append("<p style=\"margin:0;").append(FONT)
-          .append("font-size:11px;line-height:16px;font-weight:400;\"><a href=\"").append(url)
+          .append("font-size:11px;line-height:16px;font-weight:400;").append(TEXT_CENTER)
+          .append("\"><a href=\"").append(url)
           .append("\" style=\"color:").append(LINK)
           .append(";text-decoration:none;word-break:break-all;\">").append(url).append("</a>")
           .append(P_CLOSE).append(ROW_CLOSE);

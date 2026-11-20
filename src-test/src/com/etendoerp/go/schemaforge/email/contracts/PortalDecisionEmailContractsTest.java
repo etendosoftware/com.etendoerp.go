@@ -93,6 +93,9 @@ public class PortalDecisionEmailContractsTest {
     when(customer.getName()).thenReturn("Cliente SL");
     Currency euro = mock(Currency.class);
     when(euro.getISOCode()).thenReturn("EUR");
+    when(euro.getSymbol()).thenReturn("€");
+    when(euro.isCurrencySymbolAtTheRight()).thenReturn(true);
+    when(euro.getStandardPrecision()).thenReturn(2L);
     Order quotation = mock(Order.class);
     when(quotation.getDocumentNo()).thenReturn("PR-7");
     when(quotation.getGrandTotalAmount()).thenReturn(new BigDecimal("2450.00"));
@@ -223,7 +226,7 @@ public class PortalDecisionEmailContractsTest {
   }
 
   @Test
-  public void anAcceptanceShowsTheCompanyTheNumberAndTheFormattedTotal() throws Exception {
+  public void anAcceptanceShowsTheCompanyTheNumberAndTheTotalAsTheAppShowsIt() throws Exception {
     PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
     when(minted.getId()).thenReturn(DECISION_ID);
     when(minted.getUrl()).thenReturn(DECISION_URL);
@@ -237,7 +240,8 @@ public class PortalDecisionEmailContractsTest {
     assertTrue(body, body.contains(">Acme<"));
     assertTrue(body, body.contains(">PR-7<"));
     assertTrue(body, body.contains("Importe total"));
-    assertTrue(body, body.contains(">2450.00 EUR<"));
+    // As the app shows it (instance separators, default "." and ","; symbol on its side).
+    assertTrue(body, body.contains(">2.450,00\u00A0€<"));
     assertFalse(body, body.contains(">Motivo<"));
     // The Etendo footer closes the card.
     assertTrue(body, body.contains("Creado con Etendo"));

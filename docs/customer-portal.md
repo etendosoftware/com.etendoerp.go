@@ -47,13 +47,15 @@ answers the same 401 as an unknown token at once and cannot be renewed.
 ## 2. Endpoints
 
 All under the portal's own servlet, isolated from NEO (never reachable through `NeoServlet` or the
-CRUD engine), reachable with no Etendo session. Every response is `no-store`.
+CRUD engine), reachable with no Etendo session. Every response is `no-store`, except
+`GET /public-logo/{reference}` (below).
 
 | Endpoint | Answers |
 |---|---|
 | `GET /me[/{token}]` | The link's state: `valid` (Business Partner name, `email` — the customer's address the portal already uses, the first valid To of the link's root send, `""` when none; shown in the user menu —, tenant name, `hasLogo`, `entryDocument` or `null` + `entryKind` when the link's own document left its scope), `expired`, `unavailable`; or the 401 below |
 | `POST /renew` | For an expired link: `{state:"renewed", renewal:"sent"}`, `{state:"renewed", renewal:"recentlySent"}` (cool-down, nothing sent), `{state:"unavailable"}`, `{state:"valid"}` (not expired), `503` when the email could not be sent |
 | `GET /logo` | The issuing company's logo, resolved from the link's organization; served for any sent link, so the expired page keeps the branding |
+| `GET /public-logo/{reference}` | **No portal token** (ETP-6209). The same logo, for the header of the portal emails, where the portal token must never appear in an image URL. Details below |
 | `GET /home?months=` | Pending-payment balances, one tile per kind (count + highlight: quotations awaiting an answer, overdue invoices, orders in progress, shipments this month), recent documents, `paidThisYear` (per currency, `Invoice.totalPaid` of this year's completed/closed invoices), `invoicesThisYear` (`total`, `upToDate`) and `chart` (invoiced per month over `months` = 3, 6 or 12, default 12, in the currency invoiced in most months) — server-side aggregates |
 | `GET /search?q=` | Documents of every kind matching `q` (number, reference, description), newest first, 8 at most; blank `q` answers an empty list |
 | `GET /documents?type=&group=&status=&dateFrom=&dateTo=&q=&limit=&offset=` | One kind's list, filtered and paged (default 50, max 200), with invoice payment fields, a quotation's generated order (`orderId`, `orderNo`) and the kind's `groups`; `group` (one of the kind's status groups, below) replaces `status` |
@@ -101,6 +103,31 @@ is visible) plus, where the status alone cannot say it, a condition on the docum
 
 No group (or an unknown one) is every visible status. The home's tiles count the same sets
 (`awaiting`, `overdue`, `inProgress`), so a tile and its tab always agree.
+
+### The public logo — `GET /public-logo/{reference}` (ETP-6209)
+
+The decision confirmation emails show the issuing company's logo. `GET /logo` needs the portal
+token, and an image URL is fetched and cached by image proxies (Gmail's among them), so the emails
+use a token-free URL built by `PortalLogoReference`:
+
+- **URL:** `{etendo.go.app.baseUrl}/sws/portal/public-logo/{reference}` — the same base the
+  email's own links use (`PublicUrlResolver.resolveConfiguredAppBaseUrl`). No logo, no base URL or
+  no signing secret: the email shows the company's initials instead.
+- **Reference:** `base64url(clientId + "|" + orgId) + "." + HMAC-SHA256`. The MAC is
+  `DocumentDownloadTokenService#signDetached("portal-logo:v1", payload)`, keyed by the existing
+  `etendo.go.email.documentDownloadTokenSecret` (no new secret). Domain-separated: the MAC covers
+  `"portal-logo:v1:" + payload`, and a download token's MAC covers a base64url payload with no
+  `:`, so neither can validate as the other. Stable per tenant and never expiring (an email is
+  opened long after it was sent).
+- **What it grants:** the bytes of that one tenant's document logo (`CompanyLogoResolver`, the
+  same image `/logo` serves) and nothing else — no data, no session, no other tenant; it cannot be
+  forged without the secret. The payload carries the tenant's internal ids, which grant nothing.
+- **Only PNG or JPEG**, typed from the bytes (`NeoImageHelper.sniffMimeType`), with
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`: a stored SVG
+  or anything else answers 404, so the URL never serves active content. Every failure (forged or
+  malformed reference, no logo, other type) is the same `404 {"error":"Not found"}`.
+- **Cacheable:** `Cache-Control: public, max-age=86400` (a logo change shows within a day). Not
+  rate limited: a signature check plus one logo read, and image proxies cache it.
 
 ## 3. The token header — `X-Portal-Token`
 

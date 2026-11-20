@@ -32,6 +32,7 @@ import com.etendoerp.go.portal.PortalDecisionService;
 import com.etendoerp.go.portal.PortalDocumentKind;
 import com.etendoerp.go.portal.PortalLink;
 import com.etendoerp.go.portal.PortalLinkService;
+import com.etendoerp.go.portal.PortalLogoReference;
 import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractCommand;
@@ -168,8 +169,9 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
     }
     String tenantName = StringUtils.defaultString(session.getClientName());
     QuotationFacts quotation = quotationFacts(quotationId);
-    EmailContent content = buildContent(decision, language, tenantName, quotation,
-        reasonValue(reasonCode, reasonText, language), minted.get().getUrl());
+    EmailContent content = buildContent(decision, language, tenantName,
+        issuer(session, tenantName), quotation, reasonValue(reasonCode, reasonText, language),
+        minted.get().getUrl());
     try {
       JSONObject data = new JSONObject();
       String name = StringUtils.trimToNull(session.getBusinessPartnerName());
@@ -228,12 +230,9 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
    * customer's reason instead (PO decision: exactly the Figma, no amount).
    */
   private static EmailContent buildContent(String decision, String language, String tenantName,
-      QuotationFacts quotation, String reason, String url) {
+      EmailContent.Builder issuer, QuotationFacts quotation, String reason, String url) {
     boolean accept = PortalDecisionService.DECISION_ACCEPT.equals(decision);
-    EmailContent.Builder content = EmailContent.builder()
-        // No public logo URL exists: the portal's logo endpoint needs the customer's session token,
-        // which must never travel in an image request. The card shows the company's initials.
-        .issuer(tenantName, null)
+    EmailContent.Builder content = issuer
         .badge(EmailMessages.get(CONFIRM_PREFIX + "badge", language))
         .title(EmailMessages.get(CONFIRM_PREFIX + "title." + decision, language))
         .subtitle(EmailMessages.get(CONFIRM_PREFIX + "subtitle." + decision, language))
@@ -256,6 +255,24 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
         .footer(EmailFooter.etendo(accept ? EmailFooter.Piece.DECISION_ACCEPT
             : EmailFooter.Piece.DECISION_REJECT, language))
         .build();
+  }
+
+  /**
+   * Starts the card with its issuer: the company name and, when the tenant has a PNG/JPEG logo,
+   * its token-free public URL ({@link PortalLogoReference}) — never the portal's own
+   * {@code /logo}, whose token must not travel in an image request. No logo: the initials.
+   */
+  private static EmailContent.Builder issuer(PortalLink session, String tenantName) {
+    EmailContent.Builder content = EmailContent.builder();
+    Optional<PortalLogoReference.PublicLogo> logo = PortalLogoReference.find(
+        session.getClientId(), session.getOrganizationId());
+    if (logo.isPresent()) {
+      content.issuer(tenantName, logo.get().getUrl())
+          .issuerLogoSize(logo.get().getWidth(), logo.get().getHeight());
+    } else {
+      content.issuer(tenantName, null);
+    }
+    return content;
   }
 
   /**
@@ -282,7 +299,7 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
 
   /**
    * The quotation's number and total, read in admin mode (the portal has no Etendo session). The
-   * total is formatted like every other GO document email's ({@code formatAmount}).
+   * total is formatted as the app shows it ("2.450,00 €", {@link EmailAmountFormat}).
    */
   static QuotationFacts quotationFacts(String quotationId) {
     OBContext.setAdminMode(true);
@@ -292,8 +309,7 @@ final class PortalDecisionConfirmEmailContract implements EmailContract {
         return new QuotationFacts("", null);
       }
       return new QuotationFacts(StringUtils.defaultString(quotation.getDocumentNo()),
-          DalEmailContractDataResolver.formatAmount(quotation.getGrandTotalAmount(),
-              quotation.getCurrency()));
+          EmailAmountFormat.format(quotation.getGrandTotalAmount(), quotation.getCurrency()));
     } finally {
       OBContext.restorePreviousMode();
     }

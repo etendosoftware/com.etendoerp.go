@@ -382,15 +382,23 @@ The portal side (endpoints, renewal checks, rate limits, PDF) is in `customer-po
   block and the footer. `EmailLayout.render` selects it when the content has a `title`; the markup
   is in the package-private `EmailCardLayout`, still reached only through `EmailLayout`. Copy:
   `portal-quotation-decision.confirm.*` (tuteo, as the design), subject per decision.
-  - Accept columns: Empresa (tenant name) · Nº presupuesto · Importe total (formatted by
-    `DalEmailContractDataResolver.formatAmount`, like every document email).
+  - Accept columns: Empresa (tenant name) · Nº presupuesto · Importe total, formatted as the app
+    shows it ("2.450,00 €") by `EmailAmountFormat`: the instance separators of
+    `NeoCurrencyFormatConfig` (the source behind `GET /sws/neo/currency-format`), the currency's
+    `Symbol` on the side `IsSymbolRightSide` says, the ISO code when it has no symbol. The
+    document emails keep `DalEmailContractDataResolver.formatAmount` ("2450.00 EUR"), untouched.
   - Reject columns: Empresa · Nº presupuesto · Motivo — **no amount** (PO decision). Motivo is the
     customer's portal reason in the email language; for `OTHER` it is the text the customer typed
     (whitespace collapsed, cut to 80 characters with "…", escaped), falling back to the "Otros"
     label when empty. The tenant's internal reject reasons never appear.
-  - The avatar shows the tenant's **initials**: the only logo endpoint (`/sws/portal/logo`) needs
-    the customer's portal token, which must never travel in an image URL. `EmailContent#issuer`
-    accepts a logo URL for when a public one exists.
+  - The avatar is the tenant's **logo**, through the token-free `GET /sws/portal/public-logo/{ref}`
+    (`PortalLogoReference`; see `customer-portal.md` → *The public logo*), never `/sws/portal/logo`,
+    whose portal token must not travel in an image URL. The logo is fitted inside the 52px circle
+    with its aspect kept (fixed width/height; email clients ignore `object-fit`). Only a tenant
+    with no PNG/JPEG logo, or an instance without the app base URL or signing secret, gets the
+    initials avatar.
+  - The "¿El botón no funciona?" block is centred; the "¿No reconoces esta solicitud?" block is
+    left-aligned, as in the design.
 - **The "Creado con Etendo" footer** (`EmailFooter`, copy `footer.*`) closes the emails our
   customers' customers receive through the portal: both decision confirmations, the
   `portal-link-renewal`, and the four portal document sends **only when a portal link was minted**

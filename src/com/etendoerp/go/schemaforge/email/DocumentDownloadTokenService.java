@@ -151,6 +151,42 @@ public final class DocumentDownloadTokenService {
     }
   }
 
+  /**
+   * Signs a value for a purpose other than a document download, with the same email signing secret
+   * (ETP-6209: the public logo reference of the portal emails), so no second secret has to be
+   * configured.
+   *
+   * <p><b>Domain-separated:</b> the MAC covers {@code purpose + ":" + value}. A download token's MAC
+   * covers a base64url JSON payload, an alphabet with no {@code ':'}, so a detached signature can
+   * never validate as a download token and the other way round.</p>
+   *
+   * @param purpose a fixed label naming what the signature is for, such as {@code portal-logo:v1}
+   * @param value the value to sign
+   * @return the base64url signature, or empty when the secret is not configured or an argument is
+   *     blank
+   */
+  public static Optional<String> signDetached(String purpose, String value) {
+    String secret = readConfig(PROP_TOKEN_SECRET, ENV_TOKEN_SECRET);
+    if (StringUtils.isAnyBlank(secret, purpose, value)) {
+      return Optional.empty();
+    }
+    return Optional.of(sign(purpose + ":" + value, secret));
+  }
+
+  /**
+   * Checks a signature made by {@link #signDetached}, in constant time.
+   *
+   * @param purpose the label the value was signed for
+   * @param value the signed value
+   * @param signature the signature to check
+   * @return {@code true} only when the signature is that value's, for that purpose
+   */
+  public static boolean verifyDetached(String purpose, String value, String signature) {
+    Optional<String> expected = signDetached(purpose, value);
+    return expected.isPresent() && StringUtils.isNotBlank(signature)
+        && constantTimeEquals(expected.get(), signature);
+  }
+
   static String createToken(String contractName, String specName, String recordId,
       String clientId, String idempotencyKey, long expiresAtSeconds) {
     return createToken(contractName, specName, recordId, clientId, idempotencyKey,

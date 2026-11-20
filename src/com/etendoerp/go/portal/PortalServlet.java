@@ -269,6 +269,8 @@ public class PortalServlet extends HttpBaseServlet {
         handleDocument(request, response, path.substring(PATH_DOCUMENTS.length() + 1));
       } else if (path.equals(PATH_LOGO)) {
         handleLogo(request, response);
+      } else if (path.startsWith(PortalLogoReference.PATH)) {
+        handlePublicLogo(response, path.substring(PortalLogoReference.PATH.length()));
       } else {
         sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       }
@@ -427,6 +429,38 @@ public class PortalServlet extends HttpBaseServlet {
         NeoImageHelper.sniffMimeType(bytes));
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType(StringUtils.defaultIfBlank(mimeType, NeoImageHelper.MIME_PNG));
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
+  }
+
+  /**
+   * Serves a tenant's logo to the portal emails, without a portal token (ETP-6209).
+   *
+   * <p>{@code GET /sws/portal/public-logo/<reference>}: the reference is
+   * {@link PortalLogoReference}'s signed tenant id, so it answers the bytes of that one tenant's
+   * document logo and nothing else — no data, no session, no other tenant. Every failure (bad or
+   * forged reference, no logo, a stored type other than PNG/JPEG) is the same 404. Unlike the rest
+   * of the portal it is cacheable: an email client's image proxy should fetch it once, not on every
+   * open, and the bytes are typed from themselves with {@code nosniff} and a {@code default-src
+   * 'none'} policy so a direct visit renders nothing but an image.</p>
+   */
+  private static void handlePublicLogo(HttpServletResponse response, String reference)
+      throws IOException {
+    Optional<String[]> tenant = PortalLogoReference.resolve(reference);
+    Image logo = tenant.isPresent()
+        ? CompanyLogoResolver.resolve(tenant.get()[0], tenant.get()[1]) : null;
+    byte[] bytes = logo == null ? null : logo.getBindaryData();
+    String mimeType = PortalLogoReference.servableMimeType(bytes);
+    if (mimeType == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+      return;
+    }
+    response.setStatus(HttpServletResponse.SC_OK);
+    // Replaces the portal-wide no-store set in service(): a logo is public and changes rarely.
+    response.setHeader("Cache-Control", "public, max-age=86400");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Content-Security-Policy", "default-src 'none'");
+    response.setContentType(mimeType);
     response.setContentLength(bytes.length);
     response.getOutputStream().write(bytes);
   }

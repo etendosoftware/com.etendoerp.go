@@ -45,6 +45,8 @@ public final class EmailContent {
   private final EmailFooter footer;
   private final String issuerName;
   private final String issuerLogoUrl;
+  private final int issuerLogoWidth;
+  private final int issuerLogoHeight;
   private final String badge;
   private final String title;
   private final String subtitle;
@@ -66,6 +68,8 @@ public final class EmailContent {
     this.footer = builder.footer;
     this.issuerName = builder.issuerName;
     this.issuerLogoUrl = builder.issuerLogoUrl;
+    this.issuerLogoWidth = builder.issuerLogoWidth;
+    this.issuerLogoHeight = builder.issuerLogoHeight;
     this.badge = builder.badge;
     this.title = builder.title;
     this.subtitle = builder.subtitle;
@@ -201,6 +205,24 @@ public final class EmailContent {
    */
   public String getIssuerLogoUrl() {
     return issuerLogoUrl;
+  }
+
+  /**
+   * Natural width of the issuer logo, so the layout can fit it inside the round avatar.
+   *
+   * @return the width in pixels, or {@code 0} when unknown (treated as square)
+   */
+  public int getIssuerLogoWidth() {
+    return issuerLogoWidth;
+  }
+
+  /**
+   * Natural height of the issuer logo.
+   *
+   * @return the height in pixels, or {@code 0} when unknown (treated as square)
+   */
+  public int getIssuerLogoHeight() {
+    return issuerLogoHeight;
   }
 
   /**
@@ -363,6 +385,8 @@ public final class EmailContent {
     private EmailFooter footer;
     private String issuerName;
     private String issuerLogoUrl;
+    private int issuerLogoWidth;
+    private int issuerLogoHeight;
     private String badge;
     private String title;
     private String subtitle;
@@ -512,6 +536,20 @@ public final class EmailContent {
     public Builder issuer(String name, String logoUrl) {
       this.issuerName = StringUtils.trimToNull(name);
       this.issuerLogoUrl = StringUtils.trimToNull(logoUrl);
+      return this;
+    }
+
+    /**
+     * Sets the natural size of the issuer logo, so it is fitted inside the round avatar without
+     * being stretched (email clients ignore {@code object-fit}).
+     *
+     * @param width the logo width in pixels
+     * @param height the logo height in pixels
+     * @return this builder
+     */
+    public Builder issuerLogoSize(int width, int height) {
+      this.issuerLogoWidth = Math.max(0, width);
+      this.issuerLogoHeight = Math.max(0, height);
       return this;
     }
 
