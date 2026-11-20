@@ -201,8 +201,9 @@ public class EmailLayoutTest {
     String plain = EmailLayout.render(letter().build());
     String withFooter = EmailLayout.render(letter().footer(footer).build());
 
+    // Only markup that did not exist before the card and footer (the letter already used sf-card).
     for (String marker : new String[] { EmailLayout.CARD_FONT_STACK,
-        EmailLayout.FOOTER_ICON_BACKGROUND, "sf-card", footer.getTitle() }) {
+        EmailLayout.FOOTER_ICON_BACKGROUND, footer.getTitle() }) {
       assertFalse(marker, plain.contains(marker));
     }
     int prefix = 0;

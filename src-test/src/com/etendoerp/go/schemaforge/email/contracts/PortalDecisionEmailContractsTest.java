@@ -292,7 +292,9 @@ public class PortalDecisionEmailContractsTest {
   public void anAcceptanceWithoutATotalDrawsTwoEvenColumnsInsteadOfAnEmptyThird()
       throws Exception {
     stubMint();
-    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(link()));
+    // Built before the stubbing: link() stubs its own mock (no nested stubbing).
+    PortalLink session = link();
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
     Order quotation = OBDal.getInstance().get(Order.class, QUOTATION_ID);
 
     String withTotal = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
