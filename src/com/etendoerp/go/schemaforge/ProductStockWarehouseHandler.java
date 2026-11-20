@@ -31,6 +31,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 
 /**
  * NEO Handler for the {@code stock} entity (M_StorageDetail) in the product window.
@@ -59,7 +61,8 @@ public class ProductStockWarehouseHandler implements NeoHandler {
       + "  COALESCE(sd.qtyonhand, 0)     AS qty_on_hand, "
       + "  COALESCE(sd.reservedqty, 0)   AS reserved_qty, "
       + "  COALESCE(sd.allocatedqty, 0)  AS allocated_qty, "
-      + "  COALESCE(sd.m_attributesetinstance_id, '0') AS attribute_set_instance "
+      + "  COALESCE(sd.m_attributesetinstance_id, '0') AS attribute_set_instance, "
+      + "  sd.updated                    AS updated "
       + "FROM m_storage_detail sd "
       + "JOIN m_locator l  ON l.m_locator_id  = sd.m_locator_id "
       + "JOIN m_warehouse wh ON wh.m_warehouse_id = l.m_warehouse_id "
@@ -110,6 +113,13 @@ public class ProductStockWarehouseHandler implements NeoHandler {
           item.put("reservedQty",             ProductHandlerUtils.toBigDecimal(row[6]));
           item.put("allocatedQuantity",       ProductHandlerUtils.toBigDecimal(row[7]));
           item.put("attributeSetValue",       row[8]);
+          // ETP-5220: the generic write path requires `updated` echoed back on every PUT/PATCH
+          // (NeoCrudHandler#validateUpdateRequest); without it each edit 400s as missing_updated.
+          // toAuditToken keeps the offset, as in ProductPriceHandler (ETP-5245/ETP-5255).
+          String auditToken = NeoDateFormat.toAuditToken(row[9]);
+          String rawUpdated = row[9] != null ? String.valueOf(row[9]) : null;
+          String updatedValue = auditToken != null ? auditToken : rawUpdated;
+          item.put("updated", updatedValue != null ? updatedValue : JSONObject.NULL);
           data.put(item);
         }
 

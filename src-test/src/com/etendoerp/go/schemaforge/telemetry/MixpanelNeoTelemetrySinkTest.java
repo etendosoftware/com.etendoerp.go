@@ -169,6 +169,35 @@ class MixpanelNeoTelemetrySinkTest {
   }
 
   /**
+   * ETP-5466: backend submission is off unless explicitly enabled — a token alone (a developer
+   * machine) is not configured; {@code true} / {@code Y} switch it on, anything else keeps it off.
+   *
+   * @param enabled {@code etendo.go.mixpanel.enabled}, or empty when unset
+   * @param expected whether the backend submits events
+   */
+  @ParameterizedTest(name = "[{index}] enabled={0} -> configured={1}")
+  @CsvSource({ ", false", "true, true", "Y, true", "TRUE, true", "false, false", "N, false",
+      "yes, false" })
+  void fromRuntimeIsDisabledUnlessExplicitlyEnabled(String enabled, boolean expected) {
+    Map<String, String> properties = new HashMap<>();
+    putIfPresent(properties, MixpanelNeoTelemetryConfig.PROP_ENABLED, enabled);
+    properties.put(MixpanelNeoTelemetryConfig.PROP_TOKEN, "token-123");
+
+    try (MockedStatic<ConfigPropertyReader> reader =
+        Mockito.mockStatic(ConfigPropertyReader.class)) {
+      reader.when(() -> ConfigPropertyReader.readConfigValue(Mockito.anyString(),
+          Mockito.anyString(), Mockito.nullable(String.class))).thenAnswer(inv -> {
+            String fromProperty = trimToNull(properties.get(inv.getArgument(0)));
+            return fromProperty != null ? fromProperty : inv.getArgument(2);
+          });
+
+      MixpanelNeoTelemetryConfig config = MixpanelNeoTelemetryConfig.fromRuntime();
+      assertEquals(expected, config.isEnabled());
+      assertEquals(expected, config.isConfigured());
+    }
+  }
+
+  /**
    * ETP-5581: with the real {@link ConfigPropertyReader}, the override set as a JVM system property
    * wins over whatever the machine's environment variables say, and is normalized.
    */

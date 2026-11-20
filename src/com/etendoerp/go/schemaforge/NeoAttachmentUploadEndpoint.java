@@ -319,6 +319,7 @@ public final class NeoAttachmentUploadEndpoint {
       throws IOException {
     response.setStatus(status);
     if (body != null) {
+      NeoDownloadHeaders.markPrivateJson(response);
       response.setContentType("application/json");
       response.setCharacterEncoding(ENCODING);
       response.getWriter().write(body.toString());

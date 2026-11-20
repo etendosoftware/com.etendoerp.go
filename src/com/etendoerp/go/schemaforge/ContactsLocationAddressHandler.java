@@ -668,7 +668,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     }
   }
 
-  private static String buildDisplayName(org.openbravo.model.common.geography.Location geoLoc) {
+  // Package-visible (ETP-5806 CP-12c, QA finding): BpLocationHandler re-syncs the display name of
+  // every C_BPartner_Location linked to a C_Location it just edited, and must compute that name
+  // the exact same way this handler already does for its own create/update paths — see
+  // BpLocationHandler#syncLinkedContactNames. Reusing this method, rather than a third private
+  // copy, keeps "how a contact address's display name is computed" in one place; WarehouseLocationHandler
+  // keeps its own copy because a Warehouse's C_Location has no C_BPartner_Location to sync.
+  static String buildDisplayName(org.openbravo.model.common.geography.Location geoLoc) {
     String result = joinNonNull(nullIfEmpty(geoLoc.getCityName()), nullIfEmpty(geoLoc.getAddressLine1()));
     if (result != null) {
       return result;

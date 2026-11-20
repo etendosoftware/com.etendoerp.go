@@ -240,8 +240,11 @@ final class McpWriteRequestSupport {
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
         // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
-        directiveNames = reportIfUnknown(key, sfEntity, virtualFieldNames, directiveNames,
-            unknown);
+        // ETP-5806 CP-12g: the same courtesy for a structured-address field an entity carries on
+        // its OWN table (bp-location IS C_Location, not a wrapper around one) — see
+        // NeoSelectorPolicy#ownPropertyForPublishedName.
+        directiveNames = reportIfUnknown(key, sfEntity, dalEntity, virtualFieldNames,
+            directiveNames, unknown);
       } else {
         applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
       }
@@ -274,15 +277,19 @@ final class McpWriteRequestSupport {
 
   /**
    * Adds an unresolved key to {@code unknown} unless the write tools or the entity declare it:
-   * {@code parentId}, a wrapper's virtual field, or a create directive of its customization.
+   * {@code parentId}, a wrapper's virtual field, a structured-address field the entity's own table
+   * carries directly (ETP-5806 CP-12g), or a create directive of its customization.
    *
+   * @param dalEntity      the entity being written to, for {@link
+   *                       NeoSelectorPolicy#ownPropertyForPublishedName}
    * @param directiveNames the create directives resolved so far, or {@code null} when not yet
    *                       resolved
    * @return the create directives, resolved on first need so most writes never look them up
    */
-  private static Set<String> reportIfUnknown(String key, SFEntity sfEntity,
+  private static Set<String> reportIfUnknown(String key, SFEntity sfEntity, Entity dalEntity,
       Set<String> virtualFieldNames, Set<String> directiveNames, Set<String> unknown) {
-    if (McpConstants.PARAM_PARENT_ID.equals(key) || virtualFieldNames.contains(key)) {
+    if (McpConstants.PARAM_PARENT_ID.equals(key) || virtualFieldNames.contains(key)
+        || NeoSelectorPolicy.ownPropertyForPublishedName(dalEntity, key) != null) {
       return directiveNames;
     }
     Set<String> resolved = directiveNames != null ? directiveNames
