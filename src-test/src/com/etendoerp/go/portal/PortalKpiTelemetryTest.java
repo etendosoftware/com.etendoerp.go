@@ -19,8 +19,10 @@ package com.etendoerp.go.portal;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -34,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -43,6 +46,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -58,13 +63,17 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.QuotationDecisions;
+import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
@@ -92,6 +101,8 @@ public class PortalKpiTelemetryTest {
   private static final String KEY_TYPE = "type";
   private static final String KEY_DECISION = "decision";
   private static final String KEY_SOURCE = "source";
+  private static final String KEY_THIRD_PARTY = "third_party";
+  private static final String KEY_PIECE = "piece";
 
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<OBContext> obContext;
@@ -345,6 +356,196 @@ public class PortalKpiTelemetryTest {
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────
+
+  // ── ETP-6209: portal visits and portal emails ─────────────────────────────
+
+  @Test
+  public void aVisitOpensOnlyAfterThirtyMinutesWithoutAValidMeOfTheSameLink() {
+    String linkId = uniqueLinkId();
+    long start = 1_000_000L;
+    long minute = TimeUnit.MINUTES.toMillis(1);
+
+    assertTrue("first", PortalKpiTelemetry.isNewVisit(linkId, start));
+    assertFalse("29 min later", PortalKpiTelemetry.isNewVisit(linkId, start + 29 * minute));
+    assertFalse("the window slid: 58 min after the first, 29 after the last",
+        PortalKpiTelemetry.isNewVisit(linkId, start + 58 * minute));
+    assertTrue("31 min without one", PortalKpiTelemetry.isNewVisit(linkId, start + 89 * minute));
+    for (String blank : new String[] { null, "", "  " }) {
+      assertFalse("blank id " + blank, PortalKpiTelemetry.isNewVisit(blank, start));
+    }
+  }
+
+  @Test
+  public void reachingTheCapSweepsTheLinksWhoseVisitEnded() throws Exception {
+    Map<String, Long> tracked = trackedOpens();
+    String prefix = uniqueLinkId() + "-";
+    long now = TimeUnit.HOURS.toMillis(2);
+    try {
+      for (int i = 0; i < 10_000; i++) {
+        tracked.put(prefix + i, 0L);
+      }
+      tracked.put(prefix + "recent", now - TimeUnit.MINUTES.toMillis(1));
+
+      assertTrue(PortalKpiTelemetry.isNewVisit(prefix + "new", now));
+
+      assertFalse("ended visits are swept", tracked.containsKey(prefix + 0));
+      assertFalse(tracked.containsKey(prefix + 9_999));
+      assertFalse("a visit still open is kept",
+          PortalKpiTelemetry.isNewVisit(prefix + "recent", now));
+    } finally {
+      tracked.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+  }
+
+  @Test
+  public void anOpenedVisitNamesTheEntryTypeTheOriginAndAStablePseudonymOfTheCustomer() {
+    Invoice creditNote = creditNote();
+    when(obDal.get(Invoice.class, RECORD_ID)).thenReturn(creditNote);
+    withSigningSecret(() -> {
+      Map<String, Object> send = opened(PortalLink.ORIGIN_SEND, PortalDocumentKind.INVOICE, "BP-1");
+      Map<String, Object> renewal = opened(PortalLink.ORIGIN_RENEWAL,
+          PortalDocumentKind.QUOTATION, "BP-1");
+      Map<String, Object> otherCustomer = opened(PortalLink.ORIGIN_SEND,
+          PortalDocumentKind.QUOTATION, "BP-2");
+
+      assertEquals(new HashSet<>(Arrays.asList(KEY_ACCOUNT, KEY_THIRD_PARTY, "entry_doc_type",
+          "origin")), send.keySet());
+      assertEquals(CLIENT_ID, send.get(KEY_ACCOUNT));
+      assertEquals("credit_note", send.get("entry_doc_type"));
+      assertEquals("send", send.get("origin"));
+      assertEquals("quotation", renewal.get("entry_doc_type"));
+      assertEquals("renewal", renewal.get("origin"));
+      assertEquals("same customer, same pseudonym", send.get(KEY_THIRD_PARTY),
+          renewal.get(KEY_THIRD_PARTY));
+      assertNotEquals(send.get(KEY_THIRD_PARTY), otherCustomer.get(KEY_THIRD_PARTY));
+      for (Map<String, Object> properties : Arrays.asList(send, renewal, otherCustomer)) {
+        for (Object value : properties.values()) {
+          String text = String.valueOf(value);
+          for (String identifier : Arrays.asList(RECORD_ID, "BP-1", "BP-2", "LINK-",
+              "a@customer.test", "Customer SL")) {
+            assertFalse(text + " leaks " + identifier, text.contains(identifier));
+          }
+        }
+      }
+    });
+  }
+
+  @Test
+  public void withoutTheSigningSecretAnOpenedVisitCarriesNoThirdParty() {
+    withoutSigningSecret(() -> assertEquals(new HashSet<>(Arrays.asList(KEY_ACCOUNT,
+        "entry_doc_type", "origin")),
+        opened(PortalLink.ORIGIN_SEND, PortalDocumentKind.ORDER, "BP-1").keySet()));
+  }
+
+  @Test
+  public void aPortalEmailIsCountedByPieceAndOnlyADocumentSendNamesItsType() {
+    Map<String, Object> send = emittedBy(
+        () -> PortalKpiTelemetry.linkEmailSent(link(PortalLink.ORIGIN_SEND)));
+    Map<String, Object> renewal = emittedBy(
+        () -> PortalKpiTelemetry.linkEmailSent(link(PortalLink.ORIGIN_RENEWAL)));
+    Map<String, Object> accept = emittedBy(
+        () -> PortalKpiTelemetry.decisionEmailSent(true, CLIENT_ID));
+    Map<String, Object> reject = emittedBy(
+        () -> PortalKpiTelemetry.decisionEmailSent(false, CLIENT_ID));
+
+    assertEquals(properties(KEY_PIECE, PortalKpiTelemetry.PIECE_DOCUMENT_SEND, "doc_type",
+        "invoice"), send);
+    assertEquals(properties(KEY_PIECE, PortalKpiTelemetry.PIECE_LINK_RENEWAL), renewal);
+    assertEquals(properties(KEY_PIECE, PortalKpiTelemetry.PIECE_DECISION_ACCEPT), accept);
+    assertEquals(properties(KEY_PIECE, PortalKpiTelemetry.PIECE_DECISION_REJECT), reject);
+  }
+
+  @Test
+  public void aDecisionOrSharedLinkEmailIsNotCountedAsAPortalEmail() {
+    PortalKpiTelemetry.linkEmailSent(link(PortalLink.ORIGIN_DECISION));
+    PortalKpiTelemetry.linkEmailSent(link(PortalLink.ORIGIN_SHARED));
+    PortalKpiTelemetry.linkEmailSent(null);
+
+    assertNothingEmittedBeforeTheSentinel();
+  }
+
+  /** Opens a visit of a fresh link and returns its {@code backend_portal_opened} properties. */
+  private static Map<String, Object> opened(String origin, PortalDocumentKind kind,
+      String businessPartnerId) {
+    PortalLink link = new PortalLink(uniqueLinkId(), CLIENT_ID, "Acme", "ORG-1",
+        businessPartnerId, "Customer SL", kind, RECORD_ID, origin, null, LINK_ID,
+        "sales-invoice-send", "a@customer.test", null, "es_ES", new Date(0L), new Date(1L), true,
+        false);
+    NeoTelemetryService captured = mock(NeoTelemetryService.class);
+    PortalKpiTelemetry.setTelemetryService(captured);
+    PortalKpiTelemetry.portalOpened(link);
+    return awaitEvent(captured, NeoTelemetryEvents.BACKEND_PORTAL_OPENED);
+  }
+
+  /** Runs a call against a fresh service and returns its {@code backend_portal_email_sent}. */
+  private static Map<String, Object> emittedBy(Runnable call) {
+    NeoTelemetryService captured = mock(NeoTelemetryService.class);
+    PortalKpiTelemetry.setTelemetryService(captured);
+    call.run();
+    return awaitEvent(captured, NeoTelemetryEvents.BACKEND_PORTAL_EMAIL_SENT);
+  }
+
+  /** The tenant's account plus the given key/value pairs. */
+  private static Map<String, Object> properties(String... pairs) {
+    Map<String, Object> expected = new HashMap<>();
+    expected.put(KEY_ACCOUNT, CLIENT_ID);
+    for (int i = 0; i < pairs.length; i += 2) {
+      expected.put(pairs[i], pairs[i + 1]);
+    }
+    return expected;
+  }
+
+  /** A link id no other test used: the visit tracker is static and outlives a test. */
+  private static String uniqueLinkId() {
+    return "LINK-" + UUID.randomUUID();
+  }
+
+  private static Map<String, Long> trackedOpens() throws Exception {
+    Field field = PortalKpiTelemetry.class.getDeclaredField("LAST_OPEN");
+    field.setAccessible(true);
+    return (Map<String, Long>) field.get(null);
+  }
+
+  private static Invoice creditNote() {
+    DocumentType type = mock(DocumentType.class);
+    when(type.getDocumentCategory()).thenReturn("ARC");
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getTransactionDocument()).thenReturn(type);
+    return invoice;
+  }
+
+  /** The {@code third_party} pseudonym is signed with the email signing secret. */
+  private static void withSigningSecret(Runnable body) {
+    String previous = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, "kpi-secret");
+    try {
+      body.run();
+    } finally {
+      restoreSecret(previous);
+    }
+  }
+
+  /** No secret anywhere: property cleared, Openbravo.properties empty (env assumed absent). */
+  private static void withoutSigningSecret(Runnable body) {
+    String previous = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+    when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+    try (MockedStatic<OBPropertiesProvider> properties = mockStatic(OBPropertiesProvider.class)) {
+      properties.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+      System.clearProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+      body.run();
+    } finally {
+      restoreSecret(previous);
+    }
+  }
+
+  private static void restoreSecret(String previous) {
+    if (previous == null) {
+      System.clearProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    } else {
+      System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previous);
+    }
+  }
 
   private Map<String, Object> awaitEvent(String event) {
     return awaitEvent(telemetry, event);

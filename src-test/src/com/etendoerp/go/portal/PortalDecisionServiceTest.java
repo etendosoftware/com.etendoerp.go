@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -538,6 +539,39 @@ public class PortalDecisionServiceTest {
 
     assertTrue(statements.stream().noneMatch(s -> ((String) s[0]).contains("FOR UPDATE")));
     verify(quotation, never()).setDocumentStatus(anyString());
+  }
+
+  // ── markSent (ETP-6209: the decision email KPI) ─────────────────────────────
+
+  /** With the failure case below: the KPI follows a committed stamp, never a rolled-back one. */
+  @Test
+  public void markSentStampsTheDecisionCommitsAndCountsItsEmail() {
+    // Columns: decision, accepted as the KPI receives it.
+    Object[][] cases = { { "ACCEPT", true }, { "REJECT", false } };
+    for (Object[] c : cases) {
+      decisionRow = row((String) c[0], null, null, PortalDecisionService.STATUS_PENDING, false);
+      boolean accepted = (Boolean) c[1];
+
+      service().markSent(DECISION_ID);
+
+      kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(accepted, CLIENT_ID));
+    }
+    verify(obDal, times(2)).commitAndClose();
+    verify(obDal, never()).rollbackAndClose();
+    assertTrue("the decision is stamped sent", statements.stream().anyMatch(
+        s -> ((String) s[0]).startsWith("UPDATE etgo_portal_decision SET sent_at")
+            && DECISION_ID.equals(((Map<?, ?>) s[1]).get("id"))));
+  }
+
+  @Test
+  public void aMarkSentThatFailsToCommitRollsBackAndCountsNothing() {
+    decisionRow = row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, false);
+    doThrow(new IllegalStateException("could not commit")).when(obDal).commitAndClose();
+
+    service().markSent(DECISION_ID);
+
+    verify(obDal).rollbackAndClose();
+    kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(anyBoolean(), any()), never());
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────

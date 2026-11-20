@@ -303,6 +303,26 @@ class NeoTelemetryServiceTest {
         "operation", "post"), emitted);
   }
 
+  /** ETP-6209: the portal KPI properties pass the allowlist; the link's identifiers never do. */
+  @Test
+  void emitKeepsThePortalKpiPropsAndDropsTheLinksIdentifiers() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_PORTAL_OPENED, mapOf("account_id", "CLIENT-1",
+        "third_party", "pseudonym", "entry_doc_type", "credit_note", "origin", "send",
+        "linkId", "LINK-1", "recordId", "INV-1", "email", "a@customer.test"));
+    Map<String, Object> opened = sink.last().getProperties();
+    service.emit(NeoTelemetryEvents.BACKEND_PORTAL_EMAIL_SENT, mapOf("account_id", "CLIENT-1",
+        "piece", "document_send", "doc_type", "invoice", "businessPartner", "BP-1"));
+    Map<String, Object> emailSent = sink.last().getProperties();
+
+    assertEquals(Map.of("account_id", "CLIENT-1", "third_party", "pseudonym",
+        "entry_doc_type", "credit_note", "origin", "send"), opened);
+    assertEquals(Map.of("account_id", "CLIENT-1", "piece", "document_send", "doc_type",
+        "invoice"), emailSent);
+  }
+
   @Test
   void emitDropsANonBooleanInternalFlag() {
     RecordingSink sink = new RecordingSink();
