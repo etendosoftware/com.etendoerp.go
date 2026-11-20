@@ -397,8 +397,10 @@ public final class ContactTypeRules {
 
   /**
    * Whether the request chose {@code key} itself: the channel's own record of the keys the caller
-   * sent when it provides one ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, MCP
-   * {@code etendo_create}), otherwise presence of the key in the body.
+   * sent when it provides one ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}: MCP
+   * {@code etendo_create}, and {@code etendo_batch} through its preprocessor since ETP-6177),
+   * otherwise presence of the key in the body. On {@code etendo_batch} the two agree: its
+   * preprocessor never adds the contact type flags.
    */
   static boolean isExplicit(NeoContext ctx, JSONObject body, String key) {
     Object clientProvided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);

@@ -1991,6 +1991,9 @@ public class McpToolRouter {
     // supplied a price — after an injection the body can no longer answer that. Safe to take here
     // even though ref substitution already ran: that replaces values, it never adds a field.
     Set<String> agentProvided = NeoCrudHelper.snapshotBodyFields(body);
+    // ETP-6177: the same witness for the op's pre-hook, which runs after the injections below and
+    // would otherwise read an injected price as one the agent sent (as etendo_create's does).
+    op.hookAttributes().put(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, agentProvided);
     Tab adTab;
     Entity dalEntity;
     SFEntity sfEntity;
