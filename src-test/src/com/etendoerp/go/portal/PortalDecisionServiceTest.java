@@ -382,9 +382,9 @@ public class PortalDecisionServiceTest {
       // The portal's reason never becomes the tenant's internal reject reason.
       verify(rejected, never()).setRejectReason(any(RejectReason.class));
     }
-    // The KPI counts each applied rejection once, for the decision's tenant.
-    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(false, CLIENT_ID),
-        times(cases.length));
+    // Each applied rejection is handed to the KPI gate, for the decision's tenant and quotation.
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationConfirmed(false, CLIENT_ID, DECISION_ID,
+        QUOTATION_ID), times(cases.length));
   }
 
   @Test
@@ -399,7 +399,8 @@ public class PortalDecisionServiceTest {
     verify(quotation, never()).setDescription(anyString());
     assertTrue(executed("SET status = 'CONFIRMED'"));
     assertFalse(view.isCustomerClosed());
-    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(true, CLIENT_ID));
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationConfirmed(true, CLIENT_ID, DECISION_ID,
+        QUOTATION_ID));
   }
 
   @Test

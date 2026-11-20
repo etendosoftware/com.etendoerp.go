@@ -106,10 +106,22 @@ public final class EmailFooter {
    * @return the link to emit
    */
   static String link(String base, Piece piece) {
-    if (piece == null || StringUtils.isBlank(piece.trackingQuery)) {
+    return link(base, piece == null ? null : piece.trackingQuery);
+  }
+
+  /**
+   * Appends a tracking query to a link: after {@code ?}, or after {@code &} when the link already
+   * has a query. A blank query leaves the link as it is.
+   *
+   * @param base the link without tracking
+   * @param trackingQuery the query, without the leading {@code ?}; may be blank
+   * @return the link to emit
+   */
+  static String link(String base, String trackingQuery) {
+    if (StringUtils.isBlank(trackingQuery)) {
       return base;
     }
-    return base + (base.contains("?") ? "&" : "?") + piece.trackingQuery;
+    return base + (base.contains("?") ? "&" : "?") + trackingQuery;
   }
 
   public String getTitle() {

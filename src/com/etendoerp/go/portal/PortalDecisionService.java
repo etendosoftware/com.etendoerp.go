@@ -649,8 +649,9 @@ public class PortalDecisionService {
         () -> confirmInTransaction(decision, voided));
     if (result.isAppliedNow()) {
       PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.action);
-      PortalKpiTelemetry.portalQuotationDecided(DECISION_ACCEPT.equals(decision.action),
-          decision.clientId);
+      // Counted once per quotation and only for one emailed with a link: checked after the commit.
+      PortalKpiTelemetry.portalQuotationConfirmed(DECISION_ACCEPT.equals(decision.action),
+          decision.clientId, decision.id, decision.quotationId);
       if (!voided.isEmpty()) {
         PortalDecisionEvents.voided(decision.quotationId, voided.size());
       }

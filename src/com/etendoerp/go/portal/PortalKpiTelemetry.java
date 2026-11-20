@@ -45,8 +45,9 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
  *       document's first sent link ({@code ETGO_PORTAL_LINK.FIRST_DOWNLOADED}): only the request
  *       whose update set it emits.</li>
  *   <li>{@code backend_quotation_decided} ({@code decision} {@code accepted|rejected},
- *       {@code source} {@code portal|app}): a quotation answered from the portal (a confirmed
- *       decision) or decided in the app (rejected, or converted into an order or an invoice from
+ *       {@code source} {@code portal|app}): a quotation answered from the portal — once per
+ *       quotation, its first confirmed portal decision, and only for a quotation that was emailed
+ *       with a portal link — or decided in the app (rejected, or converted into an order or an invoice from
  *       Under evaluation; a conversion of a quotation the customer already accepted from the portal
  *       is not a second decision).</li>
  *   <li>{@code backend_portal_opened} ({@code third_party}, {@code entry_doc_type},
@@ -103,6 +104,20 @@ public final class PortalKpiTelemetry {
   private static final String PARAM_RECORD = "record";
   private static final String PARAM_CLIENT = "client";
   private static final int QUEUE_CAPACITY = 1000;
+
+  /** Whether the document was emailed with a portal link: a confirmed link of a send. */
+  private static final String EMAILED_WITH_LINK_SQL = "SELECT count(*) FROM etgo_portal_link"
+      + " WHERE ad_client_id = :client AND record_id = :record AND link_origin = '"
+      + PortalLink.ORIGIN_SEND + "' AND sent_at IS NOT NULL";
+
+  /**
+   * The quotation's first confirmed portal decision. Confirmations of one quotation are serialized
+   * by its row lock ({@code PortalDecisionService#confirm}) and a confirmed decision never changes
+   * state again, so exactly one decision is ever first: only its confirmation emits.
+   */
+  private static final String FIRST_CONFIRMED_DECISION_SQL = "SELECT etgo_portal_decision_id"
+      + " FROM etgo_portal_decision WHERE ad_client_id = :client AND c_order_id = :record"
+      + " AND status = 'CONFIRMED' ORDER BY confirmed_at, etgo_portal_decision_id LIMIT 1";
 
   /** Other sent links of the same document by an email send (renewals and decision links aside). */
   private static final String OTHER_SENT_SENDS_SQL = "SELECT count(*) FROM etgo_portal_link"
@@ -174,8 +189,8 @@ public final class PortalKpiTelemetry {
   }
 
   /**
-   * A portal decision was applied (after the confirmation's commit): emits
-   * {@code backend_quotation_decided} with {@code source = portal}. Never throws.
+   * Emits {@code backend_quotation_decided} with {@code source = portal}, unconditionally: the
+   * gate is {@link #portalQuotationConfirmed}, the only production caller. Never throws.
    *
    * @param accepted whether the customer accepted the quotation (else rejected it)
    * @param clientId the quotation's tenant
@@ -304,6 +319,54 @@ public final class PortalKpiTelemetry {
    */
   private static String docTypeOf(PortalLink link) {
     return link.getDocumentKind().copyKey(link.getRecordId()).toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * A portal decision was applied (after the confirmation's commit): emits
+   * {@code backend_quotation_decided} with {@code source = portal} only when the quotation was
+   * emailed with a portal link (the KPI's denominator is {@code backend_portal_document_sent}, so a
+   * quotation reached through a shared contact link or another document's link is outside it) and
+   * this is the quotation's first confirmed portal decision (a re-opened quotation decided again
+   * from the portal is not counted twice). Read-only checks after the commit, so the decision is
+   * never affected. Never throws.
+   *
+   * @param accepted whether the customer accepted the quotation (else rejected it)
+   * @param clientId the quotation's tenant
+   * @param decisionId the decision just applied
+   * @param quotationId the quotation
+   */
+  static void portalQuotationConfirmed(boolean accepted, String clientId, String decisionId,
+      String quotationId) {
+    try {
+      if (StringUtils.isAnyBlank(clientId, decisionId, quotationId)
+          || !countsAsPortalDecision(clientId, decisionId, quotationId)) {
+        return;
+      }
+      portalQuotationDecided(accepted, clientId);
+    } catch (RuntimeException e) {
+      log.debug("Portal KPI telemetry: the decided check failed: {}", e.getMessage());
+      discard();
+    }
+  }
+
+  private static boolean countsAsPortalDecision(String clientId, String decisionId,
+      String quotationId) {
+    OBContext.setAdminMode(true);
+    try {
+      List<?> emailed = OBDal.getInstance().getSession().createNativeQuery(EMAILED_WITH_LINK_SQL)
+          .setParameter(PARAM_CLIENT, clientId)
+          .setParameter(PARAM_RECORD, quotationId).list();
+      if (emailed.isEmpty() || ((Number) emailed.get(0)).longValue() == 0) {
+        return false;
+      }
+      List<?> first = OBDal.getInstance().getSession()
+          .createNativeQuery(FIRST_CONFIRMED_DECISION_SQL)
+          .setParameter(PARAM_CLIENT, clientId)
+          .setParameter(PARAM_RECORD, quotationId).list();
+      return !first.isEmpty() && decisionId.equals(String.valueOf(first.get(0)));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**

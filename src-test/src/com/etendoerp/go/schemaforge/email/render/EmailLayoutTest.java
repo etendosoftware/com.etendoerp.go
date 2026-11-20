@@ -246,7 +246,7 @@ public class EmailLayoutTest {
       assertEquals(piece.name(), "https://x.test/a?b=1", EmailFooter.link("https://x.test/a?b=1",
           piece));
     }
-    assertEquals("https://x.test/a", EmailFooter.link("https://x.test/a", null));
+    assertEquals("https://x.test/a", EmailFooter.link("https://x.test/a", (EmailFooter.Piece) null));
   }
 
   @Test
