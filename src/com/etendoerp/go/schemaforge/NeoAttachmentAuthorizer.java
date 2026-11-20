@@ -141,7 +141,7 @@ public final class NeoAttachmentAuthorizer {
     if (StringUtils.isBlank(attachmentId)) {
       return null;
     }
-    Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
+    Attachment attachment = loadAttachment(attachmentId);
     if (attachment == null || attachment.getTable() == null) {
       return null;
     }
@@ -173,6 +173,22 @@ public final class NeoAttachmentAuthorizer {
   public static boolean authorizeByRecord(String tableName, String recordId, Access access) {
     String tableId = StringUtils.isBlank(recordId) ? null : tableIdOrNull(tableName);
     return tableId == null || canAccessParent(tableId, recordId, access);
+  }
+
+  /**
+   * Loads the attachment row inside a narrow admin scope — reading the row needs no entity access
+   * of the caller's role, the decision is taken afterwards on its parent — and keeps only a row of
+   * the caller's tenant. A security failure while loading reads as "not found".
+   */
+  private static Attachment loadAttachment(String attachmentId) {
+    OBContext.setAdminMode(true);
+    try {
+      return TenantOwnership.loadOwned(Attachment.class, attachmentId);
+    } catch (OBSecurityException e) {
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /** The table id for a request's table name, or {@code null} when it is blank or unknown. */
@@ -232,14 +248,18 @@ public final class NeoAttachmentAuthorizer {
     if (!hasEntityAccess(context, entity, access)) {
       return false;
     }
-    BaseOBObject parent = OBDal.getInstance().get(entity.getName(), recordId);
-    if (parent == null || (parent instanceof ActiveEnabled
-        && !Boolean.TRUE.equals(((ActiveEnabled) parent).isActive()))) {
+    try {
+      BaseOBObject parent = OBDal.getInstance().get(entity.getName(), recordId);
+      if (parent == null || (parent instanceof ActiveEnabled
+          && !Boolean.TRUE.equals(((ActiveEnabled) parent).isActive()))) {
+        return false;
+      }
+      return access == Access.WRITE ? TenantOwnership.isWritableByCurrentTenant(parent)
+          && TenantOwnership.isVisibleToCurrentTenant(parent)
+          : TenantOwnership.isVisibleToCurrentTenant(parent);
+    } catch (OBSecurityException e) {
       return false;
     }
-    return access == Access.WRITE ? TenantOwnership.isWritableByCurrentTenant(parent)
-        && TenantOwnership.isVisibleToCurrentTenant(parent)
-        : TenantOwnership.isVisibleToCurrentTenant(parent);
   }
 
   /**

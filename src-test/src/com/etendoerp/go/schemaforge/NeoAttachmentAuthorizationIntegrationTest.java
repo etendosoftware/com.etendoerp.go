@@ -186,7 +186,8 @@ public class NeoAttachmentAuthorizationIntegrationTest extends OBBaseTest {
 
   /** Creates (inside the rolled-back session) an attachment bound to the given order. */
   private static String createAttachment(String orderId) {
-    OBContext.setAdminMode(true);
+    // false: the fixture for a foreign client's order must not trip the org/client access check
+    OBContext.setAdminMode(false);
     try {
       Order order = OBDal.getInstance().get(Order.class, orderId);
       Attachment attachment = OBProvider.getInstance().get(Attachment.class);
