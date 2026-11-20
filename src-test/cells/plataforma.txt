@@ -385,6 +385,7 @@ com.etendoerp.go.schemaforge.NeoDisplayLogicHandlerTest
 com.etendoerp.go.schemaforge.NeoDocTemplateConfigEndpointTest
 com.etendoerp.go.schemaforge.NeoDocumentDownloadServiceTest
 com.etendoerp.go.schemaforge.NeoDocumentPdfTest
+com.etendoerp.go.schemaforge.NeoDownloadHeadersTest
 com.etendoerp.go.schemaforge.NeoErrorClassifierTest
 com.etendoerp.go.schemaforge.NeoExtensionMigrationTest
 com.etendoerp.go.schemaforge.NeoExtensionParityTest

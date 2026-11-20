@@ -325,4 +325,84 @@ public class NeoAttachmentPolicyTest {
     assertEquals(tenMegabytes, NeoAttachmentPolicy.MULTIPART_MARGIN_BYTES);
     assertEquals(20 * tenMegabytes + tenMegabytes, NeoAttachmentPolicy.MAX_REQUEST_BYTES);
   }
+
+  // ── ETP-4571 (SEC-09b): abuse / regression cases ─────────────────────────────
+
+  @Test
+  public void rejectsEmptyFile() throws IOException {
+    File file = writeFile("empty.pdf", new byte[0]);
+    assertNotNull(NeoAttachmentPolicy.validateContent("empty.pdf", file));
+  }
+
+  @Test
+  public void rejectsOversizedFile() {
+    assertNotNull(NeoAttachmentPolicy.validateMetadata("big.pdf",
+        NeoAttachmentPolicy.MAX_FILE_BYTES + 1));
+  }
+
+  @Test
+  public void rejectsMimeSpoofedHtmlRenamedAsPdf() throws IOException {
+    File file = writeFile("x.pdf", "<html><script>alert(1)</script></html>"
+        .getBytes(StandardCharsets.UTF_8));
+    assertNotNull(NeoAttachmentPolicy.validateContent("x.pdf", file));
+  }
+
+  @Test
+  public void rejectsActiveInnerExtensionInDoubleExtension() {
+    for (String name : Arrays.asList("evil.html.pdf", "evil.php.png", "evil.svg.pdf",
+        "evil.js.pdf", "evil.exe.pdf", "EVIL.HTM.PDF", "a.jsp.docx")) {
+      assertNotNull(name, NeoAttachmentPolicy.validateMetadata(name, 10));
+    }
+  }
+
+  @Test
+  public void acceptsHarmlessDottedNames() {
+    assertNull(NeoAttachmentPolicy.validateMetadata("invoice.2026.v2.pdf", 10));
+  }
+
+  @Test
+  public void rejectsTraversalAndControlCharsInRawNames() {
+    for (String name : Arrays.asList("../../etc/passwd.pdf", "a/b.pdf", "a\\b.pdf",
+        "a\u0000.pdf", "a\r\nSet-Cookie: x.pdf", "a\u007f.pdf", "..pdf\u0001")) {
+      assertNotNull(name, NeoAttachmentPolicy.validateMetadata(name, 10));
+    }
+  }
+
+  @Test
+  public void rejectsOverlongName() {
+    String name = new String(new char[300]).replace('\0', 'a') + ".pdf";
+    assertNotNull(NeoAttachmentPolicy.validateMetadata(name, 10));
+  }
+
+  @Test
+  public void sanitizeFileNameStripsTraversal() {
+    assertEquals("passwd.pdf", NeoAttachmentPolicy.sanitizeFileName("../../etc/passwd.pdf"));
+  }
+
+  @Test
+  public void svgAndXmlAreNeverServedAsActiveContent() {
+    assertEquals("application/octet-stream", NeoAttachmentPolicy.inertMimeType("logo.svg"));
+    assertEquals("application/octet-stream", NeoAttachmentPolicy.inertMimeType("f.xml"));
+    assertEquals("application/octet-stream", NeoAttachmentPolicy.inertMimeType("x.html"));
+    assertEquals("application/octet-stream", NeoAttachmentPolicy.inertMimeType("noext"));
+    assertEquals("application/pdf", NeoAttachmentPolicy.inertMimeType("a.pdf"));
+    assertEquals("image/png", NeoAttachmentPolicy.inertMimeType("a.PNG"));
+  }
+
+  @Test
+  public void rejectsPngBytesNamedPdfWhateverTheDeclaredType() throws IOException {
+    // The declared Content-Type is not an input of the policy; the bytes decide.
+    File file = writeFile("photo.pdf", PNG_HEADER);
+    assertNotNull(NeoAttachmentPolicy.validateContent("photo.pdf", file));
+  }
+
+  @Test
+  public void acceptsOrdinaryMultiDotUnicodeAndDottedHostNames() throws IOException {
+    for (String name : Arrays.asList("informe.v2.final.pdf", "factura_año.pdf", "acme.com.pdf",
+        "www.empresa.com.factura.pdf", "v1..2.pdf", "script.py.pdf")) {
+      assertNull(name, NeoAttachmentPolicy.validateMetadata(name, 10));
+      assertNull(name, NeoAttachmentPolicy.validateContent(name,
+          writeFile(Integer.toHexString(name.hashCode()) + ".pdf", PDF_HEADER)));
+    }
+  }
 }
