@@ -20,6 +20,7 @@ package com.etendoerp.go.hubspot;
 import static com.etendoerp.go.hubspot.HubSpotValues.association;
 import static com.etendoerp.go.hubspot.HubSpotValues.countryCode;
 import static com.etendoerp.go.hubspot.HubSpotValues.countryName;
+import static com.etendoerp.go.hubspot.HubSpotValues.countryNameOf;
 import static com.etendoerp.go.hubspot.HubSpotValues.date;
 import static com.etendoerp.go.hubspot.HubSpotValues.dateTime;
 import static com.etendoerp.go.hubspot.HubSpotValues.encode;
@@ -33,6 +34,7 @@ import static com.etendoerp.go.hubspot.HubSpotValues.putIfPresent;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -131,6 +133,20 @@ class HubSpotEventSender {
   static final String COUNTRY = "country";
   /** HubSpot's standard two-letter country code of the contact. */
   static final String COUNTRY_CODE = "hs_country_region_code";
+  /** HubSpot's standard company name of the contact (ETP-6363, sent with {@code DEMO_READY}). */
+  static final String CONTACT_COMPANY = "company";
+
+  /**
+   * ETP-6363 — the fields of the sign-up form ("Alta app – onboarding"), from the contact's own
+   * properties: what is known at sign-up. The phone, the sector and the country code are not
+   * fields of the form; the account's event writes them on the contact right after.
+   */
+  static final List<String> SIGNUP_FORM_FIELDS = List.of(EMAIL, "firstname", "lastname",
+      "country", "etendo_camino_entrada");
+  /** HubSpot's object type of a contact, which each form field names. */
+  static final String CONTACT_OBJECT_TYPE = "0-1";
+  /** How many attempts the account's event waits for the sign-up form's contact. */
+  static final int FORM_CONTACT_WAIT_ATTEMPTS = 3;
 
   /** The deal {@code datetime} property of each milestone, created by marketing on 2026-11-05. */
   static final Map<String, String> MILESTONE_PROPERTIES = Map.of(
@@ -151,13 +167,20 @@ class HubSpotEventSender {
   private final HubSpotConfiguration configuration;
   private final HubSpotOutboxStore store;
   private final DemoTrials trials;
+  private final HubSpotSignupForm signupForm;
 
   HubSpotEventSender(HubSpotClient client, HubSpotConfiguration configuration,
       HubSpotOutboxStore store, DemoTrials trials) {
+    this(client, configuration, store, trials, HubSpotSignupForm.DISABLED);
+  }
+
+  HubSpotEventSender(HubSpotClient client, HubSpotConfiguration configuration,
+      HubSpotOutboxStore store, DemoTrials trials, HubSpotSignupForm signupForm) {
     this.client = client;
     this.configuration = configuration;
     this.store = store;
     this.trials = trials;
+    this.signupForm = signupForm;
   }
 
   /**
@@ -170,6 +193,8 @@ class HubSpotEventSender {
   Outcome send(PendingEvent event, Instant now) {
     try {
       switch (event.eventType()) {
+        case HubSpotOutboxStore.SIGNUP_FORM:
+          return sendSignupForm(event);
         case HubSpotOutboxStore.ACCOUNT_CREATED:
           return Outcome.sent(sendAccountCreated(event));
         case HubSpotOutboxStore.DEMO_READY:
@@ -204,6 +229,10 @@ class HubSpotEventSender {
    * derives the contact's from its deal's (marketing's spec, ETP-6082).
    */
   private String sendAccountCreated(PendingEvent event) throws CallFailed, JSONException {
+    if (awaitsFormContact(event)) {
+      throw new CallFailed(Outcome.retry("HubSpot has not created the contact of the sign-up form"
+          + " yet"));
+    }
     String contactId = upsertContact(event, contactBase(event, true));
     String existingDeal = findDeal(event.accountId());
     if (existingDeal != null) {
@@ -211,6 +240,92 @@ class HubSpotEventSender {
     }
     return createAccountDeal(event, StringUtils.defaultIfBlank(event.name(), event.email()),
         contactId, null);
+  }
+
+  /**
+   * ETP-6363 — the sign-up, submitted to marketing's sign-up form with its lead attribution: HubSpot
+   * creates or updates the contact, joins it to the visits of its cookie and records the
+   * conversion, so the contact gets its original source (Google, LinkedIn, an ad) instead of
+   * "Offline". Only what is known at sign-up: the trial dates and the company come with
+   * {@code DEMO_READY}, whose update does not change the source.
+   *
+   * <p>Submitted once: a refusal is final (a field the form lacks), so the account's event then
+   * creates the contact through the CRM API instead of waiting for it.
+   */
+  private Outcome sendSignupForm(PendingEvent event) throws CallFailed, JSONException {
+    if (!signupForm.isEnabled()) {
+      return Outcome.skipped("No HubSpot sign-up form is configured");
+    }
+    JSONObject contact = contactBase(event, true);
+    JSONArray fields = new JSONArray();
+    for (String name : SIGNUP_FORM_FIELDS) {
+      String value = contact.optString(name, null);
+      if (StringUtils.isNotBlank(value)) {
+        fields.put(new JSONObject().put("objectTypeId", CONTACT_OBJECT_TYPE).put("name", name)
+            .put("value", value));
+      }
+    }
+    JSONObject body = new JSONObject().put("fields", fields);
+    JSONObject context = formContext(payloadOf(event));
+    if (context.length() > 0) {
+      body.put("context", context);
+    }
+    Response response = requestForm(body);
+    if (response.isSuccess()) {
+      return Outcome.sent(null);
+    }
+    String reason = describe("POST", signupForm.submitPath(), response);
+    if (response.isRetryable()) {
+      return Outcome.retry(reason);
+    }
+    // Usually a field the form does not have: worth the response in the log (marketing's spec).
+    log.warn("HubSpot refused the sign-up form of account {}: {}", event.accountId(), reason);
+    return Outcome.failed(reason);
+  }
+
+  /** The visitor cookie (only when there is one), the page and its title. */
+  private static JSONObject formContext(JSONObject signupContext) throws JSONException {
+    JSONObject context = new JSONObject();
+    for (String field : new String[] { HubSpotOutbox.FIELD_HUTK, HubSpotOutbox.FIELD_PAGE_URI,
+        HubSpotOutbox.FIELD_PAGE_NAME }) {
+      String value = StringUtils.trimToNull(signupContext.optString(field, null));
+      if (value != null) {
+        context.put(field, value);
+      }
+    }
+    return context;
+  }
+
+  private Response requestForm(JSONObject body) throws CallFailed {
+    try {
+      return client.send(signupForm.baseUrl(), "POST", signupForm.submitPath(), body);
+    } catch (HubSpotUnreachableException e) {
+      throw new CallFailed(Outcome.retry(e.getMessage()));
+    }
+  }
+
+  /**
+   * Whether the account's event must still wait for the contact the sign-up form creates: HubSpot
+   * processes a submission in a few seconds, and a contact upserted before that would be created
+   * without its source. After {@value #FORM_CONTACT_WAIT_ATTEMPTS} attempts it stops waiting, so a
+   * form HubSpot never processes does not cost the account its deal.
+   */
+  private boolean awaitsFormContact(PendingEvent event) throws CallFailed, JSONException {
+    if (event.attemptCount() >= FORM_CONTACT_WAIT_ATTEMPTS || !HubSpotOutboxStore.STATUS_SENT
+        .equals(store.findStatus(event.accountId(), HubSpotOutboxStore.SIGNUP_FORM))) {
+      return false;
+    }
+    String path = "/crm/v3/objects/contacts/" + encode(event.email()) + "?idProperty=email";
+    Response response = request("GET", path, null);
+    if (response.status() == 404) {
+      return true;
+    }
+    if (!response.isSuccess()) {
+      String reason = describe("GET", path, response);
+      throw new CallFailed(response.isRetryable() ? Outcome.retry(reason)
+          : Outcome.failed(reason));
+    }
+    return false;
   }
 
   private String sendDemoReady(PendingEvent event, Instant now)
@@ -224,15 +339,27 @@ class HubSpotEventSender {
       contact.put("etendo_inicio_prueba", date(trial.get().startedAt()));
       contact.put("etendo_fin_prueba", date(trial.get().endsAt()));
     }
-    String country = countryName(payload);
-    putIfPresent(contact, COUNTRY, country);
-    putIfPresent(contact, COUNTRY_CODE, countryCode(payload));
+    // ETP-6363: the country chosen at sign-up wins over the organization's, which the onboarding
+    // fixes to Spain; the organization's only fills an account that has none (an SSO sign-up, or
+    // one created before the register form asked it). The company takes the same one.
+    String country;
+    if (contact.has(COUNTRY)) {
+      country = contact.getString(COUNTRY);
+    } else {
+      country = countryName(payload);
+      putIfPresent(contact, COUNTRY, country);
+      putIfPresent(contact, COUNTRY_CODE, countryCode(payload));
+    }
+    String companyName = payload.optString(HubSpotOutbox.FIELD_COMPANY_NAME, "");
+    // ETP-6363: the company the onboarding asked, on the contact too: the sign-up form had none.
+    if (bookedDeal == null && StringUtils.isNotBlank(companyName)) {
+      contact.put(CONTACT_COMPANY, companyName.trim());
+    }
     String contactId = upsertContact(event, contact);
     if (bookedDeal != null) {
       return claimBookedDeal(event, bookedDeal);
     }
 
-    String companyName = payload.optString(HubSpotOutbox.FIELD_COMPANY_NAME, "");
     JSONObject existingDeal = searchDeal(event.accountId());
     if (existingDeal == null) {
       // An account confirmed before the deal moved to the confirmation (ETP-6082) has none yet.
@@ -665,6 +792,13 @@ class HubSpotEventSender {
     String sector = StringUtils.trimToNull(event.sector());
     if (sector != null && HubSpotOutbox.SECTORS.contains(sector)) {
       properties.put(SECTOR, sector);
+    }
+    // ETP-6363: asked at sign-up, so the contact has its country from the first event on.
+    String signupCountry = HubSpotOutbox.countryCode(event.countryCode());
+    String signupCountryName = countryNameOf(signupCountry);
+    if (signupCountryName != null) {
+      properties.put(COUNTRY, signupCountryName);
+      properties.put(COUNTRY_CODE, signupCountry);
     }
     return properties;
   }

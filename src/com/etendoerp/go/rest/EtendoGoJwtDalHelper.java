@@ -119,6 +119,10 @@ final class EtendoGoJwtDalHelper {
   /** ETP-6081 — ETGO_ACCOUNT.PHONE. */
   static final String PROPERTY_PHONE = "phone";
   static final String PROPERTY_SECTOR = "sector";
+  /** ETP-6363 — ETGO_ACCOUNT.COUNTRYCODE, the country chosen at sign-up. */
+  static final String PROPERTY_COUNTRY_CODE = "countryCode";
+  /** ETP-6363 — the sign-up's lead attribution, sent to HubSpot's sign-up form. */
+  static final String PROPERTY_HUBSPOT_CONTEXT = "hubSpotContext";
   // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.

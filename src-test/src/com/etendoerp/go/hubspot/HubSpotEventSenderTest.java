@@ -165,6 +165,45 @@ class HubSpotEventSenderTest {
   }
 
   @Test
+  void theCountryChosenAtSignUpReachesTheContactInSpanishWithItsCode() throws Exception {
+    sender.send(signedUpIn(HubSpotOutboxStore.ACCOUNT_CREATED, null, "AR"), NOW);
+
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertEquals("Argentina", contact.getString("country"));
+    assertEquals("AR", contact.getString("hs_country_region_code"));
+  }
+
+  @Test
+  void aSignUpCountryThatNamesNoCountryIsLeftOut() throws Exception {
+    sender.send(signedUpIn(HubSpotOutboxStore.ACCOUNT_CREATED, null, "ZZ"), NOW);
+
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertFalse(contact.has("country"));
+    assertFalse(contact.has("hs_country_region_code"));
+  }
+
+  @Test
+  void theSignUpCountryWinsOverTheOrganizationsForContactAndCompany() throws Exception {
+    // ETP-6363: the onboarding fixes the organization to Spain; marketing wants the visitor's.
+    sender.send(signedUpIn(HubSpotOutboxStore.DEMO_READY,
+        HubSpotOutbox.demoPayload("Empresa SL", "Spain", "ES"), "MX"), NOW);
+
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertEquals("México", contact.getString("country"));
+    assertEquals("MX", contact.getString("hs_country_region_code"));
+    assertEquals("México", call("POST", "/crm/v3/objects/companies").properties()
+        .getString("country"));
+  }
+
+  private static PendingEvent signedUpIn(String type, String payload, String countryCode) {
+    return new PendingEvent("row-5", ACCOUNT, type, CLIENT, payload, 0, null, "ana@empresa.es",
+        "Ana García López", null, null, null, countryCode);
+  }
+
+  @Test
   void aSectorHubSpotDoesNotKnowIsLeftOutRatherThanRefused() throws Exception {
     PendingEvent event = new PendingEvent("row-4", ACCOUNT, HubSpotOutboxStore.ACCOUNT_CREATED,
         CLIENT, null, 0, null, "ana@empresa.es", "Ana", null, null, "Industria");
@@ -213,6 +252,8 @@ class HubSpotEventSenderTest {
     assertEquals("2026-10-29", contact.getString("etendo_fin_prueba"));
     assertEquals("Spain", contact.getString("country"));
     assertFalse(contact.has("lifecyclestage"), "HubSpot derives it from the deal");
+    // ETP-6363: the sign-up form had no company; the onboarding's reaches the contact here.
+    assertEquals("Empresa SL", contact.getString("company"));
 
     JSONObject company = call("POST", "/crm/v3/objects/companies").properties();
     assertEquals("Empresa SL", company.getString("name"));
@@ -980,5 +1021,156 @@ class HubSpotEventSenderTest {
     assertEquals(DEMO_PIPELINE, created.getString("pipeline"));
     assertEquals(HubSpotConfiguration.DEFAULT_DEMO_CARD_STAGE, created.getString("dealstage"));
     assertFalse(created.has("etendo_camino_entrada_deal"));
+  }
+
+  // ETP-6363 — the sign-up through marketing's sign-up form (Forms API), with its attribution.
+
+  private static final HubSpotSignupForm FORM = new HubSpotSignupForm("https://forms.test",
+      "123", "form-1");
+  private static final String HUTK = "0123456789abcdef0123456789abcdef";
+  private static final String FORM_PATH = "/submissions/v3/integration/secure/submit/123/form-1";
+
+  private record FormCall(String baseUrl, String path, JSONObject body) {
+  }
+
+  private final List<FormCall> formCalls = new ArrayList<>();
+  private Response formAnswer = new Response(200, "{\"inlineMessage\":\"Thanks\"}");
+
+  private final HubSpotEventSender formSender = new HubSpotEventSender(new HubSpotClient() {
+    @Override
+    public Response send(String method, String path, JSONObject body) {
+      Call call = new Call(method, path, body);
+      calls.add(call);
+      return answers.apply(call);
+    }
+
+    @Override
+    public Response send(String baseUrl, String method, String path, JSONObject body) {
+      formCalls.add(new FormCall(baseUrl, path, body));
+      return formAnswer;
+    }
+  }, CONFIG, store, trials, FORM);
+
+  private static PendingEvent signUp(String type, String payload, int attempts) {
+    return new PendingEvent("row-6", ACCOUNT, type, CLIENT, payload, attempts, null,
+        "ana@empresa.es", "Ana García López", null, "+34 600123456", "servicios", "AR");
+  }
+
+  private static JSONObject fieldsByName(JSONObject body) throws Exception {
+    JSONObject byName = new JSONObject();
+    for (int i = 0; i < body.getJSONArray("fields").length(); i++) {
+      JSONObject field = body.getJSONArray("fields").getJSONObject(i);
+      assertEquals("0-1", field.getString("objectTypeId"));
+      byName.put(field.getString("name"), field.getString("value"));
+    }
+    return byName;
+  }
+
+  @Test
+  void aSignUpReachesTheFormWithWhatIsKnownAtSignUpAndItsAttribution() throws Exception {
+    Outcome outcome = formSender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM, new JSONObject()
+        .put("hutk", HUTK).put("pageUri", "https://app.etendo.ai/?utm_source=google")
+        .put("pageName", "Etendo").toString(), 0), NOW);
+
+    assertEquals(Outcome.Kind.SENT, outcome.kind());
+    assertTrue(calls.isEmpty(), "the form creates the contact, not the CRM API");
+    FormCall submitted = formCalls.get(0);
+    assertEquals("https://forms.test", submitted.baseUrl());
+    assertEquals(FORM_PATH, submitted.path());
+    JSONObject fields = fieldsByName(submitted.body());
+    assertEquals("ana@empresa.es", fields.getString("email"));
+    assertEquals("Ana", fields.getString("firstname"));
+    assertEquals("García López", fields.getString("lastname"));
+    assertEquals("Argentina", fields.getString("country"));
+    assertEquals("self_serve", fields.getString("etendo_camino_entrada"));
+    // Not fields of the form: the account's event writes them right after.
+    assertFalse(fields.has("phone"));
+    assertFalse(fields.has("sector"));
+    assertFalse(fields.has("hs_country_region_code"));
+    JSONObject context = submitted.body().getJSONObject("context");
+    assertEquals(HUTK, context.getString("hutk"));
+    assertEquals("https://app.etendo.ai/?utm_source=google", context.getString("pageUri"));
+    assertEquals("Etendo", context.getString("pageName"));
+  }
+
+  @Test
+  void aVisitorWhoRefusedTheCookiesSignsUpWithoutAttribution() throws Exception {
+    formSender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM,
+        "{\"pageUri\":\"https://app.etendo.ai/\"}", 0), NOW);
+    formSender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM, null, 0), NOW);
+
+    assertFalse(formCalls.get(0).body().getJSONObject("context").has("hutk"));
+    assertFalse(formCalls.get(1).body().has("context"));
+  }
+
+  @Test
+  void withoutAFormTheSignUpFormEventIsSkipped() {
+    Outcome outcome = sender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM, null, 0), NOW);
+
+    assertEquals(Outcome.Kind.SKIPPED, outcome.kind());
+    assertTrue(calls.isEmpty());
+  }
+
+  @Test
+  void aRefusedFormIsFinalButAnOutageIsRetried() {
+    formAnswer = new Response(400, "{\"errors\":[{\"errorType\":\"FIELD_NOT_IN_FORM\"}]}");
+    assertEquals(Outcome.Kind.FAILED,
+        formSender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM, null, 0), NOW).kind());
+
+    formAnswer = new Response(503, "");
+    assertEquals(Outcome.Kind.RETRY,
+        formSender.send(signUp(HubSpotOutboxStore.SIGNUP_FORM, null, 0), NOW).kind());
+  }
+
+  @Test
+  void theAccountWaitsForTheContactTheFormCreates() {
+    when(store.findStatus(ACCOUNT, HubSpotOutboxStore.SIGNUP_FORM))
+        .thenReturn(HubSpotOutboxStore.STATUS_SENT);
+    answers = call -> call.method().equals("GET") ? new Response(404, "") : ok(call);
+
+    Outcome outcome = formSender.send(signUp(HubSpotOutboxStore.ACCOUNT_CREATED, null, 0), NOW);
+
+    assertEquals(Outcome.Kind.RETRY, outcome.kind());
+    assertTrue(calls.stream().noneMatch(c -> c.path().endsWith("/batch/upsert")),
+        "a contact upserted now would have no source");
+  }
+
+  @Test
+  void theAccountCompletesTheFormsContactOnceHubSpotHasIt() throws Exception {
+    when(store.findStatus(ACCOUNT, HubSpotOutboxStore.SIGNUP_FORM))
+        .thenReturn(HubSpotOutboxStore.STATUS_SENT);
+
+    Outcome outcome = formSender.send(signUp(HubSpotOutboxStore.ACCOUNT_CREATED, null, 0), NOW);
+
+    assertEquals(Outcome.Kind.SENT, outcome.kind());
+    assertEquals("/crm/v3/objects/contacts/ana%40empresa.es?idProperty=email",
+        calls.get(0).path());
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertEquals("servicios", contact.getString("sector"));
+    assertEquals("AR", contact.getString("hs_country_region_code"));
+  }
+
+  @Test
+  void theAccountStopsWaitingForAContactHubSpotNeverCreates() {
+    when(store.findStatus(ACCOUNT, HubSpotOutboxStore.SIGNUP_FORM))
+        .thenReturn(HubSpotOutboxStore.STATUS_SENT);
+
+    Outcome outcome = formSender.send(signUp(HubSpotOutboxStore.ACCOUNT_CREATED, null,
+        HubSpotEventSender.FORM_CONTACT_WAIT_ATTEMPTS), NOW);
+
+    assertEquals(Outcome.Kind.SENT, outcome.kind());
+    assertTrue(calls.stream().noneMatch(c -> c.method().equals("GET")));
+  }
+
+  @Test
+  void anAccountWhoseFormWasRefusedCreatesTheContactAtOnce() {
+    when(store.findStatus(ACCOUNT, HubSpotOutboxStore.SIGNUP_FORM))
+        .thenReturn(HubSpotOutboxStore.STATUS_FAILED);
+
+    formSender.send(signUp(HubSpotOutboxStore.ACCOUNT_CREATED, null, 0), NOW);
+
+    assertTrue(calls.stream().noneMatch(c -> c.method().equals("GET")));
+    call("POST", "/batch/upsert");
   }
 }

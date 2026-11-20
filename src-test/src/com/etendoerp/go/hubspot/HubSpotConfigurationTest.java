@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
  * Where the HubSpot sync writes, read from the server's configuration.
  *
  * @covers com.etendoerp.go.hubspot.HubSpotConfiguration
+ * @covers com.etendoerp.go.hubspot.HubSpotSignupForm
  */
 class HubSpotConfigurationTest {
 
@@ -120,5 +121,31 @@ class HubSpotConfigurationTest {
 
     assertFalse(configuration.toString().contains("pat-secret"));
     assertTrue(configuration.toString().contains("enabled=true"));
+  }
+
+  // ETP-6363 — the sign-up form of marketing's lead attribution.
+
+  @Test
+  void theSignUpFormDefaultsToMarketingsInTheProductionPortal() {
+    HubSpotSignupForm form = HubSpotSignupForm.from((property, env) -> null);
+
+    assertTrue(form.isEnabled());
+    assertEquals("https://api.hsforms.com", form.baseUrl());
+    assertEquals("/submissions/v3/integration/secure/submit/52086088/"
+        + "7b98a4a2-a93d-412a-87d0-0d7c2bdc4925", form.submitPath());
+  }
+
+  @Test
+  void theSignUpFormCanPointElsewhereOrBeTurnedOff() {
+    HubSpotSignupForm other = HubSpotSignupForm.from((property, env) -> Map.of(
+        "etendo.go.hubspot.signup.form", "form-1",
+        "etendo.go.hubspot.signup.portal", "123",
+        "etendo.go.hubspot.signup.forms.base.url", "https://forms.test/").get(property));
+    assertEquals("https://forms.test", other.baseUrl());
+    assertEquals("/submissions/v3/integration/secure/submit/123/form-1", other.submitPath());
+
+    assertFalse(HubSpotSignupForm.from((property, env) -> "etendo.go.hubspot.signup.form"
+        .equals(property) ? "none" : null).isEnabled());
+    assertFalse(HubSpotSignupForm.DISABLED.isEnabled());
   }
 }

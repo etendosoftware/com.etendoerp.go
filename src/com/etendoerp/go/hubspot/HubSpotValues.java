@@ -94,14 +94,18 @@ final class HubSpotValues {
    * recorded falls back to the stored name.
    */
   static String countryName(JSONObject demoPayload) {
-    String code = countryCode(demoPayload);
-    if (code != null) {
-      String name = new Locale("", code).getDisplayCountry(COUNTRY_LANGUAGE);
-      if (StringUtils.isNotBlank(name) && !name.equalsIgnoreCase(code)) {
-        return name;
-      }
+    String name = countryNameOf(countryCode(demoPayload));
+    return name != null ? name
+        : StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY, ""));
+  }
+
+  /** The Spanish name of an ISO two-letter country code, or null when it names no country. */
+  static String countryNameOf(String code) {
+    if (code == null) {
+      return null;
     }
-    return StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY, ""));
+    String name = new Locale("", code).getDisplayCountry(COUNTRY_LANGUAGE);
+    return StringUtils.isNotBlank(name) && !name.equalsIgnoreCase(code) ? name : null;
   }
 
   /** The ISO 3166 two-letter code of the country the owner entered, upper case, or null. */
