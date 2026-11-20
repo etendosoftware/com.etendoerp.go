@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
  */
 public final class SelectorOrgFilter {
 
+  private static final String ORGANIZATION_PROPERTY = "organization";
+
   private SelectorOrgFilter() {
   }
 
@@ -55,6 +57,52 @@ public final class SelectorOrgFilter {
   }
 
   /**
+   * ETP-5086: ORDER BY expression ranking rows by closeness to {@code organizationId}: the
+   * organization itself, then its nearest ancestor and up, then rows of other orgs of the natural
+   * tree, then organization {@code *}. Callers append the display name and id as tiebreakers.
+   *
+   * @return the CASE expression with its params, or {@code null} when there is no org preference
+   */
+  static SelectorQueryBuilder.HqlWithParams buildOrgProximityOrder(String entityName, String alias,
+      String organizationId) {
+    if (StringUtils.isBlank(organizationId) || "0".equals(organizationId.trim())) {
+      return null;
+    }
+    Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
+    OBContext ctx = OBContext.getOBContext();
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY) || ctx == null) {
+      return null;
+    }
+    List<String> chain = ctx.getOrganizationStructureProvider()
+        .getParentList(organizationId.trim(), true);
+    return buildOrgProximityOrder(alias, chain);
+  }
+
+  /** Same as above from an explicit nearest-first org chain (the org, its parent, ...). */
+  static SelectorQueryBuilder.HqlWithParams buildOrgProximityOrder(String alias, List<String> chain) {
+    List<String> orgs = new ArrayList<>();
+    for (String orgId : chain) {
+      if (StringUtils.isNotBlank(orgId) && !"0".equals(orgId) && !orgs.contains(orgId)) {
+        orgs.add(orgId);
+      }
+    }
+    if (orgs.isEmpty()) {
+      return null;
+    }
+    Map<String, Object> params = new HashMap<>();
+    StringBuilder expr = new StringBuilder("CASE");
+    for (int i = 0; i < orgs.size(); i++) {
+      String name = "selectorPrefOrg" + i;
+      expr.append(" WHEN ").append(alias).append(".organization.id = :").append(name)
+          .append(" THEN ").append(i);
+      params.put(name, orgs.get(i));
+    }
+    expr.append(" WHEN ").append(alias).append(".organization.id = '0' THEN ").append(orgs.size() + 1)
+        .append(" ELSE ").append(orgs.size()).append(" END");
+    return new SelectorQueryBuilder.HqlWithParams(expr.toString(), params);
+  }
+
+  /**
    * Build a readable-organizations filter for org-aware entities.
    * Optionally includes organization "0" (the "*" org).
    *
@@ -63,7 +111,7 @@ public final class SelectorOrgFilter {
   static SelectorQueryBuilder.HqlWithParams buildReadableOrgsPredicate(String entityName, String alias,
       boolean includeOrgZero) {
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
-    if (entityDef == null || !entityDef.hasProperty("organization")) {
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY)) {
       return null;
     }
     OBContext ctx = OBContext.getOBContext();
@@ -100,7 +148,7 @@ public final class SelectorOrgFilter {
       return null;
     }
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
-    if (entityDef == null || !entityDef.hasProperty("organization")) {
+    if (entityDef == null || !entityDef.hasProperty(ORGANIZATION_PROPERTY)) {
       return null;
     }
     OBContext ctx = OBContext.getOBContext();
