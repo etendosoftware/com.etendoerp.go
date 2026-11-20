@@ -28,6 +28,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -82,6 +83,8 @@ public class TransactionalEmailService {
   private final EmailSafetyStore safetyStore;
   private final EmailSendLogStore sendLogStore;
   private final EmailObservabilitySink observabilitySink;
+  private final LongSupplier clock;
+  private final long duplicateWindowMillis;
 
   /**
    * Creates the default executor with runtime provider configuration.
@@ -145,6 +148,27 @@ public class TransactionalEmailService {
   TransactionalEmailService(EmailContractRegistry contractRegistry,
       EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore,
       EmailSendLogStore sendLogStore, EmailObservabilitySink observabilitySink) {
+    this(contractRegistry, providerAdapter, safetyStore, sendLogStore, observabilitySink,
+        System::currentTimeMillis, EmailDuplicateWindow.resolveSeconds());
+  }
+
+  /**
+   * Creates an executor with an explicit clock and duplicate window, so tests are deterministic.
+   *
+   * @param contractRegistry registry that resolves server-side email contracts
+   * @param providerAdapter backend-only provider adapter
+   * @param safetyStore anti-abuse, idempotency, kill-switch, and audit store
+   * @param sendLogStore readable per-document send history store
+   * @param observabilitySink redacted event sink for metrics/logging
+   * @param clock epoch-millis time source used to age prior sends
+   * @param duplicateWindowSeconds seconds during which an identical prior send is a duplicate
+   */
+  TransactionalEmailService(EmailContractRegistry contractRegistry,
+      EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore,
+      EmailSendLogStore sendLogStore, EmailObservabilitySink observabilitySink,
+      LongSupplier clock, long duplicateWindowSeconds) {
+    this.clock = Objects.requireNonNull(clock, "Email clock cannot be null");
+    this.duplicateWindowMillis = duplicateWindowSeconds * 1000L;
     this.contractRegistry = Objects.requireNonNull(contractRegistry,
         "Email contract registry cannot be null");
     this.providerAdapter = Objects.requireNonNull(providerAdapter,
@@ -432,7 +456,7 @@ public class TransactionalEmailService {
 
     Optional<EmailAuditRecord> duplicate = safetyStore.findSentByIdempotencyKey(context,
         idempotencyKey);
-    if (duplicate.isPresent()) {
+    if (duplicate.isPresent() && isWithinDuplicateWindow(duplicate.get())) {
       EmailAuditRecord prior = duplicate.get();
       recordAudit(context, idempotencyKey, HttpServletResponse.SC_OK, STATUS_DUPLICATE,
           MESSAGE_DUPLICATE, prior.getProviderStatus(), true);
@@ -453,6 +477,14 @@ public class TransactionalEmailService {
               ObservationFields.throttle(throttle.getScope())));
     }
     return null;
+  }
+
+  /**
+   * Only a recent SENT audit suppresses a repeat (double click, network retry). After the window an
+   * operator may intentionally resend the same document to the same recipients (ETP-5484).
+   */
+  private boolean isWithinDuplicateWindow(EmailAuditRecord prior) {
+    return clock.getAsLong() - prior.getCreatedAtMillis() < duplicateWindowMillis;
   }
 
   private NeoResponse submitProviderRequest(long startedAtNanos, EmailSendContext context,

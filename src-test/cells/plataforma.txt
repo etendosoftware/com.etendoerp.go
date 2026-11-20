@@ -4,7 +4,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (652)
+# --- con mocks (657)
 com.etendoerp.go.accounts.AccountDemoExpiryHandlerTest
 com.etendoerp.go.accounts.AccountGroupKeyHandlerTest
 com.etendoerp.go.agentchat.AgentChatConversationsServletTest
@@ -77,6 +77,7 @@ com.etendoerp.go.mcp.McpListReadPredicatesCallSiteTest
 com.etendoerp.go.mcp.McpListSectionTest
 com.etendoerp.go.mcp.McpListFilterValueTest
 com.etendoerp.go.mcp.McpListTabWhereCallSiteTest
+com.etendoerp.go.mcp.McpWidgetRestrictedTest
 com.etendoerp.go.mcp.McpNamedFiltersTest
 com.etendoerp.go.mcp.McpOcrToolsTest
 com.etendoerp.go.mcp.McpParentScopeUnresolvableTest
@@ -342,6 +343,7 @@ com.etendoerp.go.schemaforge.NeoActionRecordGuardTest
 com.etendoerp.go.schemaforge.NeoActionSurfaceTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationMatrixTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizerTest
+com.etendoerp.go.schemaforge.NeoAttachmentParentAuthorizationTest
 com.etendoerp.go.schemaforge.NeoAttachmentPolicyTest
 com.etendoerp.go.schemaforge.NeoAttachmentStoreTest
 com.etendoerp.go.schemaforge.NeoAttachmentTargetTest
@@ -384,6 +386,7 @@ com.etendoerp.go.schemaforge.NeoDisplayLogicHandlerTest
 com.etendoerp.go.schemaforge.NeoDocTemplateConfigEndpointTest
 com.etendoerp.go.schemaforge.NeoDocumentDownloadServiceTest
 com.etendoerp.go.schemaforge.NeoDocumentPdfTest
+com.etendoerp.go.schemaforge.NeoDownloadHeadersTest
 com.etendoerp.go.schemaforge.NeoErrorClassifierTest
 com.etendoerp.go.schemaforge.NeoExtensionMigrationTest
 com.etendoerp.go.schemaforge.NeoExtensionParityTest
@@ -582,6 +585,9 @@ com.etendoerp.go.schemaforge.webhooks.SFUpsertFieldTest
 com.etendoerp.go.schemaforge.webhooks.SFUpsertSpecTest
 com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignmentsTest
 com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMapTest
+com.etendoerp.go.security.CspPolicyTest
+com.etendoerp.go.security.CspReportCollectorTest
+com.etendoerp.go.security.CspReportSanitizerTest
 com.etendoerp.go.session.CopilotSessionBridgeFilterTest
 com.etendoerp.go.session.DalRoleDirectoryTest
 com.etendoerp.go.session.GoLegacyBearerTest
@@ -658,7 +664,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (51)
+# --- integración (BD) (52)
 com.etendoerp.go.accounts.AccountGroupServiceIntegrationTest
 com.etendoerp.go.accounts.DemoExpiryIntegrationTest
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
@@ -695,6 +701,7 @@ com.etendoerp.go.roles.UserRoleCompositionServiceRealAccessControlIntegrationTes
 com.etendoerp.go.schemaforge.DocActionIdempotencyIntegrationTest
 com.etendoerp.go.schemaforge.DocTemplateConfigStoreIntegrationTest
 com.etendoerp.go.schemaforge.NativeWriteIsolationIntegrationTest
+com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationIntegrationTest
 com.etendoerp.go.schemaforge.NeoPropertyPathsQueryIntegrationTest
 com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest

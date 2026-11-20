@@ -8327,8 +8327,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
-   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
-   * is never placed in the body.
+   * {@code nosniff} headers, and returns { status, account, csrfToken, capabilities }. The session
+   * token itself is never placed in the body.
+   *
+   * <p>ETP-5806 follow-up: {@code capabilities} must be populated here too, not only on session
+   * restore ({@link #handleSessionRestore}). This method is the shared tail of all three
+   * session-creation paths — register, login and SSO — so without it the onboarding/login frontend
+   * never learns the real flag value for a brand-new session and falls back to its "capability
+   * unknown" default on every one of them, not just register.
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
@@ -8342,6 +8348,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put(FIELD_STATUS, STATUS_SUCCESS);
     result.put(FIELD_ACCOUNT, accountJson);
     result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+    result.put(FIELD_CAPABILITIES, buildSessionCapabilities(account.getEmail()));
     writeResponse(response, status, result);
   }
 

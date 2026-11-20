@@ -53,6 +53,13 @@ public final class MixpanelNeoTelemetryConfig {
   static final String DEFAULT_ENVIRONMENT = "unknown";
   static final String DEFAULT_API_HOST = "https://api-eu.mixpanel.com";
   static final String DEFAULT_DISTINCT_ID = "neo-backend";
+  /**
+   * ETP-5466 — backend submission is off unless the deployment sets
+   * {@code etendo.go.mixpanel.enabled} / {@link #ENV_ENABLED} to {@code true}: a token alone (a
+   * developer's {@code Openbravo.properties} / {@code gradle.properties}) must not send local
+   * traffic to the production Mixpanel project.
+   */
+  static final boolean DEFAULT_ENABLED = false;
   static final int DEFAULT_TIMEOUT_MS = 5000;
 
   private final boolean enabled;
@@ -104,7 +111,8 @@ public final class MixpanelNeoTelemetryConfig {
    * @return runtime backend Mixpanel configuration
    */
   public static MixpanelNeoTelemetryConfig fromRuntime() {
-    boolean enabled = isTruthy(ConfigPropertyReader.readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
+    boolean enabled = isTruthy(ConfigPropertyReader.readConfigValue(PROP_ENABLED, ENV_ENABLED,
+        String.valueOf(DEFAULT_ENABLED)));
     String token = ConfigPropertyReader.readConfigValue(PROP_TOKEN, ENV_TOKEN, null);
     String apiHost = ConfigPropertyReader.readConfigValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
     String distinctId = ConfigPropertyReader.readConfigValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID, DEFAULT_DISTINCT_ID);

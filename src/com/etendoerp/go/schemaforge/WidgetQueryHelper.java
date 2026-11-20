@@ -145,14 +145,21 @@ final class WidgetQueryHelper {
    * EMPTY payload rather than a 403, following the SFListMenu/SFWindowAccessMap family's "deny
    * silently" convention. A restricted role gets a smaller dashboard, never an error toast.
    *
+   * <p>ETP-5850: the payload also says {@code restricted: true}. The dashboard never requests a
+   * hidden widget, so it ignores the flag; the MCP's {@code etendo_widget} needs it, because an
+   * empty list reads as "no data in the period": an agent with the Inventory role answered the
+   * quarter's result from revenue widgets that had only been denied to it.</p>
+   *
    * <p>Swallows the {@link JSONException} that building an empty array cannot realistically throw,
    * so callers can gate with a single {@code return} and no extra try/catch.</p>
    *
-   * @return an OK response carrying zero rows
+   * @return an OK response carrying zero rows and {@code restricted: true}
    */
   static NeoResponse buildEmptyDataResponse() {
     try {
-      return buildDataResponse(new JSONArray());
+      NeoResponse response = buildDataResponse(new JSONArray());
+      response.getBody().getJSONObject("response").put(WidgetAccessPolicy.KEY_RESTRICTED, true);
+      return response;
     } catch (JSONException e) {
       return NeoResponse.error(500, "Failed to build empty widget response: " + e.getMessage());
     }

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "adr": "docs/adr/0002-edge-security-headers.md",
+  "header": "Content-Security-Policy-Report-Only",
+  "reportPath": "/sws/go/csp-report",
+  "reportingGroup": "csp-endpoint",
+  "directives": [
+    "default-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "img-src 'self' blob: data:",
+    "frame-src 'self' blob:",
+    "connect-src 'self' https://dataplane.rum.eu-west-3.amazonaws.com"
+  ],
+  "deploymentConnectSources": "validated https origins appended to connect-src at render time (e.g. host of VITE_SENTRY_DSN); never hardcoded",
+  "omitted": ["upgrade-insecure-requests (ignored in Report-Only; added at enforcement, ETP-4574)"],
+  "permissionsPolicy": "camera=(), geolocation=(), microphone=()"
+}
