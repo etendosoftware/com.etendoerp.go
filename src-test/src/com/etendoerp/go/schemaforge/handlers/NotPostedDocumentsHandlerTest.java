@@ -30,6 +30,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -38,6 +39,10 @@ import java.util.Set;
 
 import javax.inject.Named;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
@@ -406,7 +411,7 @@ public class NotPostedDocumentsHandlerTest {
     }
   }
 
-  
+
   @Test
   public void handleReturns400WhenActionBodyIsNull() throws Exception {
     try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
@@ -487,7 +492,157 @@ public class NotPostedDocumentsHandlerTest {
     }
   }
 
-// ── buildRow — APRM filtering + tableId enrichment ────────────────────────────
+  // ── error log context (ETP-6394) ──────────────────────────────────────────────
+
+  /** Collects the error events the handler logger emits while a test runs. */
+  private static class CapturingAppender extends AbstractAppender {
+    final List<LogEvent> events = new ArrayList<>();
+
+    CapturingAppender() {
+      super("NotPostedDocumentsHandlerTestAppender", null, null, true, null);
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      events.add(event.toImmutable());
+    }
+  }
+
+  private CapturingAppender attachAppender() {
+    CapturingAppender appender = new CapturingAppender();
+    appender.start();
+    ((Logger) LogManager.getLogger(NotPostedDocumentsHandler.class)).addAppender(appender);
+    return appender;
+  }
+
+  private void detachAppender(CapturingAppender appender) {
+    ((Logger) LogManager.getLogger(NotPostedDocumentsHandler.class)).removeAppender(appender);
+    appender.stop();
+  }
+
+  private static void assertSingleErrorWithThrowable(CapturingAppender appender, String... expected) {
+    assertEquals(1, appender.events.size());
+    LogEvent event = appender.events.get(0);
+    String message = event.getMessage().getFormattedMessage();
+    assertTrue(message, message.startsWith("NotPostedDocumentsHandler error"));
+    for (String part : expected) {
+      assertTrue(message + " should contain " + part, message.contains(part));
+    }
+    assertNotNull(event.getThrown());
+  }
+
+  @Test
+  public void postFailureLogsOperationTableAndRecord() throws Exception {
+    CapturingAppender appender = attachAppender();
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+      when(service.post("318", "REC-1")).thenThrow(new RuntimeException("boom"));
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("post");
+      when(ctx.getRequestBody()).thenReturn(new JSONObject().put("tableId", "318").put("recordId", "REC-1"));
+
+      assertEquals(500, handler.handle(ctx).getHttpStatus());
+      assertSingleErrorWithThrowable(appender, "ACTION post", "table=318", "record=REC-1");
+    } finally {
+      detachAppender(appender);
+    }
+  }
+
+  @Test
+  public void bulkPostRowFailureLogsTableAndRecord() throws Exception {
+    CapturingAppender appender = attachAppender();
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+      when(service.post("318", "REC-BAD")).thenThrow(new RuntimeException("boom"));
+
+      JSONObject body = new JSONObject().put("rows",
+          new JSONArray().put(new JSONObject().put("tableId", "318").put("recordId", "REC-BAD")));
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      assertEquals(200, handler.handle(ctx).getHttpStatus());
+      assertEquals(1, appender.events.size());
+      String message = appender.events.get(0).getMessage().getFormattedMessage();
+      assertTrue(message, message.contains("318") && message.contains("REC-BAD"));
+      assertNotNull(appender.events.get(0).getThrown());
+    } finally {
+      detachAppender(appender);
+    }
+  }
+
+  @Test
+  public void unexpectedBulkPostFailureLogsOperationAndRowCount() throws Exception {
+    CapturingAppender appender = attachAppender();
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      handler.setPostingService(mock(DocumentPostingService.class));
+
+      JSONObject body = new JSONObject().put("rows", new JSONArray().put(new JSONObject()).put(new JSONObject()));
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      // First read (describeOperation) succeeds, the dispatch read then fails.
+      when(ctx.getFieldName()).thenReturn("bulk-post").thenThrow(new RuntimeException("boom"));
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      assertEquals(500, handler.handle(ctx).getHttpStatus());
+      assertSingleErrorWithThrowable(appender, "ACTION bulk-post", "rows=2");
+    } finally {
+      detachAppender(appender);
+    }
+  }
+
+  @Test
+  public void gridFailureLogsOnceWithFiltersAndReturns500() throws Exception {
+    CapturingAppender appender = attachAppender();
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+         MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenThrow(new RuntimeException("datasource down"));
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+
+      Map<String, String> params = new HashMap<>();
+      params.put("document", "SalesInvoice");
+      params.put("dateFrom", "2026-01-01");
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+      when(ctx.getQueryParams()).thenReturn(params);
+
+      assertEquals(500, handler.handle(ctx).getHttpStatus());
+      assertSingleErrorWithThrowable(appender, "CRUD grid", "document=SalesInvoice", "dateFrom=2026-01-01");
+    } finally {
+      detachAppender(appender);
+    }
+  }
+
+  @Test
+  public void filterOptionsFailureLogsOperation() throws Exception {
+    CapturingAppender appender = attachAppender();
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+         MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenThrow(new RuntimeException("boom"));
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_mode", "filter-options");
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+      when(ctx.getQueryParams()).thenReturn(params);
+
+      assertEquals(500, handler.handle(ctx).getHttpStatus());
+      assertSingleErrorWithThrowable(appender, "CRUD filter-options");
+    } finally {
+      detachAppender(appender);
+    }
+  }
+
+  // ── buildRow — APRM filtering + tableId enrichment ────────────────────────────
 
   @Test
   public void buildRowEnrichesKnownDocumentTypeWithTableId() throws Exception {

@@ -170,6 +170,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
   private static final String KEY_RECORD_ID = "recordId";
   private static final String KEY_SUCCESS = "success";
+  private static final String KEY_MESSAGE = "message";
   private static final String KEY_VALUE = "value";
   private static final String KEY_LABEL = "label";
   private static final String KEY_DOCUMENT_ID = "documentId";
@@ -338,17 +339,38 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     }
   }
 
-  /** Short description of the request (endpoint type and operation) for error logs. */
+  /**
+   * Context for error logs: endpoint type, operation and the technical identifiers or filters that
+   * locate the affected document. Never includes the request body itself.
+   */
   private static String describeOperation(NeoContext context) {
-    if (context.getEndpointType() == NeoEndpointType.ACTION) {
-      return "ACTION " + context.getFieldName();
+    NeoEndpointType type = context.getEndpointType();
+    if (type == NeoEndpointType.ACTION) {
+      String action = context.getFieldName();
+      JSONObject body = context.getRequestBody();
+      if ("post".equals(action) && body != null) {
+        return "ACTION post table=" + body.optString(KEY_TABLE_ID, null) + " record="
+            + body.optString(KEY_RECORD_ID, null);
+      }
+      if ("bulk-post".equals(action) && body != null) {
+        JSONArray rows = body.optJSONArray("rows");
+        return "ACTION bulk-post rows=" + (rows == null ? 0 : rows.length());
+      }
+      return "ACTION " + action;
     }
-    if (context.getEndpointType() == NeoEndpointType.CRUD) {
+    if (type == NeoEndpointType.CRUD) {
       Map<String, String> params = context.getQueryParams();
-      boolean filterOptions = params != null && "filter-options".equals(params.get("_mode"));
-      return "CRUD " + (filterOptions ? "filter-options" : "grid");
+      if (params == null) {
+        return "CRUD grid";
+      }
+      if ("filter-options".equals(params.get("_mode"))) {
+        return "CRUD filter-options document=" + params.get("document");
+      }
+      return "CRUD grid document=" + params.get("document") + " accountingStatus="
+          + params.get(KEY_ACCOUNTING_STATUS) + " dateFrom=" + params.get("dateFrom") + " dateTo="
+          + params.get("dateTo");
     }
-    return String.valueOf(context.getEndpointType());
+    return String.valueOf(type);
   }
 
   // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -433,15 +455,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   private NeoResponse buildDocumentGrid(Map<String, String> params) throws Exception {
     Map<String, String> dsParams = buildDsParams(params);
-    List<Map<String, Object>> rows;
-    try {
-      rows = new AccessibleDS().fetchAll(dsParams);
-    } catch (Exception e) {
-      log.error("NotPostedDocumentsHandler error fetching grid (document={}, statuses={}, dateFrom={}, dateTo={})",
-          dsParams.get("document"), dsParams.get("accounting_status"), dsParams.get("DateFrom"),
-          dsParams.get("DateTo"), e);
-      throw e;
-    }
+    List<Map<String, Object>> rows = new AccessibleDS().fetchAll(dsParams);
 
     List<JSONObject> built = new ArrayList<>();
     for (Map<String, Object> row : rows) {
@@ -641,32 +655,34 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     String action = context.getFieldName();
     JSONObject requestBody = context.getRequestBody();
 
+    if (!"post".equals(action) && !"bulk-post".equals(action)) {
+      return null;
+    }
     if (requestBody == null) {
       return NeoResponse.error(400, "Request body is required");
     }
-    if ("post".equals(action)) {
-      return handleSinglePost(requestBody);
-    }
-    if ("bulk-post".equals(action)) {
-      return handleBulkPost(requestBody);
-    }
-    return null;
+    return "post".equals(action) ? handleSinglePost(requestBody) : handleBulkPost(requestBody);
   }
 
   private static boolean isBlank(String value) {
-    return value == null || value.isEmpty();
+    return value == null || value.trim().isEmpty();
+  }
+
+  /** Reads a string field, treating a missing or JSON-null value as absent. */
+  private static String optId(JSONObject obj, String key) {
+    return obj == null || obj.isNull(key) ? null : obj.optString(key, null);
   }
 
   private NeoResponse handleSinglePost(JSONObject body) throws Exception {
-    String tableId = body.optString(KEY_TABLE_ID, null);
-    String recordId = body.optString(KEY_RECORD_ID, null);
+    String tableId = optId(body, KEY_TABLE_ID);
+    String recordId = optId(body, KEY_RECORD_ID);
     if (isBlank(tableId) || isBlank(recordId)) {
       return NeoResponse.error(400, "post requires tableId and recordId");
     }
     DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
     JSONObject resp = new JSONObject();
     resp.put(KEY_SUCCESS, result.ok());
-    resp.put("message", result.message());
+    resp.put(KEY_MESSAGE, result.message());
     // ETP-5175: same identity DocumentPostingService#handleAction sends, so this entry point
     // renders the Invalid-Account detail in the SPA's locale too.
     DocumentPostingService.putMessageIdentity(resp, result);
@@ -687,34 +703,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     int total = rows.length();
 
     for (int i = 0; i < total; i++) {
-      JSONObject row = rows.optJSONObject(i);
-      String tableId = row == null ? null : row.optString(KEY_TABLE_ID, null);
-      String recordId = row == null ? null : row.optString(KEY_RECORD_ID, null);
-      JSONObject rowResult = new JSONObject();
-      if (!isBlank(tableId)) {
-        rowResult.put(KEY_TABLE_ID, tableId);
-      }
-      if (!isBlank(recordId)) {
-        rowResult.put(KEY_RECORD_ID, recordId);
-      }
-      if (isBlank(tableId) || isBlank(recordId)) {
-        rowResult.put(KEY_SUCCESS, false);
-        rowResult.put("message", "Row requires tableId and recordId");
-        results.put(rowResult);
-        continue;
-      }
-      try {
-        DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
-        if (result.ok()) {
-          ok++;
-        }
-        rowResult.put(KEY_SUCCESS, result.ok());
-        rowResult.put("message", result.message());
-        DocumentPostingService.putMessageIdentity(rowResult, result);
-      } catch (Exception e) {
-        log.error("Bulk post failed for table {} record {}", tableId, recordId, e);
-        rowResult.put(KEY_SUCCESS, false);
-        rowResult.put("message", e.getMessage());
+      JSONObject rowResult = postRow(rows.optJSONObject(i));
+      if (rowResult.optBoolean(KEY_SUCCESS)) {
+        ok++;
       }
       results.put(rowResult);
     }
@@ -725,6 +716,35 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     resp.put("results", results);
     resp.put(KEY_SUCCESS, ok == total);
     return NeoResponse.ok(resp);
+  }
+
+  /** Posts one bulk row; an invalid row or a posting failure yields a failed result, never throws. */
+  private JSONObject postRow(JSONObject row) throws Exception {
+    String tableId = optId(row, KEY_TABLE_ID);
+    String recordId = optId(row, KEY_RECORD_ID);
+    JSONObject rowResult = new JSONObject();
+    if (!isBlank(tableId)) {
+      rowResult.put(KEY_TABLE_ID, tableId);
+    }
+    if (!isBlank(recordId)) {
+      rowResult.put(KEY_RECORD_ID, recordId);
+    }
+    if (isBlank(tableId) || isBlank(recordId)) {
+      rowResult.put(KEY_SUCCESS, false);
+      rowResult.put(KEY_MESSAGE, "Row requires tableId and recordId");
+      return rowResult;
+    }
+    try {
+      DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
+      rowResult.put(KEY_SUCCESS, result.ok());
+      rowResult.put(KEY_MESSAGE, result.message());
+      DocumentPostingService.putMessageIdentity(rowResult, result);
+    } catch (Exception e) {
+      log.error("Bulk post failed for table {} record {}", tableId, recordId, e);
+      rowResult.put(KEY_SUCCESS, false);
+      rowResult.put(KEY_MESSAGE, e.getMessage());
+    }
+    return rowResult;
   }
 
   // ── AD_Ref_List helpers ───────────────────────────────────────────────────────
