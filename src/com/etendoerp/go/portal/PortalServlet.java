@@ -348,6 +348,7 @@ public class PortalServlet extends HttpBaseServlet {
         body.put("entryKind", link.getDocumentKind().name());
       }
       PortalUsageEvents.opened(link);
+      PortalKpiTelemetry.portalOpened(link);
     }
     sendJson(response, HttpServletResponse.SC_OK, body);
   }

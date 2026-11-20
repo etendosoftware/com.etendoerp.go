@@ -378,17 +378,26 @@ Metric queries, the per-send vs per-document reading and the link-scanner caveat
 These usage events stay as they are.
 
 **PO KPIs (etendo-ai#22, 2026-11-16) — Mixpanel.** The PO's two success metrics are computed from
-three backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; contract
-and Mixpanel recipes in `backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
+backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; marketing's
+portal KPIs (portal reach, emails by piece) from two more. Contract and Mixpanel recipes in
+`backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
 
 | Event | Hook | "First" / dedup |
 |---|---|---|
 | `backend_portal_document_sent` (`type`) | `PortalLinkService#confirm`, after the link's commit, `SEND` origin only | no other sent `SEND` link of the same record (renewals, decision links and re-sends never emit) |
 | `backend_portal_document_downloaded` (`type`) | `/pdf` after the stream succeeded | atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link (`UPDATE … WHERE first_downloaded IS NULL`): only the request that set it emits; a document never sent with a link emits nothing (it is outside the KPI's denominator) |
+| `backend_portal_opened` (`third_party`, `entry_doc_type`, `origin`) | `GET /me` answering `valid` | one per **visit**: a link's valid `/me` after 30 minutes without one (sliding, in memory per node), so reloads inside a visit do not count. `third_party` is a keyed HMAC pseudonym of the link's Business Partner (purpose `kpi-third-party:v1`): distinct customers are countable, never identifiable |
+| `backend_portal_email_sent` (`piece`, `doc_type`) | `PortalLinkService#confirm` (`document_send` with `doc_type`, `link_renewal`) and `PortalDecisionService#markSent` (`decision_accept`, `decision_reject`), after the commit | none: every email that left (a throttled, duplicate or failed send never reaches these hooks) |
 | `backend_quotation_decided` (`decision`, `source`) | portal: `PortalDecisionService#confirm` when applied now; app: `RejectQuotationHandler#reject`, `Convertquotation` and the quotation path of `createDraftInvoice` | the app's conversion of an `ETGO_AC` quotation (accepted from the portal) is not a second decision |
 
 `type` is the portal kind in lower case (`invoice`, `quotation`, `order`, `shipment`); a credit
-note is an `invoice` (the portal kinds do not tell it apart). **Needs `update.database`** for the
+note is an `invoice` (the portal kinds do not tell it apart). The newer `entry_doc_type` /
+`doc_type` do tell it apart (`credit_note`, from `PortalDocumentKind#copyKey`).
+
+**KPIs computed from them:** customers reached = distinct `third_party` on
+`backend_portal_opened`; visits = its count (by `entry_doc_type`, `origin`); portal emails by piece =
+`backend_portal_email_sent` by `piece`; visits per email = `backend_portal_opened` ÷
+`backend_portal_email_sent`. **Needs `update.database`** for the
 `FIRST_DOWNLOADED` column.
 
 ## 8. Tests

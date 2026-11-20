@@ -43,6 +43,8 @@ Current constants:
 - `backend_portal_document_sent` (ETP-6209)
 - `backend_portal_document_downloaded` (ETP-6209)
 - `backend_quotation_decided` (ETP-6209)
+- `backend_portal_opened` (ETP-6209)
+- `backend_portal_email_sent` (ETP-6209)
 
 ### Added to every event by the Mixpanel sink (ETP-5581)
 
@@ -416,14 +418,18 @@ document number or user data is sent.
 
 ## Customer Portal KPIs (ETP-6209)
 
-`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the three events behind the PO's customer
-portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*). Every event carries only
-allowlisted keys; no new key was added to the allowlist.
+`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the events behind the PO's customer
+portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*) and marketing's portal
+KPIs. Every event carries only allowlisted keys; the portal visit and email events added
+`third_party`, `entry_doc_type`, `origin`, `piece` and `doc_type` to the allowlist
+(`NeoTelemetryService`).
 
 | Event | Properties | Fires |
 |---|---|---|
 | `backend_portal_document_sent` | `account_id`, `type` | once per document: the first time a portal link of an email **send** (`LINK_ORIGIN = SEND`) is confirmed delivered and no other sent `SEND` link of the same record exists. Renewals, decision links and re-sends of the same document never fire |
 | `backend_portal_document_downloaded` | `account_id`, `type` | once per document: the first successful portal `/pdf` stream of a document that was sent with a portal link. "First" is the atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link — only the request whose `UPDATE … WHERE first_downloaded IS NULL` set it emits, so concurrent downloads emit once. A document never sent with a link emits nothing: it is outside the KPI's denominator |
+| `backend_portal_opened` | `account_id`, `third_party`, `entry_doc_type`, `origin` (`send`, `renewal`, `decision`, `shared`) | a portal **visit** opened from a link: `GET /sws/portal/me` answered `valid` and the same link had no valid `/me` in the last 30 minutes (sliding, in memory per node — a deploy starts every visit anew). A reload or the SPA's re-checks inside a visit do not count. `third_party` = `HMAC(per-purpose key "kpi-third-party:v1", C_BPartner_ID)` base64url — stable per customer, irreversible, omitted when the email signing secret is not configured. `entry_doc_type` is the link's document type, `credit_note` told apart from `invoice` |
+| `backend_portal_email_sent` | `account_id`, `piece` (`document_send`, `link_renewal`, `decision_accept`, `decision_reject`), `doc_type` (`document_send` only) | every portal email that actually left, on delivery after its commit: `PortalLinkService#confirm` for a document send carrying a portal link (`SEND`) and a renewal (`RENEWAL`); `PortalDecisionService#markSent` for a decision confirmation. Throttled, duplicate or failed sends never fire. Every send counts (unlike `backend_portal_document_sent`, first per document, unchanged) |
 | `backend_quotation_decided` | `account_id`, `decision` (`accepted`, `rejected`), `source` (`portal`, `app`) | `portal`: a portal decision applied by its confirmation (`appliedNow`). `app`: a rejection (`RejectQuotationHandler#reject`, so also MCP and `DocAction = RJ`), or a conversion into an order (`Convertquotation`) or an invoice (`createDraftInvoice` on a quotation) — **not** when the quotation was `ETGO_AC`, i.e. already accepted from the portal and counted then |
 
 `type` is the portal document kind in lower case: `invoice`, `quotation`, `order`, `shipment`. A
@@ -450,6 +456,11 @@ are unchanged.
   `source = portal`, broken down by `decision`, ÷ count of `backend_portal_document_sent` where
   `type = quotation` (target ≥ 20 %). Manual decisions (`source = app`) are excluded from the
   metric and kept for comparison.
+- **Portal reach (marketing):** distinct `third_party` on `backend_portal_opened` = customers who
+  opened the portal; count of `backend_portal_opened` = visits, by `entry_doc_type` / `origin`.
+- **Portal emails by piece (marketing):** count of `backend_portal_email_sent` broken down by
+  `piece` (and `doc_type` for `document_send`). Visits per email sent = `backend_portal_opened`
+  ÷ `backend_portal_email_sent`, same period.
 - Per tenant: break down by `account_id`. The events carry no record id, so a document sent in one
   month and downloaded or answered in the next falls in different periods; read the ratio over
   windows long enough (a quarter) for that lag to wash out.

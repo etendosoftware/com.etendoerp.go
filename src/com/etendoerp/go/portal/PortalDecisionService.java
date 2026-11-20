@@ -585,14 +585,21 @@ public class PortalDecisionService {
    */
   public void markSent(String decisionId) {
     try {
+      Decision decision;
       OBContext.setAdminMode(true);
       try {
+        // Read before the commit closes the session: the KPI below needs its action and tenant.
+        decision = findById(decisionId);
         OBDal.getInstance().getSession().createNativeQuery("UPDATE etgo_portal_decision"
             + " SET sent_at = now(), updated = now() WHERE etgo_portal_decision_id = :id")
             .setParameter("id", decisionId).executeUpdate();
         OBDal.getInstance().commitAndClose();
       } finally {
         OBContext.restorePreviousMode();
+      }
+      if (decision != null) {
+        PortalKpiTelemetry.decisionEmailSent(DECISION_ACCEPT.equals(decision.action),
+            decision.clientId);
       }
     } catch (RuntimeException e) {
       log.error("Could not mark the decision {} as sent", decisionId, e);
