@@ -406,8 +406,10 @@ The portal side (endpoints, renewal checks, rate limits, PDF) is in `customer-po
   `portal-quotation-decision-notice` render byte-identical: the footer exists only when the
   content asks for it. The icon is the hosted `EmailLayout.LOGO_URL` (the lime Etendo tile) on a
   lime cell, so it still reads with images blocked.
-- **Footer URLs are provisional** (`EmailFooter.PRICING_URL` / `PRIVACY_URL`, both
-  `https://etendo.ai`). Marketing will send the final ones plus a UTM per piece: fill
+- **Footer URLs are provisional.** `EmailFooter.PRICING_URL` is `https://etendo.ai`.
+  `EmailFooter.PRIVACY_URL` is empty, so the "Política de cookies y privacidad" row is **not
+  rendered** (a privacy link to the home page would mislead); setting marketing's real URL there
+  brings it back, copy `footer.privacy` is kept. Marketing will send the final ones plus a UTM per piece: fill
   `EmailFooter.Piece`'s tracking query (`DOCUMENT_SEND`, `LINK_RENEWAL`, `DECISION_ACCEPT`,
   `DECISION_REJECT`); `EmailFooter.link` appends it to every footer link, no contract changes.
 

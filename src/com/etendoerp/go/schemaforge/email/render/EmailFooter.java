@@ -36,8 +36,12 @@ public final class EmailFooter {
 
   /** PROVISIONAL — marketing will send the final pricing page URL. */
   static final String PRICING_URL = "https://etendo.ai";
-  /** PROVISIONAL — marketing will send the final cookie and privacy policy URL. */
-  static final String PRIVACY_URL = "https://etendo.ai";
+  /**
+   * Cookie and privacy policy URL. Empty on purpose: the footer omits the privacy link until
+   * marketing sends the real URL — a privacy link to the home page would mislead. Set the real URL
+   * from marketing here to show it; nothing else changes (copy {@code footer.privacy} is kept).
+   */
+  static final String PRIVACY_URL = "";
   /** The public site shown as text in the footer. */
   static final String SITE_URL = "https://www.etendo.ai";
 
@@ -80,7 +84,7 @@ public final class EmailFooter {
     this.siteLabel = EmailMessages.get(KEY_PREFIX + "site", language);
     this.siteUrl = link(SITE_URL, piece);
     this.privacyLabel = EmailMessages.get(KEY_PREFIX + "privacy", language);
-    this.privacyUrl = link(PRIVACY_URL, piece);
+    this.privacyUrl = StringUtils.isBlank(PRIVACY_URL) ? null : link(PRIVACY_URL, piece);
   }
 
   /**
@@ -132,6 +136,11 @@ public final class EmailFooter {
     return privacyLabel;
   }
 
+  /**
+   * The cookie and privacy policy link.
+   *
+   * @return the URL, or {@code null} while {@link #PRIVACY_URL} is not set (the row is omitted)
+   */
   public String getPrivacyUrl() {
     return privacyUrl;
   }

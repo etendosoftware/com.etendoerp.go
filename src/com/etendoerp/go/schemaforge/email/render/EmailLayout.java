@@ -255,7 +255,7 @@ public final class EmailLayout {
 
   /**
    * Draws the "Creado con Etendo" footer (ETP-6209): the Etendo icon on its lime tile, the line,
-   * a "learn more" pill, the site and the privacy link, centred. The icon is the hosted
+   * a "learn more" pill, the site and — once its URL is set — the privacy link, centred. The icon is the hosted
    * {@link #LOGO_URL} on a lime cell, so a client that blocks images still shows the tile.
    *
    * @param html the document being written
@@ -291,7 +291,10 @@ public final class EmailLayout {
         .append(escape(footer.getCtaLabel())).append("</a></td></tr>").append(TABLE_CLOSE)
         .append(ROW_CLOSE);
     appendFooterLink(html, footer.getSiteUrl(), footer.getSiteLabel(), "none");
-    appendFooterLink(html, footer.getPrivacyUrl(), footer.getPrivacyLabel(), "underline");
+    // Omitted until EmailFooter.PRIVACY_URL holds marketing's real URL.
+    if (StringUtils.isNotBlank(footer.getPrivacyUrl())) {
+      appendFooterLink(html, footer.getPrivacyUrl(), footer.getPrivacyLabel(), "underline");
+    }
     html.append(TABLE_CLOSE).append(ROW_CLOSE).append(TABLE_CLOSE);
   }
 
