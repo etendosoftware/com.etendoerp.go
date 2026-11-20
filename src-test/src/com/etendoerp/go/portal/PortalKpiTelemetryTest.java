@@ -19,10 +19,13 @@ package com.etendoerp.go.portal;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.timeout;
@@ -40,6 +43,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.transaction.Status;
 import javax.transaction.Synchronization;
@@ -60,6 +66,7 @@ import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.QuotationDecisions;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -238,6 +245,75 @@ public class PortalKpiTelemetryTest {
     assertEquals(PortalKpiTelemetry.SOURCE_APP, properties.get(KEY_SOURCE));
   }
 
+  // ── identity hand-off (ETP-6386) ────────────────────────────────────────────
+
+  private static final NeoTelemetryIdentity APP_USER =
+      new NeoTelemetryIdentity("U1", CLIENT_ID, "OWNER-A", "productive");
+
+  /**
+   * Stubs the captured identity from the session of the CALLING thread: a GO user context gives
+   * {@link #APP_USER}, no context (the customer-facing portal runs in admin mode) gives none.
+   * Records the capture and emit threads and the identity handed to the sender.
+   */
+  private static final class IdentityProbe {
+    final AtomicReference<Thread> captureThread = new AtomicReference<>();
+    final AtomicReference<Thread> emitThread = new AtomicReference<>();
+    final AtomicReference<NeoTelemetryIdentity> handedOff = new AtomicReference<>();
+    final CountDownLatch emitted = new CountDownLatch(1);
+
+    IdentityProbe(NeoTelemetryService service) {
+      when(service.captureIdentity(any(), any())).thenAnswer(inv -> {
+        captureThread.set(Thread.currentThread());
+        return OBContext.getOBContext() == null ? NeoTelemetryIdentity.NONE : APP_USER;
+      });
+      org.mockito.Mockito.doAnswer(inv -> {
+        emitThread.set(Thread.currentThread());
+        handedOff.set(NeoTelemetryIdentity.handedOff());
+        emitted.countDown();
+        return null;
+      }).when(service).emit(anyString(), anyMap(), any());
+    }
+
+    void awaitEmit() throws InterruptedException {
+      org.junit.Assert.assertTrue(emitted.await(WAIT_MS, TimeUnit.MILLISECONDS));
+    }
+  }
+
+  @Test
+  public void aCustomerTriggeredEventCarriesNoUser() throws Exception {
+    IdentityProbe probe = new IdentityProbe(telemetry);
+    obContext.when(OBContext::getOBContext).thenReturn(null);
+
+    PortalKpiTelemetry.portalQuotationDecided(true, CLIENT_ID);
+
+    probe.awaitEmit();
+    assertSame(Thread.currentThread(), probe.captureThread.get());
+    assertNotSame(Thread.currentThread(), probe.emitThread.get());
+    assertSame(NeoTelemetryIdentity.NONE, probe.handedOff.get());
+  }
+
+  @Test
+  public void anAppSideDecisionCarriesTheUserCapturedOnTheCallingThread() throws Exception {
+    IdentityProbe probe = new IdentityProbe(telemetry);
+    obContext.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+    Transaction transaction = mock(Transaction.class);
+    when(transaction.isActive()).thenReturn(true);
+    when(session.getTransaction()).thenReturn(transaction);
+
+    PortalKpiTelemetry.appQuotationDecided(true, quotation());
+    // The commit callback runs on another thread, after the request's session is gone.
+    ArgumentCaptor<Synchronization> sync = ArgumentCaptor.forClass(Synchronization.class);
+    verify(transaction).registerSynchronization(sync.capture());
+    obContext.when(OBContext::getOBContext).thenReturn(null);
+    Thread commit = new Thread(() -> sync.getValue().afterCompletion(Status.STATUS_COMMITTED));
+    commit.start();
+    commit.join();
+
+    probe.awaitEmit();
+    assertSame(Thread.currentThread(), probe.captureThread.get());
+    assertSame(APP_USER, probe.handedOff.get());
+  }
+
   // ── payload ─────────────────────────────────────────────────────────────────
 
   @Test
@@ -285,6 +361,9 @@ public class PortalKpiTelemetryTest {
     NeoTelemetryService watched = telemetry;
     PortalKpiTelemetry.portalQuotationDecided(true, SENTINEL_CLIENT);
     verify(watched, timeout(WAIT_MS)).emit(anyString(), anyMap(), eq(SENTINEL_CLIENT));
+    // ETP-6386: the identity is captured on the calling thread at the entry point, so a decision
+    // that later rolls back was captured too (a cached lookup), though never emitted.
+    verify(watched, atLeastOnce()).captureIdentity(anyString(), any());
     verifyNoMoreInteractions(watched);
     PortalKpiTelemetry.setTelemetryService(telemetry = mock(NeoTelemetryService.class));
   }

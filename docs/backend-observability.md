@@ -54,9 +54,59 @@ caller's properties (neither key is on the allowlist, so a caller can never set 
 | `environment` | the deployment: `etendo.go.mixpanel.environment` / `ETGO_MIXPANEL_ENVIRONMENT` when set, else the deployment's `DD_ENV` (Datadog agent property `dd.env`; the ECS tasks already declare `production`, `experimental`, `staging`), else `unknown`. Lower-cased, with Datadog's aliases folded (`prod` → `production`, `stage` → `staging`), so a KPI collector can filter `environment = production` |
 | `$insert_id` | a random 32-hex id per emission (`NeoTelemetryEvent.getInsertId()`), which Mixpanel uses to drop a duplicate submission of the same event. It identifies the emission, never a record |
 
-The log sink does not print them. Platform's agreement of 2026-11-02 (`etgo_account_id`,
-`tenant_type`, `ad_user_id`, `ad_client_id` on every event) is **not** implemented in the backend
-yet: backend events still name the tenant as `account_id` only.
+The log sink does not print them.
+
+### Common identity on every event (ETP-6228)
+
+Platform's agreement of 2026-11-02: the sink also adds the common identity, last, so a caller
+property can never set or replace it. Every id is an internal identifier (no name or email); a part
+that cannot be resolved is left out, never guessed:
+
+| Property | Value |
+|---|---|
+| `ad_user_id` | the `AD_User_ID` of the session (or of the row, for MCP usage) |
+| `ad_client_id` | the `AD_Client_ID` the event happened under; same value as the SPA's |
+| `account_id` | transition: the former name of `ad_client_id`, same value, so saved reports keep working. Drop it once they move |
+| `etgo_account_id` | the `ETGO_Account` that **owns** the client (the account of its flagged owner user, `OwnerSupport.findOwnerUserId`), not the account of whoever is signed in. Absent for a client with no owner flag |
+| `tenant_type` | `demo` or `productive`, from the environment lifecycle (the source of `environmentType`) |
+
+`NeoTelemetryIdentity` is resolved once per event, from one client, when the event is built, by
+`RuntimeNeoTelemetryIdentityResolver`: the user and client come from the explicit arguments or the
+session (`OBContext`; the session's user only for the session's own client, never another tenant's),
+and `etgo_account_id` and `tenant_type` are looked up together for that client, cached for 60 s
+(at most 256 clients, least recently used out first; the owner account also sits in the
+`OwnerAccountResolver` 60 s cache, so a transfer shows up within two minutes).
+The lookup runs in its own DAL session through `IsolatedDalRead` (ETP-6386), never on the caller's
+session and never on a sender thread: a failed query cannot poison a request's transaction, a
+sender thread never opens a session nothing closes, and the read ends with a rollback, so telemetry
+never writes (the tenant type can insert an `AD_Preference`; the rollback discards it). It waits at
+most 5 s; on a timeout or any failure the event goes out with `ad_user_id` and `ad_client_id` but
+without `etgo_account_id` and `tenant_type`. The facts are not cached, but the client is skipped for
+30 s (a negative cache, also bounded to 256 clients) so a slow database does not make every event
+wait 5 s; after that the next event retries. The isolated read shares its 4 workers with the
+reports (a timed-out read is cancelled and removed from the queue). The cache lock is not held
+during the lookup. System context (client or
+user `0`) or no session means no identity: events from a scheduler or an anonymous endpoint go out
+without the ids.
+
+Emitters that send from a background thread (`BankBounceKpiTelemetry`, `ContactTypeTelemetry`,
+`AccountingKpiTelemetry`, `GoodsShipmentTelemetry`, `InvoiceInboxTelemetry`, `PortalKpiTelemetry`)
+capture the identity on the calling thread through the service (`NeoTelemetryService.captureIdentity`,
+so it uses the service's own resolver) and hand it to the sender (`NeoTelemetryIdentity.runWith`);
+`McpSessionManager.executeInContext` captures it for the call's client and user on the request
+thread, while the call's context and DAL session (owned by `DalRequestFilter`) are live, and the row
+carries it to the writer thread, which has no session and never touches `OBDal`. A new emitter
+must capture the identity on the request thread, at its public entry point (never inside an
+after-commit callback or on the sender) and hand it over with `runWith`; the resolver itself never
+touches the caller's or a sender's session. Portal customer-triggered events run in System context
+and so carry no `ad_user_id`; app-side ones carry the signed-in user's.
+
+The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`
+(`OwnerAccountResolver`), so both sides send one `etgo_account_id`.
+
+**Open items.** The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
+of `ad_user_id` with a per-deployment secret salt) is pending sign-off and is not shipped. Platform
+must still name the `ETGO_Account` lookup table's test-account flag in Mixpanel.
 
 `backend_write_operation_completed` is emitted by NEO CRUD for write methods
 only: `POST`, `PUT`, `PATCH`, and `DELETE`. `GET` requests are not emitted to
@@ -68,8 +118,10 @@ Payloads are allowlisted before reaching the sink.
 
 Allowed low-cardinality keys:
 
-- `account_id` — the tenant (`AD_Client_ID`). The **only** identifier a backend event may carry
-  (PM legal rule, ETP-5791); the web client sends the same key. No record id of any kind.
+- `account_id` — the tenant (`AD_Client_ID`); the web client sends the same key. No business
+  record id of any kind (contacts, documents, ...) — legal rule ETP-5791; the internal identity ids
+  of the ETP-6228 section above are allowed. The PM confirmed on 2026-11-19 that `ad_user_id` is
+  allowed: the rule forbids business record ids only.
 - `category`
 - `change_origin`
 - `change_trigger`

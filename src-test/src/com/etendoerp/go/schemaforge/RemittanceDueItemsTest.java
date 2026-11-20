@@ -1046,6 +1046,22 @@ class RemittanceDueItemsTest {
             new JSONObject().put("msgType", type).put("msgText", text)))));
   }
 
+  /** ETP-5850: the dues left out only by the due date are named, so the agent moves the date. */
+  @Test
+  void laterDuesAreNamedWithTheRemittanceDate() throws Exception {
+    Date dueDate = Date.from(LocalDate.of(2026, 11, 19).atStartOfDay(ZoneId.systemDefault())
+        .toInstant());
+    JSONObject none = new JSONObject();
+    RemittanceDueItems.putLaterDues(none, 0L, dueDate);
+    assertFalse(none.has("laterDues"), "no hint when nothing was left out");
+
+    JSONObject some = new JSONObject();
+    RemittanceDueItems.putLaterDues(some, 2L, dueDate);
+    assertEquals(2L, some.getLong("laterDues"));
+    assertTrue(some.getString("hint").contains("2026-11-19"), some.getString("hint"));
+    assertTrue(some.getString("hint").contains("Never select another customer's due"));
+  }
+
   private static String messageKey(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0);
   }

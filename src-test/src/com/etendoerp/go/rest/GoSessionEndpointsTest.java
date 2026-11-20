@@ -154,6 +154,42 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(401, resp.status);
+    assertEquals("INVALID_CREDENTIALS",
+        new JSONObject(resp.body.toString()).getJSONObject("error").getString("code"));
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  @Test
+  public void createWithWrongPasswordReturns401WithCode() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getPasswordHash()).thenReturn(storedHash(PASSWORD));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(jsonPost("/session",
+          new JSONObject().put("email", EMAIL).put("password", PASSWORD + "-wrong")), resp.response);
+    }
+
+    assertEquals(401, resp.status);
+    assertEquals("INVALID_CREDENTIALS",
+        new JSONObject(resp.body.toString()).getJSONObject("error").getString("code"));
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  @Test
+  public void createWithMissingFieldsReturns400WithCode() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(jsonPost("/session", new JSONObject().put("email", EMAIL)), resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertEquals("LOGIN_MISSING_FIELDS",
+        new JSONObject(resp.body.toString()).getJSONObject("error").getString("code"));
     verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
   }
 

@@ -44,12 +44,16 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.service.json.DataResolvingMode;
+import org.openbravo.service.json.DataToJsonConverter;
 
 /**
  * Unit tests for {@link NeoReferenceSelectorValidation} (ETP-6176): a reference a write sets is
@@ -59,6 +63,7 @@ import org.openbravo.model.ad.ui.Tab;
  * {@code businessPartner} (the contact/order address must belong to that partner).
  *
  * @covers com.etendoerp.go.schemaforge.NeoReferenceSelectorValidation
+ * @covers com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NeoReferenceSelectorValidationTest {
@@ -241,6 +246,186 @@ public class NeoReferenceSelectorValidationTest {
         new JSONObject().put(ADDRESS, ADDRESS_ID)));
   }
 
+  /**
+   * A line created with its header in the link-to-parent field and no {@code parentId} is judged
+   * with the header's fields: a storage bin reads the receipt's warehouse (ETP-6381).
+   */
+  @Test
+  public void testLineWithoutParentIdTakesTheHeaderFromItsLinkColumn() throws Exception {
+    try (LineFixture line = new LineFixture()) {
+      offers(Boolean.TRUE);
+
+      assertNull(NeoReferenceSelectorValidation.findRefusedReference(null, line.tab, null, null,
+          new JSONObject().put(LineFixture.LINK, LineFixture.HEADER_ID)
+              .put(LineFixture.BIN, LineFixture.BIN_ID)));
+
+      Map<String, String> context = contextFor(LineFixture.BIN);
+      assertEquals(LineFixture.WAREHOUSE_ID, context.get("M_Warehouse_ID"));
+      assertEquals(LineFixture.HEADER_ID, context.get("M_InOut_ID"));
+    }
+  }
+
+  /** An explicit {@code parentId} still names the parent over the link value the body sets. */
+  @Test
+  public void testExplicitParentIdWinsOverTheLinkValue() throws Exception {
+    try (LineFixture line = new LineFixture()) {
+      offers(Boolean.TRUE);
+
+      NeoReferenceSelectorValidation.findRefusedReference(null, line.tab, null,
+          LineFixture.HEADER_ID, new JSONObject().put(LineFixture.LINK, "OTHER-HEADER")
+              .put(LineFixture.BIN, LineFixture.BIN_ID));
+
+      assertEquals(LineFixture.WAREHOUSE_ID, contextFor(LineFixture.BIN).get("M_Warehouse_ID"));
+      Mockito.verify(dal, never()).get(LineFixture.HEADER_ENTITY, "OTHER-HEADER");
+    }
+  }
+
+  /**
+   * The tab's literal auxiliary inputs reach the selector: Sales Quotation's {@code isQuotation=Y}
+   * is what lets the quotation document type through rule 133 (ETP-6381).
+   */
+  @Test
+  public void testSelectorGetsTheTabLiteralAuxiliaryInputs() throws Exception {
+    givenAuxiliaryInput("isQuotation", "Y");
+    offers(Boolean.TRUE);
+
+    check(new JSONObject().put(ADDRESS, ADDRESS_ID));
+
+    Map<String, String> context = contextFor(ADDRESS);
+    assertEquals("Y", context.get("isQuotation"));
+    assertEquals("Y", context.get("ISQUOTATION"));
+  }
+
+  /** A value the record carries wins over an auxiliary input of the same name, in any casing. */
+  @Test
+  public void testRecordValueWinsOverAnAuxiliaryInput() throws Exception {
+    givenAuxiliaryInput("ISSOTRX", "N");
+    Property salesFlag = mock(Property.class);
+    when(salesFlag.getName()).thenReturn("salesTransaction");
+    when(salesFlag.getColumnName()).thenReturn("IsSOTrx");
+    when(salesFlag.isBoolean()).thenReturn(true);
+    when(salesFlag.isPrimitive()).thenReturn(true);
+    when(order.getProperty("salesTransaction", false)).thenReturn(salesFlag);
+    offers(Boolean.TRUE);
+
+    check(new JSONObject().put("salesTransaction", true).put(ADDRESS, ADDRESS_ID));
+
+    Map<String, String> context = contextFor(ADDRESS);
+    assertEquals("Y", context.get("IsSOTrx"));
+    assertNull(context.get("ISSOTRX"));
+  }
+
+  /**
+   * An auxiliary input wins over the window's sales flag, as in the Classic form: Product's
+   * Purchasing tab says {@code IsSOTrx=N} inside a window flagged as sales.
+   */
+  @Test
+  public void testAuxiliaryInputWinsOverTheWindowDirection() throws Exception {
+    org.openbravo.model.ad.ui.Window window = mock(org.openbravo.model.ad.ui.Window.class);
+    when(window.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(tab.getWindow()).thenReturn(window);
+    givenAuxiliaryInput("IsSOTrx", "N");
+    offers(Boolean.TRUE);
+
+    check(new JSONObject().put(ADDRESS, ADDRESS_ID));
+
+    assertEquals("N", contextFor(ADDRESS).get("IsSOTrx"));
+  }
+
+  private Map<String, String> contextFor(String field) {
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> context = ArgumentCaptor.forClass(Map.class);
+    selectorStatic.verify(() -> NeoSelectorService.offersValue(any(), any(Column.class),
+        eq(field), anyString(), context.capture()));
+    return context.getValue();
+  }
+
+  /** The written tab carries one active auxiliary input. */
+  private void givenAuxiliaryInput(String name, String code) {
+    org.openbravo.model.ad.ui.AuxiliaryInput aux = mock(
+        org.openbravo.model.ad.ui.AuxiliaryInput.class);
+    when(aux.getName()).thenReturn(name);
+    when(aux.getValidationCode()).thenReturn(code);
+    when(aux.isActive()).thenReturn(true);
+    List<org.openbravo.model.ad.ui.AuxiliaryInput> auxInputs = java.util.Collections
+        .singletonList(aux);
+    when(tab.getADAuxiliaryInputList()).thenReturn(auxInputs);
+  }
+
+  /**
+   * A goods-receipt line tab: {@code shipmentReceipt} (M_InOut_ID) links it to its header, whose
+   * {@code warehouse} the {@code storageBin} (M_Locator_ID) selector reads. Header HDR-1 is in
+   * warehouse WH-1.
+   */
+  private final class LineFixture implements AutoCloseable {
+    static final String LINK = "shipmentReceipt";
+    static final String BIN = "storageBin";
+    static final String HEADER_ID = "HDR-1";
+    static final String BIN_ID = "BIN-1";
+    static final String WAREHOUSE_ID = "WH-1";
+    static final String HEADER_ENTITY = "MaterialMgmtShipmentInOut";
+
+    private final MockedStatic<KernelUtils> kernelStatic = mockStatic(KernelUtils.class);
+    private final MockedStatic<OBProvider> providerStatic = mockStatic(OBProvider.class);
+    final Tab tab = mock(Tab.class);
+
+    LineFixture() throws Exception {
+      Entity line = mock(Entity.class);
+      Entity header = mock(Entity.class);
+      Entity locator = mock(Entity.class);
+      when(locator.getName()).thenReturn("Locator");
+      Property link = reference("M_InOut_ID", header, LINK);
+      Property bin = reference("M_Locator_ID", locator, BIN);
+      when(line.getProperty(LINK, false)).thenReturn(link);
+      when(line.getProperty(BIN, false)).thenReturn(bin);
+      when(line.getPropertyByColumnName("M_InOut_ID")).thenReturn(link);
+      when(line.getProperties()).thenReturn(java.util.Arrays.asList(link, bin));
+
+      Property warehouse = mock(Property.class);
+      when(warehouse.getName()).thenReturn("warehouse");
+      when(warehouse.getColumnName()).thenReturn("M_Warehouse_ID");
+      when(header.getProperty("warehouse", false)).thenReturn(warehouse);
+      when(header.getName()).thenReturn(HEADER_ENTITY);
+
+      Table lineTable = mock(Table.class);
+      when(lineTable.getId()).thenReturn("T-LINE");
+      Column linkColumn = column("M_InOut_ID");
+      when(linkColumn.isLinkToParentColumn()).thenReturn(true);
+      List<Column> lineColumns = java.util.Arrays.asList(linkColumn, column("M_Locator_ID"));
+      when(lineTable.getADColumnList()).thenReturn(lineColumns);
+      when(tab.getTable()).thenReturn(lineTable);
+      when(tab.getTabLevel()).thenReturn(1L);
+
+      Table headerTable = mock(Table.class);
+      when(headerTable.getId()).thenReturn("T-HEADER");
+      Tab headerTab = mock(Tab.class);
+      when(headerTab.getTable()).thenReturn(headerTable);
+      KernelUtils kernel = mock(KernelUtils.class);
+      kernelStatic.when(KernelUtils::getInstance).thenReturn(kernel);
+      when(kernel.getParentTab(tab)).thenReturn(headerTab);
+
+      ModelProvider modelProvider = ModelProvider.getInstance();
+      when(modelProvider.getEntityByTableId("T-LINE")).thenReturn(line);
+      when(modelProvider.getEntityByTableId("T-HEADER")).thenReturn(header);
+
+      BaseOBObject headerRecord = mock(BaseOBObject.class);
+      when(headerRecord.getEntity()).thenReturn(header);
+      when(dal.get(HEADER_ENTITY, HEADER_ID)).thenReturn(headerRecord);
+      OBProvider provider = mock(OBProvider.class);
+      providerStatic.when(OBProvider::getInstance).thenReturn(provider);
+      DataToJsonConverter converter = mock(DataToJsonConverter.class);
+      when(provider.get(DataToJsonConverter.class)).thenReturn(converter);
+      when(converter.toJsonObject(headerRecord, DataResolvingMode.FULL))
+          .thenReturn(new JSONObject().put("warehouse", WAREHOUSE_ID));
+    }
+
+    @Override
+    public void close() {
+      kernelStatic.close();
+      providerStatic.close();
+    }
+  }
+
   /** The stored order ORD-1, holding {@code ADDRESS_ID} and {@code PARTNER_ID}. */
   private BaseOBObject storedOrder() {
     BaseOBObject stored = mock(BaseOBObject.class);
@@ -269,6 +454,56 @@ public class NeoReferenceSelectorValidationTest {
         org.openbravo.model.ad.domain.Validation.class);
     when(validation.getValidationCode()).thenReturn(code);
     return validation;
+  }
+
+  /**
+   * ETP-6377: a customization that serves the field's selector is the selector the UI shows. It
+   * offers the value, so the write passes even though the generic selector (here: a payment method
+   * with no financial account) would not list it.
+   */
+  @Test
+  public void testTheEntityCustomizationOffersWhatTheGenericSelectorWouldNot() throws Exception {
+    offers(Boolean.FALSE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.OFFERED)) {
+      assertNull(check(new JSONObject().put(ADDRESS, ADDRESS_ID)));
+      selectorStatic.verify(() -> NeoSelectorService.offersValue(any(), any(Column.class),
+          anyString(), anyString(), any()), never());
+    }
+  }
+
+  /** A customization that serves the whole list without the value refuses it, verified. */
+  @Test
+  public void testTheEntityCustomizationRefusesWhatItDoesNotList() throws Exception {
+    offers(Boolean.TRUE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.NOT_OFFERED)) {
+      NeoReferenceSelectorValidation.RefusedReference refused = check(
+          new JSONObject().put(ADDRESS, ADDRESS_ID));
+      assertEquals(ADDRESS, refused.fieldName());
+      assertTrue(refused.isVerified());
+    }
+  }
+
+  /** A customization that cannot answer refuses the write unverified: still fail closed. */
+  @Test
+  public void testAnUnverifiableCustomizationFailsClosed() throws Exception {
+    offers(Boolean.TRUE);
+    try (MockedStatic<NeoCustomizedSelectorCheck> custom = customization(
+        NeoCustomizedSelectorCheck.Answer.UNVERIFIABLE)) {
+      NeoReferenceSelectorValidation.RefusedReference refused = check(
+          new JSONObject().put(ADDRESS, ADDRESS_ID));
+      assertEquals(ADDRESS, refused.fieldName());
+      assertFalse(refused.isVerified());
+    }
+  }
+
+  private static MockedStatic<NeoCustomizedSelectorCheck> customization(
+      NeoCustomizedSelectorCheck.Answer answer) {
+    MockedStatic<NeoCustomizedSelectorCheck> custom = mockStatic(NeoCustomizedSelectorCheck.class);
+    custom.when(() -> NeoCustomizedSelectorCheck.offers(any(), anyString(), anyString(), any()))
+        .thenReturn(answer);
+    return custom;
   }
 
   private NeoReferenceSelectorValidation.RefusedReference check(JSONObject fields) {
