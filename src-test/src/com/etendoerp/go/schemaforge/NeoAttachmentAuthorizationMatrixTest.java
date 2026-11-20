@@ -163,11 +163,9 @@ public class NeoAttachmentAuthorizationMatrixTest {
 
       NeoAttachmentsDownloader.handleDownload(FOREIGN_ATTACHMENT_ID, response);
 
-      // Uploader-controlled content type is trusted verbatim.
-      verify(response).setContentType("text/html");
-      // No nosniff anywhere on this path.
-      verify(response, org.mockito.Mockito.never())
-          .setHeader(eq("X-Content-Type-Options"), any());
+      // ETP-4571: the stored (uploader-controlled) type is never echoed; the download is inert.
+      verify(response, org.mockito.Mockito.never()).setContentType("text/html");
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
     }
   }
 

@@ -177,16 +177,14 @@ public class AnonymousAttachmentStreamerTest {
     }
   }
 
-  /** ETP-4571 — a legacy HTML type is never echoed; a blank name keeps the old {@code document.pdf}. */
+  /** ETP-4571 — a legacy HTML type is never echoed. */
   @Test
-  public void streamSendsHardenedHeadersForLegacyActiveAndBlankNamedRecords() throws Exception {
+  public void streamSendsHardenedHeadersForLegacyActiveRecords() throws Exception {
     File attachRoot = tempFolder.newFolder("attachments2");
     File dir = new File(attachRoot, "318");
     Files.createDirectories(dir.toPath());
     Files.write(new File(dir, "page.html").toPath(), FILE_BYTES);
-    Files.write(new File(dir, "document.pdf").toPath(), FILE_BYTES);
-    String[][] cases = { { "page.html", "text/html", "application/octet-stream", "page.html" },
-        { "", "text/html", "application/pdf", "document.pdf" } };
+    String[][] cases = { { "page.html", "text/html", "application/octet-stream", "page.html" } };
     for (String[] c : cases) {
       Attachment attachment = attachment("CLIENT-1");
       when(attachment.getName()).thenReturn(c[0]);

@@ -72,7 +72,7 @@ final class NeoDownloadHeaders {
    */
   static String contentDisposition(String fileName) {
     String safe = fileName == null ? DEFAULT_NAME
-        : NeoAttachmentPolicy.sanitizeFileName(fileName).replace("\"", "_");
+        : NeoAttachmentPolicy.sanitizeFileName(fileName).replaceAll("[\\p{Cc}\"]", "_");
     String encoded = URLEncoder.encode(safe, StandardCharsets.UTF_8).replace("+", "%20");
     return "attachment; filename=\"" + safe + "\"; filename*=UTF-8''" + encoded;
   }

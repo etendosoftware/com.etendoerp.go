@@ -375,10 +375,8 @@ public class NeoAttachmentPolicyTest {
   }
 
   @Test
-  public void sanitizeFileNameStripsControlCharsAndTraversal() {
+  public void sanitizeFileNameStripsTraversal() {
     assertEquals("passwd.pdf", NeoAttachmentPolicy.sanitizeFileName("../../etc/passwd.pdf"));
-    assertEquals("a__b.pdf", NeoAttachmentPolicy.sanitizeFileName("a\r\nb.pdf"));
-    assertEquals("ab.pdf", NeoAttachmentPolicy.sanitizeFileName("a\u0000b.pdf"));
   }
 
   @Test

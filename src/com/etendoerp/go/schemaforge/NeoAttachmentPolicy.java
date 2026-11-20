@@ -429,7 +429,6 @@ public final class NeoAttachmentPolicy {
     if (sep >= 0) {
       trimmed = trimmed.substring(sep + 1);
     }
-    trimmed = stripControlChars(trimmed).trim();
     return trimmed.isEmpty() ? "attachment" : trimmed;
   }
 
