@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.ocr;
 
 import java.math.BigDecimal;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -342,23 +343,91 @@ public interface OcrLookups {
     }
   }
 
+  /**
+   * A product the vendor's completed purchase invoice lines with the same description were booked
+   * to (ETP-6364), with how many lines.
+   */
+  final class HistoryProduct {
+    private final String id;
+    private final String name;
+    private final int count;
+
+    /**
+     * Describes a product of the vendor's history.
+     *
+     * @param id    the product id
+     * @param name  the product name
+     * @param count the number of lines booked to it
+     */
+    public HistoryProduct(String id, String name, int count) {
+      this.id = id;
+      this.name = name;
+      this.count = count;
+    }
+
+    /**
+     * Returns the product id.
+     *
+     * @return the product id
+     */
+    public String id() {
+      return id;
+    }
+
+    /**
+     * Returns the product name.
+     *
+     * @return the product name
+     */
+    public String name() {
+      return name;
+    }
+
+    /**
+     * Returns how many lines were booked to the product.
+     *
+     * @return the number of lines
+     */
+    public int count() {
+      return count;
+    }
+  }
+
   /** A product the similarity search proposes for a line. */
   final class Candidate {
     private final String id;
     private final String name;
     private final String similarity;
+    private final String textSimilarity;
+    private final String matchType;
 
     /**
-     * Describes a candidate.
+     * Describes a candidate from a search that reports only the score.
      *
      * @param id         the product id
      * @param name       the product name
      * @param similarity the similarity as the search reports it, may be {@code null}
      */
     public Candidate(String id, String name, String similarity) {
+      this(id, name, similarity, null, null);
+    }
+
+    /**
+     * Describes a candidate.
+     *
+     * @param id             the product id
+     * @param name           the product name
+     * @param similarity     the score as the search reports it, may be {@code null}
+     * @param textSimilarity the whole-string similarity, may be {@code null}
+     * @param matchType      "exact", "normalized" or "fuzzy" (ETP-5895), may be {@code null}
+     */
+    public Candidate(String id, String name, String similarity, String textSimilarity,
+        String matchType) {
       this.id = id;
       this.name = name;
       this.similarity = similarity;
+      this.textSimilarity = textSimilarity;
+      this.matchType = matchType;
     }
 
     /**
@@ -386,6 +455,24 @@ public interface OcrLookups {
      */
     public String similarity() {
       return similarity;
+    }
+
+    /**
+     * Returns the whole-string similarity.
+     *
+     * @return the whole-string similarity, {@code null} when the search did not report it
+     */
+    public String textSimilarity() {
+      return textSimilarity;
+    }
+
+    /**
+     * Returns how the product's identifier relates to the description.
+     *
+     * @return "exact", "normalized" or "fuzzy", {@code null} when the search did not report it
+     */
+    public String matchType() {
+      return matchType;
     }
   }
 
@@ -728,6 +815,20 @@ public interface OcrLookups {
    * @return one list per description (empty when nothing is similar), same order
    */
   List<List<Candidate>> productCandidates(List<String> descriptions);
+
+  /**
+   * The products this vendor's completed purchase invoice lines with the same description (after
+   * normalization) were booked to (ETP-6364), most frequent first.
+   *
+   * <p>Default: no history, one empty list per description.</p>
+   *
+   * @param vendorId     the resolved vendor, {@code null} when there is none yet (no query)
+   * @param descriptions one per line, blank allowed (never matched)
+   * @return one list per description, same order, empty when nothing or the lookup failed
+   */
+  default List<List<HistoryProduct>> productHistory(String vendorId, List<String> descriptions) {
+    return Collections.nCopies(descriptions.size(), List.of());
+  }
 
   /**
    * The tax a line should default to for a printed rate.

@@ -30,16 +30,20 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
@@ -47,6 +51,7 @@ import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -97,7 +102,7 @@ public class PurchaseInvoiceLineHandlerTest {
     NeoActionContract c = contracts.get("defaultTax");
     assertNotNull(c);
     assertFalse(c.isMutating());
-    assertEquals(1, contracts.size());
+    assertEquals(2, contracts.size());
     assertEquals(4, c.getParams().size());
     NeoActionContract.Param address = c.getParams().get(0);
     assertEquals("partnerAddressId", address.getName());
@@ -271,6 +276,97 @@ public class PurchaseInvoiceLineHandlerTest {
 
       assertEquals(expected, PurchaseInvoiceLineHandler.resolveOwned("ADDR", null, date,
           new BigDecimal("7")));
+    }
+  }
+
+  // ── productHistory (ETP-6364) ───────────────────────────────────────────────────────────────
+
+  private static NeoContext history(String method, JSONObject body) {
+    return ctx(method, NeoEndpointType.ACTION, PurchaseInvoiceLineHandler.ACTION_PRODUCT_HISTORY,
+        body);
+  }
+
+  private static JSONObject historyBody(String vendorId, String... descriptions) throws Exception {
+    return new JSONObject().put("vendorId", vendorId)
+        .put("descriptions", new JSONArray(Arrays.asList(descriptions)));
+  }
+
+  @Test
+  public void productHistoryIsDeclaredAsANonMutatingContract() {
+    NeoActionContract c = handler.actionContracts().get("productHistory");
+
+    assertNotNull(c);
+    assertFalse(c.isMutating());
+    assertEquals(2, c.getParams().size());
+    assertEquals("vendorId", c.getParams().get(0).getName());
+    assertEquals(NeoActionContract.TYPE_STRING, c.getParams().get(0).getType());
+    assertTrue(c.getParams().get(0).isRequired());
+    assertEquals("descriptions", c.getParams().get(1).getName());
+    assertEquals(NeoActionContract.TYPE_ARRAY, c.getParams().get(1).getType());
+    assertTrue(c.getParams().get(1).isRequired());
+  }
+
+  @Test
+  public void productHistoryNonPostIsRejectedWith405() throws Exception {
+    assertEquals(405, handler.handle(history("GET", historyBody("V1", "Cafe"))).getHttpStatus());
+  }
+
+  @Test
+  public void productHistoryContractViolationsAre422() throws Exception {
+    assertEquals(422, handler.handle(history("POST", new JSONObject().put("vendorId", "V1")))
+        .getHttpStatus());
+    assertEquals(422, handler.handle(history("POST", historyBody("V1"))).getHttpStatus());
+    assertEquals(422, handler.handle(history("POST", historyBody("V1", "Cafe").put("bogus", 1)))
+        .getHttpStatus());
+    assertEquals(422, handler.handle(history("POST", new JSONObject().put("vendorId", "V1")
+        .put("descriptions", new JSONArray().put(7)))).getHttpStatus());
+    String[] tooMany = new String[PurchaseInvoiceLineHandler.MAX_DESCRIPTIONS + 1];
+    Arrays.fill(tooMany, "Cafe");
+    assertEquals(422, handler.handle(history("POST", historyBody("V1", tooMany))).getHttpStatus());
+  }
+
+  @Test
+  public void productHistoryForeignVendorIs404() throws Exception {
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class);
+        MockedStatic<PurchaseInvoiceProductHistory> query =
+            mockStatic(PurchaseInvoiceProductHistory.class)) {
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(BusinessPartner.class), anyString()))
+          .thenReturn(null);
+
+      NeoResponse r = handler.handle(history("POST", historyBody("FOREIGN", "Cafe")));
+
+      assertEquals(404, r.getHttpStatus());
+      assertEquals("Record not found", message(r));
+      query.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void productHistoryAnswersOneItemPerDescription() throws Exception {
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class);
+        MockedStatic<PurchaseInvoiceProductHistory> query =
+            mockStatic(PurchaseInvoiceProductHistory.class)) {
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(BusinessPartner.class), eq("V1")))
+          .thenReturn(mock(BusinessPartner.class));
+      query.when(() -> PurchaseInvoiceProductHistory.find("V1", List.of("Cafe", " ")))
+          .thenReturn(List.of(List.of(new HistoryProduct("P1", "Café 1kg", 3),
+              new HistoryProduct("P2", "Café 500g", 1)), List.of()));
+
+      NeoResponse r = handler.handle(history("POST", historyBody("V1", "Cafe", " ")));
+
+      assertEquals(200, r.getHttpStatus());
+      JSONArray items = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONArray("items");
+      assertEquals(2, items.length());
+      JSONArray first = items.getJSONObject(0).getJSONArray("products");
+      assertEquals(2, first.length());
+      assertEquals("P1", first.getJSONObject(0).getString("id"));
+      assertEquals("Café 1kg", first.getJSONObject(0).getString("name"));
+      assertEquals(3, first.getJSONObject(0).getInt("count"));
+      assertEquals("a blank description keeps its index and gets nothing", 0,
+          items.getJSONObject(1).getJSONArray("products").length());
     }
   }
 }

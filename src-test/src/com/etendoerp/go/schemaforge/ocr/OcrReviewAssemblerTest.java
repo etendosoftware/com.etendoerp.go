@@ -40,6 +40,7 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.AddressState;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicate;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Tax;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
@@ -75,6 +76,8 @@ class OcrReviewAssemblerTest {
     private String orgTaxId = ORG_TAX_ID;
     private final List<String> vendorSearches = new ArrayList<>();
     private final List<String> duplicateAsks = new ArrayList<>();
+    private final java.util.Map<String, List<HistoryProduct>> history = new java.util.HashMap<>();
+    private final List<String> historyAsks = new ArrayList<>();
     private final List<String> addressAsks = new ArrayList<>();
     private final List<String> taxAsks = new ArrayList<>();
     private int orgTaxAsks;
@@ -107,6 +110,16 @@ class OcrReviewAssemblerTest {
     public List<List<Candidate>> productCandidates(List<String> descriptions) {
       productAsks++;
       return products;
+    }
+
+    @Override
+    public List<List<HistoryProduct>> productHistory(String vendorId, List<String> descriptions) {
+      historyAsks.add(vendorId);
+      List<List<HistoryProduct>> out = new ArrayList<>();
+      for (String description : descriptions) {
+        out.add(vendorId == null ? List.of() : history.getOrDefault(description, List.of()));
+      }
+      return out;
     }
 
     @Override
@@ -702,6 +715,176 @@ class OcrReviewAssemblerTest {
       assertEquals(3.5, first.getJSONObject("body").getDouble("listPrice"), 0.0);
       assertTrue(operations.getJSONObject(2).getJSONObject("body").getString("product")
           .contains("line_1_product"));
+    }
+  }
+
+  // ── product match rules (ETP-6364) ─────────────────────────────────────────
+
+  @Nested
+  @DisplayName("ETP-6364: vendor history first, a typo last")
+  class ProductMatchRules {
+
+    private OcrProductMatch classify(String description, List<HistoryProduct> history,
+        Candidate... candidates) {
+      return OcrProductMatch.classify(description, List.of(candidates), history);
+    }
+
+    private OcrProductMatch typo(String description, Candidate... candidates) {
+      return classify(description, List.of(), candidates);
+    }
+
+    private Candidate unscored(String id, String name) {
+      return new Candidate(id, name, null);
+    }
+
+    @Test
+    @DisplayName("one history product is auto-matched with its id and name")
+    void historySingleProductIsAuto() {
+      OcrProductMatch match = classify("Cafe molido",
+          List.of(new HistoryProduct("H1", "Café molido 1kg", 3)), unscored("P1", "Otro"));
+      assertEquals(OcrProductMatch.State.AUTO_MATCHED, match.state());
+      assertEquals("H1", match.chosen().id());
+      assertEquals("Café molido 1kg", match.chosen().name());
+      assertTrue(match.fromHistory());
+    }
+
+    @Test
+    @DisplayName("two history products suggest the most frequent and take none")
+    void historyManySuggestsMostFrequent() {
+      OcrProductMatch match = classify("Cafe molido", List.of(new HistoryProduct("H1", "Café 1kg", 5),
+          new HistoryProduct("H2", "Café 500g", 2)));
+      assertEquals(OcrProductMatch.State.SUGGESTED, match.state());
+      assertEquals("H1", match.chosen().id());
+      assertEquals("Café 1kg", match.chosen().name());
+    }
+
+    @Test
+    @DisplayName("history beats a different candidate with the exact name")
+    void historyBeatsExactName() {
+      OcrProductMatch match = classify("Cafe molido",
+          List.of(new HistoryProduct("H1", "Café molido 1kg", 3)), unscored("P1", "Cafe molido"));
+      assertEquals(OcrProductMatch.State.AUTO_MATCHED, match.state());
+      assertEquals("H1", match.chosen().id());
+    }
+
+    @Test
+    @DisplayName("no history and no candidates is none")
+    void noHistoryNoCandidatesIsNone() {
+      assertEquals(OcrProductMatch.State.NONE, typo("Cafe molido").state());
+    }
+
+    @Test
+    @DisplayName("a substituted letter, an adjacent swap and a missing letter are auto-matched")
+    void typosAreAuto() {
+      for (String description : List.of("Cafe molido natyral", "Cafe molido nautral",
+          "Cafe molido natral")) {
+        OcrProductMatch match = typo(description, unscored("P1", "Café molido natural"),
+            unscored("P2", "Té verde"));
+        assertEquals(OcrProductMatch.State.AUTO_MATCHED, match.state(), description);
+        assertEquals("P1", match.chosen().id(), description);
+        assertFalse(match.fromHistory());
+      }
+    }
+
+    @Test
+    @DisplayName("two edits are allowed on a description longer than 8 chars")
+    void longDescriptionAllowsTwoEdits() {
+      assertEquals(OcrProductMatch.State.AUTO_MATCHED,
+          typo("Cafe molid natura", unscored("P1", "Café molido natural")).state());
+    }
+
+    @Test
+    @DisplayName("different numbers are never a typo: 0,33L is not 0,5L, M8 is not M9")
+    void differentNumbersAreRejected() {
+      assertEquals(OcrProductMatch.State.SUGGESTED,
+          typo("Cerveza 0,33L", unscored("P1", "Cerveza 0,5L")).state());
+      assertEquals(OcrProductMatch.State.SUGGESTED,
+          typo("Tornillo M8", unscored("P1", "Tornillo M9")).state());
+    }
+
+    @Test
+    @DisplayName("different single-letter tokens are never a typo: talla L is not talla M")
+    void differentSingleLettersAreRejected() {
+      assertEquals(OcrProductMatch.State.SUGGESTED,
+          typo("Arnes talla L", unscored("P1", "Arnes talla M")).state());
+    }
+
+    @Test
+    @DisplayName("a different n-tilde count is never a typo: Panales is not Pañales")
+    void differentEnyeIsRejected() {
+      assertEquals(OcrProductMatch.State.SUGGESTED,
+          typo("Panales bebe", unscored("P1", "Pañales bebe")).state());
+    }
+
+    @Test
+    @DisplayName("two candidates a typo away are only suggested")
+    void twoCloseCandidatesAreSuggested() {
+      OcrProductMatch match = typo("Cafe molido natural", unscored("P1", "Cafe molido naturel"),
+          unscored("P2", "Cafe molida natural"));
+      assertEquals(OcrProductMatch.State.SUGGESTED, match.state());
+      assertEquals("P1", match.chosen().id());
+    }
+
+    @Test
+    @DisplayName("a description of up to 8 chars allows only 1 edit")
+    void shortDescriptionAllowsOneEdit() {
+      assertEquals(OcrProductMatch.State.AUTO_MATCHED,
+          typo("Tornilo", unscored("P1", "Tornillo")).state());
+      assertEquals(OcrProductMatch.State.SUGGESTED,
+          typo("Tornlo", unscored("P1", "Tornillo")).state());
+    }
+
+    @Test
+    @DisplayName("a description under 5 chars never takes the typo rule")
+    void veryShortDescriptionIsNeverATypo() {
+      assertEquals(OcrProductMatch.State.SUGGESTED, typo("Tuer", unscored("P1", "Tuerc")).state());
+    }
+
+    @Test
+    @DisplayName("the optimal string alignment distance counts an adjacent swap as one edit")
+    void osaDistance() {
+      assertEquals(0, OcrProductMatch.osaDistance("abc", "abc"));
+      assertEquals(1, OcrProductMatch.osaDistance("ab", "ba"));
+      assertEquals(1, OcrProductMatch.osaDistance("abc", "abd"));
+      assertEquals(1, OcrProductMatch.osaDistance("abc", "ab"));
+      assertEquals(3, OcrProductMatch.osaDistance("", "abc"));
+      assertEquals(3, OcrProductMatch.osaDistance("ca", "abc"), "OSA edits a substring once");
+    }
+
+    @Test
+    @DisplayName("the review asks the history with the chosen vendor and takes its one product")
+    void reviewUsesTheChosenVendorsHistory() throws JSONException {
+      lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café molido 1kg", 3)));
+      lookups.products = List.of(List.of(candidate("P1", "Cafe molido")));
+      JSONObject product = decision(assembler.assemble("STAGED1",
+          extraction(line("Cafe molido", 1, 1, 21)), party("V7", "Elegido")), "line_0_product");
+      assertEquals("auto_matched", product.getString("state"));
+      assertEquals("H1", product.getJSONObject("match").getString("id"));
+      assertEquals("Café molido 1kg", product.getJSONObject("match").getString("name"));
+      assertEquals(List.of("V7"), lookups.historyAsks);
+    }
+
+    @Test
+    @DisplayName("several history products are a suggestion of the most frequent")
+    void reviewSuggestsTheMostFrequent() throws JSONException {
+      lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café 1kg", 3),
+          new HistoryProduct("H2", "Café 500g", 1)));
+      lookups.products = List.of(List.of(candidate("P1", "Cafe molido")));
+      JSONObject product = decision(assembler.assemble("STAGED1",
+          extraction(line("Cafe molido", 1, 1, 21)), party("V7", "Elegido")), "line_0_product");
+      assertEquals("suggested", product.getString("state"));
+      assertEquals("H1", product.getJSONObject("suggestion").getString("id"));
+    }
+
+    @Test
+    @DisplayName("without a vendor the history is asked with none and the search rules decide")
+    void reviewWithoutVendorHasNoHistory() throws JSONException {
+      lookups.history.put("Cafe molido", List.of(new HistoryProduct("H1", "Café 1kg", 3)));
+      lookups.products = List.of(List.of(candidate("P1", "Cafe molido")));
+      JSONObject product = decision(run(extraction(line("Cafe molido", 1, 1, 21))),
+          "line_0_product");
+      assertEquals("P1", product.getJSONObject("match").getString("id"));
+      assertEquals(java.util.Arrays.asList((String) null), lookups.historyAsks);
     }
   }
 

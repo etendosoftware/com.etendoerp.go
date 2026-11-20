@@ -21,8 +21,11 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
@@ -34,11 +37,13 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.plm.Product;
 
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 
@@ -53,6 +58,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
  * the date, an extracted percentage and maybe a product are known (the OCR invoice flow).
  *
  * <pre>POST /sws/neo/purchase-invoice/lines/new/action/defaultTax</pre>
+ *
+ * <p>And (ETP-6364) the {@code productHistory} read action — for each line description, the
+ * products the vendor's completed purchase invoice lines with that description were booked to
+ * ({@link PurchaseInvoiceProductHistory}), the first rule of the OCR product match.</p>
+ *
+ * <pre>POST /sws/neo/purchase-invoice/lines/new/action/productHistory</pre>
  *
  * <p>The record id is always {@code new}, as for {@link CurrencyOptionsHandler}. It is a POST
  * because the action hook context only carries the request body; the action never persists
@@ -103,8 +114,34 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
       Param.optional(PARAM_PRODUCT_ID, NeoActionContract.TYPE_STRING, "the product id"))
       .withIdDescription("always 'new'");
 
-  private static final Map<String, NeoActionContract> CONTRACTS =
-      Collections.singletonMap(ACTION_DEFAULT_TAX, DEFAULT_TAX);
+  static final String ACTION_PRODUCT_HISTORY = "productHistory";
+  static final String PARAM_VENDOR_ID = "vendorId";
+  static final String PARAM_DESCRIPTIONS = "descriptions";
+  /** Most descriptions one {@code productHistory} call accepts. */
+  static final int MAX_DESCRIPTIONS = 100;
+
+  /** The declared contract of {@code productHistory} (ETP-6364): a read, so nothing is persisted. */
+  static final NeoActionContract PRODUCT_HISTORY = NeoActionContract.read(ACTION_PRODUCT_HISTORY,
+      "Returns, for each description, the products this vendor's completed purchase invoice "
+          + "lines with the same description (case, spacing and accents ignored) were booked to: "
+          + "{items: [{products: [{id, name, count}]}]}, items aligned by index with descriptions, "
+          + "at most 3 products each, most lines first then most recently invoiced. A blank "
+          + "description gets no products.",
+      Param.required(PARAM_VENDOR_ID, NeoActionContract.TYPE_STRING,
+          "the vendor's business partner id"),
+      Param.array(PARAM_DESCRIPTIONS, NeoActionContract.TYPE_STRING, true,
+          "the line descriptions, 1 to " + MAX_DESCRIPTIONS + "; a blank entry keeps its position")
+          .allowingBlankItems())
+      .withIdDescription("always 'new'");
+
+  private static final Map<String, NeoActionContract> CONTRACTS = contracts();
+
+  private static Map<String, NeoActionContract> contracts() {
+    Map<String, NeoActionContract> byName = new LinkedHashMap<>();
+    byName.put(ACTION_DEFAULT_TAX, DEFAULT_TAX);
+    byName.put(ACTION_PRODUCT_HISTORY, PRODUCT_HISTORY);
+    return Collections.unmodifiableMap(byName);
+  }
 
   @Override
   public Map<String, NeoActionContract> actionContracts() {
@@ -112,16 +149,20 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
   }
 
   /**
-   * Serves {@code defaultTax} directly. Anything else runs the parent's pre-hook first — a
-   * response from it still short-circuits — then prices and derives the amounts of a created line,
-   * or recalculates those of an updated one. The order matters: on a return invoice the parent
-   * negates the quantity, and the amounts are derived from the negated one.
+   * Serves {@code defaultTax} and {@code productHistory} directly. Anything else runs the parent's
+   * pre-hook first — a response from it still short-circuits — then prices and derives the amounts
+   * of a created line, or recalculates those of an updated one. The order matters: on a return
+   * invoice the parent negates the quantity, and the amounts are derived from the negated one.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && ACTION_DEFAULT_TAX.equals(context.getFieldName())) {
-      return defaultTax(context);
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      if (ACTION_DEFAULT_TAX.equals(context.getFieldName())) {
+        return defaultTax(context);
+      }
+      if (ACTION_PRODUCT_HISTORY.equals(context.getFieldName())) {
+        return productHistory(context);
+      }
     }
     NeoResponse response = super.handle(context);
     if (response != null) {
@@ -168,6 +209,66 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
     JSONObject wrapper = new JSONObject();
     wrapper.put("response", new JSONObject().put("data", toJson(result)));
     return NeoResponse.ok(wrapper);
+  }
+
+  /**
+   * {@code productHistory} (ETP-6364): the vendor's history for each description, after checking
+   * the vendor belongs to the session's tenant. The query is {@link PurchaseInvoiceProductHistory},
+   * shared with the OCR review.
+   */
+  private NeoResponse productHistory(NeoContext context) {
+    if (!"POST".equals(context.getHttpMethod())) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "productHistory only supports POST");
+    }
+    JSONObject body = context.getRequestBody() != null ? context.getRequestBody()
+        : new JSONObject();
+    NeoResponse invalid = NeoActionContract.validate(CONTRACTS, ACTION_PRODUCT_HISTORY, body);
+    if (invalid != null) {
+      return invalid;
+    }
+    JSONArray raw = body.optJSONArray(PARAM_DESCRIPTIONS);
+    if (raw.length() > MAX_DESCRIPTIONS) {
+      return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE,
+          "Parameter descriptions accepts at most " + MAX_DESCRIPTIONS + " entries");
+    }
+    try {
+      String vendorId = body.getString(PARAM_VENDOR_ID).trim();
+      if (!ownsVendor(vendorId)) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_RECORD_NOT_FOUND);
+      }
+      List<String> descriptions = new ArrayList<>(raw.length());
+      for (int i = 0; i < raw.length(); i++) {
+        descriptions.add(raw.getString(i));
+      }
+      JSONArray items = new JSONArray();
+      for (List<HistoryProduct> products : PurchaseInvoiceProductHistory.find(vendorId,
+          descriptions)) {
+        JSONArray list = new JSONArray();
+        for (HistoryProduct product : products) {
+          list.put(new JSONObject().put("id", product.id()).put("name", product.name())
+              .put("count", product.count()));
+        }
+        items.put(new JSONObject().put("products", list));
+      }
+      JSONObject wrapper = new JSONObject();
+      wrapper.put("response", new JSONObject().put("data", new JSONObject().put("items", items)));
+      return NeoResponse.ok(wrapper);
+    } catch (JSONException | RuntimeException e) {
+      log.error("[ETP-6364] productHistory failed: {}", e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Internal error reading the product history");
+    }
+  }
+
+  /** Whether the vendor exists and belongs to the session's tenant. */
+  private static boolean ownsVendor(String vendorId) {
+    OBContext.setAdminMode(true);
+    try {
+      return NeoActionRecordGuard.loadOwned(BusinessPartner.class, vendorId) != null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**

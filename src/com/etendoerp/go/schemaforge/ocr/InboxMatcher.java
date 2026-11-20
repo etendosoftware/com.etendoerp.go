@@ -136,8 +136,9 @@ public final class InboxMatcher {
     String documentNo = OcrJson.str(extraction, "document_no");
     header.put(K_DUPLICATE, duplicate(vendor, documentNo, notices));
     String date = isoDate(extraction);
-    return new InboxLineMatcher(lookups, organizationId).review(extraction.optJSONArray(OcrDocType.LINES_KEY),
-        locationId, date);
+    String vendorId = S_LINKED.equals(vendor.optString(K_STATE)) ? vendor.getString(K_ID) : null;
+    return new InboxLineMatcher(lookups, organizationId).review(
+        extraction.optJSONArray(OcrDocType.LINES_KEY), vendorId, locationId, date);
   }
 
   private JSONObject extractedVendor(JSONObject extraction) throws JSONException {

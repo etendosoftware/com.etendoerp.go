@@ -402,6 +402,19 @@ class NeoActionContractTest {
     }
 
     @Test
+    @DisplayName("ETP-6364: a string array allowing blank items accepts them, still not non-strings")
+    void blankItemsAllowed() throws Exception {
+      Map<String, NeoActionContract> map = Map.of("history", NeoActionContract.read("history",
+          "History.", NeoActionContract.Param.array("descriptions", NeoActionContract.TYPE_STRING,
+              true, "Descriptions.").allowingBlankItems()));
+      assertNull(NeoActionContract.validate(map, "history", new JSONObject()
+          .put("descriptions", new JSONArray().put("Cafe").put(" ").put(""))));
+      JSONObject error = errorOf(NeoActionContract.validate(map, "history", new JSONObject()
+          .put("descriptions", new JSONArray().put(" ").put(7))));
+      assertEquals("descriptions", error.getString("field"));
+    }
+
+    @Test
     @DisplayName("an array param given a scalar → 422")
     void arrayGivenScalar() throws Exception {
       JSONObject body = new JSONObject().put("lineId", "L1").put("ids", "T1");

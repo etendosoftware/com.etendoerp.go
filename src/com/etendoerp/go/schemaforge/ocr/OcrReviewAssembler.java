@@ -90,7 +90,9 @@ public final class OcrReviewAssembler {
     OcrVendorReview vendor = new OcrVendorReview(lookups);
     vendor.review(extraction, chosenVendor);
     String locationId = locationOf(vendor);
-    OcrLineReview lines = reviewLines(extraction, locationId, chosenVendor != null);
+    Party effective = vendor.effectiveVendor();
+    OcrLineReview lines = reviewLines(extraction, effective == null ? null : effective.id(),
+        locationId, chosenVendor != null);
     notices.addAll(vendor.notices());
     notices.addAll(lines.notices());
 
@@ -112,12 +114,12 @@ public final class OcrReviewAssembler {
         ? address.locationId() : null;
   }
 
-  private OcrLineReview reviewLines(JSONObject extraction, String locationId,
+  private OcrLineReview reviewLines(JSONObject extraction, String vendorId, String locationId,
       boolean vendorChosen) throws JSONException {
     String date = OcrJson.str(extraction, KEY_INVOICE_DATE);
     OcrLineReview lines = new OcrLineReview(lookups, type.getSpec());
     JSONArray rawLines = extraction.optJSONArray(OcrDocType.LINES_KEY);
-    lines.review(rawLines == null ? new JSONArray() : rawLines, locationId,
+    lines.review(rawLines == null ? new JSONArray() : rawLines, vendorId, locationId,
         OcrJson.filled(date) ? OcrJson.toIsoDate(date) : null, vendorChosen);
     return lines;
   }

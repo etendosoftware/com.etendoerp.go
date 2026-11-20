@@ -462,16 +462,18 @@ public final class NeoActionContract {
     private final String description;
     private final List<String> allowedValues;
     private final String refusalHint;
+    private final boolean blankItemsAllowed;
 
     private Param(String name, String type, String itemType, boolean required, String description,
         List<String> allowedValues) {
-      this(name, type, itemType, required, description, allowedValues, null);
+      this(name, type, itemType, required, description, allowedValues, null, false);
     }
 
-    @SuppressWarnings("java:S107") // one value object: the seven fields are the parameter itself
+    @SuppressWarnings("java:S107") // one value object: the eight fields are the parameter itself
     private Param(String name, String type, String itemType, boolean required, String description,
-        List<String> allowedValues, String refusalHint) {
+        List<String> allowedValues, String refusalHint, boolean blankItemsAllowed) {
       this.refusalHint = refusalHint;
+      this.blankItemsAllowed = blankItemsAllowed;
       this.name = name;
       this.type = type;
       this.itemType = itemType;
@@ -558,7 +560,19 @@ public final class NeoActionContract {
      * @return a copy carrying the hint
      */
     public Param withRefusalHint(String hint) {
-      return new Param(name, type, itemType, required, description, allowedValues, hint);
+      return new Param(name, type, itemType, required, description, allowedValues, hint,
+          blankItemsAllowed);
+    }
+
+    /**
+     * The same string-array parameter, accepting blank items (ETP-6364): for a list aligned by
+     * index with something else, where a blank entry keeps the position and is answered empty.
+     *
+     * @return a copy accepting blank string items
+     */
+    public Param allowingBlankItems() {
+      return new Param(name, type, itemType, required, description, allowedValues, refusalHint,
+          true);
     }
 
     /** @return the body key */
@@ -656,7 +670,8 @@ public final class NeoActionContract {
       for (int i = 0; i < arr.length(); i++) {
         Object item = arr.opt(i);
         boolean ok = TYPE_OBJECT.equals(itemType) ? item instanceof JSONObject
-            : item instanceof String && StringUtils.isNotBlank((String) item);
+            : item instanceof String
+                && (blankItemsAllowed || StringUtils.isNotBlank((String) item));
         if (!ok) {
           return false;
         }

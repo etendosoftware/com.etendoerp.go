@@ -143,6 +143,34 @@ class InboxMatcherTest {
     assertEquals("linked", line.getJSONObject("product").getString(STATE));
   }
 
+  // ---------------------------------------------------------------- vendor history (ETP-6364)
+
+  @Test
+  @DisplayName("ETP-6364: the linked vendor's history is asked and its one product is linked by history")
+  void theLinkedVendorsHistoryLinksTheLine() throws Exception {
+    lookups.history.put("Widget", List.of(new OcrLookups.HistoryProduct("H1", "Widget pro", 2)));
+
+    JSONObject product = build(extraction()).getJSONArray("lines").getJSONObject(0)
+        .getJSONObject("product");
+
+    assertEquals(List.of("V1"), lookups.historyAsks);
+    assertEquals("H1", product.getString("id"));
+    assertEquals("history", product.getString("matchedBy"));
+  }
+
+  @Test
+  @DisplayName("ETP-6364: a vendor that is not linked asks no history (null vendor)")
+  void anUnlinkedVendorHasNoHistory() throws Exception {
+    lookups.byTaxId.clear();
+    lookups.history.put("Widget", List.of(new OcrLookups.HistoryProduct("H1", "Widget pro", 2)));
+
+    JSONObject product = build(extraction()).getJSONArray("lines").getJSONObject(0)
+        .getJSONObject("product");
+
+    assertEquals(java.util.Arrays.asList((String) null), lookups.historyAsks);
+    assertEquals("P1", product.getString("id"));
+  }
+
   // ---------------------------------------------------------------- the happy path
 
   @Test

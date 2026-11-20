@@ -55,12 +55,14 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
+import com.etendoerp.go.schemaforge.ocr.OcrLookups.HistoryProduct;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Tax;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
 
 /**
  * Matches the lines of an extracted document (ETP-6048): the product of each one, with the rules of
- * the application's review ({@link OcrProductMatch}), and its tax.
+ * the application's review ({@link OcrProductMatch}, the vendor's history first when the vendor is
+ * linked, ETP-6364), and its tax.
  *
  * <p>The tax depends on the vendor's address. While there is none (a new vendor, a vendor without
  * address) the line is {@code pending_vendor}: it is resolved when the vendor exists, at confirm
@@ -88,12 +90,14 @@ public final class InboxLineMatcher {
    * Matches every line.
    *
    * @param items       the sanitized {@code line_items}, may be {@code null}
+   * @param vendorId    the linked vendor, {@code null} while there is none (no history is asked)
    * @param locationId  the vendor's address, {@code null} while unknown (taxes stay pending)
    * @param invoiceDate the invoice date as ISO, or {@code null} for today
    * @return the lines of the inbox document
    * @throws JSONException when an object cannot be built
    */
-  JSONArray review(JSONArray items, String locationId, String invoiceDate) throws JSONException {
+  JSONArray review(JSONArray items, String vendorId, String locationId, String invoiceDate)
+      throws JSONException {
     JSONArray out = new JSONArray();
     if (items == null || items.length() == 0) {
       return out;
@@ -103,15 +107,17 @@ public final class InboxLineMatcher {
       descriptions.add(OcrJson.str(items.optJSONObject(i), K_DESCRIPTION));
     }
     List<List<Candidate>> candidates = lookups.productCandidates(descriptions);
+    List<List<HistoryProduct>> history = lookups.productHistory(vendorId, descriptions);
     for (int i = 0; i < items.length(); i++) {
       List<Candidate> forLine = i < candidates.size() ? candidates.get(i) : List.of();
-      out.put(line(i, items.optJSONObject(i), forLine, locationId, invoiceDate));
+      List<HistoryProduct> booked = i < history.size() ? history.get(i) : List.of();
+      out.put(line(i, items.optJSONObject(i), forLine, booked, locationId, invoiceDate));
     }
     return out;
   }
 
   private JSONObject line(int index, JSONObject item, List<Candidate> candidates,
-      String locationId, String invoiceDate) throws JSONException {
+      List<HistoryProduct> history, String locationId, String invoiceDate) throws JSONException {
     BigDecimal rate = OcrJson.decimal(item, "tax_rate");
     JSONObject line = new JSONObject().put(K_INDEX, index)
         .put(K_DESCRIPTION, OcrJson.str(item, K_DESCRIPTION))
@@ -129,7 +135,7 @@ public final class InboxLineMatcher {
       line.put(K_UNIT_PRINTED, printedUnit);
     }
     line.put(K_PRODUCT, productWithDefaults(OcrJson.str(item, K_DESCRIPTION), candidates,
-        printedUnit));
+        history, printedUnit));
     line.put(K_TAX, tax(rate, locationId, invoiceDate));
     return line;
   }
@@ -141,8 +147,8 @@ public final class InboxLineMatcher {
    * printed unit is never applied to it.
    */
   private JSONObject productWithDefaults(String description, List<Candidate> candidates,
-      String printedUnit) throws JSONException {
-    JSONObject product = product(description, candidates);
+      List<HistoryProduct> history, String printedUnit) throws JSONException {
+    JSONObject product = product(description, candidates, history);
     if (S_NEW.equals(product.optString(K_STATE))) {
       JSONObject draft = newProductDefaults.draftFor(printedUnit);
       if (draft.length() > 0) {
@@ -190,9 +196,9 @@ public final class InboxLineMatcher {
     return value == null ? JSONObject.NULL : value.doubleValue();
   }
 
-  private static JSONObject product(String description, List<Candidate> candidates)
-      throws JSONException {
-    OcrProductMatch match = OcrProductMatch.classify(description, candidates);
+  private static JSONObject product(String description, List<Candidate> candidates,
+      List<HistoryProduct> history) throws JSONException {
+    OcrProductMatch match = OcrProductMatch.classify(description, candidates, history);
     JSONObject out = new JSONObject();
     switch (match.state()) {
       case AUTO_MATCHED:
@@ -209,10 +215,20 @@ public final class InboxLineMatcher {
     return out.put(K_CANDIDATES, candidatesOf(candidates));
   }
 
-  /** {@code exact} when the matched product has the very name of the line, else {@code similarity}. */
+  /**
+   * {@code history} when the product is the one the vendor's past lines with that description were
+   * booked to; {@code exact} when the matched product has the very name of the line, or the search
+   * marked it equal (its search key, or the name once accents are ignored), else
+   * {@code similarity}.
+   */
   private static String matchedBy(OcrProductMatch match, String description) {
-    boolean exact = OcrProductMatch.normalizeProductName(match.chosen().name())
-        .equals(OcrProductMatch.normalizeProductName(description));
+    if (match.fromHistory()) {
+      return "history";
+    }
+    String matchType = match.chosen().matchType();
+    boolean exact = "exact".equals(matchType) || "normalized".equals(matchType)
+        || OcrProductMatch.normalizeProductName(match.chosen().name())
+            .equals(OcrProductMatch.normalizeProductName(description));
     return exact ? "exact" : K_SIMILARITY;
   }
 
