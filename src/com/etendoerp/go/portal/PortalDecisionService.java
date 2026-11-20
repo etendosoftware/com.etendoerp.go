@@ -585,15 +585,34 @@ public class PortalDecisionService {
    */
   public void markSent(String decisionId) {
     try {
-      Decision decision;
       OBContext.setAdminMode(true);
       try {
-        // Read before the commit closes the session: the KPI below needs its action and tenant.
-        decision = findById(decisionId);
         OBDal.getInstance().getSession().createNativeQuery("UPDATE etgo_portal_decision"
             + " SET sent_at = now(), updated = now() WHERE etgo_portal_decision_id = :id")
             .setParameter("id", decisionId).executeUpdate();
         OBDal.getInstance().commitAndClose();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (RuntimeException e) {
+      log.error("Could not mark the decision {} as sent", decisionId, e);
+      OBDal.getInstance().rollbackAndClose();
+      return;
+    }
+    decisionEmailSentKpi(decisionId);
+  }
+
+  /**
+   * The {@code backend_portal_email_sent} KPI of a delivered confirmation, read after
+   * {@link #markSent} committed: a failure here only logs, it can never keep the decision's link
+   * from becoming usable.
+   */
+  private void decisionEmailSentKpi(String decisionId) {
+    try {
+      Decision decision;
+      OBContext.setAdminMode(true);
+      try {
+        decision = findById(decisionId);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -602,10 +621,16 @@ public class PortalDecisionService {
             decision.clientId);
       }
     } catch (RuntimeException e) {
-      log.error("Could not mark the decision {} as sent", decisionId, e);
-      OBDal.getInstance().rollbackAndClose();
+      log.debug("Portal KPI telemetry: the decision email could not be read: {}",
+          e.getMessage());
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } catch (RuntimeException closeFailure) {
+        log.debug("Portal KPI telemetry: rollback failed: {}", closeFailure.getMessage());
+      }
     }
   }
+
 
   // ─── Landing ─────────────────────────────────────────────────────────────
 

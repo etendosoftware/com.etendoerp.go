@@ -437,8 +437,6 @@ public class PortalKpiTelemetryTest {
     assertNothingEmittedBeforeTheSentinel();
   }
 
-  // ── fixtures ────────────────────────────────────────────────────────────────
-
   // ── ETP-6209: portal visits and portal emails ─────────────────────────────
 
   @Test
@@ -547,6 +545,8 @@ public class PortalKpiTelemetryTest {
   }
 
   /** Opens a visit of a fresh link and returns its {@code backend_portal_opened} properties. */
+  // ── fixtures ────────────────────────────────────────────────────────────────
+
   private static Map<String, Object> opened(String origin, PortalDocumentKind kind,
       String businessPartnerId) {
     PortalLink link = new PortalLink(uniqueLinkId(), CLIENT_ID, "Acme", "ORG-1",

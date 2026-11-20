@@ -42,7 +42,7 @@ import com.etendoerp.go.common.NeoCurrencyFormatConfig;
  */
 public class EmailAmountFormatTest {
 
-  private static final String NBSP = " ";
+  private static final String NBSP = "\u00A0";
   private static final NeoCurrencyFormatConfig EUROPEAN = new NeoCurrencyFormatConfig(".", ",");
   private static final NeoCurrencyFormatConfig ENGLISH = new NeoCurrencyFormatConfig(",", ".");
 

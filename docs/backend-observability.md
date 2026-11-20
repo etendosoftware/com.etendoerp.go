@@ -461,6 +461,9 @@ are unchanged.
 - **Portal emails by piece (marketing):** count of `backend_portal_email_sent` broken down by
   `piece` (and `doc_type` for `document_send`). Visits per email sent = `backend_portal_opened`
   ÷ `backend_portal_email_sent`, same period.
+- **Rotating the email signing secret** (`etendo.go.email.documentDownloadTokenSecret`) changes
+  every `third_party` pseudonym — the same customers count as new ones in the month of the
+  rotation — and every public logo reference (logos in emails already sent stop loading).
 - Per tenant: break down by `account_id`. The events carry no record id, so a document sent in one
   month and downloaded or answered in the next falls in different periods; read the ratio over
   windows long enough (a quarter) for that lag to wash out.
