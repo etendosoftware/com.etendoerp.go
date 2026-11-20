@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -44,7 +45,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.dal.core.DalThreadCleaner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
@@ -313,6 +316,142 @@ class NeoPrintAfterCompleteTest {
 
     assertEquals("SENDER", job.userId, "the marked job keeps the identity it was given");
     storeThroughTheWorker(job, MockedStatic::verifyNoInteractions);
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — the worker closes every session of its thread after a store")
+  void workerCleansEveryThreadSessionAfterAStore() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+
+    try (MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+      storeThroughTheWorker(job, usage -> { });
+      verify(cleaner, times(1)).cleanWithRollback();
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — a failed render still cleans the thread and never throws")
+  void failedRenderStillCleansTheThread() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenThrow(new IllegalStateException("boom"));
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+
+      assertEquals(NeoPrintableRenderer.Outcome.FAILED, NeoPrintAfterComplete.run(job));
+
+      verify(cleaner, times(1)).cleanWithRollback();
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — a cleanup that fails does not reach the caller and still drops the state")
+  void failingCleanupDoesNotPropagate() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+    doThrow(new IllegalStateException("This connection has been closed.")).when(cleaner)
+        .cleanWithRollback();
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenReturn(null);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<SessionHandler> handlerMock = mockStatic(SessionHandler.class);
+        MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+
+      assertEquals(NeoPrintableRenderer.Outcome.NOT_PRINTABLE, NeoPrintAfterComplete.run(job));
+
+      verify(cleaner, times(1)).cleanWithRollback();
+      handlerMock.verify(SessionHandler::deleteSessionHandler, times(1));
+      contextMock.verify(() -> OBContext.setOBContext((OBContext) null), times(1));
+      contextMock.verify(OBContext::clearAdminModeStack, times(1));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — a document that is not printable still cleans the thread")
+  void notPrintableStillCleansTheThread() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenReturn(null);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+
+      assertEquals(NeoPrintableRenderer.Outcome.NOT_PRINTABLE, NeoPrintAfterComplete.run(job));
+
+      verify(cleaner, times(1)).cleanWithRollback();
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — a document with a current PDF still cleans the thread")
+  void alreadyCurrentStillCleansTheThread() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+    NeoDocumentPdf.Result current = mock(NeoDocumentPdf.Result.class);
+    when(current.getStatus()).thenReturn(NeoDocumentPdf.Status.FOUND);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class, RETURNS_DEEP_STUBS);
+    when(dal.getSession()).thenReturn(session);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenReturn(entity);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+        MockedStatic<NeoAttachmentTarget> targetMock = mockStatic(NeoAttachmentTarget.class);
+        MockedStatic<NeoDocumentPdf> pdfMock = mockStatic(NeoDocumentPdf.class);
+        MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mock(ModelProvider.class));
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+      pdfMock.when(() -> NeoDocumentPdf.resolveStored(any(), any())).thenReturn(current);
+
+      assertEquals(NeoPrintableRenderer.Outcome.ALREADY_CURRENT, NeoPrintAfterComplete.run(job));
+
+      verify(cleaner, times(1)).cleanWithRollback();
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6399 — two jobs in a row each end with their own thread cleanup")
+  void twoJobsInARowEachCleanTheThread() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    DalThreadCleaner cleaner = mock(DalThreadCleaner.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(SFEntity.class, "ENTITY1")).thenReturn(null);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<DalThreadCleaner> cleanerMock = mockStatic(DalThreadCleaner.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      cleanerMock.when(DalThreadCleaner::getInstance).thenReturn(cleaner);
+
+      NeoPrintAfterComplete.run(job);
+      verify(cleaner, times(1)).cleanWithRollback();
+      NeoPrintAfterComplete.run(job);
+
+      verify(cleaner, times(2)).cleanWithRollback();
+    }
   }
 
   /** Runs the worker over a document with no current PDF, and checks the store and the usage. */
