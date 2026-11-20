@@ -58,8 +58,14 @@ public class HttpHubSpotClient implements HubSpotClient {
   @Override
   public Response send(String method, String path, JSONObject body)
       throws HubSpotUnreachableException {
+    return send(configuration.apiBaseUrl(), method, path, body);
+  }
+
+  @Override
+  public Response send(String baseUrl, String method, String path, JSONObject body)
+      throws HubSpotUnreachableException {
     HttpRequest request = HttpRequest.newBuilder()
-        .uri(URI.create(configuration.apiBaseUrl() + path))
+        .uri(URI.create(baseUrl + path))
         .timeout(TIMEOUT)
         .header("Authorization", "Bearer " + configuration.token())
         .header("Content-Type", "application/json")

@@ -19,6 +19,8 @@ package com.etendoerp.go.hubspot;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -31,6 +33,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+import java.time.Instant;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
@@ -48,6 +52,42 @@ import com.etendoerp.go.schemaforge.data.Account;
  * @covers com.etendoerp.go.hubspot.HubSpotOutbox
  */
 class HubSpotOutboxTest {
+
+  @Test
+  void theRegisterCountryIsKeptAsAnUpperCaseIsoCodeAndAnythingElseIsDropped() {
+    // ETP-6363: a marketing field, so an odd value is dropped rather than refusing the sign-up.
+    assertEquals("AR", HubSpotOutbox.countryCode(" ar "));
+    assertEquals("ES", HubSpotOutbox.countryCode("ES"));
+    assertNull(HubSpotOutbox.countryCode("ZZ"));
+    assertNull(HubSpotOutbox.countryCode("ESP"));
+    assertNull(HubSpotOutbox.countryCode(""));
+    assertNull(HubSpotOutbox.countryCode(null));
+  }
+
+  @Test
+  void theLeadAttributionKeepsOnlyWhatMayReachHubSpot() throws Exception {
+    // ETP-6363: the visitor cookie only when it is one, a web address, a bounded title.
+    JSONObject kept = new JSONObject(HubSpotOutbox.signupContext(new JSONObject()
+        .put("hutk", " 0123456789ABCDEF0123456789ABCDEF ")
+        .put("pageUri", "https://app.etendo.ai/?utm_source=google")
+        .put("pageName", "Etendo")
+        .put("email", "ana@empresa.es")));
+
+    assertEquals("0123456789abcdef0123456789abcdef", kept.getString("hutk"));
+    assertEquals("https://app.etendo.ai/?utm_source=google", kept.getString("pageUri"));
+    assertEquals("Etendo", kept.getString("pageName"));
+    assertFalse(kept.has("email"));
+  }
+
+  @Test
+  void aLeadAttributionWithNothingUsableIsNotKept() throws Exception {
+    assertNull(HubSpotOutbox.signupContext(null));
+    assertNull(HubSpotOutbox.signupContext(new JSONObject()));
+    assertNull(HubSpotOutbox.signupContext(new JSONObject().put("hutk", "not-a-cookie")
+        .put("pageUri", "javascript:alert(1)").put("pageName", "  ")));
+    assertEquals(255, new JSONObject(HubSpotOutbox.signupContext(new JSONObject()
+        .put("pageName", "x".repeat(400)))).getString("pageName").length());
+  }
 
   @Test
   void anAccountTheSignupApiCreatedIsNotReported() {
@@ -154,6 +194,44 @@ class HubSpotOutboxTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
       assertDoesNotThrow(() -> HubSpotOutbox.stripeEvent("invoice.paid", event));
+    }
+  }
+
+  @Test
+  void theFirstKeyActionIsTheEarliestMilestoneReached() {
+    List<String[]> rows = List.of(
+        new String[] { HubSpotOutboxStore.MILESTONE_INVOICE, "{\"at\":\"2026-11-03T10:00:00Z\"}" },
+        new String[] { HubSpotOutboxStore.MILESTONE_PRODUCT, "{\"at\":\"2026-11-02T09:30:00.250Z\"}" },
+        new String[] { HubSpotOutboxStore.MILESTONE_ORDER, "{\"at\":\"2026-11-02T11:00:00Z\"}" });
+
+    HubSpotOutbox.FirstKeyAction first = HubSpotOutbox.earliestMilestone(rows).orElseThrow();
+
+    assertEquals(HubSpotOutboxStore.MILESTONE_PRODUCT, first.action());
+    assertEquals(Instant.parse("2026-11-02T09:30:00.250Z"), first.at());
+  }
+
+  @Test
+  void noFirstKeyActionWithoutAKnownMilestoneAndAReadableDate() {
+    List<String[]> rows = List.of(
+        new String[] { "unknown", "{\"at\":\"2026-11-01T00:00:00Z\"}" },
+        new String[] { HubSpotOutboxStore.MILESTONE_PRODUCT, "not json" },
+        new String[] { HubSpotOutboxStore.MILESTONE_ORDER, "{\"at\":\"yesterday\"}" },
+        new String[] { HubSpotOutboxStore.MILESTONE_INVOICE, null });
+
+    assertTrue(HubSpotOutbox.earliestMilestone(rows).isEmpty());
+    assertTrue(HubSpotOutbox.earliestMilestone(List.of()).isEmpty());
+  }
+
+  @Test
+  void anUnreadableFirstKeyActionAnswersNothingAndDoesNotFailTheCaller() {
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenThrow(new IllegalStateException("no session"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      assertTrue(HubSpotOutbox.firstKeyAction("A1").isEmpty());
+      assertTrue(HubSpotOutbox.firstKeyAction(" ").isEmpty());
     }
   }
 }

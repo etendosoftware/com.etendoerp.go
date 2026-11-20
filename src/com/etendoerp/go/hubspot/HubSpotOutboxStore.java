@@ -34,6 +34,12 @@ import java.util.Optional;
 interface HubSpotOutboxStore {
 
   /** Event types, in the order a deal moves through them. */
+  /**
+   * ETP-6363 — the sign-up sent to HubSpot's sign-up form (Forms API), with its lead attribution,
+   * so HubSpot creates the contact with its original source. Reported with, and just before,
+   * {@link #ACCOUNT_CREATED}, which waits for that contact.
+   */
+  String SIGNUP_FORM = "SIGNUP_FORM";
   String ACCOUNT_CREATED = "ACCOUNT_CREATED";
   String DEMO_READY = "DEMO_READY";
   String DEMO_ENTERED = "DEMO_ENTERED";
@@ -355,10 +361,19 @@ interface HubSpotOutboxStore {
    * @param occurredAt    when the event happened at Stripe, or {@code null} for the demo events
    * @param phone         the account's phone, or {@code null}
    * @param sector        the business sector chosen at sign-up, or {@code null}
+   * @param countryCode   the country chosen at sign-up (ISO alpha-2), or {@code null}
    */
   record PendingEvent(String id, String accountId, String eventType, String environmentId,
       String payload, int attemptCount, Instant nextAttemptAt, String email, String name,
-      Instant occurredAt, String phone, String sector) {
+      Instant occurredAt, String phone, String sector, String countryCode) {
+
+    /** An event of an account with no country (ETP-6363: asked only from then on). */
+    PendingEvent(String id, String accountId, String eventType, String environmentId,
+        String payload, int attemptCount, Instant nextAttemptAt, String email, String name,
+        Instant occurredAt, String phone, String sector) {
+      this(id, accountId, eventType, environmentId, payload, attemptCount, nextAttemptAt, email,
+          name, occurredAt, phone, sector, null);
+    }
 
     /** An event of an account with no sector (ETP-6082: asked only from then on). */
     PendingEvent(String id, String accountId, String eventType, String environmentId,
