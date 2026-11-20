@@ -306,8 +306,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   /**
    * Creates the invoice from the receipt(s) or the purchase order and completes it in one step
    * (ETP-5381). Runs inside {@link #handle}'s admin-mode block, whose catches turn the exceptions
-   * into responses: a {@link DocumentCurrencyRate.MissingRateException} (ETP-5840, order route
-   * only) rolls the whole generation back and answers the 422 completion refusal.
+   * into responses: a {@link DocumentCurrencyRate.MissingRateException} (ETP-5840; every route
+   * since ETP-6365) rolls the whole generation back and answers the 422 completion refusal.
    */
   private NeoResponse createAndCompleteInvoice(NeoContext context, String specName,
       String recordId) throws JSONException {
@@ -322,6 +322,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       invoice = receiptIds.size() == 1
           ? createFromReceipt(receiptIds.get(0), body)
           : createFromReceipts(receiptIds, body);
+      // ETP-6365: no receipt route stored a rate (with or without a purchase order, one receipt or
+      // several): the invoice gets its own for its accounting date (last range of the day), as
+      // the order route does in createFromOrder; null when none is configured — refused below.
+      getSupport().propagateOrderRateToInvoice(null, invoice);
     } else {
       // The status error comes first, as on the sales route: the status guard of createFromOrder
       // runs after this block, so it is applied here too (a missing order is reported there).
@@ -350,12 +354,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
     // and closes the session, leaving `invoice` detached.
     String invoiceId = invoice.getId();
-    // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
-    // own accounting date; a foreign-currency one without a rate is refused before completing,
-    // and the generation rolled back (catch below) — nothing is left behind.
-    if (!SPEC_GOODS_RECEIPT.equals(specName)) {
-      DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
-    }
+    // ETP-5840: an invoice generated from an order or (ETP-6365) receipts got its rate
+    // recomputed for its own accounting date; a foreign-currency one without a rate is refused
+    // before completing, and the generation rolled back (catch below) — nothing is left behind.
+    DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
     // ETP-6179: the SIF fields the caller chose (or their defaults) before completing.
     InvoiceSifPreset.applyBeforeCompletion(invoice, context.getRequestBody());
     InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
@@ -785,7 +787,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // are all scoped to ONE source order and would be meaningless (or wrong) when receipts
     // span several orders or none. A bulk invoice therefore does not carry per-line
     // % Descuento nor a header total-discount from the source order(s) — a known, accepted
-    // gap relative to the single-receipt flow, not an oversight.
+    // gap relative to the single-receipt flow, not an oversight. The invoice's own rate is not
+    // order-scoped: createAndCompleteInvoice stores it for every receipt route (ETP-6365).
 
     return invoice;
   }
