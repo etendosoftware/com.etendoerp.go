@@ -333,6 +333,25 @@ class ConversionRateWrites {
   // --- shared --------------------------------------------------------------------------------
 
   /**
+   * The row {@code id} names when the current client may change it. A row the client can read is
+   * judged first, so a downloaded one — the client's or a System ({@code 0}) one, which is where
+   * the downloader writes — gets the synced-lock refusal, not a 404. A System row is never
+   * writable by a tenant, downloaded or not: it answers {@code null}, as an unknown id does.
+   *
+   * @param id the id of the request
+   * @return the row, or {@code null} when it is unknown, of another tenant or of System
+   * @throws ConversionRateRefusal {@code SYNCED_LOCKED} when the row is downloaded
+   */
+  ConversionRate writableRate(String id) {
+    ConversionRate row = store.readableRate(id);
+    if (row == null) {
+      return null;
+    }
+    checkEditable(row);
+    return store.isOwn(row) ? row : null;
+  }
+
+  /**
    * Every manual range can be changed or deleted, used in accounting or not: a posted document
    * keeps the rate it was posted with. Only a downloaded row is locked.
    */

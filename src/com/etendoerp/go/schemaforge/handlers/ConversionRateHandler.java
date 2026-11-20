@@ -93,7 +93,7 @@ public class ConversionRateHandler extends AbstractNeoHandler {
   }
 
   private NeoResponse delete(ConversionRateWrites writes, String recordId) {
-    ConversionRate row = store().ownRate(recordId);
+    ConversionRate row = writes.writableRate(recordId);
     if (row == null) {
       return ConversionRateResponses.notFound(recordId);
     }

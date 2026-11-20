@@ -44,6 +44,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.currency.Currency;
 
+import com.etendoerp.go.schemaforge.ConversionRateLookup;
 import com.etendoerp.go.schemaforge.handlers.ConversionRateRules.Range;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 
@@ -71,6 +72,11 @@ class ConversionRateStore {
   static final String SYSTEM_ID = "0";
 
   private static final String COL_ID = "c_currency_id";
+  /**
+   * The client's rows and the System ({@code 0}) ones, over alias {@code cr}: the rates the
+   * downloader writes are System rows, and a tenant reads them as its own (bind the client id).
+   */
+  private static final String CLIENT_OR_SYSTEM = " cr.ad_client_id IN (?, '0')";
   private static final String CURRENCY_COLUMNS = "c.c_currency_id, c.iso_code,"
       + " COALESCE(t.description, c.description) AS name,"
       + " COALESCE(t.cursymbol, c.cursymbol) AS symbol";
@@ -164,14 +170,14 @@ class ConversionRateStore {
   }
 
   /**
-   * The currencies that already have an active conversion rate of the client with
-   * {@code orgCurrencyId}, in either direction, on any date.
+   * The currencies that already have an active conversion rate of the client — or of System, where
+   * the downloaded rates live — with {@code orgCurrencyId}, in either direction, on any date.
    */
   Set<String> currenciesWithRates(String clientId, String orgCurrencyId) {
     Set<String> ids = new HashSet<>();
     String sql = "SELECT DISTINCT CASE WHEN cr.c_currency_id = ? THEN cr.c_currency_id_to"
         + " ELSE cr.c_currency_id END FROM c_conversion_rate cr"
-        + " WHERE cr.ad_client_id = ? AND cr.isactive = 'Y'"
+        + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y'"
         + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)";
     try (PreparedStatement ps = connection().prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
@@ -214,10 +220,11 @@ class ConversionRateStore {
   }
 
   /**
-   * One entry per currency with a range of the client against {@code orgCurrencyId} that contains
-   * the current moment, in either direction; the latest start wins, and the forward row (from the
-   * organization currency) when both directions start at once. The rate is always expressed as
-   * "1 organization currency = rate X".
+   * One entry per currency with a range of the client or of System against {@code orgCurrencyId}
+   * that contains the current moment, in either direction. The client's row wins over the System
+   * one (the precedence of {@link ConversionRateLookup}), then the latest start, then the forward
+   * row (from the organization currency) when both directions start at once. The rate is always
+   * expressed as "1 organization currency = rate X".
    */
   List<CurrentRate> currentRates(String clientId, String orgCurrencyId) {
     String sql = "SELECT " + CURRENCY_COLUMNS + ", cr.c_currency_id AS from_id, cr.multiplyrate,"
@@ -225,11 +232,11 @@ class ConversionRateStore {
         + " FROM c_conversion_rate cr"
         + " JOIN c_currency c ON c.c_currency_id = CASE WHEN cr.c_currency_id = ?"
         + " THEN cr.c_currency_id_to ELSE cr.c_currency_id END" + CURRENCY_TRL_JOIN
-        + " WHERE cr.ad_client_id = ? AND cr.isactive = 'Y' AND c.isactive = 'Y'"
+        + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y' AND c.isactive = 'Y'"
         + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)"
         + " AND cr.validfrom <= now()"
         + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= now()"
-        + " ORDER BY c.iso_code, cr.validfrom DESC,"
+        + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + ", cr.validfrom DESC,"
         + " CASE WHEN cr.c_currency_id = ? THEN 0 ELSE 1 END";
     Map<String, CurrentRate> byCurrency = new LinkedHashMap<>();
     try (PreparedStatement ps = connection().prepareStatement(sql)) {
@@ -256,7 +263,8 @@ class ConversionRateStore {
   }
 
   /**
-   * The latest {@code SUCCESS} run of the rate downloader for the client, or {@code null} when
+   * The latest {@code SUCCESS} run of the rate downloader for the client or for System (the
+   * downloader runs as System and logs there), or {@code null} when
    * there is none or the module is not installed. The log is per run, not per currency pair: a
    * run that failed any pair is {@code PARTIAL}/{@code FAILED} and is not counted.
    */
@@ -265,7 +273,7 @@ class ConversionRateStore {
       return null;
     }
     String sql = "SELECT MAX(l.sync_date) FROM smfcr_sync_log l"
-        + " WHERE l.ad_client_id = ? AND l.status = 'SUCCESS'";
+        + " WHERE l.ad_client_id IN (?, '0') AND l.status = 'SUCCESS'";
     try (PreparedStatement ps = connection().prepareStatement(sql)) {
       ps.setString(1, clientId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -282,10 +290,23 @@ class ConversionRateStore {
     return id == null ? null : OBDal.getInstance().get(ConversionRate.class, id);
   }
 
-  /** The row when it belongs to the current client, else {@code null} (unknown or foreign). */
-  ConversionRate ownRate(String id) {
+  /**
+   * The row when the current client can read it — its own or a System ({@code 0}) one, where the
+   * downloaded rates live — else {@code null} (unknown or of another tenant). Reading is all a
+   * System row allows: {@link ConversionRateWrites#writableRate} refuses to change it.
+   */
+  ConversionRate readableRate(String id) {
     ConversionRate row = rate(id);
-    return row != null && row.getClient().getId().equals(currentClientId()) ? row : null;
+    if (row == null) {
+      return null;
+    }
+    String owner = row.getClient().getId();
+    return owner.equals(currentClientId()) || SYSTEM_ID.equals(owner) ? row : null;
+  }
+
+  /** Whether {@code row} belongs to the current client (not to System, not to another tenant). */
+  boolean isOwn(ConversionRate row) {
+    return row.getClient().getId().equals(currentClientId());
   }
 
   /**

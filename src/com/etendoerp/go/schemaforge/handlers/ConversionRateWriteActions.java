@@ -153,7 +153,7 @@ final class ConversionRateWriteActions {
 
   private static NeoResponse updateRate(String recordId, JSONObject params,
       ConversionRateStore store, ConversionRateWrites writes) throws JSONException {
-    ConversionRate row = store.ownRate(recordId);
+    ConversionRate row = writes.writableRate(recordId);
     if (row == null) {
       return ConversionRateResponses.notFound(recordId);
     }

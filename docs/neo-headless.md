@@ -10087,6 +10087,11 @@ core's `TriggerHandler` (`ConversionRateTriggerBypass`):
 | `updateManualRate` ("Modificar la tasa") — action on the rate's id (either direction) | `{multipleRateBy, confirm?}` — always the forward rate (units of the other currency per 1 organization currency) | only the rate changes, on both rows (the inverse gets 1/X; a legacy range without its inverse gets one); the period never changes (delete and create again). **Without `confirm: true` nothing is saved** and the answer is `{saved:false, proposal:{forward:{fromIso, toIso, old, new}, inverse:{fromIso, toIso, old, new}, validFrom, validTo}, warning}` (`validTo` `null` when open; `warning` = `ETGO_ConvRateUpdateWarning`: "El cambio solo se aplica a los documentos en los que se seleccione la divisa a partir de ahora. Los documentos ya creados conservan el tipo de cambio que copiaron al seleccionar la divisa, y su contabilidad sigue usando ese tipo de cambio."). With `confirm: true` it saves and answers the forward row |
 | delete | — | deletes both rows; the range it had closed is **not** reopened |
 
+**System rows are read, never written.** `updateManualRate` and delete resolve the id among the
+client's rows **and** the System (`0`) ones (`ConversionRateWrites.writableRate`): a downloaded row
+of either answers 409 `ETGO_ConvRateSyncedLocked`; any other System row answers 404 like an unknown
+id or another tenant's row. Only the tenant's own non-downloaded rows are ever written.
+
 A range is the pair of rows with the same `ValidFrom`/`ValidTo`; `ValidTo` empty or in year 2999+
 means open. Refusals, all before anything is written (Spanish/English text in
 `messages/neo_hints_*.properties`, key in `error.messageKeys`, and `error.field` — the request
@@ -10106,7 +10111,7 @@ for `InvalidRate`, `validFromDate` for `InvalidValidFrom`/`FutureStart`/`Overlap
 | `ETGO_ConvRateUseActions` | 405 | a generic create or update reached the customization (only if the flags were opened again) |
 | `ETGO_ConvRateFutureStart` | 400 | start later than the server's current minute — "La fecha y hora de inicio no puede ser posterior al momento actual." |
 | `ETGO_ConvRateOverlap` | 409 | the new range falls inside a closed range, or does not start after the start of the range in force — "Ya existe una tasa de conversión para EUR → CHF en las fechas indicadas (01/11/2026 09:00 – 18/11/2026 14:29). Elija una fecha de inicio posterior al 18/11/2026 14:30." `{2}`–`{3}` is the colliding range (`dd/MM/yyyy HH:mm` in every language; an open end reads "sin fecha de fin" / "no end date", key `ETGO_ConvRateNoEndDate`); `{4}` is the start of the pair's open range, or, with none, the latest end of the colliding ranges. Also the translation of core's 20504 (the ranges are read again after the rollback to fill the dates) |
-| `ETGO_ConvRateSyncedLocked` | 409 | update/delete of a downloaded row (also the translation of `SMFCR_CannotDeleteSyncedRate`) |
+| `ETGO_ConvRateSyncedLocked` | 409 | update/delete of a downloaded row — the tenant's own or a System (`0`) one, where the downloader writes (also the translation of `SMFCR_CannotDeleteSyncedRate`) |
 | `ETGO_ConvRateNoOrgCurrency` | 422 | the organization has no currency |
 
 **State — one virtual column** on `C_Conversion_Rate`, listed, filtered and sorted like any other
@@ -10130,10 +10135,10 @@ follow. The function is total (every edge case answers `HISTORIC`).
 
 | Action | Parameters | Answer (`response.data`) |
 |---|---|---|
-| `manualCurrencyOptions` | optional `withoutRates` (boolean, default `false`; `"true"`/`"false"` accepted on the query string) | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; with `withoutRates: true` also minus every currency that already has an active `C_Conversion_Rate` row of the client with the organization currency, in either direction and on any date — the list of the "Nueva divisa" popup (a currency that already has rates gets a new range from its own "Nueva tasa · ISO" entry). `name`/`symbol` in the request language |
+| `manualCurrencyOptions` | optional `withoutRates` (boolean, default `false`; `"true"`/`"false"` accepted on the query string) | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; with `withoutRates: true` also minus every currency that already has an active `C_Conversion_Rate` row of the client (or of System) with the organization currency, in either direction and on any date — the list of the "Nueva divisa" popup (a currency that already has rates gets a new range from its own "Nueva tasa · ISO" entry). `name`/`symbol` in the request language |
 | `previewManualRate` | `toCurrency`, `multipleRateBy`, optional `validFromDate` (default now), optional `mode` (`newCurrency` = the checks of `createManualCurrency`, `newRate` = those of `createManualRate`; absent = no check on existing rates) | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey, errorField}` with the refusal a create would get (same text as the create; `errorField` as `error.field` above, absent for refusals bound to no field). Writes nothing |
 | `serverClock` | — | `{now: "yyyy-MM-dd'T'HH:mm:00"}` — the server's current minute, server-local wall clock (the zone `validFromDate` is read in); the default start of a new rate |
-| `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now (latest start wins); `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
+| `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now, of the client or of System (the downloader's rows): the client's row wins over the System one, as in `ConversionRateLookup`, then the latest start; `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client or of System, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
 
 On MCP `etendo_create`, `resolveServerCreateFields` fills `currency`, `conversionRateType` and
 `divideRateBy` before the mandatory pre-check, and `etendo_schema(view:"create")` lists them as
