@@ -333,26 +333,11 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * Verifies default binary content type fallback when metadata is blank.
-   */
-  @Test
-  public void resolveContentTypeReturnsDefaultForBlankValues() throws Exception {
-    String fromNull = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, (Object) null);
-    String fromBlank = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "   ");
-    String fromValue = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "text/plain");
-
-    assertEquals("application/octet-stream", fromNull);
-    assertEquals("application/octet-stream", fromBlank);
-    assertEquals("text/plain", fromValue);
-  }
-
-  /**
    * Verifies that content disposition includes both ASCII and RFC 5987 entries.
    */
   @Test
-  public void buildContentDispositionIncludesAsciiAndUtf8Filename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "invoice 2026.pdf");
+  public void contentDispositionIncludesAsciiAndUtf8Filename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("invoice 2026.pdf");
 
     assertTrue(disposition.contains("filename=\"invoice 2026.pdf\""));
     assertTrue(disposition.contains("filename*=UTF-8''invoice%202026.pdf"));
@@ -362,9 +347,8 @@ public class NeoAttachmentsHelperTest {
    * Verifies that dangerous quotes in file names are normalized.
    */
   @Test
-  public void buildContentDispositionReplacesQuotesInFilename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "in\"voice\".pdf");
+  public void contentDispositionReplacesQuotesInFilename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("in\"voice\".pdf");
 
     assertTrue(disposition.contains("filename=\"in_voice_.pdf\""));
   }
@@ -801,6 +785,9 @@ public class NeoAttachmentsHelperTest {
       verify(aim, times(1)).download(eq("ATT-OTHER"), any());
       verify(aim, times(1)).download(eq("ATT-MAIN"), any());
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response).setContentType("application/zip");
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
+      verify(response).setHeader("Cache-Control", "no-store");
 
       assertEquals(
           new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
@@ -1908,7 +1895,55 @@ public class NeoAttachmentsHelperTest {
     verify(response).setStatus(422);
     verify(response).setContentType("application/json");
     verify(response).setCharacterEncoding(StandardCharsets.UTF_8.name());
+    verify(response).setHeader("Cache-Control", "no-store");
+    verify(response).setHeader("X-Content-Type-Options", "nosniff");
     assertTrue(sink.toString().contains("unprocessable"));
+  }
+
+  /**
+   * ETP-4571 — a legacy record stored as HTML or SVG is served inert: type from the extension
+   * allow-list (never the stored one), attachment, nosniff, no-store, sandbox CSP.
+   */
+  @Test
+  public void handleDownloadServesLegacyActiveTypesInert() throws Exception {
+    String[][] cases = { { "page.html", "text/html", "application/octet-stream" },
+        { "logo.svg", "image/svg+xml", "application/octet-stream" },
+        { "informe.v2.final.pdf", "text/html", "application/pdf" },
+        { "factura_año.pdf", "application/pdf", "application/pdf" } };
+    for (String[] c : cases) {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      stubOutputStream(response);
+      Attachment attachment = stubAttachment("ATT1", c[0]);
+      when(attachment.getDataType()).thenReturn(c[1]);
+      AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
+
+      try (MockedStatic<TenantOwnership> ownership = Mockito.mockStatic(TenantOwnership.class);
+          MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+        ownership.when(() -> TenantOwnership.loadOwned(Attachment.class, "ATT1"))
+            .thenReturn(attachment);
+        weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(
+            AttachImplementationManager.class)).thenReturn(aim);
+
+        NeoAttachmentsDownloader.handleDownload("ATT1", response);
+      }
+
+      verify(response).setContentType(c[2]);
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
+      verify(response).setHeader("Cache-Control", "no-store");
+      verify(response).setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
+      verify(response).setHeader("Content-Disposition",
+          NeoDownloadHeaders.contentDisposition(c[0]));
+    }
+  }
+
+  /** ETP-4571 — a Unicode name keeps its RFC 5987 form; a multi-dot name stays intact. */
+  @Test
+  public void contentDispositionKeepsUnicodeAndMultiDotNames() {
+    String unicode = NeoDownloadHeaders.contentDisposition("factura_año.pdf");
+    assertTrue(unicode.startsWith("attachment;"));
+    assertTrue(unicode.contains("filename*=UTF-8''factura_a%C3%B1o.pdf"));
+    assertTrue(NeoDownloadHeaders.contentDisposition("informe.v2.final.pdf")
+        .contains("filename=\"informe.v2.final.pdf\""));
   }
 
   /**

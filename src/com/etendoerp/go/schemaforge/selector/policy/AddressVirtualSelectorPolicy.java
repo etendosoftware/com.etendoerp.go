@@ -207,6 +207,42 @@ public final class AddressVirtualSelectorPolicy {
   }
 
   /**
+   * The DAL property behind a published structured-address field name, when {@code dalEntity}'s
+   * OWN table carries that column directly — e.g. {@code bp-location}'s entity, which IS
+   * {@code C_Location} rather than a wrapper around it (ETP-5806 CP-12g, QA finding).
+   *
+   * <p><b>Why this exists alongside {@link #resolveVirtualColumns}.</b> That method only ever
+   * answers for a <em>wrapper</em> entity ({@link #isAddressWrapper}) — one whose own table does
+   * NOT carry the column, and that reaches it through a separate FK-linked
+   * {@code C_Location}/{@code C_BPartner_Location} row. {@code bp-location}'s entity is neither: it
+   * IS {@code C_Location}, so {@code isAddressWrapper} answers {@code false} for it and
+   * {@code streetName}/{@code buildingNumber}/{@code buildingName} are reported as
+   * {@code unknownFields} by {@code McpWriteRequestSupport#reportIfUnknown} even though
+   * {@link com.etendoerp.go.schemaforge.BpLocationHandler} recognises and persists them under
+   * every one of these 3 spellings. The field IS written correctly; only the write response's
+   * {@code unknownFields} lied about it, which an agent client reads as a silent failure.
+   *
+   * <p>Structural: it asks "does THIS entity's own table carry the backing AD column for this
+   * published name", a question answerable for any entity and naming none — not a branch on
+   * {@code bp-location} specifically. An entity that is itself {@code C_Location} (today, only
+   * {@code bp-location}) is the only one that can ever answer non-{@code null} here, but nothing
+   * about the check names that spec.
+   *
+   * @param dalEntity     the DAL entity a write targets; {@code null} answers {@code null}
+   * @param publishedName the field name as a caller may have sent it, e.g. {@code streetName}
+   * @return the property, when {@code dalEntity}'s own table carries the backing column;
+   *     {@code null} otherwise (including when {@code publishedName} is not one of the 3
+   *     structured-address fields)
+   */
+  public static Property ownPropertyForPublishedName(Entity dalEntity, String publishedName) {
+    if (dalEntity == null) {
+      return null;
+    }
+    String rawColumn = rawColumnNameForPublishedName(publishedName);
+    return rawColumn == null ? null : dalEntity.getPropertyByColumnName(rawColumn, false);
+  }
+
+  /**
    * The wrapper's own fields that the handler resolves server-side, by published field name.
    *
    * @param entity source Schema Forge entity

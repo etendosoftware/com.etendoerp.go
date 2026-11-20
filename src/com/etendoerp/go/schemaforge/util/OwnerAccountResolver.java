@@ -16,6 +16,11 @@
  */
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -31,8 +36,36 @@ import com.etendoerp.go.schemaforge.data.Account;
  */
 public final class OwnerAccountResolver {
 
+  /** How long an answer is kept: an ownership transfer shows up within this. */
+  public static final long TTL_MILLIS = 60_000L;
+  static final int MAX_ENTRIES = 256;
+
+  private static final class Cached {
+    private final String accountId;
+    private final long until;
+
+    Cached(String accountId, long until) {
+      this.accountId = accountId;
+      this.until = until;
+    }
+  }
+
+  // ETP-6386: one cache for every caller (the session payload is read on page load and by every
+  // report query). Access order, so eviction drops the least recently used client.
+  private static final Map<String, Cached> CACHE = new LinkedHashMap<>(16, 0.75f, true);
+  private static final AtomicReference<LongSupplier> CLOCK =
+      new AtomicReference<>(System::currentTimeMillis);
+
   private OwnerAccountResolver() {
     // static helper
+  }
+
+  /** Test seam: replaces the clock and empties the cache; {@code null} restores the real clock. */
+  static void resetForTest(LongSupplier testClock) {
+    CLOCK.set(testClock == null ? System::currentTimeMillis : testClock);
+    synchronized (CACHE) {
+      CACHE.clear();
+    }
   }
 
   /**
@@ -40,15 +73,32 @@ public final class OwnerAccountResolver {
    *
    * @param clientId the {@code AD_Client_ID}
    * @return the {@code ETGO_Account} id, or {@code null} when the client has no owner flagged (a
-   *     legacy client), the owner has no email or no active account matches: absent, never guessed
+   *     legacy client), the owner has no email or no active account matches: absent, never guessed.
+   *     Answers (a {@code null} too) are cached for {@link #TTL_MILLIS}; a failed lookup throws and
+   *     is not cached.
    */
   public static String findOwnerAccountId(String clientId) {
+    long now = CLOCK.get().getAsLong();
+    synchronized (CACHE) {
+      Cached cached = CACHE.get(clientId);
+      if (cached != null && cached.until > now) {
+        return cached.accountId;
+      }
+    }
+    String accountId;
     OBContext.setAdminMode(true);
     try {
-      return lookup(clientId);
+      accountId = lookup(clientId);
     } finally {
       OBContext.restorePreviousMode();
     }
+    synchronized (CACHE) {
+      CACHE.put(clientId, new Cached(accountId, now + TTL_MILLIS));
+      if (CACHE.size() > MAX_ENTRIES) {
+        CACHE.remove(CACHE.keySet().iterator().next());
+      }
+    }
+    return accountId;
   }
 
   private static String lookup(String clientId) {
