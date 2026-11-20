@@ -125,6 +125,8 @@ public class McpToolRouter {
   private static final String HTTP_METHOD_POST = "POST";
   private static final String HTTP_METHOD_PUT = "PUT";
   private static final String HTTP_METHOD_DELETE = "DELETE";
+  /** The selector search parameter of the REST endpoint ({@code NeoSelectorEndpoint}). */
+  private static final String SELECTOR_SEARCH_PARAM = "q";
   /** DAL property names the line-policy injection keys off (IMP-15). */
   /** The batch tool's own name, used by the router switch and in its refusal envelopes. */
   private static final String TOOL_NEO_BATCH = "etendo_batch";
@@ -1414,7 +1416,7 @@ public class McpToolRouter {
         .surface(NeoExtensionSurface.SELECTOR)
         .channel(NeoExtensionChannel.MCP)
         .context(McpHookExecutor.buildSelectorHookContext(
-            specName, entityName, columnName, contextParams, adTab, sfEntity))
+            specName, entityName, columnName, withSearch(contextParams, query), adTab, sfEntity))
         .build();
 
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(selectorRequest);
@@ -1441,6 +1443,24 @@ public class McpToolRouter {
     NeoResponse response = McpSelectorContextHelper.withDiagnostics(
         neoResponse, columnName, contextParams);
     return McpHookExecutor.neoResponseToMcpResult(response);
+  }
+
+  /**
+   * The selector context a customization receives, with the search as {@code q} — the parameter
+   * the REST selector endpoint reads ({@code NeoSelectorEndpoint}) — so a field served by the
+   * entity's own SELECTOR customization is searched on MCP as on REST (ETP-6365). Before, the
+   * {@code query} argument reached the generic selector only, and a customization listed every
+   * candidate whatever was searched. The generic query keeps its own copy without it.
+   */
+  private static Map<String, String> withSearch(Map<String, String> contextParams, String query) {
+    Map<String, String> params = new HashMap<>();
+    if (contextParams != null) {
+      params.putAll(contextParams);
+    }
+    if (StringUtils.isNotBlank(query)) {
+      params.put(SELECTOR_SEARCH_PARAM, query);
+    }
+    return params;
   }
 
   // ── etendo_defaults ──────────────────────────────────────────────────────

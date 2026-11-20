@@ -76,6 +76,7 @@ final class HeaderCurrencySelector {
   private static final String KEY_ID = "id";
   private static final String KEY_ISO = "isoCode";
   private static final String KEY_NAME = "name";
+  private static final String KEY_LABEL = "label";
 
   private HeaderCurrencySelector() {
   }
@@ -135,7 +136,7 @@ final class HeaderCurrencySelector {
     for (String id : ids) {
       String[] isoAndName = named.get(id);
       if (isoAndName != null) {
-        items.add(new JSONObject().put(KEY_ID, id).put("label", isoAndName[0])
+        items.add(new JSONObject().put(KEY_ID, id).put(KEY_LABEL, isoAndName[0])
             .put(KEY_ISO, isoAndName[0]).put(KEY_NAME, isoAndName[1]));
       }
     }
@@ -162,7 +163,10 @@ final class HeaderCurrencySelector {
     return named;
   }
 
-  /** The items whose ISO code or name contains {@code search}, ignoring case; all when blank. */
+  /**
+   * The items whose ISO code, name or label contains {@code search}, ignoring case; all when blank,
+   * none (an empty page, {@code totalCount} 0) when nothing matches.
+   */
   private static List<JSONObject> filter(List<JSONObject> items, String search) {
     if (StringUtils.isBlank(search)) {
       return items;
@@ -170,7 +174,8 @@ final class HeaderCurrencySelector {
     String needle = search.trim().toLowerCase(Locale.ROOT);
     List<JSONObject> matching = new ArrayList<>();
     for (JSONObject item : items) {
-      if (contains(item.optString(KEY_ISO), needle) || contains(item.optString(KEY_NAME), needle)) {
+      if (contains(item.optString(KEY_ISO), needle) || contains(item.optString(KEY_NAME), needle)
+          || contains(item.optString(KEY_LABEL), needle)) {
         matching.add(item);
       }
     }
@@ -202,7 +207,11 @@ final class HeaderCurrencySelector {
     return null;
   }
 
-  /** A parameter of the context (MCP, write check), else of the current HTTP request (REST). */
+  /**
+   * A parameter of the context — MCP {@code etendo_selectors} puts its {@code query} there as
+   * {@code q}, the write check and the name resolution their synthetic one — else of the current
+   * HTTP request (REST {@code ?q=}, read by {@code NeoSelectorEndpoint}).
+   */
   private static String param(NeoContext context, String name) {
     Map<String, String> query = context.getQueryParams();
     String value = query != null ? StringUtils.trimToNull(query.get(name)) : null;
