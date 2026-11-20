@@ -22,10 +22,23 @@ alongside the environment/role-list payload, for backend-only flags that must be
 tenant or role exists — the signup wizard runs ahead of both, so it cannot use the role-scoped
 `capabilities` map `SFWindowAccessMap` serves elsewhere (§8c of `docs/neo-headless.md`). Today it
 carries a single key, `structuredAddressForSepa` (`GoFeatureFlags.isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)`,
-environment-wide, no per-account targeting), which the wizard's Company step reads to decide
-whether to render the structured Street/Number/Building Name/City block or the legacy single
-address field. Add future onboarding-time backend-only flags to this same object rather than
-inventing a second capabilities endpoint.
+per-account targeted, see the ETP-5806 follow-up in `docs/feature-flags-and-tenant-upgrade.md`), which
+the wizard's Company step reads to decide whether to render the structured Street/Number/Building
+Name/City block or the legacy single address field. Add future onboarding-time backend-only flags to
+this same object rather than inventing a second capabilities endpoint.
+
+**`buildSessionCapabilities` is called from every session-creation path, not only session restore
+(ETP-5806 follow-up).** `EtendoGoJwtServlet#writeSessionResponse` — the shared tail of register,
+login and SSO — populates `capabilities` exactly the same way `handleSessionRestore` does. Before
+this fix, only session restore (`GET /sws/go/session`) carried the key: register/login/SSO responses
+omitted it entirely, so `capabilities.structuredAddressForSepa` stayed stuck at its frontend "unknown"
+default (`{}`) for the **entire** onboarding session of a brand-new account — the mount-time
+session-restore call 401s for a not-yet-authenticated visitor, and nothing ever refreshed it after the
+account actually signed up or logged in. Every fresh sign-up therefore saw the legacy single-line
+address field in the Company step regardless of the flag's real value. The frontend
+(`OnboardingFlow.jsx`, `postAuth.js`, `LoginStep.jsx`, `RegisterStep.jsx`) now forwards the
+`capabilities` object from both register (password + SSO) and login (password + SSO) responses into
+`setCapabilities`, matching what session-restore already did.
 
 Client resolution never uses the company name (ETP-5548). The classic path
 creates the client under a **provisioning name** (`ProvisioningClientName`,
