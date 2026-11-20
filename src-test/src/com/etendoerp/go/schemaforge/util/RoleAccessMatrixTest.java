@@ -49,6 +49,9 @@ import org.openbravo.model.ad.ui.Window;
  * Unit tests for {@link RoleAccessMatrix}'s pure row-building edge cases (ETP-5485). The
  * end-to-end tier resolution through real OBCriteria mocks is covered by {@code
  * SFRolesOverviewTest} and {@code SFSystemRoleTemplatesTest}, which both call this builder.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.RoleAccessMatrix
+ * @covers com.etendoerp.go.schemaforge.util.ReportAccessCatalog
  */
 class RoleAccessMatrixTest {
 
@@ -230,5 +233,32 @@ class RoleAccessMatrixTest {
     }
     assertEquals(ReportAccessCatalog.ROWS.size(), count);
     assertTrue(granted);
+  }
+
+  @Test
+  @DisplayName("reportsMatrix groups the aging schedules under Treasury, apart from Finance")
+  void testReportsMatrixGroupsAgingSchedulesUnderTreasury() throws Exception {
+    // The SPA matches this string against its menu.json group name and i18n key verbatim.
+    assertEquals("Treasury", ReportAccessCatalog.TREASURY_CATEGORY);
+
+    JSONObject reportsMatrix = RoleAccessMatrix.buildReportsMatrix(Map.of("r1", Map.of()));
+
+    JSONArray categories = reportsMatrix.getJSONArray("categories");
+    assertEquals(3, categories.length());
+    assertEquals(ReportAccessCatalog.FINANCE_CATEGORY, categories.getJSONObject(0).getString("name"));
+    assertEquals(6, categories.getJSONObject(0).getJSONArray("reports").length());
+    assertEquals(ReportAccessCatalog.INVENTORY_CATEGORY,
+        categories.getJSONObject(1).getString("name"));
+    assertEquals(1, categories.getJSONObject(1).getJSONArray("reports").length());
+
+    JSONObject treasury = categories.getJSONObject(2);
+    assertEquals(ReportAccessCatalog.TREASURY_CATEGORY, treasury.getString("name"));
+    JSONArray treasuryReports = treasury.getJSONArray("reports");
+    assertEquals(2, treasuryReports.length());
+    // Rows sort by name: "Aging Report (Payables)" before "Aging Report (Receivables)".
+    assertEquals("aging-payable", treasuryReports.getJSONObject(0).getString("id"));
+    assertEquals("aging-receivable", treasuryReports.getJSONObject(1).getString("id"));
+    assertEquals(RoleAccessMatrix.NONE,
+        treasuryReports.getJSONObject(0).getJSONObject("access").getString("r1"));
   }
 }
