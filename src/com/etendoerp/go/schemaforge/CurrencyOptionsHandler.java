@@ -227,7 +227,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * Total: without a session, or without a readable list, it never throws and never honours the
    * parameter.
    */
-  private static String readableOrganization(String requested, OBContext obCtx) {
+  static String readableOrganization(String requested, OBContext obCtx) {
     if (obCtx == null) {
       return null; // no session: no organization to fall back to, and none to trust
     }
@@ -362,7 +362,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * currency with no range at all is not offered; one whose ranges do not cover the reference date
    * is, with {@code rate: null} (ETP-5840 plan de pruebas, casos 8 / N2).
    */
-  private static Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
+  static Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
       String clientId, String orgId) throws java.sql.SQLException {
     Map<String, String> currencies = new LinkedHashMap<>();
     try (PreparedStatement ps = conn.prepareStatement(

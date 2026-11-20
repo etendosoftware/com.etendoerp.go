@@ -169,6 +169,26 @@ public class NeoSelectorService {
   }
 
   /**
+   * The candidates the entity's own SELECTOR customization serves for {@code fieldName}, searched
+   * by {@code search}, or {@code null} when the field is served by the generic selector (ETP-6365).
+   * A field can have its own picker — the payment method of the document headers, the currency of
+   * the headers that route {@code currencyOptions} — and a caller that resolves a value by name
+   * must read the same list the app and {@code etendo_selectors} show. Structural: the entity's
+   * customization answers or not; no entity or field is named here.
+   *
+   * @param sfEntity      the Schema Forge entity written
+   * @param fieldName     the DAL property name of the reference
+   * @param search        the search text
+   * @param limit         the page size
+   * @param contextParams the selector context
+   * @return the customization's response, or {@code null}
+   */
+  public static NeoResponse queryCustomizedSelector(SFEntity sfEntity, String fieldName,
+      String search, int limit, Map<String, String> contextParams) {
+    return NeoCustomizedSelectorCheck.query(sfEntity, fieldName, search, limit, contextParams);
+  }
+
+  /**
    * Query selector values using an AD_Column directly, bypassing ETGO_SF_FIELD lookup.
    * Used by the MCP layer to resolve FK selectors for ALL dictionary columns,
    * not just those included in ETGO_SF_FIELD configuration.

@@ -846,10 +846,12 @@ public class McpToolRouter {
     // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
     // ETP-5535: a child's selectors also see its parent record, as etendo_selectors' parentContext
     // would carry it — a line's tax rule reads the header's order date.
-    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+    // ETP-6365: with the SF entity, so a name the field's own picker lists resolves too.
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
         McpSelectorContextHelper.buildSelectorContextParams(
             McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, filteredBody, null, null),
-            adTab), log);
+            adTab), log, value -> false);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
     }
@@ -1139,8 +1141,9 @@ public class McpToolRouter {
       return wrapAsErrorContent(imageError);
     }
 
-    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
-        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log, value -> false);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
     }
@@ -2044,7 +2047,8 @@ public class McpToolRouter {
     // parent nowhere in the body yet — BatchService injects it only when the record is created —
     // exactly the reason McpLinePriceInjector below takes op.parentId() too. A placeholder that is
     // somehow still unresolved is skipped and the op resolves with the pre-ETP-5535 context.
-    JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
+    JSONObject fkError = McpFkResolver.resolveFkNames(body,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
         McpSelectorContextHelper.buildSelectorContextParams(
             McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, body, op.parentId(),
                 value -> value.startsWith(BatchService.REF_PREFIX)),

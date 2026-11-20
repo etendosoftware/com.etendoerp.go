@@ -195,10 +195,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+    NeoResponse ownSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
-    if (paymentMethodSelector != null) {
-      return paymentMethodSelector;
+    if (ownSelector == null) {
+      // ETP-6365: the header currency's selector lists what currencyOptions lists, on every channel
+      ownSelector = HeaderCurrencySelector.handleIfCurrencySelector(context);
+    }
+    if (ownSelector != null) {
+      return ownSelector;
     }
     // ETP-5692: completed-invoice write fence + unpost status gate, before anything is captured.
     NeoResponse invoiceGuard =

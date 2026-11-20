@@ -1437,8 +1437,28 @@ the generic selector; `true`/`false` replaces its answer), resolved with
 lists from, scoped by the record's (else the session's) client and organization. Consequence on
 every channel alike: a header currency with no range against the organization currency is refused,
 even EUR/USD/GBP — the app never offers it either. A failure while answering refuses the write as
-not verifiable (fail closed). No selector the UI shows changes, and `etendo_selectors` on a header
-`currency` still answers the generic allowlist; the header's offered list is `currencyOptions`.
+not verifiable (fail closed).
+
+**The header currency's selector is that same list (ETP-6365, MCP parity).** The five header
+customizations serve the SELECTOR of `currency` / `C_Currency_ID` themselves
+(`HeaderCurrencySelector.handleIfCurrencySelector`, right after the payment-method selector in
+their `handle`): `{items:[{id, label, isoCode, name}], columns, totalCount, hasMore}`, the
+organization currency first and then by ISO code exactly as `currencyOptions` lists them (`label` is
+the ISO code, `C_Currency`'s identifier; `name` in the request language), searched by `q` on ISO code
+or name, paged by `limit`/`offset`. The list depends on no date, so a selector call needs none;
+organization = the request's `organization` when the role can read it, else the session's. So REST
+`…/selectors/currency`, MCP `etendo_selectors` and the write check read one list. **Names on MCP
+writes:** `McpFkResolver` now carries the SF entity (`McpFkResolver.Target`) and, when the generic
+selector finds nothing, looks the value up in the list the entity's own SELECTOR customization
+serves (`NeoSelectorService.queryCustomizedSelector` → `NeoCustomizedSelectorCheck.query`, the same
+hook chain and synthetic request as the write check): `currency: "CHF"` or `"Franco Suizo"` resolves
+to the id. Structural: it applies to every field an entity serves itself, only for values the
+generic selector did not find, so nothing that resolved before resolves differently. Other Currency
+pickers (financial accounts, G/L journals…) keep the allowlist. UI: the five header forms already
+pick the currency from `currencyOptions` (`CurrencyRatePicker`) — except the purchase invoice, whose
+form entity is `invoice`, which the SPA's `isCurrencyRateSelectorField` does not match: its header
+currency field uses the generic selector and now lists the `currencyOptions` currencies instead of
+EUR/USD/GBP, the list its own save already enforced.
 
 Tests: `NeoReferenceSelectorValidationTest` (customization answer replaces / defers to the
 selector), `CurrencyOptionsHandlerTest` (`offersHeaderCurrency`).
@@ -7258,7 +7278,9 @@ name. The ACTION sub-endpoint now passes the query string to the hooks
 (`NeoSubEndpointDispatcher`, as the defaults sub-endpoint already did, ETP-5680).
 ETP-6365: the write validation of the header `currency` accepts exactly what this action lists
 (`CurrencyOptionsHandler.offersHeaderCurrency`, answered through `NeoHandler#offersReference`;
-see §4.3.7 *A write never SETS a reference the app would not offer*).
+see §4.3.7 *A write never SETS a reference the app would not offer*). The header's `currency` selector serves the
+same list (`HeaderCurrencySelector`), so `etendo_selectors` and a currency named on an MCP write
+(`"CHF"`) agree with it.
 
 **Refusal body** (`DocumentRateMessages`):
 `{"error":{"status":422,"code":"exchange_rate_missing"|"exchange_rate_empty"|"exchange_rate_missing_on_complete","message":<translated text>,"messageKeys":[…],"messageParams":{…}}}`.
