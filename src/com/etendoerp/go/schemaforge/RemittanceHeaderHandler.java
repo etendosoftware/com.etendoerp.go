@@ -121,7 +121,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>The handler keeps the hooks and the seams; the work is split by responsibility into
  * {@link RemittanceHeaderWrites} (writes), {@link RemittanceHeaderSelectors} (selectors),
  * {@link RemittanceNameCallout} (callouts and the suggested name),
- * {@link RemittanceSepaFileDataAction} ({@code sepaFileData}) and {@link RemittanceRequestParams}
+ * {@link RemittanceSepaFileDataAction} ({@code sepaFileData}), {@link RemittanceHeaderActions}
+ * (the action dispatch and the due-items actions) and {@link RemittanceRequestParams}
  * (the query string of an action). Each reads the DAL, the request and the day through the
  * handler's package-private seams, so a test stubs them on the handler as before.
  */
@@ -171,8 +172,6 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** The record id the SPA sends for a remittance that is not saved yet. */
   static final String NEW_RECORD_ID = "new";
 
-  private static final int SC_UNPROCESSABLE = 422;
-
   @Override
   public NeoResponse handle(NeoContext context) {
     // Evaluated at request entry, while the request runs as the account owner.
@@ -184,25 +183,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
       return RemittanceNameCallout.answer(this);
     }
     if (endpoint == NeoEndpointType.ACTION
-        && RemittanceSepaFileData.serves(context.getFieldName())) {
-      return RemittanceSepaFileDataAction.handle(this, context);
-    }
-    if (endpoint == NeoEndpointType.ACTION
-        && RemittanceFileAction.serves(context.getFieldName())) {
-      return RemittanceFileAction.handle(this, context);
-    }
-    if (endpoint == NeoEndpointType.ACTION
-        && RemittanceStatusAction.serves(context.getFieldName())) {
-      return RemittanceStatusAction.handle(this, context);
-    }
-    if (endpoint == NeoEndpointType.ACTION
-        && RemittanceReturnAction.serves(context.getFieldName())) {
-      return RemittanceReturnAction.handle(this, context);
-    }
-    if (endpoint == NeoEndpointType.ACTION
-        && (RemittanceDueItems.serves(context.getFieldName())
-            || RemittanceProcessAction.serves(context.getFieldName()))) {
-      return handleDueItemsAction(context);
+        && RemittanceHeaderActions.serves(context.getFieldName())) {
+      return RemittanceHeaderActions.dispatch(this, context);
     }
     OBContext.setAdminMode(true);
     try {
@@ -304,77 +286,6 @@ public class RemittanceHeaderHandler implements NeoHandler {
   @Override
   public boolean servesActions() {
     return true;
-  }
-
-  /**
-   * Runs a due-items action: 404 for an unknown remittance, 422 on a processed one, 405 for a
-   * {@code selectDueItems} that is not a POST, the contract's 422 for a malformed call. Read
-   * parameters come from the body (MCP, POST) or the query string (REST GET).
-   */
-  NeoResponse handleDueItemsAction(NeoContext context) {
-    String action = context.getFieldName();
-    boolean post = "POST".equals(context.getHttpMethod());
-    boolean write = RemittanceDueItems.isWrite(action)
-        || RemittanceProcessAction.serves(action);
-    if (write && !post) {
-      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          action + " only supports POST");
-    }
-    OBContext.setAdminMode(true);
-    try {
-      JSONObject params = actionParams(action, context.getRequestBody() != null
-          ? context.getRequestBody()
-          : RemittanceDueItems.paramsFromQuery(RemittanceRequestParams.of(context,
-              this::currentRequest, RemittanceDueItems.P_SEARCH, RemittanceDueItems.P_PAGE,
-              RemittanceDueItems.P_PAGE_SIZE)));
-      NeoResponse invalid = NeoActionContract.validate(actionContracts(), action, params);
-      if (invalid != null) {
-        return invalid;
-      }
-      Remittance remittance = loadRemittance(context.getRecordId());
-      if (remittance == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Remittance not found");
-      }
-      if (RemittanceProcessAction.ACTION.equals(action)) {
-        return processRemittance(remittance, params);
-      }
-      if (RemittanceProcessAction.ACTION_REACTIVATE.equals(action)) {
-        return reactivateRemittance(remittance);
-      }
-      if (Boolean.TRUE.equals(remittance.isProcessed())) {
-        return NeoMessageText.error(SC_UNPROCESSABLE, MSG_PROCESSED);
-      }
-      if (RemittanceDueItems.ACTION_SYNC.equals(action)) {
-        return syncDueItems(remittance, params);
-      }
-      return RemittanceDueItems.ACTION_AVAILABLE.equals(action)
-          ? availableDueItems(remittance, params)
-          : selectDueItems(remittance, params);
-    } catch (Exception e) {
-      log.error("remittance action {} failed on {}", action, context.getRecordId(), e);
-      // syncDueItems deletes lines before the Classic run: an unexpected failure after that must
-      // not leave the deletes pending in the session (unless a batch owns the transaction).
-      NeoErrorResponses.rollbackUnlessBatchOwned();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not run " + action + ". Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * The parameters of a call, read where its contract says they travel: {@code process} and
-   * {@code reactivate} are pressed from the SPA's process dialog, which posts
-   * {@code {"fieldValues": {...}}}, and {@code etendo_action} wraps the agent's flat parameters
-   * the same way for those contracts. A flat body is still accepted for them.
-   */
-  JSONObject actionParams(String action, JSONObject body) {
-    NeoActionContract contract = action != null ? actionContracts().get(action) : null;
-    if (contract == null || !contract.isFieldValuesBody()) {
-      return body;
-    }
-    JSONObject fieldValues = body.optJSONObject(FIELD_VALUES);
-    return fieldValues != null ? fieldValues : body;
   }
 
   /** Seam over {@link RemittanceProcessAction#process}. */

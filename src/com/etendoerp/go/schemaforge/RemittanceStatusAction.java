@@ -134,7 +134,7 @@ final class RemittanceStatusAction {
       JSONObject body = context.getRequestBody() != null ? context.getRequestBody()
           : new JSONObject();
       NeoResponse invalid = NeoActionContract.validate(handler.actionContracts(), action,
-          handler.actionParams(action, body));
+          RemittanceHeaderActions.actionParams(handler, action, body));
       if (invalid != null) {
         return invalid;
       }

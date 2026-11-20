@@ -470,6 +470,14 @@ public class NeoTelemetryService {
     if (BOOLEAN_PROPERTY_KEYS.contains(key)) {
       return value instanceof Boolean ? value : null;
     }
+    return sanitizeScalar(key, value);
+  }
+
+  /**
+   * A safe key with no specific rule: a number within its bounds, a string or a boolean; any
+   * other value drops the property.
+   */
+  private static Object sanitizeScalar(String key, Object value) {
     if (value instanceof Number) {
       return isSafeNumber(key, value) ? value : null;
     }

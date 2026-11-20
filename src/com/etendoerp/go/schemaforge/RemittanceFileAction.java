@@ -140,7 +140,7 @@ final class RemittanceFileAction {
     try {
       JSONObject body = context.getRequestBody() != null ? context.getRequestBody()
           : new JSONObject();
-      JSONObject params = handler.actionParams(action, body);
+      JSONObject params = RemittanceHeaderActions.actionParams(handler, action, body);
       NeoResponse invalid = NeoActionContract.validate(handler.actionContracts(), action, params);
       if (invalid != null) {
         return invalid;

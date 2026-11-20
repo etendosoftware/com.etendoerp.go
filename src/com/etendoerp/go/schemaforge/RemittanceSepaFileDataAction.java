@@ -92,45 +92,7 @@ final class RemittanceSepaFileDataAction {
       if (invalid != null) {
         return invalid;
       }
-      boolean saveToAccount = params.optBoolean(RemittanceSepaFileData.P_SAVE_TO_ACCOUNT, false);
-      if (save && saveToAccount && !handler.canWriteFinancialAccount()) {
-        // The account default is a write on FIN_FINANCIAL_ACCOUNT, done in admin mode: the
-        // remittance spec's access is not enough, the role must be able to edit accounts.
-        return NeoMessageText.error(HttpServletResponse.SC_FORBIDDEN, MSG_ACCOUNT_WRITE_DENIED);
-      }
-      FIN_FinancialAccount account =
-          handler.loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
-      if (account == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Financial account not found");
-      }
-      String refusal = handler.eligibilityRefusal(account);
-      if (refusal != null) {
-        return NeoMessageText.error(SC_UNPROCESSABLE, refusal);
-      }
-      String remittanceRef = remittanceRef(context, params);
-      Remittance remittance = remittanceRef != null ? handler.loadRemittance(remittanceRef) : null;
-      if (save) {
-        NeoResponse refusal2 = saveRefusal(handler, remittanceRef, remittance, account,
-            saveToAccount);
-        if (refusal2 != null) {
-          return refusal2;
-        }
-      }
-      // The remittance's own copy only means something on the account it is on.
-      boolean sameAccount = remittance != null && account.getId().equals(
-          RemittanceHeaderHandler.idOf(remittance.getFinancialAccount()));
-      OrganizationChoice choice = resolveOrganization(handler, remittance, params, account);
-      if (choice.unknown) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
-      }
-      if (save) {
-        NeoResponse refused = saveCreditorId(handler, remittance, account, saveToAccount,
-            params.optString(RemittanceSepaFileData.P_CREDITOR_ID, null));
-        if (refused != null) {
-          return refused;
-        }
-      }
-      return NeoResponse.ok(body(handler, account, choice.organization, remittance, sameAccount));
+      return answer(handler, context, params, save);
     } catch (JSONException | RuntimeException e) {
       log.error("remittance action {} failed for account", action, e);
       if (save) {
@@ -141,6 +103,54 @@ final class RemittanceSepaFileDataAction {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The answer of a validated call: the write-access check of {@code saveToAccount}, the account
+   * and its eligibility, the remittance, the save refusals, the organization, the save itself and
+   * the {@code sepaFileData} body. Runs in the caller's admin mode and error handling.
+   */
+  private static NeoResponse answer(RemittanceHeaderHandler handler, NeoContext context,
+      JSONObject params, boolean save) throws JSONException {
+    boolean saveToAccount = params.optBoolean(RemittanceSepaFileData.P_SAVE_TO_ACCOUNT, false);
+    if (save && saveToAccount && !handler.canWriteFinancialAccount()) {
+      // The account default is a write on FIN_FINANCIAL_ACCOUNT, done in admin mode: the
+      // remittance spec's access is not enough, the role must be able to edit accounts.
+      return NeoMessageText.error(HttpServletResponse.SC_FORBIDDEN, MSG_ACCOUNT_WRITE_DENIED);
+    }
+    FIN_FinancialAccount account =
+        handler.loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Financial account not found");
+    }
+    String refusal = handler.eligibilityRefusal(account);
+    if (refusal != null) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, refusal);
+    }
+    String remittanceRef = remittanceRef(context, params);
+    Remittance remittance = remittanceRef != null ? handler.loadRemittance(remittanceRef) : null;
+    if (save) {
+      NeoResponse refusal2 = saveRefusal(handler, remittanceRef, remittance, account,
+          saveToAccount);
+      if (refusal2 != null) {
+        return refusal2;
+      }
+    }
+    // The remittance's own copy only means something on the account it is on.
+    boolean sameAccount = remittance != null && account.getId().equals(
+        RemittanceHeaderHandler.idOf(remittance.getFinancialAccount()));
+    OrganizationChoice choice = resolveOrganization(handler, remittance, params, account);
+    if (choice.unknown) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
+    }
+    if (save) {
+      NeoResponse refused = saveCreditorId(handler, remittance, account, saveToAccount,
+          params.optString(RemittanceSepaFileData.P_CREDITOR_ID, null));
+      if (refused != null) {
+        return refused;
+      }
+    }
+    return NeoResponse.ok(body(handler, account, choice.organization, remittance, sameAccount));
   }
 
   /**

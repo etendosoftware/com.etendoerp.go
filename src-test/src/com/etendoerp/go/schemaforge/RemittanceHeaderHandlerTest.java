@@ -83,6 +83,7 @@ import org.openbravo.module.remittance.RemittanceType;
  * @covers com.etendoerp.go.schemaforge.RemittanceNameCallout
  * @covers com.etendoerp.go.schemaforge.RemittanceSepaFileDataAction
  * @covers com.etendoerp.go.schemaforge.RemittanceRequestParams
+ * @covers com.etendoerp.go.schemaforge.RemittanceHeaderActions
  */
 class RemittanceHeaderHandlerTest {
 
@@ -2511,12 +2512,16 @@ class RemittanceHeaderHandlerTest {
     JSONObject wrapped = new JSONObject().put("fieldValues", inner);
     JSONObject flat = new JSONObject().put("grouping", "P");
 
-    org.junit.jupiter.api.Assertions.assertSame(inner, handler.actionParams("process", wrapped));
-    org.junit.jupiter.api.Assertions.assertSame(flat, handler.actionParams("process", flat),
+    org.junit.jupiter.api.Assertions.assertSame(inner,
+        RemittanceHeaderActions.actionParams(handler, "process", wrapped));
+    org.junit.jupiter.api.Assertions.assertSame(flat,
+        RemittanceHeaderActions.actionParams(handler, "process", flat),
         "a flat body is still accepted");
     org.junit.jupiter.api.Assertions.assertSame(wrapped,
-        handler.actionParams("availableDueItems", wrapped), "not a fieldValues contract");
-    org.junit.jupiter.api.Assertions.assertSame(wrapped, handler.actionParams(null, wrapped));
+        RemittanceHeaderActions.actionParams(handler, "availableDueItems", wrapped),
+        "not a fieldValues contract");
+    org.junit.jupiter.api.Assertions.assertSame(wrapped,
+        RemittanceHeaderActions.actionParams(handler, null, wrapped));
   }
 
   // ---------------------------------------------------------------- reactivate action

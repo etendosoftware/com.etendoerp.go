@@ -73,6 +73,15 @@ final class RemittanceHeaderWrites {
     if (create) {
       RemittanceNameCallout.fillSuggestedName(handler, body);
     }
+    return validateFields(handler, body, stored, create);
+  }
+
+  /**
+   * The field rules of a create or update body, in order, the first refusal winning; with none,
+   * the values the remittance takes from its account and type ({@link #proposeAccountValues}).
+   */
+  private static NeoResponse validateFields(RemittanceHeaderHandler handler, JSONObject body,
+      Remittance stored, boolean create) throws JSONException {
     NeoResponse fieldError = validateIban(body);
     if (fieldError == null) {
       fieldError = validateOptions(handler, body, stored);
