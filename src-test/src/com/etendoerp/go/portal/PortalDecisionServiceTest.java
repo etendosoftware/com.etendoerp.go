@@ -113,6 +113,8 @@ public class PortalDecisionServiceTest {
   private String emailStatus = TransactionalEmailService.STATUS_SENT;
   /** The decision row the table holds (by token or by id), or {@code null}. */
   private Object[] decisionRow;
+  /** A failure the decision row read throws, or {@code null}. */
+  private RuntimeException decisionReadFailure;
   /** Requests made for the quotation inside the cool-down. */
   private long recentRequests;
   /** Other pending requests of the quotation, voided by a confirmation. */
@@ -577,6 +579,42 @@ public class PortalDecisionServiceTest {
     kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(anyBoolean(), any()), never());
   }
 
+  /**
+   * The decision is read for the KPI only after the stamp committed: whether that read fails or
+   * finds no row, the stamp stays committed, nothing is counted and nothing escapes.
+   */
+  @Test
+  public void aKpiReadThatFailsOrFindsNothingNeverUndoesTheCommittedStamp() {
+    // Columns: label, decision row, failure of the read.
+    Object[][] cases = {
+        { "the read throws", row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, false),
+            new IllegalStateException("session closed") },
+        { "no decision row", null, null },
+    };
+    for (Object[] c : cases) {
+      decisionRow = (Object[]) c[1];
+      decisionReadFailure = (RuntimeException) c[2];
+      statements.clear();
+      List<Integer> statementsAtCommit = new ArrayList<>();
+      doAnswer(inv -> {
+        statementsAtCommit.add(statements.size());
+        return null;
+      }).when(obDal).commitAndClose();
+
+      service().markSent(DECISION_ID);
+
+      String label = (String) c[0];
+      assertEquals(label, 2, statements.size());
+      assertTrue(label, ((String) statements.get(0)[0]).startsWith(
+          "UPDATE etgo_portal_decision SET sent_at"));
+      assertTrue(label, ((String) statements.get(1)[0]).startsWith(
+          "SELECT etgo_portal_decision_id"));
+      assertEquals(label + ": committed once, after the UPDATE and before the read",
+          Collections.singletonList(1), statementsAtCommit);
+    }
+    kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(anyBoolean(), any()), never());
+  }
+
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   private PortalDecisionService service() {
@@ -656,6 +694,10 @@ public class PortalDecisionServiceTest {
     }
     if (sql.startsWith("SELECT count(*)")) {
       return Collections.singletonList(recentRequests);
+    }
+    if (sql.startsWith("SELECT etgo_portal_decision_id, ad_client_id")
+        && decisionReadFailure != null) {
+      throw decisionReadFailure;
     }
     if (sql.startsWith("SELECT etgo_portal_decision_id, ad_client_id") && decisionRow != null) {
       boolean byToken = params.containsKey("hash");
