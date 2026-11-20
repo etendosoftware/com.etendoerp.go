@@ -154,8 +154,7 @@ public final class HubSpotOutbox {
   // Every milestone the sync detected for the account, whatever became of its send: the action
   // happened even when HubSpot refused the event.
   private static final String MILESTONES_OF_ACCOUNT_SQL = "select event_key, payload"
-      + " from etgo_hubspot_outbox where etgo_account_id = ? and event_type = '"
-      + HubSpotOutboxStore.MILESTONE + "'";
+      + " from etgo_hubspot_outbox where etgo_account_id = ? and event_type = ?";
 
   /** One write against the open connection. */
   @FunctionalInterface
@@ -340,6 +339,7 @@ public final class HubSpotOutbox {
     write("the first key action of account " + accountId, connection -> {
       try (PreparedStatement statement = connection.prepareStatement(MILESTONES_OF_ACCOUNT_SQL)) {
         statement.setString(1, accountId);
+        statement.setString(2, HubSpotOutboxStore.MILESTONE);
         try (ResultSet result = statement.executeQuery()) {
           while (result.next()) {
             rows.add(new String[] { result.getString(1), result.getString(2) });

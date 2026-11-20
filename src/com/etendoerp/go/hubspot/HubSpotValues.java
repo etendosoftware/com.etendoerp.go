@@ -145,6 +145,19 @@ final class HubSpotValues {
     return instant.truncatedTo(ChronoUnit.MILLIS).toString();
   }
 
+  /** One line for the log and the outbox row: the call and what HubSpot answered. */
+  static String describe(String method, String path, HubSpotClient.Response response) {
+    return method + " " + StringUtils.substringBefore(path, "?") + " answered HTTP "
+        + response.status() + ": " + response.body();
+  }
+
+  /** The pipeline of a deal read with its {@code pipeline} property, or {@code null}. */
+  static String pipelineOf(JSONObject deal) {
+    JSONObject properties = deal.optJSONObject("properties");
+    return properties == null || properties.isNull("pipeline") ? null
+        : properties.optString("pipeline", null);
+  }
+
   static String encode(String value) {
     return URLEncoder.encode(value, StandardCharsets.UTF_8);
   }

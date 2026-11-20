@@ -22,6 +22,7 @@ import static com.etendoerp.go.hubspot.HubSpotValues.countryCode;
 import static com.etendoerp.go.hubspot.HubSpotValues.countryName;
 import static com.etendoerp.go.hubspot.HubSpotValues.countryNameOf;
 import static com.etendoerp.go.hubspot.HubSpotValues.date;
+import static com.etendoerp.go.hubspot.HubSpotValues.describe;
 import static com.etendoerp.go.hubspot.HubSpotValues.dateTime;
 import static com.etendoerp.go.hubspot.HubSpotValues.encode;
 import static com.etendoerp.go.hubspot.HubSpotValues.equalTo;
@@ -29,6 +30,7 @@ import static com.etendoerp.go.hubspot.HubSpotValues.eventDate;
 import static com.etendoerp.go.hubspot.HubSpotValues.hubSpotPlan;
 import static com.etendoerp.go.hubspot.HubSpotValues.isAnnual;
 import static com.etendoerp.go.hubspot.HubSpotValues.payloadOf;
+import static com.etendoerp.go.hubspot.HubSpotValues.pipelineOf;
 import static com.etendoerp.go.hubspot.HubSpotValues.putIfPresent;
 
 import java.time.Instant;
@@ -142,7 +144,7 @@ class HubSpotEventSender {
    * fields of the form; the account's event writes them on the contact right after.
    */
   static final List<String> SIGNUP_FORM_FIELDS = List.of(EMAIL, "firstname", "lastname",
-      "country", "etendo_camino_entrada");
+      COUNTRY, "etendo_camino_entrada");
   /** HubSpot's object type of a contact, which each form field names. */
   static final String CONTACT_OBJECT_TYPE = "0-1";
   /** How many attempts the account's event waits for the sign-up form's contact. */
@@ -167,7 +169,7 @@ class HubSpotEventSender {
   private final HubSpotConfiguration configuration;
   private final HubSpotOutboxStore store;
   private final DemoTrials trials;
-  private final HubSpotSignupForm signupForm;
+  private final HubSpotSignupFormSender signupForms;
 
   HubSpotEventSender(HubSpotClient client, HubSpotConfiguration configuration,
       HubSpotOutboxStore store, DemoTrials trials) {
@@ -180,7 +182,7 @@ class HubSpotEventSender {
     this.configuration = configuration;
     this.store = store;
     this.trials = trials;
-    this.signupForm = signupForm;
+    this.signupForms = new HubSpotSignupFormSender(client, signupForm);
   }
 
   /**
@@ -194,7 +196,7 @@ class HubSpotEventSender {
     try {
       switch (event.eventType()) {
         case HubSpotOutboxStore.SIGNUP_FORM:
-          return sendSignupForm(event);
+          return signupForms.send(event, contactBase(event, true));
         case HubSpotOutboxStore.ACCOUNT_CREATED:
           return Outcome.sent(sendAccountCreated(event));
         case HubSpotOutboxStore.DEMO_READY:
@@ -240,68 +242,6 @@ class HubSpotEventSender {
     }
     return createAccountDeal(event, StringUtils.defaultIfBlank(event.name(), event.email()),
         contactId, null);
-  }
-
-  /**
-   * ETP-6363 — the sign-up, submitted to marketing's sign-up form with its lead attribution: HubSpot
-   * creates or updates the contact, joins it to the visits of its cookie and records the
-   * conversion, so the contact gets its original source (Google, LinkedIn, an ad) instead of
-   * "Offline". Only what is known at sign-up: the trial dates and the company come with
-   * {@code DEMO_READY}, whose update does not change the source.
-   *
-   * <p>Submitted once: a refusal is final (a field the form lacks), so the account's event then
-   * creates the contact through the CRM API instead of waiting for it.
-   */
-  private Outcome sendSignupForm(PendingEvent event) throws CallFailed, JSONException {
-    if (!signupForm.isEnabled()) {
-      return Outcome.skipped("No HubSpot sign-up form is configured");
-    }
-    JSONObject contact = contactBase(event, true);
-    JSONArray fields = new JSONArray();
-    for (String name : SIGNUP_FORM_FIELDS) {
-      String value = contact.optString(name, null);
-      if (StringUtils.isNotBlank(value)) {
-        fields.put(new JSONObject().put("objectTypeId", CONTACT_OBJECT_TYPE).put("name", name)
-            .put("value", value));
-      }
-    }
-    JSONObject body = new JSONObject().put("fields", fields);
-    JSONObject context = formContext(payloadOf(event));
-    if (context.length() > 0) {
-      body.put("context", context);
-    }
-    Response response = requestForm(body);
-    if (response.isSuccess()) {
-      return Outcome.sent(null);
-    }
-    String reason = describe("POST", signupForm.submitPath(), response);
-    if (response.isRetryable()) {
-      return Outcome.retry(reason);
-    }
-    // Usually a field the form does not have: worth the response in the log (marketing's spec).
-    log.warn("HubSpot refused the sign-up form of account {}: {}", event.accountId(), reason);
-    return Outcome.failed(reason);
-  }
-
-  /** The visitor cookie (only when there is one), the page and its title. */
-  private static JSONObject formContext(JSONObject signupContext) throws JSONException {
-    JSONObject context = new JSONObject();
-    for (String field : new String[] { HubSpotOutbox.FIELD_HUTK, HubSpotOutbox.FIELD_PAGE_URI,
-        HubSpotOutbox.FIELD_PAGE_NAME }) {
-      String value = StringUtils.trimToNull(signupContext.optString(field, null));
-      if (value != null) {
-        context.put(field, value);
-      }
-    }
-    return context;
-  }
-
-  private Response requestForm(JSONObject body) throws CallFailed {
-    try {
-      return client.send(signupForm.baseUrl(), "POST", signupForm.submitPath(), body);
-    } catch (HubSpotUnreachableException e) {
-      throw new CallFailed(Outcome.retry(e.getMessage()));
-    }
   }
 
   /**
@@ -502,13 +442,6 @@ class HubSpotEventSender {
     if (from.apply(pipeline.get()).contains(current.optString(DEAL_STAGE, ""))) {
       properties.put(DEAL_STAGE, stage.apply(pipeline.get()));
     }
-  }
-
-  /** The pipeline of a deal read with its {@code pipeline} property, or {@code null}. */
-  private static String pipelineOf(JSONObject deal) {
-    JSONObject properties = deal.optJSONObject(PROPERTIES);
-    return properties == null || properties.isNull(PIPELINE) ? null
-        : properties.optString(PIPELINE, null);
   }
 
   /** Whether the sync moves the stages of a deal: those of the Self-Serve and Demo pipelines. */
@@ -894,11 +827,6 @@ class HubSpotEventSender {
     } catch (HubSpotUnreachableException e) {
       throw new CallFailed(Outcome.retry(e.getMessage()));
     }
-  }
-
-  private static String describe(String method, String path, Response response) {
-    return method + " " + StringUtils.substringBefore(path, "?") + " answered HTTP "
-        + response.status() + ": " + response.body();
   }
 
   private static String idOf(JSONObject object) throws CallFailed, JSONException {

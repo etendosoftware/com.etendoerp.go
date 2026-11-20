@@ -2950,6 +2950,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     handleRegister(request, response, true);
   }
 
+  /**
+   * The optional marketing data of the register form, for HubSpot: the phone (ETP-6081), the
+   * business sector (ETP-6082), the country and the lead attribution (ETP-6363). A value that is
+   * not valid is dropped rather than refusing the sign-up over a marketing field.
+   */
+  private static void recordSignupMarketingData(Account account, JSONObject body) {
+    // ETP-6081: the optional phone of the register form. A value that is not a phone is dropped
+    // rather than refusing the sign-up over a marketing field (the form already validates it).
+    String phone = SignupPhone.normalize(body.optString(FIELD_PHONE, null));
+    if (phone != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
+    }
+    // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
+    // value outside the list is dropped rather than refusing the sign-up over a marketing field.
+    String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
+    if (sector != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+    }
+    // ETP-6363: the country of the register form, for HubSpot. Marketing data only: the
+    // organization keeps its own country. The form requires it; a code that names no country is
+    // dropped rather than refusing the sign-up over a marketing field.
+    String countryCode = HubSpotOutbox.countryCode(body.optString(FIELD_COUNTRY_CODE, null));
+    if (countryCode != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_COUNTRY_CODE, countryCode);
+    }
+    // ETP-6363: the lead attribution, kept until the address is confirmed and the sign-up goes
+    // to HubSpot's form. Absent when the visitor refused the cookies; never a reason to refuse.
+    String hubspotContext = HubSpotOutbox.signupContext(
+        body.optJSONObject(FIELD_HUBSPOT_CONTEXT));
+    if (hubspotContext != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_HUBSPOT_CONTEXT, hubspotContext);
+    }
+  }
+
   private void handleRegister(HttpServletRequest request, HttpServletResponse response,
       boolean createCookieSession) throws IOException {
     JSONObject body;
@@ -3020,32 +3054,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
-      // ETP-6081: the optional phone of the register form. A value that is not a phone is dropped
-      // rather than refusing the sign-up over a marketing field (the form already validates it).
-      String phone = SignupPhone.normalize(body.optString(FIELD_PHONE, null));
-      if (phone != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
-      }
-      // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
-      // value outside the list is dropped rather than refusing the sign-up over a marketing field.
-      String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
-      if (sector != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
-      }
-      // ETP-6363: the country of the register form, for HubSpot. Marketing data only: the
-      // organization keeps its own country. The form requires it; a code that names no country is
-      // dropped rather than refusing the sign-up over a marketing field.
-      String countryCode = HubSpotOutbox.countryCode(body.optString(FIELD_COUNTRY_CODE, null));
-      if (countryCode != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_COUNTRY_CODE, countryCode);
-      }
-      // ETP-6363: the lead attribution, kept until the address is confirmed and the sign-up goes
-      // to HubSpot's form. Absent when the visitor refused the cookies; never a reason to refuse.
-      String hubspotContext = HubSpotOutbox.signupContext(
-          body.optJSONObject(FIELD_HUBSPOT_CONTEXT));
-      if (hubspotContext != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_HUBSPOT_CONTEXT, hubspotContext);
-      }
+      recordSignupMarketingData(account, body);
       // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
       // older screen) gave none.
       TermsAndConditionsService.recordMarketingConsent(account,
