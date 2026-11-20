@@ -93,6 +93,9 @@ dependencies {
     implementation('org.openbravo:module.remittance:[5.1.1,)')
     implementation('org.openbravo:sepa.iso20022:[2.0.0,)')
     implementation('org.openbravo:sepa.iso20022.coredirectdebit.customertobank:[2.0.0,)')
+    // ETP-6247 — «Confirmar» writes the payment remittance's file with Classic's pain.001.001.09
+    // generator (CreditTransfer), named by class on the provisioned SCT remittance type.
+    implementation('org.openbravo:sepa.iso20022.credittransfer.customertobank:[2.0.0,)')
     // ETP-6148 — the remittance spec's ETGO_SF_FIELD rows reference columns of the automated
     // remittance module (REM_Remittance.EM_Etar_Automaticprocess,
     // REM_RemittanceLine_Cancel.EM_Etar_ReturnReceipt),

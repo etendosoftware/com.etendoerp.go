@@ -41,6 +41,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.ProductMovementsPolicy;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -131,7 +132,9 @@ public final class GoodsShipmentTelemetry {
       }
       String accountId = accountId(ctx);
       Map<String, Object> properties = properties(accountId, flagEnabled(accountId));
-      NeoBatchScope.runAfterCommit(() -> send(properties, accountId));
+      // Captured on the request thread, before the after-commit callback and the sender thread.
+      NeoTelemetryIdentity identity = telemetry().captureIdentity(accountId, null);
+      NeoBatchScope.runAfterCommit(() -> send(properties, accountId, identity));
     } catch (Exception e) {
       log.debug("Goods shipment telemetry: could not build the event: {}", e.getMessage());
     }
@@ -203,12 +206,13 @@ public final class GoodsShipmentTelemetry {
     }
   }
 
-  private static void send(Map<String, Object> properties, String clientId) {
+  private static void send(Map<String, Object> properties, String clientId,
+      NeoTelemetryIdentity identity) {
     try {
       SENDER.execute(() -> {
         try {
-          telemetry().emit(NeoTelemetryEvents.BACKEND_GOODS_SHIPMENT_COMPLETED, properties,
-              clientId);
+          NeoTelemetryIdentity.runWith(identity, () -> telemetry().emit(
+              NeoTelemetryEvents.BACKEND_GOODS_SHIPMENT_COMPLETED, properties, clientId));
         } catch (RuntimeException e) {
           log.debug("Goods shipment telemetry: emit failed: {}", e.getMessage());
         }

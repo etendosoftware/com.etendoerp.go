@@ -97,7 +97,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountHandler.class);
 
-  private static final String SPEC = "financial-account";
+  static final String SPEC = "financial-account";
   private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";

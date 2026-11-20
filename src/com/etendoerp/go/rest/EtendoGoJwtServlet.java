@@ -117,6 +117,7 @@ import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.CheckoutPromotionTerms;
@@ -264,6 +265,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_CSRF_TOKEN = "csrfToken";
   private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ETGO_ACCOUNT_ID = "etgoAccountId";
   private static final String FIELD_ROLE_LIST = "roleList";
   private static final String HEADER_USER_AGENT = "User-Agent";
   private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
@@ -3083,12 +3085,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return passwordHash == null ? AUTH_METHOD_LINK : FIELD_PASSWORD;
   }
 
+  /** Work done for an authenticated login/session-create request, still in admin mode. */
+  @FunctionalInterface
+  private interface AuthenticatedLoginAction {
+    void run(Account account) throws JSONException, IOException;
+  }
+
   /**
-   * POST /sws/go/login
-   * Body: { "email": "...", "password": "..." }
-   * Returns 200 with new session token on success, 401 on invalid credentials.
+   * Shared flow of /login and /session: parses the JSON body, checks email and local password
+   * (coded 400/401 on failure so the front maps them to the right message) and runs the action
+   * in admin mode for the matching account.
    */
-  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+  private void handleCredentialLogin(HttpServletRequest request, HttpServletResponse response,
+      String label, String serverErrorMessage, AuthenticatedLoginAction action)
       throws IOException {
     JSONObject body;
     try {
@@ -3098,7 +3107,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
-
     String email;
     String password;
     try {
@@ -3121,30 +3129,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             INVALID_CREDENTIALS, INVALID_CREDENTIALS);
         return;
       }
-
-      String sessionToken = generateToken();
-      EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
-
-      JSONObject accountJson = buildAccountJson(account);
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_TOKEN, sessionToken);
-      result.put(FIELD_ACCOUNT, accountJson);
-
-      writeResponse(response, HttpServletResponse.SC_OK, result);
+      action.run(account);
     } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("login", e, log);
-      log.error("Database error during login", e);
+      EtendoGoDalHelper.rollbackDalChanges(label, e, log);
+      log.error("Database error during {}", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_LOGIN_SERVER_ERROR,
-          "Login failed due to a server error", "Login failed due to a server error");
+          serverErrorMessage, serverErrorMessage);
     } catch (JSONException e) {
-      log.error("JSON error building login response", e);
+      log.error("JSON error building {} response", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
           INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * POST /sws/go/login
+   * Body: { "email": "...", "password": "..." }
+   * Returns 200 with new session token on success, 401 on invalid credentials.
+   */
+  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    handleCredentialLogin(request, response, "login", "Login failed due to a server error",
+        account -> {
+          String sessionToken = generateToken();
+          EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
+
+          JSONObject result = new JSONObject();
+          result.put(FIELD_STATUS, STATUS_SUCCESS);
+          result.put(FIELD_TOKEN, sessionToken);
+          result.put(FIELD_ACCOUNT, buildAccountJson(account));
+
+          writeResponse(response, HttpServletResponse.SC_OK, result);
+        });
   }
 
   /**
@@ -7637,49 +7655,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionCreate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    JSONObject body;
-    try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
-      return;
-    }
-
-    String email;
-    String password;
-    try {
-      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString(FIELD_PASSWORD);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_EMAIL_PASSWORD);
-      return;
-    }
-
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
-      if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
-          || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
-        return;
-      }
-
-      IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-          request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
-    } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
-      log.error("Database error during session create", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Session creation failed due to a server error");
-    } catch (JSONException e) {
-      log.error("JSON error building session response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    handleCredentialLogin(request, response, "session create",
+        "Session creation failed due to a server error", account -> {
+          IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
+              request.getHeader(HEADER_USER_AGENT), null);
+          writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+        });
   }
 
   /**
@@ -8097,7 +8078,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Build the environment block of a restore response: the selected {@code user/role/client/org/
    * warehouse}, or {@code null} when no environment has been entered yet on this session.
    */
-  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+  static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
     if (sessionRecord.getUserId() == null) {
       return JSONObject.NULL;
     }
@@ -8107,7 +8088,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     env.put(FIELD_CLIENT_ID, sessionRecord.getCtxClientId());
     env.put("orgId", sessionRecord.getCtxOrgId());
     env.put("warehouseId", sessionRecord.getWarehouseId());
+    // ETP-6228: the account that OWNS the environment, for analytics; not `account.id`, which is
+    // whoever is signed in. Left out when it cannot be resolved, never guessed.
+    String ownerAccountId = ownerAccountIdOf(sessionRecord.getCtxClientId());
+    if (ownerAccountId != null) {
+      env.put(FIELD_ETGO_ACCOUNT_ID, ownerAccountId);
+    }
     return env;
+  }
+
+  private static String ownerAccountIdOf(String clientId) {
+    if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) {
+      return null;
+    }
+    try {
+      return OwnerAccountResolver.findOwnerAccountId(clientId);
+    } catch (RuntimeException e) {
+      log.debug("Owner account of client {} not resolved: {}", clientId, e.getMessage());
+      return null;
+    }
   }
 
   private static JSONArray loadSessionRoleList(GoSessionRecord sessionRecord) throws JSONException {
@@ -8328,8 +8327,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
-   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
-   * is never placed in the body.
+   * {@code nosniff} headers, and returns { status, account, csrfToken, capabilities }. The session
+   * token itself is never placed in the body.
+   *
+   * <p>ETP-5806 follow-up: {@code capabilities} must be populated here too, not only on session
+   * restore ({@link #handleSessionRestore}). This method is the shared tail of all three
+   * session-creation paths — register, login and SSO — so without it the onboarding/login frontend
+   * never learns the real flag value for a brand-new session and falls back to its "capability
+   * unknown" default on every one of them, not just register.
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
@@ -8343,6 +8348,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put(FIELD_STATUS, STATUS_SUCCESS);
     result.put(FIELD_ACCOUNT, accountJson);
     result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+    result.put(FIELD_CAPABILITIES, buildSessionCapabilities(account.getEmail()));
     writeResponse(response, status, result);
   }
 

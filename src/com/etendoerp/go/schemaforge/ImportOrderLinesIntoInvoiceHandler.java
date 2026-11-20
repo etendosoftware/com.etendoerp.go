@@ -165,9 +165,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "), offset and includeCovered are optional; with limit or offset the answer adds "
             + "offset and nextOffset (page on while hasMore). includeCovered also lists the orders "
             + "whose pending lines are all held by draft invoices, with pendingLines 0 and amount 0; "
-            + "detail adds creationDate (ISO instant, UTC) and leaves out of pendingLines and "
-            + "amount the lines this invoice already holds (an order left at 0 is then listed only "
-            + "with includeCovered)."
+            + "detail adds creationDate (ISO instant, UTC). A line this invoice already holds in "
+            + "part still counts in pendingLines and amount for what is left of it."
             + " Step 1." + flow,
         OrderImportListing.availableOrdersParams())
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
@@ -182,8 +181,10 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "holds, and the id is the sourceLineId importOrderLines takes. When other draft "
             + "invoices hold part of the line, inDraftInvoices lists them ([{id, documentNo, "
             + "quantity}], this invoice left out; quantity is what that draft holds of the "
-            + "line): tell the user which draft holds what is missing. "
-            + "includeCovered also lists the lines with nothing left at pendingQuantity 0; "
+            + "line): tell the user which draft holds what is missing. A line whose whole "
+            + "pending is held by other draft invoices is returned at pendingQuantity 0 with "
+            + "inDraftInvoices, with or without includeCovered. "
+            + "includeCovered also lists the other lines with nothing left at pendingQuantity 0; "
             + "detail adds "
             + OrderImportListing.LINE_DETAIL_KEYS + " and importedHere (this invoice has an "
             + "active line linked to the order line). Step 2." + flow,
@@ -522,23 +523,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       }
     }
     return sum.setScale(OrderImportListing.amountPrecision(order), RoundingMode.HALF_UP);
-  }
-
-  /**
-   * The pending lines the popup leaves selectable (ETP-6099, {@code detail}): those not already
-   * linked from an active line of THIS invoice. Pending is quantity-based, so a line partly on this
-   * invoice still has some left, but the popup greys it out ({@code importedHere}); counting it
-   * listed an order that turned out empty once expanded. Without {@code detail} the set is empty
-   * and the pending map is returned as is, so the default answer is unchanged.
-   */
-  static Map<String, BigDecimal> selectableOnly(Map<String, BigDecimal> pending,
-      Set<String> importedHere) {
-    if (importedHere.isEmpty() || pending.isEmpty()) {
-      return pending;
-    }
-    Map<String, BigDecimal> selectable = new LinkedHashMap<>(pending);
-    selectable.keySet().removeAll(importedHere);
-    return selectable;
   }
 
   // ---------------------------------------------------------------------------

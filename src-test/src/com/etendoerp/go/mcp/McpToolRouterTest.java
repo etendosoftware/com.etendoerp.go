@@ -296,6 +296,84 @@ public class McpToolRouterTest {
     assertEquals("TBAI_ConfigNotFound", error.getJSONArray("messageKeys").getString(0));
   }
 
+  /**
+   * ETP-5806 CP-8b (QA Pasada 2, bloqueante, persists) — repro for one of the 3 affected
+   * entities: an {@code etendo_list} on {@code warehouse}/{@code contacts}/{@code bp-location}
+   * returned the raw {@code IdentifierProvider}-built {@code locationAddress$_identifier}
+   * (address-wrapper FK identifier) with consecutive {@code " - "} separators wherever an
+   * optional address segment (second line, region) was blank — e.g.
+   * {@code "Poligono Industrial Norte, s/n - Nave 3 - - - Getafe - - España"}. A client-side fix
+   * only cleaned what the SPA itself rendered; an MCP agent reading {@code etendo_list} directly
+   * still saw the raw string. {@link McpResponseSanitizer#render} must now clean every
+   * {@code "<prop>$_identifier"} (and the bare {@code "_identifier"}) key, at any depth, the same
+   * way every other JSON result it renders is sanitised.
+   */
+  @Test
+  public void testRenderCleansDashJoinedIdentifiersAtAnyDepth() throws Exception {
+    JSONObject row = new JSONObject()
+        .put("id", "bpl-1")
+        .put("locationAddress$_identifier",
+            "Poligono Industrial Norte, s/n - Nave 3 - - - Getafe - - España")
+        .put("_identifier", "Nave 3 - - Getafe");
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray().put(row)));
+
+    String rendered = McpResponseSanitizer.render(body);
+
+    JSONObject parsed = new JSONObject(rendered);
+    JSONObject cleanedRow = parsed.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals("Poligono Industrial Norte, s/n - Nave 3 - Getafe - España",
+        cleanedRow.getString("locationAddress$_identifier"));
+    assertEquals("Nave 3 - Getafe", cleanedRow.getString("_identifier"));
+  }
+
+  /**
+   * An identifier with no blank segment at all — the common case for most entities — is left
+   * byte-for-byte unchanged, including one that legitimately contains {@code " - "} between two
+   * non-blank segments (ETP-5806 CP-8b).
+   */
+  @Test
+  public void testRenderLeavesACleanDashJoinedIdentifierUnchanged() throws Exception {
+    JSONObject row = new JSONObject().put("name$_identifier", "Product A - Variant B");
+    JSONObject body = new JSONObject().put("row", row);
+
+    String rendered = McpResponseSanitizer.render(body);
+
+    assertEquals("Product A - Variant B",
+        new JSONObject(rendered).getJSONObject("row").getString("name$_identifier"));
+  }
+
+  /**
+   * Direct coverage of {@link McpResponseSanitizer#sanitizeDashJoinedIdentifier} for a
+   * separator-run sitting at the very START of the string (leading blank segment(s)) — reviewed
+   * by hand during ETP-5806 CP-8b follow-up but never pinned as a test until now.
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierDropsALeadingSeparatorRun() {
+    assertEquals("Madrid",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier(" -  - Madrid"));
+  }
+
+  /**
+   * Mirror case: a separator-run at the very END of the string (trailing blank segment(s)).
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierDropsATrailingSeparatorRun() {
+    assertEquals("Madrid",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier("Madrid -  - "));
+  }
+
+  /**
+   * A literal 3+-consecutive-blank run in the middle collapses to a single separator, same as a
+   * single blank segment would — {@link McpResponseSanitizer}'s dash-run pattern matches the
+   * whole repeated-token run regardless of how many blank segments produced it.
+   */
+  @Test
+  public void testSanitizeDashJoinedIdentifierCollapsesALongBlankRun() {
+    assertEquals("A - B",
+        McpResponseSanitizer.sanitizeDashJoinedIdentifier("A - - - - B"));
+  }
+
   /** A static OBContext whose language is {@code code}; the caller closes it. */
   private static MockedStatic<OBContext> contextInLanguage(String code) {
     org.openbravo.model.ad.system.Language language =

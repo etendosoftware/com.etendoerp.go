@@ -167,6 +167,21 @@ public final class NeoSelectorPolicy {
   }
 
   /**
+   * The DAL property behind a published structured-address field name, when the given entity's
+   * OWN table carries the backing column directly — e.g. {@code bp-location}, whose entity IS
+   * {@code C_Location} (ETP-5806 CP-12g; see {@code AddressVirtualSelectorPolicy#ownPropertyForPublishedName}
+   * for why this needs to be asked separately from {@link #hasVirtualColumns}).
+   *
+   * @param dalEntity     the DAL entity a write targets
+   * @param publishedName the field name as a caller may have sent it, e.g. {@code streetName}
+   * @return the property, or {@code null} when it does not apply
+   */
+  public static org.openbravo.base.model.Property ownPropertyForPublishedName(
+      org.openbravo.base.model.Entity dalEntity, String publishedName) {
+    return AddressVirtualSelectorPolicy.ownPropertyForPublishedName(dalEntity, publishedName);
+  }
+
+  /**
    * Enrich selector results through the registered enrichment policies.
    *
    * @param response selector response to enrich

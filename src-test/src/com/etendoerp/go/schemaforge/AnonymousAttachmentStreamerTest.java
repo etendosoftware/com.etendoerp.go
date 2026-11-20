@@ -177,19 +177,37 @@ public class AnonymousAttachmentStreamerTest {
     }
   }
 
+  /** ETP-4571 — a legacy HTML type is never echoed. */
   @Test
-  public void sanitizeFileNameReplacesUnsafeCharactersAndFallsBackWhenBlank() {
-    assertEquals("invoice_2026_final_.pdf",
-        AnonymousAttachmentStreamer.sanitizeFileName("invoice/2026:final?.pdf"));
-    assertEquals("document.pdf", AnonymousAttachmentStreamer.sanitizeFileName("   "));
-  }
+  public void streamSendsHardenedHeadersForLegacyActiveRecords() throws Exception {
+    File attachRoot = tempFolder.newFolder("attachments2");
+    File dir = new File(attachRoot, "318");
+    Files.createDirectories(dir.toPath());
+    Files.write(new File(dir, "page.html").toPath(), FILE_BYTES);
+    String[][] cases = { { "page.html", "text/html", "application/octet-stream", "page.html" } };
+    for (String[] c : cases) {
+      Attachment attachment = attachment("CLIENT-1");
+      when(attachment.getName()).thenReturn(c[0]);
+      when(attachment.getDataType()).thenReturn(c[1]);
+      when(attachment.getPath()).thenReturn("318");
+      Properties properties = new Properties();
+      properties.setProperty("attach.path", attachRoot.getAbsolutePath());
+      OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+      when(provider.getOpenbravoProperties()).thenReturn(properties);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(response.getOutputStream()).thenReturn(mock(ServletOutputStream.class));
 
-  @Test
-  public void contentDispositionIncludesSanitizedAsciiAndUtf8Filename() {
-    String disposition = AnonymousAttachmentStreamer.contentDisposition("invoice/2026 final.pdf");
+      try (MockedStatic<OBPropertiesProvider> props = mockStatic(OBPropertiesProvider.class)) {
+        props.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+        AnonymousAttachmentStreamer.stream(attachment, response, "test");
+      }
 
-    assertTrue(disposition.contains("filename=\"invoice_2026 final.pdf\""));
-    assertTrue(disposition.contains("filename*=UTF-8''invoice_2026%20final.pdf"));
+      verify(response).setContentType(c[2]);
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
+      verify(response).setHeader("Cache-Control", "no-store");
+      verify(response).setHeader("Content-Disposition",
+          NeoDownloadHeaders.contentDisposition(c[3]));
+    }
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────

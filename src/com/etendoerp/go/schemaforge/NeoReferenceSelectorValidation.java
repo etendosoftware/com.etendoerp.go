@@ -58,8 +58,10 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * <p><b>The rule.</b> If the app allows it, the API allows it; if the app does not, the API does
  * not. A reference the request sets is accepted only when the selector the UI shows for that field
  * — validation rule, selector policies and organization scoping, all of it, through
- * {@link NeoSelectorService#offersValue} — lists it. Ownership ({@link NeoReferenceOwnership}) and
- * activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
+ * {@link NeoSelectorService#offersValue} — lists it. When the entity serves the field's selector
+ * from its own SELECTOR customization, that customization is the selector the UI shows, so it is
+ * the one asked ({@link NeoCustomizedSelectorCheck}, ETP-6377). Ownership
+ * ({@link NeoReferenceOwnership}) and activeness ({@link NeoReferenceActiveness}) are checked before and stay as they are.
  *
  * <p><b>A field with its own picker (ETP-6365).</b> When the entity's customization answers
  * {@link NeoHandler#offersReference} for a field, its answer replaces the generic selector's: the
@@ -69,8 +71,10 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * {@code Currency} selector keeps its EUR/USD/GBP allowlist for every other picker.
  *
  * <p><b>Context.</b> The UI resolves a selector against the whole form. Here the form is the
- * <i>merged record</i>: the parent record (child tabs), overlaid by the stored record (updates),
- * overlaid by the incoming values (on update, the callout outputs are already in them). Every property is published under its DAL name and under its
+ * <i>merged record</i>: the parent record (child tabs; found through {@code parentId} or the
+ * link-to-parent value the request sets), overlaid by the stored record (updates), overlaid by the
+ * incoming values (on update, the callout outputs are already in them), completed with the tab's
+ * literal auxiliary inputs (ETP-6381). Every property is published under its DAL name and under its
  * column name, which is how validation rules ({@code @C_BPartner_ID@}) and selector policies
  * ({@code businessPartner}) read it. So an address must belong to the partner, a price list must
  * match the document direction, a tax must be valid for the line, and a payment method must suit
@@ -169,8 +173,8 @@ public final class NeoReferenceSelectorValidation {
 
   /**
    * Whether the app offers {@code id} for the property: the entity's customization answers when
-   * the field's picker is its own ({@link NeoHandler#offersReference}, ETP-6365), the field's
-   * generic selector otherwise.
+   * the field's picker is its own ({@link NeoHandler#offersReference}, ETP-6365), the selector the
+   * app shows for the field otherwise ({@link #offeredByTheAppSelector}).
    */
   private static RefusedReference check(SFEntity sfEntity, NeoHandler customization,
       Column column, Property property, String id, Map<String, String> context) {
@@ -178,7 +182,7 @@ public final class NeoReferenceSelectorValidation {
     Optional<Boolean> offered = customization == null ? Optional.empty()
         : customization.offersReference(key, id, context);
     if (offered.isEmpty()) {
-      offered = NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+      offered = offeredByTheAppSelector(sfEntity, column, key, id, context);
     }
     if (Boolean.TRUE.equals(offered.orElse(null))) {
       return null;
@@ -187,6 +191,24 @@ public final class NeoReferenceSelectorValidation {
         offered.isPresent() ? "not offered" : "not verifiable");
     return new RefusedReference(key, property.getTargetEntity().getName(), id,
         offered.isPresent());
+  }
+
+  /**
+   * The selector the app shows for the field: the entity's own SELECTOR customization when it
+   * serves the field (ETP-6377), otherwise the generic selector.
+   */
+  private static Optional<Boolean> offeredByTheAppSelector(SFEntity sfEntity, Column column,
+      String key, String id, Map<String, String> context) {
+    switch (NeoCustomizedSelectorCheck.offers(sfEntity, key, id, context)) {
+      case OFFERED:
+        return Optional.of(Boolean.TRUE);
+      case NOT_OFFERED:
+        return Optional.of(Boolean.FALSE);
+      case UNVERIFIABLE:
+        return Optional.empty();
+      default:
+        return NeoSelectorService.offersValue(sfEntity, column, key, id, context);
+    }
   }
 
   /**
@@ -312,17 +334,22 @@ public final class NeoReferenceSelectorValidation {
     }
   }
 
-  /** Parent record, overlaid by the stored record, overlaid by the incoming values. */
+  /**
+   * Parent record, overlaid by the stored record, overlaid by the incoming values, then the tab's
+   * literal auxiliary inputs and the window direction for what the record does not say.
+   *
+   * <p>The parent is the explicit {@code parentId}, else the one the request sets in the link-to-
+   * parent column (a line created with {@code shipmentReceipt} and no {@code parentId}), else the
+   * stored record's. Without it a line selector that reads a header field — a storage bin reading
+   * the receipt's warehouse — offers nothing.
+   */
   private static Map<String, String> mergedContext(Tab adTab, Entity written,
       BaseOBObject stored, String parentId, JSONObject requestFields) {
     Map<String, String> context = new HashMap<>();
     Entity parentEntity = parentEntity(adTab);
-    String effectiveParent = parentId;
     Property parentLink = parentLink(adTab, written);
-    if (StringUtils.isBlank(effectiveParent) && stored != null && parentLink != null
-        && stored.get(parentLink.getName()) instanceof BaseOBObject) {
-      effectiveParent = ((BaseOBObject) stored.get(parentLink.getName())).getId().toString();
-    }
+    String effectiveParent = effectiveParent(written, parentLink, parentId, stored,
+        requestFields);
     if (parentEntity != null && StringUtils.isNotBlank(effectiveParent)) {
       BaseOBObject parent = load(parentEntity, effectiveParent);
       if (parent != null) {
@@ -336,8 +363,45 @@ public final class NeoReferenceSelectorValidation {
       publish(context, written, flat(stored));
     }
     publish(context, written, requestFields);
+    addAuxiliaryLiterals(adTab, context);
     addWindowDirection(adTab, context);
     return context;
+  }
+
+  private static String effectiveParent(Entity written, Property parentLink, String parentId,
+      BaseOBObject stored, JSONObject requestFields) {
+    if (StringUtils.isNotBlank(parentId) || parentLink == null) {
+      return parentId;
+    }
+    String linkName = parentLink.getName();
+    if (requestFields.has(linkName)) {
+      String sent = referenceId(written, linkName, requestFields.opt(linkName));
+      if (sent != null) {
+        return sent;
+      }
+    }
+    return storedId(stored, linkName);
+  }
+
+  /**
+   * The tab's literal auxiliary inputs (Sales Quotation's {@code isQuotation=Y}, a return window's
+   * {@code isReturnMaterial=Y}), as Classic puts them in the form context. A value the record
+   * already carries under any casing of the name wins: the record, not the window, says.
+   */
+  private static void addAuxiliaryLiterals(Tab adTab, Map<String, String> context) {
+    Set<String> present = new HashSet<>();
+    for (String key : context.keySet()) {
+      present.add(key.toLowerCase(Locale.ROOT));
+    }
+    for (Map.Entry<String, String> literal : NeoAuxiliaryInputResolver.literalValues(adTab)
+        .entrySet()) {
+      String name = literal.getKey();
+      if (present.add(name.toLowerCase(Locale.ROOT))) {
+        context.put(name, literal.getValue());
+        context.put(name.toUpperCase(Locale.ROOT), literal.getValue());
+        context.put(name.toLowerCase(Locale.ROOT), literal.getValue());
+      }
+    }
   }
 
   private static Entity parentEntity(Tab adTab) {

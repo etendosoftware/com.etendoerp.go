@@ -51,16 +51,27 @@ public final class StructuredAddressComposer {
   private static final int ADDRESS_LINE_MAX_LENGTH = 60;
 
   /**
-   * Field lengths of the 3 structured SEPA columns themselves ({@code org.openbravo.sepa.iso20022}'s
-   * {@code AD_COLUMN.FIELDLENGTH} for {@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm}:
-   * VARCHAR(70)/(16)/(35) respectively). ETP-5806 follow-up: neither the UI nor this handler
-   * enforced them before a value was written, so a value longer than the DB column reached
-   * {@code OBDal.flush()} as a raw data-truncation SQL exception — surfaced to the caller as an
-   * opaque 500 with no indication of which field or why. {@link #fieldsExceedingMaxLength} turns
-   * that into a clean 400 before the write is attempted, on both create and update, for both
-   * handlers that call into this composer.
+   * Field lengths of the 3 structured SEPA columns themselves. Building Number and Building Name
+   * mirror {@code org.openbravo.sepa.iso20022}'s own {@code AD_COLUMN.FIELDLENGTH} for
+   * {@code EM_OBSEPA_BldgNb}/{@code BldgNm}: VARCHAR(16)/(35). ETP-5806 follow-up: neither the UI
+   * nor this handler enforced them before a value was written, so a value longer than the DB
+   * column reached {@code OBDal.flush()} as a raw data-truncation SQL exception — surfaced to the
+   * caller as an opaque 500 with no indication of which field or why. {@link
+   * #fieldsExceedingMaxLength} turns that into a clean 400 before the write is attempted, on both
+   * create and update, for every handler that calls into this composer.
+   *
+   * <p><b>Street Name is 60, NOT the SEPA column's 70 (CP-6, agreed with product + QA).</b> The
+   * underlying column, {@code EM_OBSEPA_StrtNm}, legitimately stays {@code VARCHAR(70)} — it is a
+   * real SEPA/ISO20022 field other consumers may fill up to that width, and shrinking the column
+   * itself would both break existing 61-70 char data on {@code update.database} and wrongly
+   * restrict SEPA export for callers unrelated to this composer. The composer's OWN cap is 60,
+   * stricter than the column, specifically so {@link #composeAddressLines}'s street-truncating
+   * branches become structurally unreachable for valid input: a street that cannot fit on the
+   * 60-char {@link #ADDRESS_LINE_MAX_LENGTH} line is now rejected here with a clean 400 before
+   * {@code composeAddressLines} ever sees it, instead of being silently cut mid-word when composed
+   * into {@code Address1}/{@code Address2}.
    */
-  private static final int STREET_NAME_MAX_LENGTH = 70;
+  private static final int STREET_NAME_MAX_LENGTH = 60;
   private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
   private static final int BUILDING_NAME_MAX_LENGTH = 35;
 
@@ -128,15 +139,21 @@ public final class StructuredAddressComposer {
    * between street+number and building name in Line 1. {@code append} only inserts a separator
    * when both sides are non-blank.
    *
-   * <p><b>Truncation is intentional and required (reverted CP-6).</b> {@code C_Location.Address1}/
-   * {@code Address2} are real {@code VARCHAR(60)} DB columns, while the source field {@code
-   * EM_OBSEPA_StrtNm} allows up to {@link #STREET_NAME_MAX_LENGTH} (70) characters. A street name
-   * between 61 and 70 chars passes {@link #fieldsExceedingMaxLength} (which validates against the
-   * source column's own 70-char limit) but cannot fit in the 60-char {@code Address1}/{@code
-   * Address2} on its own — it must be cut to fit the real DB column, or persistence fails with a
-   * data-truncation SQL exception instead of a clean value. This is the accepted tradeoff, and it
-   * matches Classic's {@code LocationSEPA.java::fillAddressLines} ({@code
-   * org.openbravo.sepa.iso20022}) exactly, which this method is a direct port of.
+   * <p><b>The street-truncating branches below are dead code in practice (CP-6, re-fixed).</b> An
+   * earlier revision of this javadoc required truncation because the composer's own validation cap
+   * matched the SEPA column's 70 chars, letting a 61-70 char street pass {@link
+   * #fieldsExceedingMaxLength} and then overflow the 60-char {@code Address1}/{@code Address2}
+   * line, forcing a silent mid-word cut. {@link #STREET_NAME_MAX_LENGTH} is now 60 — tighter than
+   * the SEPA column — so any street that reaches this method has already been validated to fit
+   * {@link #ADDRESS_LINE_MAX_LENGTH} on its own: the branches that truncate the street itself
+   * ({@code streetAndNumber.length() > ADDRESS_LINE_MAX_LENGTH}) can no longer be taken by valid
+   * input. They are left in place anyway, unchanged, as correct defensive behavior for a street
+   * that somehow reaches this method without going through {@link #fieldsExceedingMaxLength} first
+   * (a future caller that forgets the check, or a pre-existing record edited around the
+   * validation), and because they still match Classic's {@code LocationSEPA.java::fillAddressLines}
+   * ({@code org.openbravo.sepa.iso20022}) exactly, which this method is a direct port of. The
+   * building-name-only truncation path (street+number fits, the composed whole does not) stays
+   * fully reachable — Building Name has no line-width cap of its own.
    *
    * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
    * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank

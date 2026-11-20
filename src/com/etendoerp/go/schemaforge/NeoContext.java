@@ -88,9 +88,19 @@ public class NeoContext {
   /**
    * ETP-5791 — {@link #getAttribute attribute} holding the {@code Set<String>} of body keys the
    * caller itself sent on a create, when the channel has already filled defaults into the body
-   * before the pre-hook runs. Only MCP {@code etendo_create} sets it: REST single, REST batch and
-   * {@code etendo_batch} hand the pre-hook the body as sent, so there key presence already answers
-   * "did the caller choose this field". Absent means: presence in the body is the answer.
+   * before the pre-hook runs. MCP {@code etendo_create} sets it; since ETP-6177 {@code etendo_batch}
+   * sets it too (its preprocessor injects prices before the op's pre-hook), on a context that is
+   * NOT {@link #isMcpOrigin()}, so the readers that gate on MCP origin keep ignoring it there. REST
+   * single and REST batch hand the pre-hook the body as sent, so there key presence already
+   * answers "did the caller choose this field". Absent means: presence in the body is the answer.
+   *
+   * <p>The readers NOT gated on MCP origin ({@code ContactTypeRules.isExplicit},
+   * {@code PaymentTermCreateDefaults.isCallerValue}, and through it {@code PaymentTermHandler})
+   * therefore also see the {@code etendo_batch} key set. Their result is unchanged: that set is the
+   * op body before the batch preprocessor ran, and the preprocessor only adds the line {@code uOM},
+   * the bill-to address and the line prices (FK-name resolution replaces values of keys the agent
+   * sent, it adds none), none of which those readers ask about; {@code parentId} is added later by
+   * {@code BatchService} and is not asked about either.
    */
   public static final String ATTR_CLIENT_PROVIDED_FIELDS = "neo.clientProvidedFields";
 

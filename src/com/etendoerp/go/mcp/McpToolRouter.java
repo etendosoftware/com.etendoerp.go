@@ -351,7 +351,7 @@ public class McpToolRouter {
 
   /**
    * Handle the {@code docs} tool: fetch documentation from Context7 for the
-   * {@code etendosoftware/etendo-docs} library, filtered by a topic.
+   * {@code etendo-ai/etendo-docs} library, filtered by a topic.
    * <p>
    * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
    * client. Tests should call the package-private overload with a mocked client.
@@ -1991,6 +1991,9 @@ public class McpToolRouter {
     // supplied a price — after an injection the body can no longer answer that. Safe to take here
     // even though ref substitution already ran: that replaces values, it never adds a field.
     Set<String> agentProvided = NeoCrudHelper.snapshotBodyFields(body);
+    // ETP-6177: the same witness for the op's pre-hook, which runs after the injections below and
+    // would otherwise read an injected price as one the agent sent (as etendo_create's does).
+    op.hookAttributes().put(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, agentProvided);
     Tab adTab;
     Entity dalEntity;
     SFEntity sfEntity;

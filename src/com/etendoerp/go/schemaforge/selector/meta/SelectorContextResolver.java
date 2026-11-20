@@ -110,7 +110,16 @@ public final class SelectorContextResolver {
       organizationId = StringUtils.trimToNull(contextParams.get(PARAM_INPUT_ORG_ID));
     }
     if (organizationId == null) {
-      organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
+      String parentId = contextParams.get("parentId");
+      if (parentId != null && !parentId.matches("^[A-Za-z0-9_\\-]+$")) {
+        log.warn("Invalid parent identifier in selector context: {}", parentId);
+        parentId = null;
+      }
+      organizationId = resolveOrgFromParentRecord(sourceEntity, parentId);
+    }
+    if (organizationId != null && !organizationId.matches("^[A-Za-z0-9_\\-]+$")) {
+      log.warn("Invalid organization identifier in selector context: {}", organizationId);
+      return null;
     }
     if ("0".equals(organizationId)) {
       return null;
@@ -132,7 +141,16 @@ public final class SelectorContextResolver {
     target.put(key, value);
   }
 
-  private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
+  /**
+   * Organization of the record {@code parentId} names for {@code sourceEntity}'s tab: the parent
+   * tab's record for a child tab, the record itself for a header tab. Unlike
+   * {@link #resolveContextOrganizationId}, organization {@code 0} is returned as is.
+   *
+   * @param sourceEntity Schema Forge entity whose tab the record is created in
+   * @param parentId id of the parent tab's record (of the record itself for a header tab)
+   * @return the organization id, or {@code null} when it cannot be resolved
+   */
+  public static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
     if (sourceEntity == null || StringUtils.isBlank(parentId)) {
       return null;
     }

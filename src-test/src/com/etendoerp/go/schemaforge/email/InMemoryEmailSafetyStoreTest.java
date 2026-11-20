@@ -184,7 +184,7 @@ public class InMemoryEmailSafetyStoreTest {
   }
 
   @Test
-  public void idempotencyIndexKeepsFirstRecord() throws Exception {
+  public void idempotencyIndexKeepsLatestRecord() throws Exception {
     InMemoryEmailSafetyStore store = new InMemoryEmailSafetyStore();
     EmailSendContext ctx = simpleContext();
     EmailAuditRecord first = auditRecord(ctx, "key-1", TransactionalEmailService.STATUS_SENT);
@@ -193,7 +193,8 @@ public class InMemoryEmailSafetyStoreTest {
     store.recordAudit(second);
     Optional<EmailAuditRecord> found = store.findSentByIdempotencyKey(ctx, "key-1");
     assertTrue(found.isPresent());
-    assertSame(first, found.get());
+    // ETP-5484: the duplicate window counts from the latest send
+    assertSame(second, found.get());
     assertEquals(2, store.getAuditRecords().size());
   }
 

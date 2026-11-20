@@ -39,6 +39,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -104,6 +105,39 @@ class InvoiceInboxTelemetryTest {
     assertFalse(properties.getValue().containsKey("id"));
     assertEquals("backend_invoice_inbox_document_confirmed",
         NeoTelemetryEvents.BACKEND_INVOICE_INBOX_DOCUMENT_CONFIRMED);
+  }
+
+  @Test
+  @DisplayName("the event carries the identity captured on the calling thread, handed to the sender")
+  @SuppressWarnings("unchecked")
+  void theEventCarriesTheIdentityCapturedOnTheCallingThread() throws Exception {
+    NeoTelemetryService service = mock(NeoTelemetryService.class);
+    NeoTelemetryIdentity identity = new NeoTelemetryIdentity("U1", "CLIENT-1", "OWNER-A", "demo");
+    java.util.concurrent.atomic.AtomicReference<Thread> captureThread =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<Thread> emitThread =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<NeoTelemetryIdentity> handedOff =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    CountDownLatch emitted = new CountDownLatch(1);
+    org.mockito.Mockito.when(service.captureIdentity(any(), any())).thenAnswer(inv -> {
+      captureThread.set(Thread.currentThread());
+      return identity;
+    });
+    org.mockito.Mockito.doAnswer(inv -> {
+      emitThread.set(Thread.currentThread());
+      handedOff.set(NeoTelemetryIdentity.handedOff());
+      emitted.countDown();
+      return null;
+    }).when(service).emit(any(), any(Map.class), any());
+    InvoiceInboxTelemetry.setTelemetryService(service);
+
+    InvoiceInboxTelemetry.documentConfirmed(true, "CLIENT-1");
+
+    assertTrue(emitted.await(5, TimeUnit.SECONDS));
+    assertSame(Thread.currentThread(), captureThread.get());
+    assertTrue(emitThread.get() != Thread.currentThread());
+    assertSame(identity, handedOff.get());
   }
 
   @Test

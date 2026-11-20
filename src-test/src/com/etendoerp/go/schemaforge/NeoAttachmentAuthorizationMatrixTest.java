@@ -38,7 +38,6 @@ import javax.servlet.ServletOutputStream;
 import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletResponse;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.weld.WeldUtils;
@@ -89,13 +88,15 @@ import org.openbravo.model.ad.utility.Attachment;
  *       meaningful once a parent-derivation step exists, so it belongs to ETP-4570.</li>
  * </ul>
  *
- * <h2>Why group A asserts insecure behavior</h2>
+ * <h2>What group A pins</h2>
  *
- * <p>These tests <b>pin the vulnerable contract as it exists today</b> so the
- * reproduction is repeatable in CI without a provisioned environment. They are
- * expected to <b>fail once ETP-4570 lands</b> — that is the point. The target
- * contract is expressed in group B, disabled until the fix exists. Do not "repair"
- * a group A failure by relaxing it: invert it to the group B expectation.</p>
+ * <p>These tests call {@code NeoAttachmentsHelper} and {@code NeoAttachmentsDownloader} directly,
+ * so they pin the <b>helper-level</b> behaviour, which has no authorization of its own. Since
+ * ETP-4570 the HTTP handler guards every route with {@code NeoAttachmentAuthorizer} before it
+ * reaches these methods; that guard is tested in {@code NeoAttachmentParentAuthorizationTest} and
+ * {@code NeoBuiltInEndpointHandlerTest}. Group A therefore still passes and documents why the
+ * guard must stay in the handler: any new caller of the helpers must authorize first. The former
+ * group B (disabled target contract) is implemented in those two classes.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsDownloader
@@ -163,11 +164,9 @@ public class NeoAttachmentAuthorizationMatrixTest {
 
       NeoAttachmentsDownloader.handleDownload(FOREIGN_ATTACHMENT_ID, response);
 
-      // Uploader-controlled content type is trusted verbatim.
-      verify(response).setContentType("text/html");
-      // No nosniff anywhere on this path.
-      verify(response, org.mockito.Mockito.never())
-          .setHeader(eq("X-Content-Type-Options"), any());
+      // ETP-4571: the stored (uploader-controlled) type is never echoed; the download is inert.
+      verify(response, org.mockito.Mockito.never()).setContentType("text/html");
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
     }
   }
 
@@ -260,53 +259,9 @@ public class NeoAttachmentAuthorizationMatrixTest {
     }
   }
 
-  // ───────────────── Group B — target contract (red until ETP-4570) ──────────
-
-  /**
-   * S3 — same client, non-readable organization. Must be {@code 404} and must not
-   * stream any bytes.
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustReturnNotFoundForNonReadableOrganization() {
-    throw new UnsupportedOperationException(
-        "Implement with ADR-0003's authorizer: derive the parent record from the "
-            + "attachment, authorize it outside admin mode, and return a uniform 404.");
-  }
-
-  /**
-   * S6 versus S2–S5 — the {@code 404} for nonexistent and for unauthorized must be
-   * byte-identical, removing the enumeration oracle (ADR-0003 D5).
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustReturnIdenticalNotFoundForMissingAndUnauthorized() {
-    throw new UnsupportedOperationException(
-        "Assert identical status, body and headers for a nonexistent ID and an "
-            + "existing-but-unauthorized ID.");
-  }
-
-  /**
-   * S8 — a legitimate multi-organization administrator must keep working, through
-   * the normal permission model and with no hardcoded GOAdmin exception (ADR-0003 D4).
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void handleDownloadMustStillAllowLegitimateMultiOrgRole() {
-    throw new UnsupportedOperationException(
-        "Requires OBBaseTest fixtures: a role with several readable organizations.");
-  }
-
-  /**
-   * S7 — a client-supplied parent that disagrees with the attachment's real parent
-   * must be rejected, never used as the authorization basis.
-   */
-  @Test
-  @Ignore("ETP-4570: red until centralized parent-record authorization lands")
-  public void suppliedParentMismatchingRealParentMustBeRejected() {
-    throw new UnsupportedOperationException(
-        "Applies to list, upload and download-all once parent derivation exists.");
-  }
+  // Group B (the target contract, formerly @Ignore) is implemented by ETP-4570 in
+  // NeoAttachmentParentAuthorizationTest (S1–S8 on the authorizer) and
+  // NeoBuiltInEndpointHandlerTest (every route answers the uniform 404 when denied).
 
   // ───────────────────────────────── helpers ─────────────────────────────────
 
