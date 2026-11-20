@@ -115,7 +115,6 @@ public class RemittanceFileGeneratorIntegrationTest extends WeldBaseTest {
   /** The BIC of the partners' bank accounts; none unless a test sets it. */
   private String partnerBic;
 
-  private static final String EURO_ID = "102";
   private static final String SPAIN_ID = "106";
   private static final String COMPANY_IBAN = "ES9121000418450200051332";
   private static final String PARTNER_IBAN = "ES7921000813610123456789";

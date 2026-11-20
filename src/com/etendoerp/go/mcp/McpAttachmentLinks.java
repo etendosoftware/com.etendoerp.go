@@ -35,6 +35,8 @@ public final class McpAttachmentLinks {
   }
 
   /**
+   * The signed, short-lived download link of one attachment of a record, for the current client.
+   *
    * @param specName     the NEO spec of the record
    * @param recordId     the record the attachment belongs to
    * @param attachmentId the {@code C_File_ID} the link serves

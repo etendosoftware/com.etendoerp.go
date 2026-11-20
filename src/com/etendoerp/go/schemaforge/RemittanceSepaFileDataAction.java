@@ -153,8 +153,9 @@ final class RemittanceSepaFileDataAction {
     if (ref != null) {
       return ref;
     }
-    String record = StringUtils.trimToNull(context.getRecordId());
-    return record == null || RemittanceHeaderHandler.NEW_RECORD_ID.equals(record) ? null : record;
+    String recordId = StringUtils.trimToNull(context.getRecordId());
+    return recordId == null || RemittanceHeaderHandler.NEW_RECORD_ID.equals(recordId) ? null
+        : recordId;
   }
 
   /**
@@ -237,13 +238,13 @@ final class RemittanceSepaFileDataAction {
     OrganizationInformation info = organization != null
         ? handler.loadOrganizationInfo(organization)
         : null;
-    JSONObject response = RemittanceSepaFileData.build(account,
+    JSONObject response = RemittanceSepaFileData.build(new RemittanceSepaFileData.Inputs(account,
         RemittanceHeaderHandler.hasValidIban(account),
         organization != null ? organization.getId() : null, countryIsoOf(info),
-        info != null ? info.getTaxID() : null, handler.creditorBusinessCode(account),
-        handler.storedCreditorId(account),
-        sameAccount ? RemittanceCreditorId.snapshot(remittance) : null,
-        sameAccount ? RemittanceIban.stored(remittance) : null);
+        info != null ? info.getTaxID() : null, handler.creditorBusinessCode(account))
+        .accountCreditorId(handler.storedCreditorId(account))
+        .remittanceCreditorId(sameAccount ? RemittanceCreditorId.snapshot(remittance) : null)
+        .remittanceIban(sameAccount ? RemittanceIban.stored(remittance) : null));
     response.put("collection", remittance == null ? JSONObject.NULL : isCollection(remittance));
     boolean collection = remittance != null && isCollection(remittance);
     response.put(RemittanceHeaderHandler.FIELD_SCHEME,

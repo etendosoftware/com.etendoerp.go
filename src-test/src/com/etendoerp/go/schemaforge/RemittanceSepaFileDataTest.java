@@ -201,8 +201,8 @@ class RemittanceSepaFileDataTest {
   /** The remittance's own copy is the effective one, whatever the account holds. */
   @Test
   void theRemittanceCopyWinsOverTheAccountDefault() throws Exception {
-    JSONObject body = RemittanceSepaFileData.build(account("ES9121000418450200051332"), true,
-        "ORG-1", "ES", TAX_ID, null, STORED, COPY);
+    JSONObject body = RemittanceSepaFileData.build(inputs(account("ES9121000418450200051332"), true)
+        .accountCreditorId(STORED).remittanceCreditorId(COPY));
 
     assertEquals(COPY, body.getString("remittanceCreditorId"));
     assertEquals(STORED, body.getString("accountCreditorId"));
@@ -214,8 +214,8 @@ class RemittanceSepaFileDataTest {
   /** A present but invalid copy is NOT replaced by the account's: the file would be refused. */
   @Test
   void anInvalidRemittanceCopyIsNotReplacedByTheAccountDefault() throws Exception {
-    JSONObject body = RemittanceSepaFileData.build(account("ES9121000418450200051332"), true,
-        "ORG-1", "ES", TAX_ID, null, STORED, "ES00000B87654323");
+    JSONObject body = RemittanceSepaFileData.build(inputs(account("ES9121000418450200051332"), true)
+        .accountCreditorId(STORED).remittanceCreditorId("ES00000B87654323"));
 
     assertTrue(body.isNull("remittanceCreditorId"));
     assertFalse(body.getBoolean("remittanceCreditorIdValid"));
@@ -228,8 +228,8 @@ class RemittanceSepaFileDataTest {
 
   @Test
   void theRemittanceIbanWinsAndTheAccountsIsReportedApart() throws Exception {
-    JSONObject body = RemittanceSepaFileData.build(account(ACC_IBAN), true, "ORG-1", "ES", TAX_ID,
-        null, null, null, REM_IBAN);
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(ACC_IBAN), true)
+        .remittanceIban(REM_IBAN));
 
     assertEquals(REM_IBAN, body.getString("iban"));
     assertEquals(REM_IBAN, body.getString("remittanceIban"));
@@ -241,8 +241,8 @@ class RemittanceSepaFileDataTest {
   /** The account's invalid IBAN does not block a remittance that has its own valid one. */
   @Test
   void aValidRemittanceIbanCoversAnAccountWithoutOne() throws Exception {
-    JSONObject body = RemittanceSepaFileData.build(account(null), false, "ORG-1", "ES", TAX_ID,
-        null, null, null, REM_IBAN);
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(null), false)
+        .remittanceIban(REM_IBAN));
 
     assertTrue(body.getBoolean("ibanValid"));
     assertFalse(body.getBoolean("accountIbanValid"));
@@ -252,8 +252,8 @@ class RemittanceSepaFileDataTest {
   /** A present but invalid copy is not replaced by the account's: the file would be refused. */
   @Test
   void anInvalidRemittanceIbanIsMissingNotReplaced() throws Exception {
-    JSONObject body = RemittanceSepaFileData.build(account(ACC_IBAN), true, "ORG-1", "ES", TAX_ID,
-        null, null, null, "ES0021000418450200051332");
+    JSONObject body = RemittanceSepaFileData.build(inputs(account(ACC_IBAN), true)
+        .remittanceIban("ES0021000418450200051332"));
 
     assertTrue(body.isNull("remittanceIban"));
     assertFalse(body.getBoolean("remittanceIbanValid"));
@@ -299,6 +299,12 @@ class RemittanceSepaFileDataTest {
       String businessCode) throws Exception {
     return RemittanceSepaFileData.build(account("ES9121000418450200051332"), ibanValid, "ORG-1",
         country, taxId, businessCode);
+  }
+
+  /** The inputs of a Spanish organization with {@code TAX_ID} and no business code. */
+  private static RemittanceSepaFileData.Inputs inputs(FIN_FinancialAccount account,
+      boolean ibanValid) {
+    return new RemittanceSepaFileData.Inputs(account, ibanValid, "ORG-1", "ES", TAX_ID, null);
   }
 
   private static FIN_FinancialAccount account(String iban) {

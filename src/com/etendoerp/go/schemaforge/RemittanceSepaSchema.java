@@ -57,8 +57,9 @@ import org.xml.sax.XMLReader;
  * and external access is closed by means every parser has:
  * <ul>
  *   <li>the document is read through an {@link XMLReader} that refuses any DOCTYPE
- *       ({@code disallow-doctype-decl}) and never loads external entities or DTDs; a document
- *       with a DOCTYPE is therefore invalid, whatever the parser;</li>
+ *       ({@code disallow-doctype-decl}, required: Xerces 2.9 and the JDK parser both know it) and
+ *       never loads external entities or DTDs; a document with a DOCTYPE is therefore invalid,
+ *       whatever the parser;</li>
  *   <li>the schema factory and the validator get a resource resolver that refuses every
  *       resolution: the two SEPA XSDs import nothing, so nothing legitimate is refused;</li>
  *   <li>{@link XMLConstants#FEATURE_SECURE_PROCESSING} on the factory, plus the JAXP 1.5
@@ -134,12 +135,17 @@ final class RemittanceSepaSchema {
 
   /**
    * A namespace-aware reader that refuses a DOCTYPE and never reads anything external.
+   *
+   * <p>{@code disallow-doctype-decl} is set directly and is NOT tolerated when missing: it is the
+   * setting that closes external entities on every parser, and both parsers Etendo can resolve to
+   * (Xerces 2.9 and the JDK's) support it. A parser without it fails here, before reading
+   * anything. The other settings are defence in depth and are skipped when unsupported.
    */
   static XMLReader secureReader() throws ParserConfigurationException, SAXException {
     SAXParserFactory factory = SAXParserFactory.newInstance();
+    factory.setFeature(FEATURE_DISALLOW_DOCTYPE, true);
     factory.setNamespaceAware(true);
     factory.setValidating(false);
-    setFeature(factory, FEATURE_DISALLOW_DOCTYPE, true);
     setFeature(factory, FEATURE_EXTERNAL_GENERAL_ENTITIES, false);
     setFeature(factory, FEATURE_EXTERNAL_PARAMETER_ENTITIES, false);
     setFeature(factory, FEATURE_LOAD_EXTERNAL_DTD, false);

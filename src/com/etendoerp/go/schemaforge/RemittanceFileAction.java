@@ -79,6 +79,9 @@ final class RemittanceFileAction {
   private RemittanceFileAction() {
   }
 
+  /** The description of the record id the three actions take. */
+  private static final String ID_DESCRIPTION = "the id of the remittance";
+
   /** Declares the three actions on the remittance header. */
   static void addContracts(Map<String, NeoActionContract> contracts) {
     contracts.put(ACTION_READINESS, NeoActionContract.read(ACTION_READINESS,
@@ -88,7 +91,7 @@ final class RemittanceFileAction {
             + "businessPartnerName, invoiceId, documentNo), summary (invoiceCount, lineCount, "
             + "totalAmount, currency, dueDate) and latestFile ({attachmentId, fileName} of the "
             + "last generated file, or null). Fix the problems before calling confirm.")
-        .withIdDescription("the id of the remittance"));
+        .withIdDescription(ID_DESCRIPTION));
     contracts.put(ACTION_CONFIRM, NeoActionContract.write(ACTION_CONFIRM,
         "Confirms the remittance: processes it (creates the payments of its lines, status "
             + "Remitted; nothing is settled and the invoices stay unpaid), generates its SEPA "
@@ -103,14 +106,14 @@ final class RemittanceFileAction {
             + "' one payment per business partner and due date.",
             List.of(RemittanceProcessAction.GROUPING_NONE,
                 RemittanceProcessAction.GROUPING_BP_DUE_DATE)))
-        .withIdDescription("the id of the remittance")
+        .withIdDescription(ID_DESCRIPTION)
         .withFieldValuesBody());
     contracts.put(ACTION_GENERATE, NeoActionContract.write(ACTION_GENERATE,
         "Generates the SEPA file of a confirmed (processed) remittance again (while it is PR or "
             + "SB, or later) and attaches it as its main document; the earlier files are kept. Takes no parameters. Returns "
             + "status, attachmentId, fileName and downloadUrl, as confirm. Refused once a line "
             + "of the remittance was returned (the file would still list it).")
-        .withIdDescription("the id of the remittance"));
+        .withIdDescription(ID_DESCRIPTION));
   }
 
   /** @return whether {@code action} is one of this class's actions */

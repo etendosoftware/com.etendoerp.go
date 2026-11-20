@@ -84,12 +84,10 @@ public class RemittanceTriggerIntegrationTest extends WeldBaseTest {
   private static final String ACCOUNT_A_CREDITOR_ID = "ES39001B87654321";
   /** The BBVA sandbox account, IBAN ES84 0182 6450 0002 0150 0191. */
   private static final String ACCOUNT_B_ID = "23341D8933D9408E9BB048B2930C2CFB";
-  private static final String ACCOUNT_B_IBAN = "ES8401826450000201500191";
   private static final String ACCOUNT_B_CREDITOR_ID = "ES97000B12345678";
 
-  /** Two collection types (pay-in) and a payment type (pay-out only). */
+  /** A collection type (pay-in) and a payment type (pay-out only). */
   private static final String COLLECTION_TYPE_ID = "A0AA4E4F8FA94E6CB3C4E9F306979447";
-  private static final String OTHER_COLLECTION_TYPE_ID = "19EC581FA02748CEB1C7953075815482";
   private static final String PAYMENT_TYPE_ID = "F3A00FA0887246D88F53B164957D985D";
 
   private static final String TYPED_IBAN = "ES6000491500051234567892";

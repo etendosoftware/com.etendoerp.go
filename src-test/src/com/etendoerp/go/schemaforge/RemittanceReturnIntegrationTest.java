@@ -156,7 +156,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     Remittance remittance = confirmed(RemittanceProcessAction.GROUPING_NONE, DUE_A_DETAIL_ID);
     String remittanceId = remittance.getId();
     String lineId = lineIds(remittance).get(0);
-    String scheduleId = scheduleIdOf(remittance, lineId);
+    String scheduleId = scheduleIdOf(lineId);
     String invoiceId = invoiceOf(scheduleId).getId();
 
     JSONObject before = lineOf(RemittanceReturnAction.state(remittance), lineId);
@@ -282,7 +282,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     String paymentId = first.getString("paymentId");
     List<String> scheduleIds = new ArrayList<>();
     for (String id : ids) {
-      scheduleIds.add(scheduleIdOf(remittance, id));
+      scheduleIds.add(scheduleIdOf(id));
     }
 
     NeoResponse partial = RemittanceReturnAction.returnLines(handler, remittance,
@@ -344,7 +344,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, line.getString("paymentId"));
     assertEquals("the payment is only remitted", "REM_SENT", payment.getStatus());
     assertTrue("nothing is deposited", payment.getFINFinaccTransactionList().isEmpty());
-    String scheduleId = scheduleIdOf(reloaded, lineId);
+    String scheduleId = scheduleIdOf(lineId);
     assertEquals("the due is still owed", 0, DUE_AMOUNT.compareTo(outstandingOf(scheduleId)));
     Invoice invoice = invoiceOf(scheduleId);
     OBDal.getInstance().refresh(invoice);
@@ -366,7 +366,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     String lineId = lineIds(remittance).get(0);
     String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
         .getString("paymentId");
-    String scheduleId = scheduleIdOf(remittance, lineId);
+    String scheduleId = scheduleIdOf(lineId);
 
     NeoResponse sent = RemittanceStatusAction.markSent(remittance);
 
@@ -576,7 +576,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     String lineId = lineIds(remittance).get(0);
     String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
         .getString("paymentId");
-    String scheduleId = scheduleIdOf(remittance, lineId);
+    String scheduleId = scheduleIdOf(lineId);
     Date dueDate = remittance.getDueDate();
 
     NeoResponse collected = RemittanceStatusAction.markCollected(remittance);
@@ -610,7 +610,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     String lineId = lineIds(remittance).get(0);
     String paymentId = lineOf(RemittanceReturnAction.state(remittance), lineId)
         .getString("paymentId");
-    String scheduleId = scheduleIdOf(remittance, lineId);
+    String scheduleId = scheduleIdOf(lineId);
 
     NeoResponse reactivated = RemittanceProcessAction.reactivate(remittance);
 
@@ -787,7 +787,7 @@ public class RemittanceReturnIntegrationTest extends WeldBaseTest {
     return ids;
   }
 
-  private static String scheduleIdOf(Remittance remittance, String lineId) {
+  private static String scheduleIdOf(String lineId) {
     RemittanceLine line = OBDal.getInstance().get(RemittanceLine.class, lineId);
     return line.getPaymentScheduleDetail().getInvoicePaymentSchedule().getId();
   }

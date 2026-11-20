@@ -57,6 +57,9 @@ final class RemittanceSepaRules {
 
   private static final String PAYMENT_INFORMATION = "PmtInf";
   private static final String TRANSACTION = "DrctDbtTxInf";
+  private static final String INITIATING_PARTY = RemittanceCreditorIdRewriter.INITIATING_PARTY;
+  private static final String FIN_INSTITUTION_ID = RemittanceCreditorIdRewriter.FIN_INSTITUTION_ID;
+  private static final String BICFI = RemittanceCreditorIdRewriter.BICFI;
 
   private RemittanceSepaRules() {
   }
@@ -139,33 +142,50 @@ final class RemittanceSepaRules {
     return value != null && (value.startsWith("/") || value.endsWith("/") || value.contains("//"));
   }
 
-  private static final String[] COLLECTION_ID_HOLDERS = {"CdtrSchmeId", "InitgPty"};
+  private static final String[] COLLECTION_ID_HOLDERS = {"CdtrSchmeId", INITIATING_PARTY};
   /** pain.001: the identifications of the initiating party, the debtor and the creditor. */
-  private static final String[] PAYMENT_ID_HOLDERS = {"InitgPty", "Dbtr", "Cdtr"};
+  private static final String[] PAYMENT_ID_HOLDERS = {INITIATING_PARTY, "Dbtr", "Cdtr"};
 
   private static Violation slashRule(Document document, String[] holders) {
     for (String reference : REFERENCES) {
-      NodeList found = document.getElementsByTagNameNS("*", reference);
-      for (int i = 0; i < found.getLength(); i++) {
-        Violation violation = slash(found.item(i));
-        if (violation != null) {
-          return violation;
-        }
+      Violation violation = firstSlash(document.getElementsByTagNameNS("*", reference));
+      if (violation != null) {
+        return violation;
       }
     }
     // The creditor identifier (AT-E005): Othr/Id under CdtrSchmeId and the initiating party.
     for (String holder : holders) {
       NodeList found = document.getElementsByTagNameNS("*", holder);
       for (int i = 0; i < found.getLength(); i++) {
-        NodeList ids = ((Element) found.item(i)).getElementsByTagNameNS("*", "Id");
-        for (int j = 0; j < ids.getLength(); j++) {
-          if (ids.item(j).getParentNode() != null
-              && "Othr".equals(ids.item(j).getParentNode().getLocalName())) {
-            Violation violation = slash(ids.item(j));
-            if (violation != null) {
-              return violation;
-            }
-          }
+        Violation violation = otherIdSlash((Element) found.item(i));
+        if (violation != null) {
+          return violation;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** The first of {@code nodes} that breaks the slash rule, or {@code null}. */
+  private static Violation firstSlash(NodeList nodes) {
+    for (int i = 0; i < nodes.getLength(); i++) {
+      Violation violation = slash(nodes.item(i));
+      if (violation != null) {
+        return violation;
+      }
+    }
+    return null;
+  }
+
+  /** The first {@code Othr/Id} under {@code holder} that breaks the slash rule, or {@code null}. */
+  private static Violation otherIdSlash(Element holder) {
+    NodeList ids = holder.getElementsByTagNameNS("*", "Id");
+    for (int j = 0; j < ids.getLength(); j++) {
+      Node parent = ids.item(j).getParentNode();
+      if (parent != null && "Othr".equals(parent.getLocalName())) {
+        Violation violation = slash(ids.item(j));
+        if (violation != null) {
+          return violation;
         }
       }
     }
@@ -184,7 +204,7 @@ final class RemittanceSepaRules {
     }
     Element message = child(document.getDocumentElement(), "CstmrDrctDbtInitn");
     Element header = child(message, "GrpHdr");
-    Violation violation = partyName(child(header, "InitgPty"), false);
+    Violation violation = partyName(child(header, INITIATING_PARTY), false);
     if (violation != null) {
       return violation;
     }
@@ -232,54 +252,71 @@ final class RemittanceSepaRules {
     }
     Element message = child(document.getDocumentElement(), "CstmrCdtTrfInitn");
     Element header = child(message, "GrpHdr");
-    violation = partyName(child(header, "InitgPty"), false);
+    violation = partyName(child(header, INITIATING_PARTY), false);
     if (violation != null) {
       return violation;
     }
-    int transactionCount = 0;
-    BigDecimal total = BigDecimal.ZERO;
+    Totals totals = new Totals();
     for (Element block : children(message, PAYMENT_INFORMATION)) {
-      violation = debtorAgent(block, requireBic);
-      if (violation == null) {
-        violation = partyName(child(block, "Dbtr"), true);
-      }
+      violation = paymentBlockViolation(block, requireBic, totals);
       if (violation != null) {
         return violation;
       }
-      List<Element> transactions = children(block, "CdtTrfTxInf");
-      BigDecimal blockTotal = BigDecimal.ZERO;
-      for (Element transaction : transactions) {
-        violation = creditorAgent(transaction, requireBic);
-        if (violation == null) {
-          violation = partyName(child(transaction, "Cdtr"), true);
-        }
-        if (violation != null) {
-          return violation;
-        }
-        Element amount = child(child(transaction, "Amt"), "InstdAmt");
-        if (amount == null) {
-          return missing(transaction, "Amt/InstdAmt");
-        }
-        blockTotal = blockTotal.add(new BigDecimal(amount.getTextContent().trim()));
-      }
-      violation = controls(block, transactions.size(), blockTotal);
-      if (violation != null) {
-        return violation;
-      }
-      transactionCount += transactions.size();
-      total = total.add(blockTotal);
     }
-    return controls(header, transactionCount, total);
+    return controls(header, totals.count, totals.amount);
+  }
+
+  /**
+   * Checks one {@code PmtInf} of a pain.001: its debtor agent and name, then every transaction in
+   * order, then its own count and total, which are added to {@code totals} once they pass.
+   */
+  private static Violation paymentBlockViolation(Element block, boolean requireBic,
+      Totals totals) {
+    Violation violation = debtorAgent(block, requireBic);
+    if (violation == null) {
+      violation = partyName(child(block, "Dbtr"), true);
+    }
+    if (violation != null) {
+      return violation;
+    }
+    List<Element> transactions = children(block, "CdtTrfTxInf");
+    BigDecimal blockTotal = BigDecimal.ZERO;
+    for (Element transaction : transactions) {
+      violation = creditorAgent(transaction, requireBic);
+      if (violation == null) {
+        violation = partyName(child(transaction, "Cdtr"), true);
+      }
+      if (violation != null) {
+        return violation;
+      }
+      Element amount = child(child(transaction, "Amt"), "InstdAmt");
+      if (amount == null) {
+        return missing(transaction, "Amt/InstdAmt");
+      }
+      blockTotal = blockTotal.add(new BigDecimal(amount.getTextContent().trim()));
+    }
+    violation = controls(block, transactions.size(), blockTotal);
+    if (violation == null) {
+      totals.count += transactions.size();
+      totals.amount = totals.amount.add(blockTotal);
+    }
+    return violation;
+  }
+
+  /** The transaction count and amount of the blocks checked so far, for the group header. */
+  private static final class Totals {
+    int count;
+    BigDecimal amount = BigDecimal.ZERO;
   }
 
   /** 2.53-2.61: exactly one of BICFI or Othr/Id = NOTPROVIDED; BICFI when the type requires it. */
   private static Violation debtorAgent(Element block, boolean requireBic) {
-    Element institution = child(child(block, "DbtrAgt"), "FinInstnId");
+    Element institution = child(child(block, "DbtrAgt"), FIN_INSTITUTION_ID);
     if (institution == null) {
       return missing(block, "DbtrAgt/FinInstnId");
     }
     Element other = child(institution, "Othr");
-    boolean hasBic = child(institution, "BICFI") != null;
+    boolean hasBic = child(institution, BICFI) != null;
     if (requireBic && !hasBic) {
       return new Violation(MSG_BIC_REQUIRED, path(institution));
     }
@@ -296,8 +333,8 @@ final class RemittanceSepaRules {
     if (agent == null) {
       return requireBic ? new Violation(MSG_BIC_REQUIRED, path(transaction) + "/CdtrAgt") : null;
     }
-    Element institution = child(agent, "FinInstnId");
-    if (institution == null || child(institution, "BICFI") == null
+    Element institution = child(agent, FIN_INSTITUTION_ID);
+    if (institution == null || child(institution, BICFI) == null
         || child(institution, "Othr") != null) {
       return new Violation(MSG_CREDITOR_AGENT, path(agent));
     }
@@ -307,9 +344,9 @@ final class RemittanceSepaRules {
   private static Violation partyAndAgent(Element parent, String party, String agentName,
       boolean requireBic) {
     Element agent = child(parent, agentName);
-    Element institution = child(agent, "FinInstnId");
+    Element institution = child(agent, FIN_INSTITUTION_ID);
     Element other = child(institution, "Othr");
-    boolean hasBic = child(institution, "BICFI") != null;
+    boolean hasBic = child(institution, BICFI) != null;
     boolean hasOther = other != null;
     if (requireBic && !hasBic) {
       return new Violation(MSG_BIC_REQUIRED, path(institution));
@@ -376,19 +413,25 @@ final class RemittanceSepaRules {
     StringBuilder path = new StringBuilder();
     for (Node n = node; n != null && n.getNodeType() == Node.ELEMENT_NODE;
         n = n.getParentNode()) {
-      int index = 1;
-      int same = 0;
-      for (Node s = n.getParentNode() == null ? null : n.getParentNode().getFirstChild();
-          s != null; s = s.getNextSibling()) {
-        if (s.getNodeType() == Node.ELEMENT_NODE && n.getLocalName().equals(s.getLocalName())) {
-          same++;
-          if (s == n) {
-            index = same;
-          }
-        }
-      }
-      path.insert(0, "/" + n.getLocalName() + (same > 1 ? "[" + index + "]" : ""));
+      path.insert(0, "/" + n.getLocalName() + positionOf(n));
     }
     return path.toString();
+  }
+
+  /** {@code [i]}, the 1-based position of {@code n} among its same-named siblings, if any. */
+  private static String positionOf(Node n) {
+    Node parent = n.getParentNode();
+    int index = 1;
+    int same = 0;
+    for (Node s = parent == null ? null : parent.getFirstChild(); s != null;
+        s = s.getNextSibling()) {
+      if (s.getNodeType() == Node.ELEMENT_NODE && n.getLocalName().equals(s.getLocalName())) {
+        same++;
+        if (s == n) {
+          index = same;
+        }
+      }
+    }
+    return same > 1 ? "[" + index + "]" : "";
   }
 }

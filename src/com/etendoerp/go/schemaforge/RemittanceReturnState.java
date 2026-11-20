@@ -64,6 +64,9 @@ import org.openbravo.module.remittance.RemittanceLineReturn;
  */
 final class RemittanceReturnState {
 
+  /** The HQL parameter of the remittance id in the queries below. */
+  private static final String P_REMITTANCE = "remittance";
+
   static final String PENDING = "PENDING";
   static final String PROCESSED = "PROCESSED";
   static final String SETTLED = "SETTLED";
@@ -175,7 +178,7 @@ final class RemittanceReturnState {
         "select c from " + RemittanceLineCancel.ENTITY_NAME + " as c"
             + " where c.remittance.id = :remittance and c.processed = true and c.active = true"
             + " order by c.lineNo", RemittanceLineCancel.class)
-        .setParameter("remittance", remittance.getId())
+        .setParameter(P_REMITTANCE, remittance.getId())
         .list();
     Map<String, RemittanceLineCancel> byPayment = new HashMap<>();
     for (RemittanceLineCancel row : rows) {
@@ -197,7 +200,7 @@ final class RemittanceReturnState {
         "select count(r.id) from " + RemittanceLineReturn.ENTITY_NAME + " as r"
             + " where r.remittance.id = :remittance and r.processed = true and r.active = true",
         Long.class)
-        .setParameter("remittance", remittance.getId())
+        .setParameter(P_REMITTANCE, remittance.getId())
         .uniqueResult();
     return count != null && count > 0;
   }
@@ -217,7 +220,7 @@ final class RemittanceReturnState {
         "select r from " + RemittanceLineReturn.ENTITY_NAME + " as r"
             + " where r.remittance.id = :remittance and r.processed = true and r.active = true",
         RemittanceLineReturn.class)
-        .setParameter("remittance", remittance.getId())
+        .setParameter(P_REMITTANCE, remittance.getId())
         .list();
     RemittanceLineReturn nearest = null;
     long best = Long.MAX_VALUE;

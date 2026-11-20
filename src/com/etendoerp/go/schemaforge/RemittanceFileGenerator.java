@@ -136,7 +136,7 @@ final class RemittanceFileGenerator {
    */
   static byte[] generate(Remittance remittance) throws Refusal {
     REM_RemittanceCreateFile generator = instantiate(remittance);
-    StringBuffer xml;
+    CharSequence xml;
     try {
       // Classic's generator reads the account's IBAN and refuses a blank one: stand in for it
       // while it runs; the file then carries the remittance's IBAN (withIban).

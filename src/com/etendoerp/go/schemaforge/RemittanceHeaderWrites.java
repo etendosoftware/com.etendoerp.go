@@ -119,12 +119,8 @@ final class RemittanceHeaderWrites {
     if (!create && !bodyHasAccount && !bodyHasType) {
       return;
     }
-    String accountId = bodyHasAccount
-        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_ACCOUNT))
-        : stored != null ? RemittanceHeaderHandler.idOf(stored.getFinancialAccount()) : null;
-    String typeId = bodyHasType
-        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
-        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
+    String accountId = effectiveAccountId(body, stored);
+    String typeId = effectiveTypeId(body, stored);
     if (accountId == null || typeId == null) {
       return;
     }
@@ -136,12 +132,7 @@ final class RemittanceHeaderWrites {
     if (account == null) {
       return;
     }
-    if (!body.has(RemittanceHeaderHandler.FIELD_IBAN)) {
-      String iban = RemittanceIban.normalize(account.getIBAN());
-      if (!iban.isEmpty()) {
-        body.put(RemittanceHeaderHandler.FIELD_IBAN, iban);
-      }
-    }
+    proposeIban(body, account);
     if (collection) {
       proposeCreditorId(body, account, create);
       if (create && !body.has(RemittanceHeaderHandler.FIELD_SCHEME)) {
@@ -149,6 +140,18 @@ final class RemittanceHeaderWrites {
       }
     } else if (!create) {
       body.put(RemittanceHeaderHandler.FIELD_CREDITOR_ID, JSONObject.NULL);
+    }
+  }
+
+  /** The account's IBAN, when the body carries none and the account has one. */
+  private static void proposeIban(JSONObject body, FIN_FinancialAccount account)
+      throws JSONException {
+    if (body.has(RemittanceHeaderHandler.FIELD_IBAN)) {
+      return;
+    }
+    String iban = RemittanceIban.normalize(account.getIBAN());
+    if (!iban.isEmpty()) {
+      body.put(RemittanceHeaderHandler.FIELD_IBAN, iban);
     }
   }
 
@@ -281,12 +284,7 @@ final class RemittanceHeaderWrites {
       }
       return refusal;
     }
-    String typeId = body.has(RemittanceHeaderHandler.FIELD_TYPE)
-        ? RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_TYPE))
-        : stored != null ? RemittanceHeaderHandler.idOf(stored.getRemittanceType()) : null;
-    RemittanceType type = typeId != null ? handler.loadType(typeId) : null;
-    if (type != null
-        && !RemittanceSepaProvisioning.SCHEME_CORE.equals(RemittanceSepaFileSetup.schemeOf(type))) {
+    if (isPaymentType(handler, effectiveTypeId(body, stored))) {
       return NeoMessageText.error(SC_UNPROCESSABLE,
           RemittanceHeaderHandler.MSG_OPTIONS_COLLECTION_ONLY);
     }
@@ -354,6 +352,14 @@ final class RemittanceHeaderWrites {
     boolean financed = "true".equalsIgnoreCase(text) || "Y".equalsIgnoreCase(text);
     body.put(RemittanceHeaderHandler.FIELD_FINANCED, financed);
     return financed;
+  }
+
+  /** The account the write leaves: the body's, else the stored one's; may be null. */
+  private static String effectiveAccountId(JSONObject body, Remittance stored) {
+    if (body.has(RemittanceHeaderHandler.FIELD_ACCOUNT)) {
+      return RemittanceHeaderHandler.idOf(body.opt(RemittanceHeaderHandler.FIELD_ACCOUNT));
+    }
+    return stored != null ? RemittanceHeaderHandler.idOf(stored.getFinancialAccount()) : null;
   }
 
   /** The type the write leaves on the remittance: the body's, else the stored one's; may be null. */

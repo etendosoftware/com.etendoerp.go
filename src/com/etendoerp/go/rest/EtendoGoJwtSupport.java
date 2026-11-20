@@ -164,6 +164,9 @@ public final class EtendoGoJwtSupport {
    * <p>Package-private since ETP-5734: the "Mis empresas" environment details label an invited
    * account's role in another tenant with exactly these names. Public since ETP-6247: the backend
    * telemetry derives {@code role_groups} from them ({@code NeoRoleGroups}), as the SPA does.
+   *
+   * @param userId the {@code AD_User_ID} whose personal role is read
+   * @return the template role names, in composition order; empty, never {@code null}, when none
    */
   public static List<String> resolveEffectiveRoleNames(String userId) {
     List<String> templateRoleIds = new UserRoleCompositionService()

@@ -200,7 +200,7 @@ final class RemittanceReturnAction {
       entry.put("state", line.state);
       entry.put("returnable", line.returnable());
       entry.put("reasonCode", line.returnable() ? JSONObject.NULL : line.reasonCode);
-      entry.put("returnDate", line.returnDate != null ? line.returnDate : JSONObject.NULL);
+      entry.put(P_RETURN_DATE, line.returnDate != null ? line.returnDate : JSONObject.NULL);
       entry.put("paymentId", line.paymentId != null ? line.paymentId : JSONObject.NULL);
       entry.put("paymentLineIds", new JSONArray(line.paymentLineIds));
       lines.put(line.lineId, entry);

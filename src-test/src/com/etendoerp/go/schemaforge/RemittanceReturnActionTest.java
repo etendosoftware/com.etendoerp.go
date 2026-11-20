@@ -704,7 +704,7 @@ class RemittanceReturnActionTest {
     states.put(lineId, new LineState(lineId, paymentId, RemittanceReturnState.SETTLED, null, null,
         List.of(lineId)));
     payment(paymentId);
-    registerCancel(paymentId);
+    registerCancel();
   }
 
   /** Several returnable lines that share one payment. */
@@ -714,7 +714,7 @@ class RemittanceReturnActionTest {
           List.of(lineIds)));
     }
     payment(paymentId);
-    registerCancel(paymentId);
+    registerCancel();
   }
 
   private FIN_Payment payment(String id) {
@@ -729,7 +729,7 @@ class RemittanceReturnActionTest {
   }
 
   /** The settlement rows the state answers: all of them before the run, none after it. */
-  private void registerCancel(String paymentId) {
+  private void registerCancel() {
     Map<String, RemittanceLineCancel> before = new LinkedHashMap<>();
     for (String id : payments.keySet()) {
       before.put(id, cancel(id));

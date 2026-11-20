@@ -167,33 +167,43 @@ final class RemittanceCreditorIdRewriter {
     try {
       Document document = parse(xml);
       if (scheme != null) {
-        int changed = 0;
-        NodeList instruments = document.getElementsByTagNameNS("*", "LclInstrm");
-        for (int i = 0; i < instruments.getLength(); i++) {
-          Element code = child(instruments.item(i), "Cd");
-          if (code != null) {
-            code.setTextContent(scheme);
-            changed++;
-          }
-        }
-        if (changed == 0) {
-          throw new IOException("The SEPA file has no LclInstrm/Cd: the scheme cannot be applied");
-        }
+        applyScheme(document, scheme);
       }
       if (msgIdPrefix != null) {
-        NodeList ids = document.getElementsByTagNameNS("*", "MsgId");
-        if (ids.getLength() == 0) {
-          throw new IOException("The SEPA file has no MsgId: the financed prefix cannot be applied");
-        }
-        Node id = ids.item(0);
-        String current = id.getTextContent() == null ? "" : id.getTextContent();
-        if (!current.startsWith(msgIdPrefix)) {
-          id.setTextContent(prefixedMsgId(msgIdPrefix, current));
-        }
+        applyMsgIdPrefix(document, msgIdPrefix);
       }
       return write(document);
     } catch (SAXException | ParserConfigurationException | TransformerException e) {
       throw new IOException("Could not apply the direct debit options: " + e.getMessage(), e);
+    }
+  }
+
+  /** Writes {@code scheme} into {@code LclInstrm/Cd} of every payment information block. */
+  private static void applyScheme(Document document, String scheme) throws IOException {
+    int changed = 0;
+    NodeList instruments = document.getElementsByTagNameNS("*", "LclInstrm");
+    for (int i = 0; i < instruments.getLength(); i++) {
+      Element code = child(instruments.item(i), "Cd");
+      if (code != null) {
+        code.setTextContent(scheme);
+        changed++;
+      }
+    }
+    if (changed == 0) {
+      throw new IOException("The SEPA file has no LclInstrm/Cd: the scheme cannot be applied");
+    }
+  }
+
+  /** Prefixes {@code GrpHdr/MsgId} with {@code msgIdPrefix} unless it already starts with it. */
+  private static void applyMsgIdPrefix(Document document, String msgIdPrefix) throws IOException {
+    NodeList ids = document.getElementsByTagNameNS("*", "MsgId");
+    if (ids.getLength() == 0) {
+      throw new IOException("The SEPA file has no MsgId: the financed prefix cannot be applied");
+    }
+    Node id = ids.item(0);
+    String current = id.getTextContent() == null ? "" : id.getTextContent();
+    if (!current.startsWith(msgIdPrefix)) {
+      id.setTextContent(prefixedMsgId(msgIdPrefix, current));
     }
   }
 
@@ -216,6 +226,10 @@ final class RemittanceCreditorIdRewriter {
   /** Agent elements whose empty institution identification the EPC does not accept. */
   private static final String[] AGENTS = {"CdtrAgt", "DbtrAgt"};
   static final String NOT_PROVIDED = "NOTPROVIDED";
+  /** The financial institution identification of an agent. */
+  static final String FIN_INSTITUTION_ID = "FinInstnId";
+  /** The BIC of a financial institution identification. */
+  static final String BICFI = "BICFI";
   // BICFIDec2014Identifier in pain.008.001.08.xsd. Keep malformed input for schema validation.
   private static final Pattern BICFI_FORMAT = Pattern.compile("[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?");
 
@@ -269,7 +283,7 @@ final class RemittanceCreditorIdRewriter {
         NodeList agents = document.getElementsByTagNameNS(
             document.getDocumentElement().getNamespaceURI(), agent);
         for (int i = 0; i < agents.getLength(); i++) {
-          useIbanOnlyIdentification(document, child(agents.item(i), "FinInstnId"));
+          useIbanOnlyIdentification(document, child(agents.item(i), FIN_INSTITUTION_ID));
         }
       }
     }
@@ -303,13 +317,13 @@ final class RemittanceCreditorIdRewriter {
     if (ibanOnly) {
       NodeList debtorAgents = document.getElementsByTagNameNS(namespace, "DbtrAgt");
       for (int i = 0; i < debtorAgents.getLength(); i++) {
-        useIbanOnlyIdentification(document, child(debtorAgents.item(i), "FinInstnId"));
+        useIbanOnlyIdentification(document, child(debtorAgents.item(i), FIN_INSTITUTION_ID));
       }
     }
     NodeList creditorAgents = document.getElementsByTagNameNS(namespace, "CdtrAgt");
     List<Node> empty = new ArrayList<>();
     for (int i = 0; i < creditorAgents.getLength(); i++) {
-      Element institution = child(creditorAgents.item(i), "FinInstnId");
+      Element institution = child(creditorAgents.item(i), FIN_INSTITUTION_ID);
       if (institution == null || !hasElementChild(institution)) {
         empty.add(creditorAgents.item(i));
       }
@@ -366,7 +380,7 @@ final class RemittanceCreditorIdRewriter {
     if (institution == null) {
       return;
     }
-    Element bic = child(institution, "BICFI");
+    Element bic = child(institution, BICFI);
     if (bic != null) {
       if (child(institution, OTHER) != null || hasElementChild(bic)
           || !BICFI_FORMAT.matcher(bic.getTextContent()).matches()) {
@@ -409,6 +423,12 @@ final class RemittanceCreditorIdRewriter {
     return out.toByteArray();
   }
 
+  /**
+   * The identity-transform factory: no external DTD or stylesheet is ever loaded. The JAXP 1.5
+   * attributes are set directly: Etendo ships no {@code TransformerFactory} provider (Xerces 2.9
+   * has none), so this is the JDK's, which knows them. The secure-processing feature stays
+   * optional, as before.
+   */
   private static TransformerFactory secureFactory() {
     TransformerFactory factory = TransformerFactory.newInstance();
     try {
@@ -416,6 +436,8 @@ final class RemittanceCreditorIdRewriter {
     } catch (TransformerConfigurationException e) {
       // A factory that does not know the feature keeps the identity transform, which loads nothing.
     }
+    factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+    factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
     return factory;
   }
 
