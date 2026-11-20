@@ -141,19 +141,19 @@ public final class NeoAttachmentAuthorizer {
     if (StringUtils.isBlank(attachmentId)) {
       return null;
     }
-    Attachment attachment = loadAttachment(attachmentId);
-    if (attachment == null || attachment.getTable() == null) {
+    AttachmentParent found = loadAttachment(attachmentId);
+    if (found == null) {
       return null;
     }
-    String tableId = attachment.getTable().getId();
-    String recordId = attachment.getRecord();
+    String tableId = found.tableId;
+    String recordId = found.recordId;
     if (StringUtils.isNotEmpty(suppliedTableName) && !isSameTable(suppliedTableName, tableId)) {
       return null;
     }
     if (StringUtils.isNotEmpty(suppliedRecordId) && !suppliedRecordId.equals(recordId)) {
       return null;
     }
-    return canAccessParent(tableId, recordId, access) ? attachment : null;
+    return canAccessParent(tableId, recordId, access) ? found.attachment : null;
   }
 
   /**
@@ -175,15 +175,35 @@ public final class NeoAttachmentAuthorizer {
     return tableId == null || canAccessParent(tableId, recordId, access);
   }
 
+  /** An attachment with its parent's table and record id, read while the row was loaded. */
+  private static final class AttachmentParent {
+    final Attachment attachment;
+    final String tableId;
+    final String recordId;
+
+    AttachmentParent(Attachment attachment, String tableId, String recordId) {
+      this.attachment = attachment;
+      this.tableId = tableId;
+      this.recordId = recordId;
+    }
+  }
+
   /**
-   * Loads the attachment row inside a narrow admin scope — reading the row needs no entity access
-   * of the caller's role, the decision is taken afterwards on its parent — and keeps only a row of
-   * the caller's tenant. A security failure while loading reads as "not found".
+   * Loads the attachment row inside a narrow admin scope — reading the row, and its lazily loaded
+   * table reference, needs no entity access of the caller's role; the decision is taken afterwards
+   * on its parent — and keeps only a row of the caller's tenant. A security failure while loading
+   * reads as "not found".
+   *
+   * @return the attachment with its table id and record id, or {@code null}
    */
-  private static Attachment loadAttachment(String attachmentId) {
+  private static AttachmentParent loadAttachment(String attachmentId) {
     OBContext.setAdminMode(true);
     try {
-      return TenantOwnership.loadOwned(Attachment.class, attachmentId);
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
+      if (attachment == null || attachment.getTable() == null) {
+        return null;
+      }
+      return new AttachmentParent(attachment, attachment.getTable().getId(), attachment.getRecord());
     } catch (OBSecurityException e) {
       return null;
     } finally {
