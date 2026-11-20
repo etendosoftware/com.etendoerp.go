@@ -43,6 +43,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Location;
 
@@ -601,6 +602,19 @@ class BpLocationHandlerTest {
       when(existingCountry.getId()).thenReturn("ES");
       when(existing.getCountry()).thenReturn(existingCountry);
       when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+      // syncLinkedContactNames (ETP-5806 CP-12c) runs unconditionally after the setters above and
+      // calls OBDal#createCriteria on C_BPartner_Location — these getters give buildDisplayName
+      // enough to compute a non-null name, unlike the bare-mock create tests above where every
+      // getter is null and that call short-circuits before reaching createCriteria at all. Left
+      // unstubbed, createCriteria() returns Mockito's default null and criteria.list() NPEs,
+      // silently swallowed by afterHandle's catch-all — which skipped flush() with no visible
+      // failure except this test's own verify(obDal).flush(). No linked contacts for this case.
+      @SuppressWarnings("unchecked")
+      OBCriteria<org.openbravo.model.common.businesspartner.Location> linkedCriteria =
+          mock(OBCriteria.class);
+      when(obDal.createCriteria(org.openbravo.model.common.businesspartner.Location.class))
+          .thenReturn(linkedCriteria);
+      when(linkedCriteria.list()).thenReturn(java.util.List.of());
 
       JSONObject body = new JSONObject();
       body.put("buildingName", "Torre A"); // partial body: only the optional field changes
@@ -618,6 +632,61 @@ class BpLocationHandlerTest {
       verify(existing).setOBSEPABuildingName("Torre A");
       verify(existing).setAddressLine1("Gran Via, 45 - Torre A");
       verify(obDal).flush();
+    }
+
+    /**
+     * ETP-5806 CP-12c (QA finding, Pasada 2, bloqueante) — repro: editing a C_Location through
+     * {@code bp-location} correctly updates the record's own computed Address1 preview, but the
+     * Contacts window's "Dirección" column and {@code _identifier} (both sourced from
+     * {@code C_BPartner_Location.Name}) kept showing the value from before the edit, because this
+     * handler only ever wrote {@code C_Location}'s own columns and never touched any linked
+     * {@code C_BPartner_Location} row. Editing the exact same record through
+     * {@code contacts/locationAddress} instead DID propagate, since that handler recomputes its
+     * own row's name on every update ({@code ContactAddressName#forUpdate}).
+     *
+     * <p>Asserts {@link BpLocationHandler} now re-syncs every {@code C_BPartner_Location} linked
+     * to the edited {@code C_Location} with the freshly-computed display name.
+     */
+    @Test
+    void patchResyncsTheNameOfEveryLinkedContactAddress() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Gran Via");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("45");
+      when(existing.getOBSEPABuildingName()).thenReturn("Torre A");
+      when(existing.getCityName()).thenReturn("Madrid");
+      // Simulates the post-write state applyGeoLocFields-equivalent setAddressLine1 left behind —
+      // a plain mock's getter is independent of the setter the production code calls on it.
+      when(existing.getAddressLine1()).thenReturn("Gran Via, 99 - Torre A");
+      org.openbravo.model.common.geography.Country existingCountry =
+          mock(org.openbravo.model.common.geography.Country.class);
+      when(existingCountry.getId()).thenReturn("ES");
+      when(existing.getCountry()).thenReturn(existingCountry);
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      org.openbravo.model.common.businesspartner.Location linkedContact =
+          mock(org.openbravo.model.common.businesspartner.Location.class);
+      @SuppressWarnings("unchecked")
+      OBCriteria<org.openbravo.model.common.businesspartner.Location> linkedCriteria =
+          mock(OBCriteria.class);
+      when(obDal.createCriteria(org.openbravo.model.common.businesspartner.Location.class))
+          .thenReturn(linkedCriteria);
+      when(linkedCriteria.list()).thenReturn(java.util.List.of(linkedContact));
+
+      JSONObject body = new JSONObject();
+      body.put("buildingNumber", "99"); // the exact repro: only buildingNumber changes
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+
+      NeoContext postCtx = buildCrudContext("PATCH", "loc-1", body);
+      postCtx.setPreviousResult(wrapRecord("loc-1"));
+
+      NeoResponse result = handler.afterHandle(postCtx);
+
+      assertNotNull(result);
+      verify(existing).setAddressLine1("Gran Via, 99 - Torre A");
+      verify(linkedContact).setName("Madrid, Gran Via, 99 - Torre A");
+      verify(linkedContact).setUpdated(any(java.util.Date.class));
+      verify(obDal).save(linkedContact);
     }
 
     @Test
