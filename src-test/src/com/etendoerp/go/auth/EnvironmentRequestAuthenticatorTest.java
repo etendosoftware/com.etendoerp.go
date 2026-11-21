@@ -44,6 +44,7 @@ import java.util.stream.Stream;
 import javax.servlet.http.HttpServletRequest;
 
 import org.hibernate.Session;
+import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,6 +62,7 @@ import org.openbravo.dal.service.OBDal;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
+import com.etendoerp.go.common.NeoRequestLogContext;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
@@ -341,6 +343,32 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals("rebound-role", outcome.getRoleId());
     swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, "rebound-role", ORG_ID,
         null, CLIENT_ID));
+  }
+
+  /** ETP-5646 — a real authentication binds the SESSION's user and client into the request's log context. */
+  @Test
+  void authenticationBindsTheSessionIdentityIntoAnOpenRequestContext() {
+    stubCookie();
+    ThreadContext.put(NeoRequestLogContext.REQUEST_ID, "req-12345678");
+    try {
+      EnvironmentAuthOutcome outcome = authenticator.authenticate(
+          mock(HttpServletRequest.class), SurfacePolicy.NEO_API);
+
+      assertTrue(outcome.isAuthenticated());
+      assertEquals(USER_ID, ThreadContext.get(NeoRequestLogContext.AD_USER_ID));
+      assertEquals(CLIENT_ID, ThreadContext.get(NeoRequestLogContext.AD_CLIENT_ID));
+    } finally {
+      NeoRequestLogContext.clear();
+    }
+  }
+
+  /** ETP-5646 — outside a feature-tagged request nothing is bound. */
+  @Test
+  void authenticationBindsNothingWithoutAnOpenRequestContext() {
+    stubCookie();
+    authenticator.authenticate(mock(HttpServletRequest.class), SurfacePolicy.NEO_API);
+
+    assertNull(ThreadContext.get(NeoRequestLogContext.AD_USER_ID));
   }
 
   /** No role left to rebind to: the session cannot be used for any environment until re-entry. */

@@ -22,6 +22,7 @@ import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -81,7 +82,7 @@ public final class CorsUtils {
     response.setHeader("Access-Control-Allow-Origin", origin);
     response.setHeader("Vary", "Origin");
     response.setHeader("Access-Control-Allow-Methods", methods);
-    response.setHeader("Access-Control-Allow-Headers", headers);
+    response.setHeader("Access-Control-Allow-Headers", withCorrelationHeaders(headers));
     response.setHeader("Access-Control-Max-Age", "86400");
     if (StringUtils.isNotBlank(exposedHeaders)) {
       response.setHeader("Access-Control-Expose-Headers", exposedHeaders);
@@ -105,6 +106,23 @@ public final class CorsUtils {
       return true;
     }
     return resolveConfiguredOrigins().stream().anyMatch(pattern -> matchesOrigin(pattern, origin));
+  }
+
+  /**
+   * ETP-5646: the SPA sends the feature context and a request id on first-party NEO requests, so
+   * a preflight must allow them whichever endpoint answers it. Appended once, never duplicated.
+   */
+  static String withCorrelationHeaders(String headers) {
+    String allowed = StringUtils.defaultString(headers);
+    Set<String> present = Arrays.stream(StringUtils.split(allowed, ','))
+        .map(name -> StringUtils.trim(name).toLowerCase(Locale.ROOT))
+        .collect(Collectors.toSet());
+    for (String extra : new String[] { NeoFeatureContext.HEADER, "X-Request-Id" }) {
+      if (!present.contains(extra.toLowerCase(Locale.ROOT))) {
+        allowed = allowed.isEmpty() ? extra : allowed + ", " + extra;
+      }
+    }
+    return allowed;
   }
 
   private static Set<String> resolveConfiguredOrigins() {

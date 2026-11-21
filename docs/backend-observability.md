@@ -129,6 +129,35 @@ must still name the `ETGO_Account` lookup table's test-account flag in Mixpanel.
 only: `POST`, `PUT`, `PATCH`, and `DELETE`. `GET` requests are not emitted to
 avoid high-volume read telemetry.
 
+## Feature context and request correlation (ETP-5646)
+
+`NeoRequestContextFilter` (`@WebFilter /*`) correlates a first-party NEO request with the SPA's RUM
+view. The SPA sends `X-Etendo-Feature` (a key such as `window.sales-order`, validated by
+`NeoFeatureContext`: four kinds, lower-case, at most 80 characters) and optionally `X-Request-Id`
+and the W3C `traceparent`.
+
+- The header is **attribution only**. It is honoured when the request has no `Origin` (same
+  origin / direct navigation) or an `Origin` allowlisted by `CorsUtils`; otherwise it is ignored. A
+  malformed value is dropped, never repaired.
+- User and tenant come from the authenticated session only: `EnvironmentRequestAuthenticator.bind`
+  calls `NeoRequestLogContext.bindIdentity(AD_User_ID, AD_Client_ID)`. A request header can never
+  set them.
+- Per-request log4j2 context keys (`request_id`, `feature_key`, `operation`, `ad_user_id`,
+  `ad_client_id`, `frontend_trace_id`) are removed in the filter's `finally`, also on an error status
+  or an exception. Work handed to another thread uses `NeoRequestLogContext.wrap(Runnable)`.
+- One JSON line per request with a feature, logger `com.etendoerp.go.telemetry.NeoRequest`:
+  `event=neo_request`, `outcome` (`success` < 400, `rejected` 4xx, `error` 5xx, `rollback` when an
+  exception left the chain), `operation` (`read`/`write`), `http_status`, `latency_ms`, `dd.trace_id` /
+  `dd.span_id` (only when the Datadog Java agent is attached; copied as strings) and
+  `service`/`env`/`version` from `DD_SERVICE`/`DD_ENV`/`DD_VERSION`. No path, query, payload, name or
+  e-mail.
+- `CorsUtils.apply` adds `X-Etendo-Feature` and `X-Request-Id` to `Access-Control-Allow-Headers`.
+
+This line observes the HTTP response. It is **not** the committed-business-outcome metric: that is
+the existing `backend_*` telemetry event of each operation, emitted after commit. See schema_forge
+`docs/ops/feature-usage-and-correlation.md` for dashboards, sampling, forwarding and APM
+prerequisites.
+
 ## Payload Safety
 
 Payloads are allowlisted before reaching the sink.

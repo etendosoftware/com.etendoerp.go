@@ -22,6 +22,7 @@ com.etendoerp.go.common.JwtAuthUtilsEnvironmentAccessTest
 com.etendoerp.go.common.JwtAuthUtilsTest
 com.etendoerp.go.common.NeoCurrencySymbolPositionsTest
 com.etendoerp.go.common.NeoFiscalTestModeServletTest
+com.etendoerp.go.common.NeoRequestContextFilterTest
 com.etendoerp.go.common.ProtocolErrorAdaptersTest
 com.etendoerp.go.common.PublicUrlResolverTest
 com.etendoerp.go.common.RequestTimingFilterTest

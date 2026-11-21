@@ -31,6 +31,7 @@ import org.openbravo.dal.core.OBContext;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
+import com.etendoerp.go.common.NeoRequestLogContext;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
@@ -410,6 +411,8 @@ public class EnvironmentRequestAuthenticator {
     }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    // ETP-5646: the authenticated identity, for the request's logs (never read from the request).
+    NeoRequestLogContext.bindIdentity(identity.userId, identity.clientId);
 
     if (policy.isCommercialAccessRequired()) {
       // ETP-5047 — the shared guard: null for an allowed tenant, for one that predates lifecycle
