@@ -467,6 +467,9 @@ class McpConfigSourcedataTest {
   private static final List<String> INVOICE_PAYMENT_CHILDREN = List.of(
       "0D5FAC6A352140EABD483FF77539FAEA", "1F7ACD054BF14A148B7A11CD32A8704D",
       "28A6378134714F1E8D3C0869C1C77438", "1343B4002EE14A9896594655770261ED");
+  /** sales-invoice and purchase-invoice paymentPlan (a subset of the list above). */
+  private static final Set<String> PAYMENT_PLANS = Set.of("28A6378134714F1E8D3C0869C1C77438",
+      "1343B4002EE14A9896594655770261ED");
   private static final String FA_TRANSACTION = "AF50E181A0094E439C7B46B25A9E38FC";
   private static final String FA_RECONCILIATIONS = "F904BC5EBBCA4C55BE9F62871E2AD171";
   private static final String FA_ACCOUNT = "BE3EAEED69644E56B0ECDCFE4A7E9BC1";
@@ -549,7 +552,14 @@ class McpConfigSourcedataTest {
       JSONObject verbs = payload.getJSONObject(McpVerbsSection.NAME);
       assertEveryWriteHidden(verbs, id);
       assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("registerPayment"), id);
-      assertFalse(payload.has(McpActionsSection.NAME), id);
+      if (PAYMENT_PLANS.contains(id)) {
+        // ETP-5812: updatePaymentPlan is an internal flag, hidden from agents.
+        JSONObject actions = payload.getJSONObject(McpActionsSection.NAME);
+        assertEquals(Set.of("updatePaymentPlan"),
+            setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN)), id);
+      } else {
+        assertFalse(payload.has(McpActionsSection.NAME), id);
+      }
       assertResolvesCleanly(id);
     }
   }
