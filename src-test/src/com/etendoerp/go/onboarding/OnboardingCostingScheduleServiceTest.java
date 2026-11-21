@@ -35,6 +35,11 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.etendoerp.go.payment.TestLogCapture;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.Level;
@@ -47,12 +52,12 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.SessionInfo;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.common.enterprise.Organization;
-import com.etendoerp.go.payment.TestLogCapture;
 import org.openbravo.scheduling.OBScheduler;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessContext;
@@ -241,8 +246,7 @@ public class OnboardingCostingScheduleServiceTest {
   }
 
   /** Spy whose request is in {@code status} and whose scheduler state is as given. */
-  private OnboardingCostingScheduleService activationService(String status, boolean allowed,
-      boolean jobExists) throws Exception {
+  private OnboardingCostingScheduleService activationService(String status, boolean allowed) throws Exception {
     OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     Process process = mock(Process.class);
     ProcessRequest request = mock(ProcessRequest.class);
@@ -271,21 +275,21 @@ public class OnboardingCostingScheduleServiceTest {
 
   @Test
   public void activateScheduleSkipsWhenSchedulingNotAllowed() throws Exception {
-    OnboardingCostingScheduleService service = activationService("SCH", false, false);
+    OnboardingCostingScheduleService service = activationService("SCH", false);
     activate(service, false);
     verify(service, never()).scheduleOnCleanConnection(anyString(), any());
   }
 
   @Test
   public void activateScheduleSkipsWhenJobAlreadyExists() throws Exception {
-    OnboardingCostingScheduleService service = activationService("SCH", true, true);
+    OnboardingCostingScheduleService service = activationService("SCH", true);
     activate(service, true);
     verify(service, never()).scheduleOnCleanConnection(anyString(), any());
   }
 
   @Test
   public void activateScheduleSkipsWhenRequestNotScheduled() throws Exception {
-    OnboardingCostingScheduleService service = activationService("UNS", true, false);
+    OnboardingCostingScheduleService service = activationService("UNS", true);
     activate(service, false);
     verify(service, never()).scheduleOnCleanConnection(anyString(), any());
   }
@@ -293,7 +297,7 @@ public class OnboardingCostingScheduleServiceTest {
   /** The scheduler call runs on a thread other than the caller's, so it gets its own connection. */
   @Test
   public void activateScheduleArmsOnADifferentThreadThanTheCaller() throws Exception {
-    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    OnboardingCostingScheduleService service = activationService("SCH", true);
     AtomicReference<Thread> armedOn = new AtomicReference<>();
     doAnswer(invocation -> {
       armedOn.set(Thread.currentThread());
@@ -320,6 +324,7 @@ public class OnboardingCostingScheduleServiceTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SessionInfo> sessionInfo = mockStatic(SessionInfo.class);
         MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class);
         MockedStatic<ProcessContext> processContext = mockStatic(ProcessContext.class);
         MockedStatic<ProcessBundle> processBundle = mockStatic(ProcessBundle.class)) {
@@ -336,6 +341,7 @@ public class OnboardingCostingScheduleServiceTest {
       verify(scheduler).schedule(Mockito.eq(ACTIVATE_REQUEST_ID), any());
       verify(dal).rollbackAndClose();
       obContext.verify(OBContext::restorePreviousMode);
+      sessionInfo.verify(SessionInfo::init);
     }
   }
 
@@ -351,6 +357,7 @@ public class OnboardingCostingScheduleServiceTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SessionInfo> sessionInfo = mockStatic(SessionInfo.class);
         MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class);
         MockedStatic<ProcessContext> processContext = mockStatic(ProcessContext.class);
         MockedStatic<ProcessBundle> processBundle = mockStatic(ProcessBundle.class)) {
@@ -369,13 +376,14 @@ public class OnboardingCostingScheduleServiceTest {
       }
       verify(dal).rollbackAndClose();
       obContext.verify(OBContext::restorePreviousMode);
+      sessionInfo.verify(SessionInfo::init);
     }
   }
 
   /** A scheduler failure is swallowed, and the WARN carries the exception with its cause. */
   @Test
   public void activateScheduleLogsCauseOnSchedulerFailure() throws Exception {
-    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    OnboardingCostingScheduleService service = activationService("SCH", true);
     RuntimeException cause = new RuntimeException("sqlstate");
     SchedulerException failure = new SchedulerException("trigger", cause);
     doThrow(failure).when(service).armOnCurrentThread(anyString(), any());
@@ -396,11 +404,11 @@ public class OnboardingCostingScheduleServiceTest {
   /** A hung activation is abandoned after the timeout and ends in a WARN, not in an exception. */
   @Test
   public void activateScheduleWarnsAndReturnsWhenActivationTimesOut() throws Exception {
-    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    OnboardingCostingScheduleService service = activationService("SCH", true);
     service.activationTimeoutSeconds = 1L;
-    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
     doAnswer(invocation -> {
-      release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+      release.await(30, TimeUnit.SECONDS);
       return null;
     }).when(service).armOnCurrentThread(anyString(), any());
 
@@ -409,7 +417,7 @@ public class OnboardingCostingScheduleServiceTest {
     try {
       activate(service, false);
       assertEquals(1, capture.thrownAt(Level.WARN).size());
-      assertTrue(capture.thrownAt(Level.WARN).get(0) instanceof java.util.concurrent.TimeoutException);
+      assertTrue(capture.thrownAt(Level.WARN).get(0) instanceof TimeoutException);
     } finally {
       release.countDown();
       capture.detach();

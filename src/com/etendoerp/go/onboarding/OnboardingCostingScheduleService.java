@@ -44,6 +44,7 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.SessionInfo;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
@@ -253,9 +254,13 @@ public class OnboardingCostingScheduleService {
    * {@code TriggerData} query gets a fresh pooled connection instead of the one the long-lived
    * onboarding request thread has been using (and may have left aborted or severed).
    *
-   * @throws Exception the failure of the activation, or a {@link TimeoutException}
+   * @throws SchedulerException  the scheduler rejected the activation
+   * @throws ServletException     the process bundle could not be built
+   * @throws TimeoutException     the activation did not finish within the bound
+   * @throws InterruptedException the calling thread was interrupted while waiting
    */
-  void scheduleOnCleanConnection(String requestId, OBContext callerContext) throws Exception {
+  void scheduleOnCleanConnection(String requestId, OBContext callerContext)
+      throws SchedulerException, ServletException, TimeoutException, InterruptedException {
     FutureTask<Void> task = new FutureTask<>(() -> {
       armOnCurrentThread(requestId, callerContext);
       return null;
@@ -266,7 +271,7 @@ public class OnboardingCostingScheduleService {
     try {
       task.get(activationTimeoutSeconds, TimeUnit.SECONDS);
     } catch (ExecutionException e) {
-      throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
+      rethrowActivationFailure(e.getCause());
     } catch (TimeoutException | InterruptedException e) {
       task.cancel(true);
       if (e instanceof InterruptedException) {
@@ -276,10 +281,25 @@ public class OnboardingCostingScheduleService {
     }
   }
 
+  /** Rethrows the failure of the activation thread as its own type. */
+  private static void rethrowActivationFailure(Throwable cause)
+      throws SchedulerException, ServletException {
+    if (cause instanceof SchedulerException) {
+      throw (SchedulerException) cause;
+    }
+    if (cause instanceof ServletException) {
+      throw (ServletException) cause;
+    }
+    if (cause instanceof RuntimeException) {
+      throw (RuntimeException) cause;
+    }
+    throw new IllegalStateException("Costing schedule activation failed", cause);
+  }
+
   /**
    * Body of the activation thread: applies the caller's context, resolves the request and builds
    * the bundle here (the request thread's DAL session is not shared), arms Quartz, and always
-   * closes this thread's DAL session and context.
+   * releases what this thread acquired.
    */
   void armOnCurrentThread(String requestId, OBContext callerContext)
       throws SchedulerException, ServletException {
@@ -291,12 +311,23 @@ public class OnboardingCostingScheduleService {
       DalConnectionProvider conn = new DalConnectionProvider(false);
       OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
     } finally {
-      try {
-        OBDal.getInstance().rollbackAndClose();
-      } finally {
-        OBContext.restorePreviousMode();
-        OBContext.setOBContext((OBContext) null);
-      }
+      releaseThreadResources();
+    }
+  }
+
+  /**
+   * Closes the DAL session, restores the context and, last, resets {@link SessionInfo}: the
+   * trigger query makes {@code ConnectionProviderImpl} cache its pooled connection in this
+   * thread's {@code SessionInfo} (and {@code releaseConnection} then leaves it open), so without
+   * {@code SessionInfo.init()} that connection would leak when the thread ends.
+   */
+  private void releaseThreadResources() {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+      OBContext.setOBContext((OBContext) null);
+      SessionInfo.init();
     }
   }
 
