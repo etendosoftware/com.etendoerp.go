@@ -16636,3 +16636,17 @@ version), `ETGO_MCP_ROUTINE_VERSION` (parameters and steps per version, cascade-
 no DAL entity — so saving a routine or recording an execution never joins or rolls back with the steps' business
 transaction. A failure to record an execution is logged and the answer carries no `executionId`; the steps' outcome
 is unchanged. Executions are kept indefinitely for now.
+
+#### Classic process buttons with a scheduling bundle — verdict per button (ETP-5812)
+
+With the scheduling-bundle connection (ETP-5669 / ETP-5809) these five Classic buttons can run. Each was checked on a
+live instance through `etendo_schema(view:"actions")` and `etendo_action`; the domain owners (returns, finance) still have to
+validate the behaviour.
+
+| Button | Where | Verdict | Reason |
+|---|---|---|---|
+| `FIN_BankStatementProcess` | `financial-account/importedBankStatements`, `aPRMProcessBankStatement` | **Exposed** | Live: on a draft statement created with `bank-statements.createStatement(process:false)`, `docAction:"P"` answered *Process completed successfully* and `R` reopened it. The force variant `aPRMProcessBankStatementForce` stays off the surface. |
+| `FIN_ReconciliationProcess` | `financial-account/reconciliations`, `aprmProcessRec` | **Not offered** | Outside the curated surface (`etendo_action` answers *Action not found*). Reconciling goes through the `bank-reconciliation` spec (`reconcileGroup`, `undoReconciliation`...), which carries the checks Classic's window does. |
+| `RMCreateInvoice` | `sales-order/header`, `createInvoice` | **Not offered** | Outside the curated surface (404). A return is invoiced with `createReturnInvoice` on `return-material-receipt` / `return-to-vendor-shipment`, which builds the corrective invoice and links it to what it rectifies. |
+| `RMInsertOrphanLine` | `sales-order/header` and `purchase-order/header`, `addOrphanLine` | **Not offered** | Outside the curated surface (404). A return line with no origin is added with `etendo_create` on the return's lines; returns from a shipment or receipt use `importShipmentLines` / `importReceiptLines`. |
+| `UpdatePaymentPlan` | `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`, `updatePaymentPlan` | **Hidden** (`MCP_CONFIG.actions.hidden`) | An internal flag the Classic tab does not display; before this change `etendo_action` still ran it (live: *id to load is required*). The installments change only through the invoice's payments (`registerPayment`). |
