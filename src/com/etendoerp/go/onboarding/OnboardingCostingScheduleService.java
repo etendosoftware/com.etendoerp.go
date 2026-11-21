@@ -29,6 +29,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.servlet.ServletException;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
@@ -47,6 +49,7 @@ import org.openbravo.scheduling.OBScheduler;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessContext;
 import org.openbravo.service.db.DalConnectionProvider;
+import org.quartz.SchedulerException;
 
 /**
  * Provisions, per onboarded client, a scheduled {@code AD_Process_Request} that runs the core
@@ -138,6 +141,8 @@ public class OnboardingCostingScheduleService {
   static final String FREQUENCY_SECONDLY = "1";
   /** Run every 30 seconds. Left with no repetition cap so the trigger repeats forever. */
   static final Long INTERVAL_SECONDS = 30L;
+  static final int ACTIVATION_ATTEMPTS = 3;
+  static final long ACTIVATION_RETRY_DELAY_MS = 1000L;
   private static final String CHANNEL_SCHEDULER = "Process Scheduler";
   private static final String DEFAULT_LANGUAGE = "en_US";
   private static final String DESCRIPTION =
@@ -194,6 +199,12 @@ public class OnboardingCostingScheduleService {
    * connection cannot see uncommitted rows). Best-effort: any failure is logged and swallowed
    * because the {@code SCH} row is still picked up on the next scheduler initialization.
    *
+   * <p>The scheduler reads the request through the shared pool connection of the scheduler context,
+   * not the thread's DAL connection, so it can be handed a stale connection and fail with a
+   * transient I/O error. As a best-effort mitigation the activation is retried up to
+   * {@link #ACTIVATION_ATTEMPTS} times with a short linear delay, in case the pool hands out a
+   * healthy connection on a later borrow.
+   *
    * @param clientId the client whose schedule should be activated
    */
   public void activateSchedule(String clientId) {
@@ -209,15 +220,60 @@ public class OnboardingCostingScheduleService {
       }
       String requestId = request.getId();
       VariablesSecureApp vars = ProcessContext.newInstance(request.getOpenbravoContext()).toVars();
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
-      log.info("Activated costing schedule {} for client {}", requestId, clientId);
+      armWithRetry(requestId, clientId, vars);
     } catch (Exception e) {
       log.warn("Could not immediately activate the costing schedule for client {} (it will be "
           + "picked up on the next scheduler initialization): {}", clientId, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Calls {@link #arm} up to {@link #ACTIVATION_ATTEMPTS} times, logging each failure and a final
+   * warning if none succeeds. Never throws.
+   */
+  private void armWithRetry(String requestId, String clientId, VariablesSecureApp vars) {
+    Exception last = null;
+    for (int attempt = 1; attempt <= ACTIVATION_ATTEMPTS; attempt++) {
+      try {
+        arm(requestId, vars);
+        log.info("Activated costing schedule {} for client {}", requestId, clientId);
+        return;
+      } catch (Exception e) {
+        last = e;
+        log.warn("Costing schedule {} for client {}: activation attempt {}/{} failed: {}",
+            requestId, clientId, attempt, ACTIVATION_ATTEMPTS, e.getMessage());
+      }
+      if (attempt < ACTIVATION_ATTEMPTS && !pauseBeforeRetry(attempt)) {
+        break;
+      }
+    }
+    log.warn("Could not immediately activate costing schedule {} for client {}; it stays in SCH "
+        + "until the next scheduler initialization or until re-armed with the SFCostingCadence "
+        + "webhook", requestId, clientId, last);
+  }
+
+  /** Waits before the next attempt; returns false (flag restored) if interrupted. */
+  private boolean pauseBeforeRetry(int attempt) {
+    try {
+      sleep(ACTIVATION_RETRY_DELAY_MS * attempt);
+      return true;
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
+  }
+
+  /** Registers the request with the scheduler; extracted so tests can replace it. */
+  void arm(String requestId, VariablesSecureApp vars) throws SchedulerException, ServletException {
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+    OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
+  }
+
+  /** Waits between activation attempts; extracted so tests can skip the delay. */
+  void sleep(long millis) throws InterruptedException {
+    Thread.sleep(millis);
   }
 
   protected ProcessRequest buildRequest(String clientId, String orgId, String adminUserId,

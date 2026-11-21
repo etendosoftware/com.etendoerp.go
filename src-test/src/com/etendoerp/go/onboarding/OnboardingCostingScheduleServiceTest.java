@@ -22,6 +22,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -38,6 +39,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
@@ -45,6 +47,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.scheduling.ProcessContext;
 
 /**
  * Unit tests for {@link OnboardingCostingScheduleService}.
@@ -222,6 +225,76 @@ public class OnboardingCostingScheduleServiceTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       service.activateSchedule(CLIENT_ID);
       // No exception propagated — best-effort contract holds.
+    }
+  }
+
+  private OnboardingCostingScheduleService activationSpy(ProcessRequest request) throws Exception {
+    OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
+    Process process = mock(Process.class);
+    doReturn(process).when(service)
+        .resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
+    doReturn(request).when(service).findExistingRequest(CLIENT_ID, process);
+    doNothing().when(service).sleep(Mockito.anyLong());
+    return service;
+  }
+
+  private ProcessRequest requestWithContext() {
+    ProcessRequest request = mock(ProcessRequest.class);
+    when(request.getId()).thenReturn("REQ1");
+    when(request.getOpenbravoContext()).thenReturn(new ProcessContext(
+        new VariablesSecureApp(ADMIN_USER_ID, CLIENT_ID, ORG_ID, "ROLE", "en_US")).toString());
+    return request;
+  }
+
+  /** A transient failure of the first attempt must not leave the schedule unarmed. */
+  @Test
+  public void activateScheduleRetriesAfterTransientFailure() throws Exception {
+    OnboardingCostingScheduleService service = activationSpy(requestWithContext());
+    doThrow(new RuntimeException("I/O error")).doNothing().when(service).arm(any(), any());
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      service.activateSchedule(CLIENT_ID);
+      verify(service, Mockito.times(2)).arm(any(), any());
+    }
+  }
+
+  @Test
+  public void activateScheduleGivesUpAfterMaxAttempts() throws Exception {
+    OnboardingCostingScheduleService service = activationSpy(requestWithContext());
+    doThrow(new RuntimeException("I/O error")).when(service).arm(any(), any());
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      service.activateSchedule(CLIENT_ID);
+      verify(service, Mockito.times(OnboardingCostingScheduleService.ACTIVATION_ATTEMPTS))
+          .arm(any(), any());
+      obContext.verify(OBContext::restorePreviousMode);
+      verify(service).sleep(1000L);
+      verify(service).sleep(2000L);
+      verify(service, Mockito.times(2)).sleep(Mockito.anyLong());
+    }
+  }
+
+  @Test
+  public void activateScheduleDoesNotArmWhenRequestMissing() throws Exception {
+    OnboardingCostingScheduleService service = activationSpy(null);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      service.activateSchedule(CLIENT_ID);
+      verify(service, never()).arm(any(), any());
+    }
+  }
+
+  @Test
+  public void activateScheduleStopsRetryingWhenInterrupted() throws Exception {
+    OnboardingCostingScheduleService service = activationSpy(requestWithContext());
+    doThrow(new RuntimeException("I/O error")).when(service).arm(any(), any());
+    doThrow(new InterruptedException()).when(service).sleep(Mockito.anyLong());
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      service.activateSchedule(CLIENT_ID);
+      boolean interrupted = Thread.interrupted();
+      verify(service, Mockito.times(1)).arm(any(), any());
+      assertTrue(interrupted);
     }
   }
 }
