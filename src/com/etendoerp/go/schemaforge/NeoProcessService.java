@@ -44,7 +44,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
-import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
@@ -102,7 +101,7 @@ public class NeoProcessService {
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
-  private static final String BUNDLE_RECORD_ID = "recordID";
+  static final String BUNDLE_RECORD_ID = "recordID";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -740,49 +739,11 @@ public class NeoProcessService {
     if (tab == null || tab.getTable() == null || recordId == null) {
       return;
     }
-    String keyColumn = findKeyColumnName(tab.getTable());
-    if (keyColumn != null) {
-      content.put(keyColumn, recordId);
-    }
-  }
-
-  /** DB name of the table's key column (e.g. "M_Inventory_ID"), or null when it has none. */
-  static String findKeyColumnName(Table table) {
-    if (table == null) {
-      return null;
-    }
-    for (Column col : table.getADColumnList()) {
+    for (Column col : tab.getTable().getADColumnList()) {
       if (Boolean.TRUE.equals(col.isKeyColumn())) {
-        return col.getDBColumnName();
+        content.put(col.getDBColumnName(), recordId);
+        break;
       }
-    }
-    return null;
-  }
-
-  /**
-   * ETP-6407 — Scheduling processes read the record id from the table's key column (e.g.
-   * {@code M_Inventory_ID} in {@code InventoryCountProcess}), not from {@code recordID}.
-   * Adds {@code <KEY_COLUMN> -> recordID} to the bundle params, resolving the table only from
-   * {@code inpTabId}. Never overwrites a value the caller sent and never fails the execution:
-   * a resolution failure is logged at warn.
-   */
-  static void addKeyColumnParam(Map<String, Object> bundleParams, JSONObject params,
-      Process adProcess) {
-    Object recordId = bundleParams.get(BUNDLE_RECORD_ID);
-    String tabId = params == null ? null : params.optString(INP_TAB_ID, null);
-    if (recordId == null || StringUtils.isBlank(recordId.toString())
-        || StringUtils.isBlank(tabId)) {
-      return;
-    }
-    try {
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      String keyColumn = findKeyColumnName(tab == null ? null : tab.getTable());
-      if (keyColumn != null) {
-        bundleParams.putIfAbsent(keyColumn, recordId);
-      }
-    } catch (Exception e) {
-      log.warn("Could not resolve key column param for tab {}, process {}, record {}",
-          tabId, adProcess == null ? null : adProcess.getId(), recordId, e);
     }
   }
 
@@ -854,7 +815,7 @@ public class NeoProcessService {
    *
    * These processes are called via {@link Process#execute(ProcessBundle)}.
    * The bundle params include both generic keys (recordID, inpRecordId) and
-   * the table-specific key injected by this service (e.g. M_Inventory_ID, see addKeyColumnParam).
+   * the table-specific key injected by this service (e.g. M_Inventory_ID, see NeoSchedulingKeyColumn).
    */
   private static NeoResponse executeSchedulingProcess(
       org.openbravo.model.ad.ui.Process adProcess,
@@ -870,7 +831,7 @@ public class NeoProcessService {
     // Scheduling processes (e.g. InventoryCountProcess, RMCreateInvoice) call getContext() and
     // getConnection() internally.
     Map<String, Object> bundleParams = buildBundleParams(params);
-    addKeyColumnParam(bundleParams, params, adProcess);
+    NeoSchedulingKeyColumn.addKeyColumnParam(bundleParams, params, adProcess);
     ProcessBundle bundle = newClassicBundle(adProcess.getId(), bundleParams);
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();

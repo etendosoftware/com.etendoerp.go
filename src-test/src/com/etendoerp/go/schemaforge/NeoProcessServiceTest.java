@@ -914,7 +914,7 @@ public class NeoProcessServiceTest {
     }
     Process adProcess = mock(Process.class);
     when(adProcess.getId()).thenReturn("P1");
-    NeoProcessService.addKeyColumnParam(bundleParams, params, adProcess);
+    NeoSchedulingKeyColumn.addKeyColumnParam(bundleParams, params, adProcess);
     return bundleParams;
   }
 
@@ -957,7 +957,7 @@ public class NeoProcessServiceTest {
   public void keyColumnParamResolutionFailureIsLoggedAndSwallowed() throws Exception {
     List<String> warnings = new ArrayList<>();
     org.apache.logging.log4j.core.Logger logger = (org.apache.logging.log4j.core.Logger)
-        org.apache.logging.log4j.LogManager.getLogger(NeoProcessService.class);
+        org.apache.logging.log4j.LogManager.getLogger(NeoSchedulingKeyColumn.class);
     org.apache.logging.log4j.core.appender.AbstractAppender appender =
         new org.apache.logging.log4j.core.appender.AbstractAppender("etp6407", null, null, true,
             org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
@@ -995,7 +995,8 @@ public class NeoProcessServiceTest {
     params.put("inpRecordId", "REC1");
     params.put("inpTabId", "T1");
     OBDal dal = mock(OBDal.class);
-    when(dal.get(Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
+    Tab tab = tabWithKey("M_Inventory_ID");
+    when(dal.get(Tab.class, "T1")).thenReturn(tab);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
         MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
