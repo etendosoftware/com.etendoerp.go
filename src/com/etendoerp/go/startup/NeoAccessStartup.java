@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.startup;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -115,43 +117,107 @@ public class NeoAccessStartup extends SessionAwareStartup {
     log.info("NeoAccessStartup: checking automatic roles for missing NEO window/process access.");
     OBContext.setAdminMode(true);
     try {
-      Organization orgZero = OBDal.getInstance().get(Organization.class, ORG_ZERO);
-      List<SFSpec> windowSpecs = activeSpecs("W");
-      List<SFSpec> processSpecs = activeSpecs("P");
+      // Resolve everything the per-role passes need to plain values first, so no entity outlives
+      // the transaction it was loaded in (each role commits and closes its own session).
+      Set<String> specWindowIds = specTargetIds(activeSpecs("W"), true);
+      Set<String> specProcessIds = specTargetIds(activeSpecs("P"), false);
+      List<RoleRef> roles = targetRoleRefs();
+      OBDal.getInstance().commitAndClose();
 
       int rolesProcessed = 0;
+      int rolesFailed = 0;
       int accessGranted = 0;
-      for (Role role : targetRoles()) {
-        // Skip system-client roles: they must keep their trigger-managed access untouched.
-        if (role.getClient() == null || SYSTEM_CLIENT.equals(role.getClient().getId())) {
-          continue;
+      for (RoleRef ref : roles) {
+        try {
+          accessGranted += grantRole(ref, specWindowIds, specProcessIds);
+          rolesProcessed++;
+        } catch (RuntimeException e) {
+          rolesFailed++;
+          log.error("NeoAccessStartup: granting missing access to role \"{}\" ({}, client {})"
+              + " failed; continuing with the next role.", ref.name, ref.id, ref.clientId, e);
+          try {
+            OBDal.getInstance().rollbackAndClose();
+          } catch (RuntimeException rollbackError) {
+            log.debug("NeoAccessStartup: rollback after failure also failed.", rollbackError);
+          }
         }
-        int windowGranted = grantWindowAccess(role, orgZero, windowSpecs);
-        int processGranted = grantProcessAccess(role, orgZero, processSpecs);
-        int reportGranted = grantReportAccess(role, orgZero);
-        if (windowGranted + processGranted + reportGranted > 0) {
-          log.info("NeoAccessStartup: granted {} window + {} process + {} Informes-report access"
-              + " row(s) to role \"{}\" (client {}).", windowGranted, processGranted,
-              reportGranted, role.getName(), role.getClient().getId());
-        }
-        accessGranted += windowGranted + processGranted + reportGranted;
-        rolesProcessed++;
       }
 
-      OBDal.getInstance().flush();
-      OBDal.getInstance().commitAndClose();
       long elapsedMs = System.currentTimeMillis() - startMs;
-      log.info("NeoAccessStartup: processed {} automatic role(s), granted {} missing access row(s)"
-          + " in {} ms.", rolesProcessed, accessGranted, elapsedMs);
+      String summary = "NeoAccessStartup: processed {} automatic role(s), {} failed, granted {}"
+          + " missing access row(s) in {} ms.";
+      if (rolesFailed > 0) {
+        log.warn(summary, rolesProcessed, rolesFailed, accessGranted, elapsedMs);
+      } else {
+        log.info(summary, rolesProcessed, rolesFailed, accessGranted, elapsedMs);
+      }
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
+  /** Grants one role its missing access in its own transaction; returns the rows created. */
+  private int grantRole(RoleRef ref, Set<String> specWindowIds, Set<String> specProcessIds) {
+    Role role = OBDal.getInstance().get(Role.class, ref.id);
+    if (role == null) {
+      return 0;
+    }
+    Organization orgZero = OBDal.getInstance().get(Organization.class, ORG_ZERO);
+    int windowGranted = grantWindowAccess(role, orgZero, specWindowIds);
+    int processGranted = grantProcessAccess(role, orgZero, specProcessIds);
+    int reportGranted = grantReportAccess(role, orgZero);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().commitAndClose();
+    if (windowGranted + processGranted + reportGranted > 0) {
+      log.info("NeoAccessStartup: granted {} window + {} process + {} Informes-report access"
+          + " row(s) to role \"{}\" (client {}).", windowGranted, processGranted, reportGranted,
+          ref.name, ref.clientId);
+    }
+    return windowGranted + processGranted + reportGranted;
+  }
+
+  /** Window ({@code windows}) or process target ids of the given specs, skipping null links. */
+  private Set<String> specTargetIds(List<SFSpec> specs, boolean windows) {
+    Set<String> ids = new LinkedHashSet<>();
+    for (SFSpec spec : specs) {
+      if (windows && spec.getADWindow() != null) {
+        ids.add(spec.getADWindow().getId());
+      } else if (!windows && spec.getProcess() != null) {
+        ids.add(spec.getProcess().getId());
+      }
+    }
+    return ids;
+  }
+
+  /** Id, name and client of a target role, kept as plain values for logging and reloading. */
+  private static final class RoleRef {
+    final String id;
+    final String name;
+    final String clientId;
+
+    RoleRef(String id, String name, String clientId) {
+      this.id = id;
+      this.name = name;
+      this.clientId = clientId;
+    }
+  }
+
+  /** Target roles of real clients; system-client ({@code '0'}) roles keep their trigger-managed access. */
+  private List<RoleRef> targetRoleRefs() {
+    List<RoleRef> refs = new ArrayList<>();
+    for (Role role : targetRoles()) {
+      if (role.getClient() == null || SYSTEM_CLIENT.equals(role.getClient().getId())) {
+        continue;
+      }
+      refs.add(new RoleRef(role.getId(), role.getName(), role.getClient().getId()));
+    }
+    return refs;
+  }
+
   /**
    * Automatic roles: active and non-manual ({@code ismanual='N'}). The system-client ({@code '0'})
-   * roles are excluded in the caller (filtering an association id directly in the criteria is
-   * driver-fragile, so it is done in Java).
+   * roles are excluded in {@link #targetRoleRefs()} (filtering an association id directly in the
+   * criteria is driver-fragile, so it is done in Java).
    */
   private List<Role> targetRoles() {
     OBCriteria<Role> roles = OBDal.getInstance().createCriteria(Role.class);
@@ -169,39 +235,39 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return specs.list();
   }
 
-  private int grantWindowAccess(Role role, Organization orgZero, List<SFSpec> windowSpecs) {
+  private int grantWindowAccess(Role role, Organization orgZero, Set<String> windowIds) {
     Set<String> existing = existingWindowIds(role);
     int granted = 0;
-    for (SFSpec spec : windowSpecs) {
-      if (spec.getADWindow() != null && !existing.contains(spec.getADWindow().getId())) {
+    for (String windowId : windowIds) {
+      if (!existing.contains(windowId)) {
         WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
         wa.setNewOBObject(true);
         wa.setClient(role.getClient());
         wa.setOrganization(orgZero);
         wa.setRole(role);
-        wa.setWindow(spec.getADWindow());
+        wa.setWindow(OBDal.getInstance().getProxy(Window.class, windowId));
         wa.setEditableField(true);
         OBDal.getInstance().save(wa);
-        existing.add(spec.getADWindow().getId());
+        existing.add(windowId);
         granted++;
       }
     }
     return granted;
   }
 
-  private int grantProcessAccess(Role role, Organization orgZero, List<SFSpec> processSpecs) {
+  private int grantProcessAccess(Role role, Organization orgZero, Set<String> processIds) {
     Set<String> existing = existingProcessIds(role);
     int granted = 0;
-    for (SFSpec spec : processSpecs) {
-      if (spec.getProcess() != null && !existing.contains(spec.getProcess().getId())) {
+    for (String processId : processIds) {
+      if (!existing.contains(processId)) {
         ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
         pa.setNewOBObject(true);
         pa.setClient(role.getClient());
         pa.setOrganization(orgZero);
         pa.setRole(role);
-        pa.setProcess(spec.getProcess());
+        pa.setProcess(OBDal.getInstance().getProxy(Process.class, processId));
         OBDal.getInstance().save(pa);
-        existing.add(spec.getProcess().getId());
+        existing.add(processId);
         granted++;
       }
     }
@@ -330,13 +396,15 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return 1;
   }
 
-  /** Every {@code obuiapp_process_id} {@code role} already has active access to. */
+  /** Every {@code obuiapp_process_id} {@code role} already has an access row for, active or not. */
   private Set<String> existingObuiappProcessIds(Role role) {
     OBCriteria<org.openbravo.client.application.ProcessAccess> existing = OBDal.getInstance()
         .createCriteria(org.openbravo.client.application.ProcessAccess.class);
     existing.add(Restrictions.eq(
         org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    // Inactive rows still occupy the unique (role, window/process) key: count them as existing.
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (org.openbravo.client.application.ProcessAccess opa : existing.list()) {
       if (opa.getObuiappProcess() != null) {
@@ -350,6 +418,8 @@ public class NeoAccessStartup extends SessionAwareStartup {
     OBCriteria<WindowAccess> existing = OBDal.getInstance().createCriteria(WindowAccess.class);
     existing.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    // Inactive rows still occupy the unique (role, window/process) key: count them as existing.
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (WindowAccess wa : existing.list()) {
       if (wa.getWindow() != null) {
@@ -363,6 +433,8 @@ public class NeoAccessStartup extends SessionAwareStartup {
     OBCriteria<ProcessAccess> existing = OBDal.getInstance().createCriteria(ProcessAccess.class);
     existing.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    // Inactive rows still occupy the unique (role, window/process) key: count them as existing.
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (ProcessAccess pa : existing.list()) {
       if (pa.getProcess() != null) {

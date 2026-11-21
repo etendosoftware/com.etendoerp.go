@@ -18,6 +18,7 @@ package com.etendoerp.go.startup;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -57,6 +58,8 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * <p>Covers: a target automatic role gains access to an SF window/process it was missing; existing
  * access is not duplicated (idempotency); a second run grants nothing; and the role criteria filters
  * to active + non-manual + non-system-client roles only.</p>
+ *
+ * @covers com.etendoerp.go.startup.NeoAccessStartup
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -90,6 +93,7 @@ class NeoAccessStartupTest {
     orgZero = mock(Organization.class);
     client = mock(Client.class);
     when(obDal.get(Organization.class, "0")).thenReturn(orgZero);
+    when(obDal.getProxy(any(Class.class), any(String.class))).thenReturn(null);
 
     // ETP-5402 QA follow-up: the report-access grant pass runs for every non-system-client
     // target role and always reads the OBUIAPP process-access criteria as part of resolving
@@ -170,6 +174,16 @@ class NeoAccessStartupTest {
     Role role = mock(Role.class);
     when(role.getClient()).thenReturn(client);
     when(client.getId()).thenReturn("real-client");
+    return withId(role, "role-" + (++roleSeq));
+  }
+
+  private int roleSeq;
+
+  /** Gives the role an id/name and makes the per-role transaction reload it by id. */
+  private Role withId(Role role, String id) {
+    when(role.getId()).thenReturn(id);
+    when(role.getName()).thenReturn("Name " + id);
+    when(obDal.get(Role.class, id)).thenReturn(role);
     return role;
   }
 
@@ -198,7 +212,8 @@ class NeoAccessStartupTest {
     verify(obDal).save(wa);
     verify(obDal).save(pa);
     verify(obDal).flush();
-    verify(obDal).commitAndClose();
+    // One commit after the initial read, one for the role.
+    verify(obDal, times(2)).commitAndClose();
   }
 
   @Test
@@ -226,7 +241,7 @@ class NeoAccessStartupTest {
     verify(obProvider, never()).get(WindowAccess.class);
     verify(obProvider, never()).get(ProcessAccess.class);
     verify(obDal, never()).save(any());
-    verify(obDal).commitAndClose();
+    verify(obDal, times(2)).commitAndClose();
   }
 
   @Test
@@ -260,7 +275,7 @@ class NeoAccessStartupTest {
     verify(obProvider, never()).get(WindowAccess.class);
     verify(obProvider, never()).get(ProcessAccess.class);
     verify(obDal, never()).save(any());
-    verify(obDal).commitAndClose();
+    verify(obDal, times(1)).commitAndClose();
   }
 
   @Test
@@ -270,6 +285,7 @@ class NeoAccessStartupTest {
     Client systemClient = mock(Client.class);
     when(systemClient.getId()).thenReturn("0");
     when(systemRole.getClient()).thenReturn(systemClient);
+    withId(systemRole, "system-role");
 
     stubRoleCriteria(List.of(systemRole));
     stubSpecCriteria(List.of(windowSpec("win-new")), List.of(processSpec("proc-new")));
@@ -280,7 +296,7 @@ class NeoAccessStartupTest {
     verify(obDal, never()).createCriteria(WindowAccess.class);
     verify(obProvider, never()).get(WindowAccess.class);
     verify(obDal, never()).save(any());
-    verify(obDal).commitAndClose();
+    verify(obDal, times(1)).commitAndClose();
   }
 
   @Test
@@ -414,5 +430,123 @@ class NeoAccessStartupTest {
     verify(obProvider, never()).get(ProcessAccess.class);
     verify(obProvider, never()).get(org.openbravo.client.application.ProcessAccess.class);
     verify(obDal, never()).save(any());
+  }
+
+  @SuppressWarnings("unchecked")
+  private OBCriteria<WindowAccess> stubWindowAccessCriteria(List<WindowAccess> result) {
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(criteria.list()).thenReturn(result);
+    when(obDal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    return criteria;
+  }
+
+  @Test
+  @DisplayName("existing-access criteria also see inactive rows")
+  @SuppressWarnings("unchecked")
+  void existingAccessCriteriaIgnoreActiveFilter() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of());
+    OBCriteria<WindowAccess> waCriteria = stubWindowAccessCriteria(List.of());
+    OBCriteria<ProcessAccess> paCriteria = mock(OBCriteria.class);
+    when(paCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(ProcessAccess.class)).thenReturn(paCriteria);
+    OBCriteria<org.openbravo.client.application.ProcessAccess> opaCriteria = mock(OBCriteria.class);
+    when(opaCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(opaCriteria);
+
+    startup.grantMissingAccess();
+
+    verify(waCriteria, atLeastOnce()).setFilterOnActive(false);
+    verify(paCriteria, atLeastOnce()).setFilterOnActive(false);
+    verify(opaCriteria, atLeastOnce()).setFilterOnActive(false);
+  }
+
+  @Test
+  @DisplayName("an inactive existing window access is not duplicated")
+  void inactiveExistingWindowAccessIsNotDuplicated() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(windowSpec("win-inactive")), List.of());
+
+    WindowAccess inactive = mock(WindowAccess.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("win-inactive");
+    when(inactive.getWindow()).thenReturn(window);
+    stubExistingAccess(List.of(inactive), List.of());
+
+    startup.grantMissingAccess();
+
+    verify(obProvider, never()).get(WindowAccess.class);
+    verify(obDal, never()).save(any(WindowAccess.class));
+  }
+
+  @Test
+  @DisplayName("an inactive existing process access is not duplicated")
+  void inactiveExistingProcessAccessIsNotDuplicated() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of(processSpec("proc-inactive")));
+
+    ProcessAccess inactive = mock(ProcessAccess.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-inactive");
+    when(inactive.getProcess()).thenReturn(process);
+    stubExistingAccess(List.of(), List.of(inactive));
+
+    startup.grantMissingAccess();
+
+    verify(obProvider, never()).get(ProcessAccess.class);
+    verify(obDal, never()).save(any(ProcessAccess.class));
+  }
+
+  @Test
+  @DisplayName("an inactive catalog anchor access is not duplicated")
+  void inactiveExistingCatalogAnchorIsNotDuplicated() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of());
+
+    org.openbravo.client.application.ProcessAccess inactive =
+        mock(org.openbravo.client.application.ProcessAccess.class);
+    org.openbravo.client.application.Process process =
+        mock(org.openbravo.client.application.Process.class);
+    when(process.getId()).thenReturn(ReportAccessCatalog.AGING_RECEIVABLE_PROCESS_ID);
+    when(inactive.getObuiappProcess()).thenReturn(process);
+    stubObuiappProcessAccessCriteria(List.of(inactive));
+    stubExistingAccess(List.of(), List.of());
+
+    org.openbravo.client.application.Process payable =
+        mock(org.openbravo.client.application.Process.class);
+    when(obDal.get(org.openbravo.client.application.Process.class,
+        ReportAccessCatalog.AGING_PAYABLE_PROCESS_ID)).thenReturn(payable);
+    when(obProvider.get(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(mock(org.openbravo.client.application.ProcessAccess.class));
+
+    startup.grantMissingAccess();
+
+    // Only the payable anchor is created; the receivable one has an (inactive) row already.
+    verify(obProvider, times(1)).get(org.openbravo.client.application.ProcessAccess.class);
+  }
+
+  @Test
+  @DisplayName("a failing role is rolled back and the next role is still committed")
+  void failingRoleDoesNotBlockNextRole() {
+    Role first = targetRole();
+    Role second = targetRole();
+    stubRoleCriteria(List.of(first, second));
+    stubSpecCriteria(List.of(windowSpec("win-new")), List.of());
+    stubExistingAccess(List.of(), List.of());
+    when(obProvider.get(WindowAccess.class)).thenReturn(mock(WindowAccess.class));
+    org.mockito.Mockito.doThrow(new RuntimeException("unique violation"))
+        .doNothing().when(obDal).flush();
+
+    startup.grantMissingAccess();
+
+    verify(obDal, times(1)).rollbackAndClose();
+    // Initial read + the second role's own commit; the failed role never committed.
+    verify(obDal, times(2)).commitAndClose();
+    verify(obDal, times(2)).flush();
   }
 }
