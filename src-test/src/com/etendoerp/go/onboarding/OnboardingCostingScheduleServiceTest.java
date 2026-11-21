@@ -401,6 +401,25 @@ public class OnboardingCostingScheduleServiceTest {
     }
   }
 
+  /** An interrupted wait is logged and leaves the caller's interrupt flag set. */
+  @Test
+  public void activateScheduleKeepsInterruptFlagWhenInterrupted() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", true);
+    doThrow(new InterruptedException("interrupted")).when(service)
+        .scheduleOnCleanConnection(anyString(), any());
+
+    TestLogCapture capture = TestLogCapture.attachTo(OnboardingCostingScheduleService.class,
+        Level.WARN);
+    try {
+      activate(service, false);
+      assertTrue("the interrupt flag must be restored", Thread.interrupted());
+      assertEquals(1, capture.thrownAt(Level.WARN).size());
+    } finally {
+      Thread.interrupted();
+      capture.detach();
+    }
+  }
+
   /** A hung activation is abandoned after the timeout and ends in a WARN, not in an exception. */
   @Test
   public void activateScheduleWarnsAndReturnsWhenActivationTimesOut() throws Exception {

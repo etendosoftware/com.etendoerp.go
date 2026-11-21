@@ -240,12 +240,19 @@ public class OnboardingCostingScheduleService {
       }
       scheduleOnCleanConnection(requestId, OBContext.getOBContext());
       log.info("Activated costing schedule {} for client {}", requestId, clientId);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      logActivationFailure(clientId, e);
     } catch (Exception e) {
-      log.warn("Could not immediately activate the costing schedule for client {} (it will be "
-          + "picked up on the next scheduler initialization): {}", clientId, e.getMessage(), e);
+      logActivationFailure(clientId, e);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private void logActivationFailure(String clientId, Exception e) {
+    log.warn("Could not immediately activate the costing schedule for client {} (it will be "
+        + "picked up on the next scheduler initialization): {}", clientId, e.getMessage(), e);
   }
 
   /**
@@ -274,9 +281,6 @@ public class OnboardingCostingScheduleService {
       rethrowActivationFailure(e.getCause());
     } catch (TimeoutException | InterruptedException e) {
       task.cancel(true);
-      if (e instanceof InterruptedException) {
-        Thread.currentThread().interrupt();
-      }
       throw e;
     }
   }
