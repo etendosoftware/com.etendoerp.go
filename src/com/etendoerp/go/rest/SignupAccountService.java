@@ -36,6 +36,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.SessionInfo;
 
 import com.etendoerp.go.accounts.AccountGroupService;
 import com.etendoerp.go.accounts.DemoExpiryService;
@@ -337,7 +338,8 @@ public class SignupAccountService {
 
   /**
    * A worker thread is not a request: nothing closes its DAL session or clears its context for
-   * it, and the next task on the same thread would inherit both.
+   * it, and the next task on the same thread would inherit both. The legacy connection that the
+   * onboarding pipeline pins to the thread through {@link SessionInfo} is returned to the pool too.
    */
   private static void releaseWorkerSession() {
     try {
@@ -348,7 +350,17 @@ public class SignupAccountService {
     } catch (RuntimeException e) {
       log.warn("Could not release the signup worker's DAL session", e);
     } finally {
+      releaseLegacyConnection();
       OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** Returns the legacy connection pinned to the worker thread; never throws. */
+  private static void releaseLegacyConnection() {
+    try {
+      SessionInfo.init();
+    } catch (RuntimeException e) {
+      log.warn("Could not release the signup worker's database session", e);
     }
   }
 

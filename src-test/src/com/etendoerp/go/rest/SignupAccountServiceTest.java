@@ -24,6 +24,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -47,6 +49,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.SessionInfo;
 
 import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -76,6 +79,7 @@ class SignupAccountServiceTest {
   private MockedStatic<OBContext> obContext;
   private MockedStatic<OBDal> obDal;
   private MockedStatic<SessionHandler> sessionHandler;
+  private MockedStatic<SessionInfo> sessionInfo;
   private MockedStatic<SignupAccountDalHelper> signupDal;
   private MockedStatic<EtendoGoJwtDalHelper> accountDal;
   private MockedStatic<EtendoGoAuthLinkBuilder> links;
@@ -86,6 +90,7 @@ class SignupAccountServiceTest {
     obDal = mockStatic(OBDal.class);
     obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
     sessionHandler = mockStatic(SessionHandler.class);
+    sessionInfo = mockStatic(SessionInfo.class);
     signupDal = mockStatic(SignupAccountDalHelper.class);
     accountDal = mockStatic(EtendoGoJwtDalHelper.class);
     links = mockStatic(EtendoGoAuthLinkBuilder.class);
@@ -101,6 +106,7 @@ class SignupAccountServiceTest {
     links.close();
     accountDal.close();
     signupDal.close();
+    sessionInfo.close();
     sessionHandler.close();
     obDal.close();
     obContext.close();
@@ -287,5 +293,55 @@ class SignupAccountServiceTest {
 
     verifyNoInteractions(provisioner);
     signupDal.verify(() -> SignupAccountDalHelper.markFailed(eq(account), anyString()));
+  }
+
+  @Test
+  void theWorkerReleasesItsDatabaseSessionWhenTheEnvironmentIsCreated() {
+    accountIs("ready");
+    when(provisioner.provisionSignupEnvironment(anyString(), anyString(), anyString(),
+        any(JSONObject.class), any())).thenReturn(
+            new EtendoGoJwtServlet.SignupProvisioningResult(CLIENT_ID, null));
+
+    service.provisionInBackground(ACCOUNT_ID);
+
+    sessionInfo.verify(SessionInfo::init);
+  }
+
+  @Test
+  void theWorkerReleasesItsDatabaseSessionWhenProvisioningThrows() {
+    accountIs("provisioning");
+    when(provisioner.provisionSignupEnvironment(anyString(), anyString(), anyString(),
+        any(JSONObject.class), any())).thenThrow(new IllegalStateException("db down"));
+
+    service.provisionInBackground(ACCOUNT_ID);
+
+    sessionInfo.verify(SessionInfo::init);
+  }
+
+  @Test
+  void theWorkerReleasesItsDatabaseSessionEvenIfTheDalCloseFails() {
+    accountIs("provisioning");
+    when(account.getOnboardingDraft()).thenReturn(null);
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    sessionHandler.when(SessionHandler::isSessionHandlerPresent).thenReturn(true);
+    doThrow(new IllegalStateException("close failed")).when(dal).commitAndClose();
+
+    service.provisionInBackground(ACCOUNT_ID);
+
+    sessionInfo.verify(SessionInfo::init);
+    obContext.verify(() -> OBContext.setOBContext((OBContext) null), atLeastOnce());
+  }
+
+  @Test
+  void aFailingSessionInfoResetDoesNotEscapeTheWorker() {
+    accountIs("provisioning");
+    when(account.getOnboardingDraft()).thenReturn(null);
+    sessionInfo.when(SessionInfo::init).thenThrow(new IllegalStateException("broken"));
+
+    service.provisionInBackground(ACCOUNT_ID);
+
+    sessionInfo.verify(SessionInfo::init);
+    obContext.verify(() -> OBContext.setOBContext((OBContext) null), atLeastOnce());
   }
 }
