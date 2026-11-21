@@ -31,6 +31,7 @@ import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -787,26 +788,43 @@ public class ToolRegistry {
     return Optional.of(names);
   }
 
+  /** Lazy holder: the batch tool definition is built once, not on every etendo_batch call. */
+  private static final class BatchOperationKeys {
+    static final Set<String> VALUE = operationKeysOf(new ToolRegistry().buildBatchTool()
+        .getInputSchema());
+  }
+
   /**
    * The keys an {@code etendo_batch} operation declares (ETP-5810), read from the tool's own
    * schema so the guard cannot drift from what the agent was told.
    *
-   * @return the declared operation keys, never {@code null}
+   * @return the declared operation keys, never empty
    */
   static Set<String> declaredBatchOperationKeys() {
-    Object props = new ToolRegistry().buildBatchTool().getInputSchema()
-        .get(McpConstants.KEY_PROPERTIES);
+    return BatchOperationKeys.VALUE;
+  }
+
+  /**
+   * The property names of {@code operations.items} in a batch input schema.
+   *
+   * @throws IllegalStateException when the schema has none: an empty set would make the guard
+   *     refuse every key, so a drifted schema fails loudly instead
+   */
+  static Set<String> operationKeysOf(Map<String, Object> inputSchema) {
+    Object props = inputSchema == null ? null : inputSchema.get(McpConstants.KEY_PROPERTIES);
     Object operations = props instanceof Map ? ((Map<?, ?>) props).get("operations") : null;
     Object items = operations instanceof Map ? ((Map<?, ?>) operations).get("items") : null;
     Object opProps = items instanceof Map
         ? ((Map<?, ?>) items).get(McpConstants.KEY_PROPERTIES) : null;
-    Set<String> names = new java.util.LinkedHashSet<>();
-    if (opProps instanceof Map) {
-      for (Object key : ((Map<?, ?>) opProps).keySet()) {
-        names.add(String.valueOf(key));
-      }
+    if (!(opProps instanceof Map) || ((Map<?, ?>) opProps).isEmpty()) {
+      throw new IllegalStateException(
+          "etendo_batch schema declares no operations.items.properties");
     }
-    return names;
+    Set<String> names = new LinkedHashSet<>();
+    for (Object key : ((Map<?, ?>) opProps).keySet()) {
+      names.add(String.valueOf(key));
+    }
+    return java.util.Collections.unmodifiableSet(names);
   }
 
   private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {

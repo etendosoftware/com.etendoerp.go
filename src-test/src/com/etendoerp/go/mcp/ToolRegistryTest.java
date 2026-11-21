@@ -342,4 +342,15 @@ public class ToolRegistryTest {
     assertTrue(declared.get().toString(), declared.get().containsAll(
         java.util.Set.of("spec", "entity", "parentId", "assetId", "view", "recordContext")));
   }
+
+  @Test
+  public void batchOperationKeysAreExactlyTheDeclaredOnes() {
+    assertEquals(List.of("id", "spec", "entity", "parentRef", "body"),
+        new java.util.ArrayList<>(ToolRegistry.declaredBatchOperationKeys()));
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void batchOperationKeysFailFastWhenSchemaHasNoOperationProperties() {
+    ToolRegistry.operationKeysOf(Map.of("properties", Map.of("operations", Map.of())));
+  }
 }

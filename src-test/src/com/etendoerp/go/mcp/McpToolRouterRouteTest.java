@@ -607,13 +607,47 @@ class McpToolRouterRouteTest {
             result.getJSONArray("content").getJSONObject(0).getString("text"));
         assertFalse(body.getBoolean("committed"));
         assertEquals(0, body.getJSONObject("failedAt").getInt("index"));
+        assertEquals("op1", body.getJSONObject("failedAt").getString("id"));
         JSONObject error = body.getJSONObject("error");
         assertEquals("unknown_argument", error.getString("error"));
-        assertTrue(error.getString("detail").contains("parentRf"));
-        assertTrue(error.getJSONArray("available").toString().contains("parentRef"));
+        assertEquals("operations[0].parentRf", error.getString("field"));
+        assertTrue(error.getString("detail").contains("operations[0].parentRf"));
+        assertEquals(new JSONArray(List.of("id", "spec", "entity", "parentRef", "body")).toString(),
+            error.getJSONArray("available").toString());
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
             .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
                 org.mockito.ArgumentMatchers.anyBoolean());
+      }
+    }
+
+    /** ETP-5810: an operation using only declared keys still reaches BatchService. */
+    @Test
+    @DisplayName("an operation with only declared keys is not refused by the key guard")
+    void batchAcceptsDeclaredOperationKeys() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(true);
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject batchResult = new JSONObject();
+        batchResult.put("committed", true);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(batchResult);
+        JSONObject args = buildBatchArgs();
+        args.getJSONArray("operations").getJSONObject(0).put("parentRef", "op0");
+
+        JSONObject result = router.handleBatch(args);
+
+        assertFalse(result.has("isError"));
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.times(1)).executeBatch(any(),
+            any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean());
       }
     }
 

@@ -1935,7 +1935,7 @@ public class McpToolRouter {
    * @return the pre-flight failure envelope, or {@code null} when every key is declared
    */
   private static JSONObject rejectUnknownOperationKeys(JSONArray operations) throws JSONException {
-    java.util.Set<String> declared = ToolRegistry.declaredBatchOperationKeys();
+    Set<String> declared = ToolRegistry.declaredBatchOperationKeys();
     for (int i = 0; i < operations.length(); i++) {
       JSONObject op = operations.optJSONObject(i);
       if (op == null) {
@@ -1947,7 +1947,7 @@ public class McpToolRouter {
         if (!declared.contains(key)) {
           JSONObject error = McpRoutingException.unknownArgument(
               "operations[" + i + "]." + key, TOOL_NEO_BATCH,
-              new java.util.ArrayList<>(declared)).toEnvelope();
+              new ArrayList<>(declared)).toEnvelope();
           error.put(McpConstants.KEY_TOOL, TOOL_NEO_BATCH);
           return McpBatchEnvelope.toMcpBatchPreflightFailure(error, i,
               op.optString("id", null));
