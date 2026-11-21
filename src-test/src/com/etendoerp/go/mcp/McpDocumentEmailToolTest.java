@@ -534,7 +534,9 @@ class McpDocumentEmailToolTest {
       JSONObject result = McpDocumentEmailTool.run(argsTo(BASE));
 
       assertNotSent(result, 409, "no_pdf");
-      assertTrue(result.getString("hint").contains("preview"), result.getString("hint"));
+      String hint = result.getString("hint");
+      assertTrue(hint.contains("etendo_feedback"), hint);
+      assertFalse(hint.toLowerCase().contains("preview"), hint);
     }
 
     @Test
@@ -657,10 +659,9 @@ class McpDocumentEmailToolTest {
       assertNotSent(result, 409, "no_pdf");
       String hint = result.getString("hint");
       assertFalse(hint.contains("send the document by email"), hint);
-      assertTrue(hint.contains("open the document's preview in the application"), hint);
+      assertFalse(hint.contains("preview in the application"), hint);
       assertTrue(hint.contains("ask again in a few seconds"), hint);
-      assertTrue(hint.contains("ask to send again"), hint);
-      assertTrue(hint.contains("first send must be done from the application"), hint);
+      assertTrue(hint.contains("etendo_feedback"), hint);
       assertFalse(result.getBoolean("sent"));
     }
 
@@ -678,10 +679,10 @@ class McpDocumentEmailToolTest {
           .thenReturn(NeoDocumentPdf.Result.notStoredInStatus("CO"));
       String completed = McpDocumentEmailTool.run(argsTo(BASE)).getString("hint");
       assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise the "
-          + "server could not generate it: ask the user to open the document's preview in the "
-          + "application so its PDF is stored, then ask to send again."), completed);
+          + "server could not generate it: tell the user the PDF could not be generated and "
+          + "report it with etendo_feedback."), completed);
       assertFalse(completed.contains("draft"), completed);
-      assertTrue(completed.contains("first send must be done from the application"), completed);
+      assertFalse(completed.contains("preview"), completed);
 
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStored(false));
@@ -700,7 +701,9 @@ class McpDocumentEmailToolTest {
       assertNotSent(result, 409, "pdf_stale");
       String hint = result.getString("hint");
       assertTrue(hint.startsWith(McpDocumentPdfTool.STALE_RETRY_HINT), hint);
-      assertTrue(hint.contains("refreshed") && hint.contains("ask to send again"), hint);
+      assertTrue(hint.contains("If the document was reactivated, complete it again")
+          && hint.contains("ask to send again"), hint);
+      assertFalse(hint.contains("preview"), hint);
       assertFalse(hint.contains("send the document by email"), hint);
     }
 
@@ -1046,6 +1049,7 @@ class McpDocumentEmailToolTest {
       // ETP-6013: the server generates a missing or stale PDF first where it can.
       assertFalse(description.contains("never generates"), description);
       assertTrue(description.contains("ask again in a few seconds"), description);
+      assertFalse(description.contains("preview in the application"), description);
       assertTrue(description.contains("DUPLICATE") || description.contains("identical"),
           description);
     }

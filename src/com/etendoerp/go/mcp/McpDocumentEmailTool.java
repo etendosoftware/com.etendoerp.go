@@ -75,8 +75,6 @@ final class McpDocumentEmailTool {
   /** The draft advice of this tool: the same sentence as the PDF tool's, with its own retry verb. */
   private static final String DRAFT_SEND_HINT = McpDocumentPdfTool.DRAFT_HINT_PREFIX
       + "ask to send again.";
-  private static final String PREVIEW_STORES_NOTHING = "If its preview stores nothing (a return "
-      + "receipt), the first send must be done from the application.";
   /** The advice of a send refused by status (ETP-6013); the detail already names the rule. */
   static final String STATUS_HINT = "Nothing was sent. The application offers 'Send by email' "
       + "only in the statuses the detail names, whatever PDF the document already has: bring the "
@@ -263,10 +261,7 @@ final class McpDocumentEmailTool {
    * The PDF's problem as this tool words it, or {@code null} when the PDF is there and current.
    *
    * <p>The status and code are those of {@code etendo_get_document_pdf}; only the hint changes,
-   * because that tool's "or send the document by email" is circular here. The last sentence is true
-   * for every window without naming one: a window whose preview stores nothing (a return receipt)
-   * has no PDF until the application sends it once, and no declared property tells the backend
-   * which windows those are.</p>
+   * because that tool's "or send the document by email" is circular here.</p>
    */
   private static JSONObject pdfProblem(NeoDocumentPdf.Result pdf) throws JSONException {
     JSONObject problem = McpDocumentPdfTool.unavailable(pdf);
@@ -277,9 +272,9 @@ final class McpDocumentEmailTool {
       problem.put(McpConstants.KEY_HINT, missingHint(pdf));
     } else if (pdf.getStatus() == NeoDocumentPdf.Status.STALE) {
       problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.STALE_RETRY_HINT
-          + "Otherwise the server could not regenerate it: ask the user to open the document's "
-          + "preview in the application so its PDF is refreshed, then ask to send again. "
-          + PREVIEW_STORES_NOTHING);
+          + "If the document was reactivated, complete it again, then ask to send again. "
+          + "Otherwise the server could not regenerate it: tell the user the PDF could not be "
+          + "generated and report it with etendo_feedback.");
     }
     return problem;
   }
@@ -290,8 +285,8 @@ final class McpDocumentEmailTool {
       return DRAFT_SEND_HINT;
     }
     String advice = McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise the server could not "
-        + "generate it: ask the user to open the document's preview in the application so its PDF "
-        + "is stored, then ask to send again. " + PREVIEW_STORES_NOTHING;
+        + "generate it: tell the user the PDF could not be generated and report it with "
+        + "etendo_feedback.";
     return pdf.getDocumentStatus() == null
         ? McpDocumentPdfTool.UNKNOWN_STATUS_DRAFT_REMARK + advice : advice;
   }
