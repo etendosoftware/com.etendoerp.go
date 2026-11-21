@@ -1867,6 +1867,12 @@ public class McpToolRouter {
       return wrapAsErrorContent("operations must be a non-empty array");
     }
     try {
+      // ETP-5810: a key an operation does not declare was dropped without a word, as a top-level
+      // one was before IMP-40. Refused before any access check, transaction or async job.
+      JSONObject unknownKey = rejectUnknownOperationKeys(operations);
+      if (unknownKey != null) {
+        return wrapAsTextContent(unknownKey);
+      }
       // Per-spec access check: a single batch can mix specs from different
       // windows, and the top-level authorizeSpecAccess(null) on etendo_batch is a
       // no-op. Authorise each distinct spec before any DAL work happens so an
@@ -1919,6 +1925,36 @@ public class McpToolRouter {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
     }
+  }
+
+  /**
+   * Refuses the first key of an {@code etendo_batch} operation that the operation does not declare
+   * (ETP-5810), in the batch pre-flight envelope with an {@code unknown_argument} error naming it.
+   *
+   * @param operations the operations as received
+   * @return the pre-flight failure envelope, or {@code null} when every key is declared
+   */
+  private static JSONObject rejectUnknownOperationKeys(JSONArray operations) throws JSONException {
+    java.util.Set<String> declared = ToolRegistry.declaredBatchOperationKeys();
+    for (int i = 0; i < operations.length(); i++) {
+      JSONObject op = operations.optJSONObject(i);
+      if (op == null) {
+        continue;
+      }
+      Iterator<String> keys = op.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        if (!declared.contains(key)) {
+          JSONObject error = McpRoutingException.unknownArgument(
+              "operations[" + i + "]." + key, TOOL_NEO_BATCH,
+              new java.util.ArrayList<>(declared)).toEnvelope();
+          error.put(McpConstants.KEY_TOOL, TOOL_NEO_BATCH);
+          return McpBatchEnvelope.toMcpBatchPreflightFailure(error, i,
+              op.optString("id", null));
+        }
+      }
+    }
+    return null;
   }
 
   /**

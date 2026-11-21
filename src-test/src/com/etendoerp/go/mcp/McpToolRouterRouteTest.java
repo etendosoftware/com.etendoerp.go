@@ -588,6 +588,35 @@ class McpToolRouterRouteTest {
       }
     }
 
+    /** ETP-5810: a misspelled or unsupported operation key is refused by name, not dropped. */
+    @Test
+    @DisplayName("an unknown key in an operation is refused as unknown_argument naming it")
+    void batchRefusesUnknownOperationKey() throws Exception {
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject args = buildBatchArgs();
+        args.getJSONArray("operations").getJSONObject(0).put("parentRf", "op0");
+
+        JSONObject result = router.handleBatch(args);
+
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertFalse(body.getBoolean("committed"));
+        assertEquals(0, body.getJSONObject("failedAt").getInt("index"));
+        JSONObject error = body.getJSONObject("error");
+        assertEquals("unknown_argument", error.getString("error"));
+        assertTrue(error.getString("detail").contains("parentRf"));
+        assertTrue(error.getJSONArray("available").toString().contains("parentRef"));
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+      }
+    }
+
     /** ETP-5676: the etendo_batch argument reaches BatchService with the REST option's meaning. */
     @Test
     @DisplayName("an etendo_batch forwards _onlyReturnIds and _skipRedundantCallouts")

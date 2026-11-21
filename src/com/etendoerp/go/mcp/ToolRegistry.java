@@ -787,6 +787,28 @@ public class ToolRegistry {
     return Optional.of(names);
   }
 
+  /**
+   * The keys an {@code etendo_batch} operation declares (ETP-5810), read from the tool's own
+   * schema so the guard cannot drift from what the agent was told.
+   *
+   * @return the declared operation keys, never {@code null}
+   */
+  static Set<String> declaredBatchOperationKeys() {
+    Object props = new ToolRegistry().buildBatchTool().getInputSchema()
+        .get(McpConstants.KEY_PROPERTIES);
+    Object operations = props instanceof Map ? ((Map<?, ?>) props).get("operations") : null;
+    Object items = operations instanceof Map ? ((Map<?, ?>) operations).get("items") : null;
+    Object opProps = items instanceof Map
+        ? ((Map<?, ?>) items).get(McpConstants.KEY_PROPERTIES) : null;
+    Set<String> names = new java.util.LinkedHashSet<>();
+    if (opProps instanceof Map) {
+      for (Object key : ((Map<?, ?>) opProps).keySet()) {
+        names.add(String.valueOf(key));
+      }
+    }
+    return names;
+  }
+
   private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
