@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge.email.render;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * Renders {@link EmailContent} into the shared Etendo email document (ETP-5003).
@@ -48,6 +50,8 @@ import org.apache.commons.lang3.StringUtils;
  * the content asks for it — so no other email changes by a byte.</p>
  */
 public final class EmailLayout {
+
+  private static final Logger log = LogManager.getLogger(EmailLayout.class);
 
   /** Pinned to production: an email is opened long after the environment that sent it may exist. */
   static final String LOGO_URL = "https://app.etendo.ai/favicon.png";
@@ -204,7 +208,13 @@ public final class EmailLayout {
   }
 
   private static void appendCta(StringBuilder html, EmailContent content) {
+    // ADR-0005: entity escaping cannot neutralise a javascript:/data: scheme, so the button is
+    // dropped rather than rendered with a live href.
     if (!content.hasCta()) {
+      return;
+    }
+    if (!EmailEscape.isSafeUrl(content.getCtaUrl())) {
+      log.warn("Email call to action dropped: its URL has a scheme outside http, https and mailto");
       return;
     }
     String url = escape(content.getCtaUrl());
