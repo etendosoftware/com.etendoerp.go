@@ -47,6 +47,7 @@ import org.openbravo.scheduling.OBScheduler;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessContext;
 import org.openbravo.service.db.DalConnectionProvider;
+import org.quartz.JobKey;
 
 /**
  * Provisions, per onboarded client, a scheduled {@code AD_Process_Request} that runs the core
@@ -208,13 +209,28 @@ public class OnboardingCostingScheduleService {
         return;
       }
       String requestId = request.getId();
+      if (!STATUS_SCHEDULED.equals(request.getStatus())) {
+        log.info("Costing schedule {} for client {} is not in status SCH; not activating it",
+            requestId, clientId);
+        return;
+      }
+      if (!schedulingAllowed()) {
+        log.info("Scheduler does not allow scheduling now; costing schedule {} for client {} "
+            + "will be picked up on the next scheduler initialization", requestId, clientId);
+        return;
+      }
+      if (OBScheduler.getInstance().getScheduler()
+          .checkExists(JobKey.jobKey(requestId, OBScheduler.OB_GROUP))) {
+        log.info("Costing schedule {} for client {} is already armed", requestId, clientId);
+        return;
+      }
       VariablesSecureApp vars = ProcessContext.newInstance(request.getOpenbravoContext()).toVars();
       DalConnectionProvider conn = new DalConnectionProvider(false);
       OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
       log.info("Activated costing schedule {} for client {}", requestId, clientId);
     } catch (Exception e) {
       log.warn("Could not immediately activate the costing schedule for client {} (it will be "
-          + "picked up on the next scheduler initialization): {}", clientId, e.getMessage());
+          + "picked up on the next scheduler initialization): {}", clientId, e.getMessage(), e);
     } finally {
       OBContext.restorePreviousMode();
     }

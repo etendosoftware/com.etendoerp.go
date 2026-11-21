@@ -190,7 +190,7 @@ public class SiiTbaiAutoSendScheduleService {
       log.info("Activated auto-send schedule {}", requestId);
     } catch (Exception e) {
       log.warn("Could not immediately activate auto-send schedule {} (it will be picked up on "
-          + "the next scheduler initialization): {}", requestId, e.getMessage());
+          + "the next scheduler initialization): {}", requestId, e.getMessage(), e);
     } finally {
       OBContext.restorePreviousMode();
     }
