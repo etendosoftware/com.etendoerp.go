@@ -346,11 +346,11 @@ public class ToolRegistryTest {
   @Test
   public void batchOperationKeysAreExactlyTheDeclaredOnes() {
     assertEquals(List.of("id", "spec", "entity", "parentRef", "body"),
-        new java.util.ArrayList<>(ToolRegistry.declaredBatchOperationKeys()));
+        new java.util.ArrayList<>(McpBatchOperationKeys.declaredKeys()));
   }
 
   @Test(expected = IllegalStateException.class)
   public void batchOperationKeysFailFastWhenSchemaHasNoOperationProperties() {
-    ToolRegistry.operationKeysOf(Map.of("properties", Map.of("operations", Map.of())));
+    McpBatchOperationKeys.keysOf(Map.of("properties", Map.of("operations", Map.of())));
   }
 }
