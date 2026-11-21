@@ -28,6 +28,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import javax.servlet.ServletException;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -48,6 +54,7 @@ import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessContext;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.quartz.JobKey;
+import org.quartz.SchedulerException;
 
 /**
  * Provisions, per onboarded client, a scheduled {@code AD_Process_Request} that runs the core
@@ -147,6 +154,12 @@ public class OnboardingCostingScheduleService {
   /** Seconds in the cadence, i.e. the width of the window the start instant is spread over. */
   private static final int CADENCE_SECONDS = INTERVAL_SECONDS.intValue();
 
+  /** Upper bound for the activation thread, so a hung scheduler cannot stall the onboarding stream. */
+  static final long ACTIVATION_TIMEOUT_SECONDS = 10L;
+
+  /** Instance field only so tests can shorten the wait. */
+  long activationTimeoutSeconds = ACTIVATION_TIMEOUT_SECONDS;
+
   private static final SecureRandom RANDOM = new SecureRandom();
 
   /**
@@ -224,15 +237,66 @@ public class OnboardingCostingScheduleService {
         log.info("Costing schedule {} for client {} is already armed", requestId, clientId);
         return;
       }
-      VariablesSecureApp vars = ProcessContext.newInstance(request.getOpenbravoContext()).toVars();
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
+      scheduleOnCleanConnection(requestId, OBContext.getOBContext());
       log.info("Activated costing schedule {} for client {}", requestId, clientId);
     } catch (Exception e) {
       log.warn("Could not immediately activate the costing schedule for client {} (it will be "
           + "picked up on the next scheduler initialization): {}", clientId, e.getMessage(), e);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Runs {@link #armOnCurrentThread} on a short-lived dedicated thread and waits for it, bounded.
+   * The thread starts with no connection in {@code SessionInfo}'s thread-local, so core's
+   * {@code TriggerData} query gets a fresh pooled connection instead of the one the long-lived
+   * onboarding request thread has been using (and may have left aborted or severed).
+   *
+   * @throws Exception the failure of the activation, or a {@link TimeoutException}
+   */
+  void scheduleOnCleanConnection(String requestId, OBContext callerContext) throws Exception {
+    FutureTask<Void> task = new FutureTask<>(() -> {
+      armOnCurrentThread(requestId, callerContext);
+      return null;
+    });
+    Thread thread = new Thread(task, "costing-schedule-activation");
+    thread.setDaemon(true);
+    thread.start();
+    try {
+      task.get(activationTimeoutSeconds, TimeUnit.SECONDS);
+    } catch (ExecutionException e) {
+      throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
+    } catch (TimeoutException | InterruptedException e) {
+      task.cancel(true);
+      if (e instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Body of the activation thread: applies the caller's context, resolves the request and builds
+   * the bundle here (the request thread's DAL session is not shared), arms Quartz, and always
+   * closes this thread's DAL session and context.
+   */
+  void armOnCurrentThread(String requestId, OBContext callerContext)
+      throws SchedulerException, ServletException {
+    OBContext.setOBContext(callerContext);
+    OBContext.setAdminMode(true);
+    try {
+      ProcessRequest request = OBDal.getInstance().get(ProcessRequest.class, requestId);
+      VariablesSecureApp vars = ProcessContext.newInstance(request.getOpenbravoContext()).toVars();
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
+    } finally {
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } finally {
+        OBContext.restorePreviousMode();
+        OBContext.setOBContext((OBContext) null);
+      }
     }
   }
 

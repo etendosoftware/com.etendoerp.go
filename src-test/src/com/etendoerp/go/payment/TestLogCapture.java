@@ -78,6 +78,19 @@ public final class TestLogCapture extends AbstractAppender {
     return messages;
   }
 
+  /** Throwables attached to the events logged at {@code level}, in order (null entries skipped). */
+  public List<Throwable> thrownAt(Level level) {
+    List<Throwable> thrown = new ArrayList<>();
+    synchronized (events) {
+      for (LogEvent event : events) {
+        if (level.equals(event.getLevel()) && event.getThrown() != null) {
+          thrown.add(event.getThrown());
+        }
+      }
+    }
+    return thrown;
+  }
+
   @Override
   public void append(LogEvent event) {
     synchronized (events) {

@@ -303,7 +303,7 @@ public class SiiTbaiAutoSendScheduleService {
     } catch (Exception e) {
       log.warn("Could not immediately unschedule auto-send schedule {} from the live scheduler "
           + "(it will still be deactivated in the DB, so it will not be picked up on the next "
-          + "scheduler initialization regardless): {}", requestId, e.getMessage());
+          + "scheduler initialization regardless): {}", requestId, e.getMessage(), e);
     }
   }
 

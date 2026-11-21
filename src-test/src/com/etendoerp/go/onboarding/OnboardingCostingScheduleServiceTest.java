@@ -18,11 +18,14 @@ package com.etendoerp.go.onboarding;
 
 import static com.etendoerp.go.testsupport.ProcessRequestTestFixture.propertyBackedRequest;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -32,6 +35,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,6 +52,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.common.enterprise.Organization;
+import com.etendoerp.go.payment.TestLogCapture;
 import org.openbravo.scheduling.OBScheduler;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessContext;
@@ -86,6 +93,7 @@ public class OnboardingCostingScheduleServiceTest {
   private static final String EXISTING_REQUEST_ID = "req-existing";
   private static final String NEW_REQUEST_ID = "req-new";
   private static final String OB_CONTEXT = "ob-context-string";
+  private static final String ACTIVATE_REQUEST_ID = "req-activate";
 
   @After
   public void clearMocks() {
@@ -232,11 +240,9 @@ public class OnboardingCostingScheduleServiceTest {
     }
   }
 
-  private static final String ACTIVATE_REQUEST_ID = "req-activate";
-
-  /** Runs activateSchedule against a request in {@code status}, with the scheduler state given. */
-  private OBScheduler runActivate(String status, boolean allowed, boolean jobExists,
-      SchedulerException scheduleFailure) throws Exception {
+  /** Spy whose request is in {@code status} and whose scheduler state is as given. */
+  private OnboardingCostingScheduleService activationService(String status, boolean allowed,
+      boolean jobExists) throws Exception {
     OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     Process process = mock(Process.class);
     ProcessRequest request = mock(ProcessRequest.class);
@@ -246,58 +252,167 @@ public class OnboardingCostingScheduleServiceTest {
         .resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
     doReturn(request).when(service).findExistingRequest(CLIENT_ID, process);
     doReturn(allowed).when(service).schedulingAllowed();
+    return service;
+  }
 
+  /** Runs activateSchedule with the scheduler mocked to report {@code jobExists}. */
+  private void activate(OnboardingCostingScheduleService service, boolean jobExists)
+      throws Exception {
     OBScheduler scheduler = mock(OBScheduler.class);
     Scheduler quartz = mock(Scheduler.class);
     when(scheduler.getScheduler()).thenReturn(quartz);
     when(quartz.checkExists(any(JobKey.class))).thenReturn(jobExists);
-    if (scheduleFailure != null) {
-      doThrow(scheduleFailure).when(scheduler).schedule(anyString(), any());
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class)) {
+      obScheduler.when(OBScheduler::getInstance).thenReturn(scheduler);
+      service.activateSchedule(CLIENT_ID);
     }
+  }
+
+  @Test
+  public void activateScheduleSkipsWhenSchedulingNotAllowed() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", false, false);
+    activate(service, false);
+    verify(service, never()).scheduleOnCleanConnection(anyString(), any());
+  }
+
+  @Test
+  public void activateScheduleSkipsWhenJobAlreadyExists() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", true, true);
+    activate(service, true);
+    verify(service, never()).scheduleOnCleanConnection(anyString(), any());
+  }
+
+  @Test
+  public void activateScheduleSkipsWhenRequestNotScheduled() throws Exception {
+    OnboardingCostingScheduleService service = activationService("UNS", true, false);
+    activate(service, false);
+    verify(service, never()).scheduleOnCleanConnection(anyString(), any());
+  }
+
+  /** The scheduler call runs on a thread other than the caller's, so it gets its own connection. */
+  @Test
+  public void activateScheduleArmsOnADifferentThreadThanTheCaller() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    AtomicReference<Thread> armedOn = new AtomicReference<>();
+    doAnswer(invocation -> {
+      armedOn.set(Thread.currentThread());
+      return null;
+    }).when(service).armOnCurrentThread(anyString(), any());
+
+    activate(service, false);
+
+    verify(service).armOnCurrentThread(Mockito.eq(ACTIVATE_REQUEST_ID), any());
+    assertNotSame(Thread.currentThread(), armedOn.get());
+    assertTrue(armedOn.get().isDaemon());
+    assertEquals("costing-schedule-activation", armedOn.get().getName());
+  }
+
+  /** The activation thread applies the caller's context, schedules, and closes its own DAL session. */
+  @Test
+  public void armOnCurrentThreadAppliesContextSchedulesAndClosesSession() throws Exception {
+    OnboardingCostingScheduleService service = new OnboardingCostingScheduleService();
+    OBContext callerContext = mock(OBContext.class);
+    ProcessRequest request = mock(ProcessRequest.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ProcessRequest.class, ACTIVATE_REQUEST_ID)).thenReturn(request);
+    OBScheduler scheduler = mock(OBScheduler.class);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class);
         MockedStatic<ProcessContext> processContext = mockStatic(ProcessContext.class);
         MockedStatic<ProcessBundle> processBundle = mockStatic(ProcessBundle.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
       obScheduler.when(OBScheduler::getInstance).thenReturn(scheduler);
       processContext.when(() -> ProcessContext.newInstance(any()))
           .thenReturn(mock(ProcessContext.class));
       processBundle.when(() -> ProcessBundle.request(anyString(), any(), any()))
           .thenReturn(mock(ProcessBundle.class));
-      service.activateSchedule(CLIENT_ID);
+
+      service.armOnCurrentThread(ACTIVATE_REQUEST_ID, callerContext);
+
+      obContext.verify(() -> OBContext.setOBContext(callerContext));
+      verify(scheduler).schedule(Mockito.eq(ACTIVATE_REQUEST_ID), any());
+      verify(dal).rollbackAndClose();
+      obContext.verify(OBContext::restorePreviousMode);
     }
-    return scheduler;
   }
 
+  /** Even when scheduling fails, the thread's DAL session is closed and the failure propagates. */
   @Test
-  public void activateScheduleSkipsWhenSchedulingNotAllowed() throws Exception {
-    OBScheduler scheduler = runActivate("SCH", false, false, null);
-    verify(scheduler, never()).schedule(anyString(), any());
+  public void armOnCurrentThreadClosesSessionWhenSchedulingFails() throws Exception {
+    OnboardingCostingScheduleService service = new OnboardingCostingScheduleService();
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ProcessRequest.class, ACTIVATE_REQUEST_ID)).thenReturn(mock(ProcessRequest.class));
+    OBScheduler scheduler = mock(OBScheduler.class);
+    SchedulerException failure = new SchedulerException("trigger");
+    doThrow(failure).when(scheduler).schedule(anyString(), any());
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class);
+        MockedStatic<ProcessContext> processContext = mockStatic(ProcessContext.class);
+        MockedStatic<ProcessBundle> processBundle = mockStatic(ProcessBundle.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obScheduler.when(OBScheduler::getInstance).thenReturn(scheduler);
+      processContext.when(() -> ProcessContext.newInstance(any()))
+          .thenReturn(mock(ProcessContext.class));
+      processBundle.when(() -> ProcessBundle.request(anyString(), any(), any()))
+          .thenReturn(mock(ProcessBundle.class));
+
+      try {
+        service.armOnCurrentThread(ACTIVATE_REQUEST_ID, mock(OBContext.class));
+        throw new AssertionError("expected the scheduler failure to propagate");
+      } catch (SchedulerException e) {
+        assertSame(failure, e);
+      }
+      verify(dal).rollbackAndClose();
+      obContext.verify(OBContext::restorePreviousMode);
+    }
   }
 
+  /** A scheduler failure is swallowed, and the WARN carries the exception with its cause. */
   @Test
-  public void activateScheduleSkipsWhenJobAlreadyExists() throws Exception {
-    OBScheduler scheduler = runActivate("SCH", true, true, null);
-    verify(scheduler, never()).schedule(anyString(), any());
+  public void activateScheduleLogsCauseOnSchedulerFailure() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    RuntimeException cause = new RuntimeException("sqlstate");
+    SchedulerException failure = new SchedulerException("trigger", cause);
+    doThrow(failure).when(service).armOnCurrentThread(anyString(), any());
+
+    TestLogCapture capture = TestLogCapture.attachTo(OnboardingCostingScheduleService.class,
+        Level.WARN);
+    try {
+      activate(service, false);
+      assertEquals(1, capture.thrownAt(Level.WARN).size());
+      Throwable logged = capture.thrownAt(Level.WARN).get(0);
+      assertSame(failure, logged);
+      assertSame(cause, logged.getCause());
+    } finally {
+      capture.detach();
+    }
   }
 
+  /** A hung activation is abandoned after the timeout and ends in a WARN, not in an exception. */
   @Test
-  public void activateScheduleSkipsWhenRequestNotScheduled() throws Exception {
-    OBScheduler scheduler = runActivate("UNS", true, false, null);
-    verify(scheduler, never()).schedule(anyString(), any());
-  }
+  public void activateScheduleWarnsAndReturnsWhenActivationTimesOut() throws Exception {
+    OnboardingCostingScheduleService service = activationService("SCH", true, false);
+    service.activationTimeoutSeconds = 1L;
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    doAnswer(invocation -> {
+      release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+      return null;
+    }).when(service).armOnCurrentThread(anyString(), any());
 
-  @Test
-  public void activateScheduleSchedulesOnHappyPath() throws Exception {
-    OBScheduler scheduler = runActivate("SCH", true, false, null);
-    verify(scheduler).schedule(Mockito.eq(ACTIVATE_REQUEST_ID), any());
-  }
-
-  /** A scheduler failure is swallowed (the cause goes to the log, not to the caller). */
-  @Test
-  public void activateScheduleDoesNotPropagateSchedulerFailure() throws Exception {
-    OBScheduler scheduler = runActivate("SCH", true, false,
-        new SchedulerException("trigger", new RuntimeException("cause")));
-    verify(scheduler).schedule(Mockito.eq(ACTIVATE_REQUEST_ID), any());
+    TestLogCapture capture = TestLogCapture.attachTo(OnboardingCostingScheduleService.class,
+        Level.WARN);
+    try {
+      activate(service, false);
+      assertEquals(1, capture.thrownAt(Level.WARN).size());
+      assertTrue(capture.thrownAt(Level.WARN).get(0) instanceof java.util.concurrent.TimeoutException);
+    } finally {
+      release.countDown();
+      capture.detach();
+    }
   }
 }
