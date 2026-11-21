@@ -415,4 +415,51 @@ class NeoAccessStartupTest {
     verify(obProvider, never()).get(org.openbravo.client.application.ProcessAccess.class);
     verify(obDal, never()).save(any());
   }
+
+  @Test
+  @DisplayName("ETP-6410: existing-access lookups include inactive rows (unique index ignores isactive)")
+  @SuppressWarnings("unchecked")
+  void existingAccessLookupsIncludeInactiveRows() {
+    stubRoleCriteria(List.of(targetRole()));
+    stubSpecCriteria(List.of(), List.of());
+    OBCriteria<WindowAccess> waCriteria = mock(OBCriteria.class);
+    when(waCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(WindowAccess.class)).thenReturn(waCriteria);
+    OBCriteria<ProcessAccess> paCriteria = mock(OBCriteria.class);
+    when(paCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(ProcessAccess.class)).thenReturn(paCriteria);
+    OBCriteria<org.openbravo.client.application.ProcessAccess> opaCriteria = mock(OBCriteria.class);
+    when(opaCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(opaCriteria);
+
+    startup.grantMissingAccess();
+
+    verify(waCriteria).setFilterOnActive(false);
+    verify(paCriteria).setFilterOnActive(false);
+    verify(opaCriteria).setFilterOnActive(false);
+  }
+
+  @Test
+  @DisplayName("ETP-6410: a spec window equal to a report anchor yields one WindowAccess, one lookup")
+  void specWindowEqualToReportAnchorIsGrantedOnce() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(windowSpec(ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID)),
+        List.of());
+    stubExistingAccess(List.of(), List.of());
+    Window financialReportsWindow = mock(Window.class);
+    when(obDal.get(Window.class, ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+        .thenReturn(financialReportsWindow);
+    Window inventoryWindow = mock(Window.class);
+    when(obDal.get(Window.class, ReportAccessCatalog.INVENTORY_STOCK_REPORT_WINDOW_ID))
+        .thenReturn(inventoryWindow);
+    when(obProvider.get(WindowAccess.class)).thenAnswer(i -> mock(WindowAccess.class));
+
+    startup.grantMissingAccess();
+
+    verify(obDal, times(1)).createCriteria(WindowAccess.class);
+    // Financial reports: once (spec pass only); inventory stock report: once (anchor pass).
+    verify(obDal, times(2)).save(any(WindowAccess.class));
+  }
 }
