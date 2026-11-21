@@ -738,11 +738,62 @@ public class NeoProcessService {
     if (tab == null || tab.getTable() == null || recordId == null) {
       return;
     }
-    for (Column col : tab.getTable().getADColumnList()) {
+    String keyColumn = findKeyColumnName(tab.getTable());
+    if (keyColumn != null) {
+      content.put(keyColumn, recordId);
+    }
+  }
+
+  /** DB name of the table's key column (e.g. "M_Inventory_ID"), or null when it has none. */
+  static String findKeyColumnName(org.openbravo.model.ad.datamodel.Table table) {
+    if (table == null) {
+      return null;
+    }
+    for (Column col : table.getADColumnList()) {
       if (Boolean.TRUE.equals(col.isKeyColumn())) {
-        content.put(col.getDBColumnName(), recordId);
-        break;
+        return col.getDBColumnName();
       }
+    }
+    return null;
+  }
+
+  /**
+   * ETP-6407 — Classic and scheduling processes read the record id from the table's key column
+   * (e.g. {@code M_Inventory_ID} in {@code InventoryCountProcess}), not from {@code recordID}.
+   * Adds {@code <KEY_COLUMN> -> recordID} to the bundle params, resolving the table from the tab
+   * or, without a tab, from the process' AD_Column. Best-effort: never overwrites a value the
+   * caller sent and never fails the execution.
+   */
+  static void addKeyColumnParam(Map<String, Object> bundleParams, JSONObject params,
+      Process adProcess) {
+    try {
+      Object recordId = bundleParams.get("recordID");
+      if (recordId == null || StringUtils.isBlank(recordId.toString())) {
+        return;
+      }
+      org.openbravo.model.ad.datamodel.Table table = null;
+      String tabId = params == null || params.isNull(INP_TAB_ID)
+          ? null : params.optString(INP_TAB_ID, null);
+      if (StringUtils.isNotBlank(tabId)) {
+        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+        table = tab == null ? null : tab.getTable();
+      } else if (adProcess != null) {
+        OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
+        criteria.add(Restrictions.eq(Column.PROPERTY_PROCESS, adProcess));
+        for (Column col : criteria.list()) {
+          if (table != null && !table.getId().equals(col.getTable().getId())) {
+            return;
+          }
+          table = col.getTable();
+        }
+      }
+      String keyColumn = findKeyColumnName(table);
+      if (keyColumn != null && !bundleParams.containsKey(keyColumn)) {
+        bundleParams.put(keyColumn, recordId);
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve key column param for process {}",
+          adProcess == null ? null : adProcess.getId(), e);
     }
   }
 
@@ -780,7 +831,9 @@ public class NeoProcessService {
           "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
-    ProcessBundle bundle = newClassicBundle(process.getId(), buildBundleParams(params));
+    Map<String, Object> bundleParams = buildBundleParams(params);
+    addKeyColumnParam(bundleParams, params, process);
+    ProcessBundle bundle = newClassicBundle(process.getId(), bundleParams);
 
     // Invoke protected doExecute directly via reflection: DalBaseProcess.execute() would also
     // commit, close and restore the context, which NEO manages itself.
@@ -814,7 +867,7 @@ public class NeoProcessService {
    *
    * These processes are called via {@link Process#execute(ProcessBundle)}.
    * The bundle params include both generic keys (recordID, inpRecordId) and
-   * the table-specific key injected by the caller (e.g. M_Inventory_ID).
+   * the table-specific key injected by this service (e.g. M_Inventory_ID, see addKeyColumnParam).
    */
   private static NeoResponse executeSchedulingProcess(
       org.openbravo.model.ad.ui.Process adProcess,
@@ -829,7 +882,9 @@ public class NeoProcessService {
     // ETP-5809 — same bundle as the classic path: context and connection, params kept after init.
     // Scheduling processes (e.g. InventoryCountProcess, RMCreateInvoice) call getContext() and
     // getConnection() internally.
-    ProcessBundle bundle = newClassicBundle(adProcess.getId(), buildBundleParams(params));
+    Map<String, Object> bundleParams = buildBundleParams(params);
+    addKeyColumnParam(bundleParams, params, adProcess);
+    ProcessBundle bundle = newClassicBundle(adProcess.getId(), bundleParams);
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, adProcess);

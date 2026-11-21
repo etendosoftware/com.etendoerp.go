@@ -890,4 +890,64 @@ public class NeoProcessServiceTest {
       order.verify(instance).execute(built);
     }
   }
+
+  // ETP-6407: the key column param is added from the tab's table, never overwriting the caller's.
+  private static org.openbravo.model.ad.ui.Tab tabWithKey(String keyName) {
+    org.openbravo.model.ad.datamodel.Column key = mock(org.openbravo.model.ad.datamodel.Column.class);
+    when(key.isKeyColumn()).thenReturn(true);
+    when(key.getDBColumnName()).thenReturn(keyName);
+    org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
+    when(table.getADColumnList()).thenReturn(java.util.Collections.singletonList(key));
+    org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+    when(tab.getTable()).thenReturn(table);
+    return tab;
+  }
+
+  private static java.util.Map<String, Object> keyParams(String tabId, String existing) throws Exception {
+    org.codehaus.jettison.json.JSONObject params = new org.codehaus.jettison.json.JSONObject();
+    params.put("inpRecordId", "REC1");
+    if (tabId != null) {
+      params.put("inpTabId", tabId);
+    }
+    java.util.Map<String, Object> bundleParams = new java.util.HashMap<>();
+    bundleParams.put("recordID", "REC1");
+    if (existing != null) {
+      bundleParams.put("M_Inventory_ID", existing);
+    }
+    org.openbravo.model.ad.ui.Process adProcess = mock(org.openbravo.model.ad.ui.Process.class);
+    NeoProcessService.addKeyColumnParam(bundleParams, params, adProcess);
+    return bundleParams;
+  }
+
+  @Test
+  public void keyColumnParamAddedFromTab() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(org.openbravo.model.ad.ui.Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.util.Map<String, Object> result = keyParams("T1", null);
+      org.junit.Assert.assertEquals("REC1", result.get("M_Inventory_ID"));
+      org.junit.Assert.assertEquals("REC1", result.get("recordID"));
+    }
+  }
+
+  @Test
+  public void keyColumnParamKeepsCallerValue() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(org.openbravo.model.ad.ui.Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.junit.Assert.assertEquals("EXPLICIT", keyParams("T1", "EXPLICIT").get("M_Inventory_ID"));
+    }
+  }
+
+  @Test
+  public void keyColumnParamResolutionFailureIsSwallowed() throws Exception {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenThrow(new IllegalStateException("boom"));
+      java.util.Map<String, Object> result = keyParams("T1", null);
+      org.junit.Assert.assertFalse(result.containsKey("M_Inventory_ID"));
+      org.junit.Assert.assertEquals("REC1", result.get("recordID"));
+    }
+  }
 }
