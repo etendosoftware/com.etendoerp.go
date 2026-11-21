@@ -892,62 +892,134 @@ public class NeoProcessServiceTest {
   }
 
   // ETP-6407: the key column param is added from the tab's table, never overwriting the caller's.
-  private static org.openbravo.model.ad.ui.Tab tabWithKey(String keyName) {
-    org.openbravo.model.ad.datamodel.Column key = mock(org.openbravo.model.ad.datamodel.Column.class);
-    when(key.isKeyColumn()).thenReturn(true);
+  private static Tab tabWithKey(String keyName) {
+    Column key = mock(Column.class);
+    when(key.isKeyColumn()).thenReturn(keyName != null);
     when(key.getDBColumnName()).thenReturn(keyName);
-    org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-    when(table.getADColumnList()).thenReturn(java.util.Collections.singletonList(key));
-    org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(key));
+    Tab tab = mock(Tab.class);
     when(tab.getTable()).thenReturn(table);
     return tab;
   }
 
-  private static java.util.Map<String, Object> keyParams(String tabId, String existing) throws Exception {
-    org.codehaus.jettison.json.JSONObject params = new org.codehaus.jettison.json.JSONObject();
+  private static Map<String, Object> keyParams(String existing) throws Exception {
+    JSONObject params = new JSONObject();
     params.put("inpRecordId", "REC1");
-    if (tabId != null) {
-      params.put("inpTabId", tabId);
-    }
-    java.util.Map<String, Object> bundleParams = new java.util.HashMap<>();
+    params.put("inpTabId", "T1");
+    Map<String, Object> bundleParams = new java.util.HashMap<>();
     bundleParams.put("recordID", "REC1");
     if (existing != null) {
       bundleParams.put("M_Inventory_ID", existing);
     }
-    org.openbravo.model.ad.ui.Process adProcess = mock(org.openbravo.model.ad.ui.Process.class);
+    Process adProcess = mock(Process.class);
+    when(adProcess.getId()).thenReturn("P1");
     NeoProcessService.addKeyColumnParam(bundleParams, params, adProcess);
     return bundleParams;
   }
 
-  @Test
-  public void keyColumnParamAddedFromTab() throws Exception {
+  private static Map<String, Object> keyParamsWithTab(Tab tab, String existing) throws Exception {
     OBDal dal = mock(OBDal.class);
-    when(dal.get(org.openbravo.model.ad.ui.Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
+    when(dal.get(Tab.class, "T1")).thenReturn(tab);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-      java.util.Map<String, Object> result = keyParams("T1", null);
-      org.junit.Assert.assertEquals("REC1", result.get("M_Inventory_ID"));
-      org.junit.Assert.assertEquals("REC1", result.get("recordID"));
+      return keyParams(existing);
     }
+  }
+
+  @Test
+  public void keyColumnParamAddedFromTab() throws Exception {
+    Map<String, Object> result = keyParamsWithTab(tabWithKey("M_Inventory_ID"), null);
+    assertEquals("REC1", result.get("M_Inventory_ID"));
+    assertEquals("REC1", result.get("recordID"));
   }
 
   @Test
   public void keyColumnParamKeepsCallerValue() throws Exception {
-    OBDal dal = mock(OBDal.class);
-    when(dal.get(org.openbravo.model.ad.ui.Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      org.junit.Assert.assertEquals("EXPLICIT", keyParams("T1", "EXPLICIT").get("M_Inventory_ID"));
-    }
+    assertEquals("EXPLICIT",
+        keyParamsWithTab(tabWithKey("M_Inventory_ID"), "EXPLICIT").get("M_Inventory_ID"));
   }
 
   @Test
-  public void keyColumnParamResolutionFailureIsSwallowed() throws Exception {
+  public void keyColumnParamSkippedWhenTabHasNoTable() throws Exception {
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(null);
+    assertFalse(keyParamsWithTab(tab, null).containsKey("M_Inventory_ID"));
+  }
+
+  @Test
+  public void keyColumnParamSkippedWhenTableHasNoKeyColumn() throws Exception {
+    Map<String, Object> result = keyParamsWithTab(tabWithKey(null), null);
+    assertEquals(1, result.size());
+  }
+
+  @Test
+  public void keyColumnParamResolutionFailureIsLoggedAndSwallowed() throws Exception {
+    List<String> warnings = new ArrayList<>();
+    org.apache.logging.log4j.core.Logger logger = (org.apache.logging.log4j.core.Logger)
+        org.apache.logging.log4j.LogManager.getLogger(NeoProcessService.class);
+    org.apache.logging.log4j.core.appender.AbstractAppender appender =
+        new org.apache.logging.log4j.core.appender.AbstractAppender("etp6407", null, null, true,
+            org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+          @Override
+          public void append(org.apache.logging.log4j.core.LogEvent event) {
+            if (event.getLevel() == org.apache.logging.log4j.Level.WARN) {
+              warnings.add(event.getMessage().getFormattedMessage());
+            }
+          }
+        };
+    appender.start();
+    logger.addAppender(appender);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenThrow(new IllegalStateException("boom"));
-      java.util.Map<String, Object> result = keyParams("T1", null);
-      org.junit.Assert.assertFalse(result.containsKey("M_Inventory_ID"));
-      org.junit.Assert.assertEquals("REC1", result.get("recordID"));
+      Map<String, Object> result = keyParams(null);
+      assertFalse(result.containsKey("M_Inventory_ID"));
+      assertEquals("REC1", result.get("recordID"));
+    } finally {
+      logger.removeAppender(appender);
+      appender.stop();
+    }
+    assertEquals(1, warnings.size());
+    assertTrue(warnings.get(0).contains("tab T1"));
+    assertTrue(warnings.get(0).contains("process P1"));
+    assertTrue(warnings.get(0).contains("record REC1"));
+  }
+
+  @Test
+  public void schedulingProcessBundleGetsKeyColumnParam() throws Exception {
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    org.openbravo.scheduling.Process instance = mock(org.openbravo.scheduling.Process.class);
+    Process adProcess = mock(Process.class);
+    when(adProcess.getId()).thenReturn("P1");
+    JSONObject params = new JSONObject();
+    params.put("inpRecordId", "REC1");
+    params.put("inpTabId", "T1");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Tab.class, "T1")).thenReturn(tabWithKey("M_Inventory_ID"));
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
+        MockedStatic<org.openbravo.base.weld.WeldUtils> weldMock =
+            mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedConstruction<DalConnectionProvider> connMock = mockConstruction(DalConnectionProvider.class);
+        MockedConstruction<ProcessBundle> bundleMock = mockConstruction(ProcessBundle.class,
+            (b, c) -> when(b.init(any())).thenReturn(b))) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> org.openbravo.base.weld.WeldUtils.getInstanceFromStaticBeanManager(any()))
+          .thenReturn(instance);
+
+      java.lang.reflect.Method m = NeoProcessService.class.getDeclaredMethod(
+          "executeSchedulingProcess", Process.class, Class.class, JSONObject.class);
+      m.setAccessible(true);
+      m.invoke(null, adProcess, instance.getClass(), params);
+
+      @SuppressWarnings("unchecked")
+      org.mockito.ArgumentCaptor<Map<String, Object>> captor =
+          org.mockito.ArgumentCaptor.forClass(Map.class);
+      org.mockito.Mockito.verify(bundleMock.constructed().get(0)).setParams(captor.capture());
+      assertEquals("REC1", captor.getValue().get("M_Inventory_ID"));
+      assertEquals("REC1", captor.getValue().get("recordID"));
     }
   }
 }

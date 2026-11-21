@@ -44,6 +44,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
@@ -101,6 +102,7 @@ public class NeoProcessService {
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
+  private static final String BUNDLE_RECORD_ID = "recordID";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -496,7 +498,7 @@ public class NeoProcessService {
       String key = keys.next();
       Object value = params.isNull(key) ? null : params.get(key);
       if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", value);
+        bundleParams.put(BUNDLE_RECORD_ID, value);
       } else if (INP_TAB_ID.equals(key)) {
         bundleParams.put("tabId", value);
       } else {
@@ -745,7 +747,7 @@ public class NeoProcessService {
   }
 
   /** DB name of the table's key column (e.g. "M_Inventory_ID"), or null when it has none. */
-  static String findKeyColumnName(org.openbravo.model.ad.datamodel.Table table) {
+  static String findKeyColumnName(Table table) {
     if (table == null) {
       return null;
     }
@@ -758,42 +760,29 @@ public class NeoProcessService {
   }
 
   /**
-   * ETP-6407 — Classic and scheduling processes read the record id from the table's key column
-   * (e.g. {@code M_Inventory_ID} in {@code InventoryCountProcess}), not from {@code recordID}.
-   * Adds {@code <KEY_COLUMN> -> recordID} to the bundle params, resolving the table from the tab
-   * or, without a tab, from the process' AD_Column. Best-effort: never overwrites a value the
-   * caller sent and never fails the execution.
+   * ETP-6407 — Scheduling processes read the record id from the table's key column (e.g.
+   * {@code M_Inventory_ID} in {@code InventoryCountProcess}), not from {@code recordID}.
+   * Adds {@code <KEY_COLUMN> -> recordID} to the bundle params, resolving the table only from
+   * {@code inpTabId}. Never overwrites a value the caller sent and never fails the execution:
+   * a resolution failure is logged at warn.
    */
   static void addKeyColumnParam(Map<String, Object> bundleParams, JSONObject params,
       Process adProcess) {
+    Object recordId = bundleParams.get(BUNDLE_RECORD_ID);
+    String tabId = params == null ? null : params.optString(INP_TAB_ID, null);
+    if (recordId == null || StringUtils.isBlank(recordId.toString())
+        || StringUtils.isBlank(tabId)) {
+      return;
+    }
     try {
-      Object recordId = bundleParams.get("recordID");
-      if (recordId == null || StringUtils.isBlank(recordId.toString())) {
-        return;
-      }
-      org.openbravo.model.ad.datamodel.Table table = null;
-      String tabId = params == null || params.isNull(INP_TAB_ID)
-          ? null : params.optString(INP_TAB_ID, null);
-      if (StringUtils.isNotBlank(tabId)) {
-        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-        table = tab == null ? null : tab.getTable();
-      } else if (adProcess != null) {
-        OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
-        criteria.add(Restrictions.eq(Column.PROPERTY_PROCESS, adProcess));
-        for (Column col : criteria.list()) {
-          if (table != null && !table.getId().equals(col.getTable().getId())) {
-            return;
-          }
-          table = col.getTable();
-        }
-      }
-      String keyColumn = findKeyColumnName(table);
-      if (keyColumn != null && !bundleParams.containsKey(keyColumn)) {
-        bundleParams.put(keyColumn, recordId);
+      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+      String keyColumn = findKeyColumnName(tab == null ? null : tab.getTable());
+      if (keyColumn != null) {
+        bundleParams.putIfAbsent(keyColumn, recordId);
       }
     } catch (Exception e) {
-      log.debug("Could not resolve key column param for process {}",
-          adProcess == null ? null : adProcess.getId(), e);
+      log.warn("Could not resolve key column param for tab {}, process {}, record {}",
+          tabId, adProcess == null ? null : adProcess.getId(), recordId, e);
     }
   }
 
@@ -831,9 +820,7 @@ public class NeoProcessService {
           "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
-    Map<String, Object> bundleParams = buildBundleParams(params);
-    addKeyColumnParam(bundleParams, params, process);
-    ProcessBundle bundle = newClassicBundle(process.getId(), bundleParams);
+    ProcessBundle bundle = newClassicBundle(process.getId(), buildBundleParams(params));
 
     // Invoke protected doExecute directly via reflection: DalBaseProcess.execute() would also
     // commit, close and restore the context, which NEO manages itself.
