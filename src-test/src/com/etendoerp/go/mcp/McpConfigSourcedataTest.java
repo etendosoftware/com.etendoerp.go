@@ -197,6 +197,33 @@ class McpConfigSourcedataTest {
   }
 
   /**
+   * ETP-5812 — {@code updatePaymentPlan} is an internal flag of {@code FIN_Payment_Schedule}, not an
+   * agent action: both invoice {@code paymentPlan} entities must keep it in {@code actions.hidden}
+   * with a reason.
+   */
+  @Test
+  @DisplayName("both invoice paymentPlan entities hide updatePaymentPlan with a reason")
+  void paymentPlanHidesUpdatePaymentPlan() throws IOException, JSONException {
+    Map<String, String> byId = new TreeMap<>();
+    for (String[] row : authoredPayloads()) {
+      byId.put(row[0], row[1]);
+    }
+    for (String id : new String[] { "1343B4002EE14A9896594655770261ED",
+        "28A6378134714F1E8D3C0869C1C77438" }) {
+      String payload = byId.get("ETGO_SF_ENTITY.xml#" + id);
+      assertNotNull(payload, "MCP_CONFIG of paymentPlan entity " + id + " not found");
+      JSONObject actions = new JSONObject(payload).getJSONObject(McpActionsSection.NAME);
+      Set<String> hidden = new TreeSet<>();
+      JSONArray array = actions.getJSONArray("hidden");
+      for (int i = 0; i < array.length(); i++) {
+        hidden.add(array.getString(i));
+      }
+      assertTrue(hidden.contains("updatePaymentPlan"), id + " must hide updatePaymentPlan");
+      assertFalse(actions.getString("reason").trim().isEmpty(), id + " needs a reason");
+    }
+  }
+
+  /**
    * ETP-5715 — the windows whose SPA hides the Attachments tab ({@code window.attachments:false} in
    * {@code schema_forge/artifacts/<window>/decisions.json}) carry {@code MCP_CONFIG.attachments
    * .enabled:false} on their root entity, so the MCP offers no attachments either. The flag lives in
