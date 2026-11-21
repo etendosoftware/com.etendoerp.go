@@ -117,56 +117,119 @@ public class NeoAccessStartup extends SessionAwareStartup {
     log.info("NeoAccessStartup: checking automatic roles for missing NEO window/process access.");
     OBContext.setAdminMode(true);
     try {
-      // Resolve everything the per-role passes need to plain values first, so no entity outlives
-      // the transaction it was loaded in (each role commits and closes its own session).
-      Set<String> specWindowIds = specTargetIds(activeSpecs("W"), true);
-      Set<String> specProcessIds = specTargetIds(activeSpecs("P"), false);
-      List<RoleRef> roles = targetRoleRefs();
-      OBDal.getInstance().commitAndClose();
+      PassInput input = readPassInput();
 
       int rolesProcessed = 0;
-      int rolesFailed = 0;
       int accessGranted = 0;
-      for (RoleRef ref : roles) {
+      List<String> failedRoleIds = new ArrayList<>();
+      for (RoleRef ref : input.roles) {
+        RolePass pass = new RolePass();
         try {
-          accessGranted += grantRole(ref, specWindowIds, specProcessIds);
+          int granted = grantRole(ref, input, pass);
+          if (granted == ROLE_GONE) {
+            log.info("NeoAccessStartup: role \"{}\" ({}) no longer exists; skipping.", ref.name,
+                ref.id);
+            continue;
+          }
+          accessGranted += granted;
           rolesProcessed++;
         } catch (RuntimeException e) {
-          rolesFailed++;
+          failedRoleIds.add(ref.id);
           log.error("NeoAccessStartup: granting missing access to role \"{}\" ({}, client {})"
-              + " failed; continuing with the next role.", ref.name, ref.id, ref.clientId, e);
-          try {
-            OBDal.getInstance().rollbackAndClose();
-          } catch (RuntimeException rollbackError) {
-            log.debug("NeoAccessStartup: rollback after failure also failed.", rollbackError);
-          }
+              + " failed during {} (access id {}; access rows pending in this role: {});"
+              + " continuing with the next role.", ref.name, ref.id, ref.clientId, pass.phase,
+              pass.accessId, pass.pending, e);
+          rollbackQuietly();
         }
       }
 
       long elapsedMs = System.currentTimeMillis() - startMs;
-      String summary = "NeoAccessStartup: processed {} automatic role(s), {} failed, granted {}"
+      String summary = "NeoAccessStartup: processed {} automatic role(s), {} failed {}, granted {}"
           + " missing access row(s) in {} ms.";
-      if (rolesFailed > 0) {
-        log.warn(summary, rolesProcessed, rolesFailed, accessGranted, elapsedMs);
+      if (failedRoleIds.isEmpty()) {
+        log.info(summary, rolesProcessed, 0, failedRoleIds, accessGranted, elapsedMs);
       } else {
-        log.info(summary, rolesProcessed, rolesFailed, accessGranted, elapsedMs);
+        log.warn(summary, rolesProcessed, failedRoleIds.size(), failedRoleIds, accessGranted,
+            elapsedMs);
       }
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
-  /** Grants one role its missing access in its own transaction; returns the rows created. */
-  private int grantRole(RoleRef ref, Set<String> specWindowIds, Set<String> specProcessIds) {
+  /** Marker returned by {@link #grantRole} when the role vanished between the read and the grant. */
+  private static final int ROLE_GONE = -1;
+
+  /** What the per-role passes need, resolved to plain values in the initial read transaction. */
+  private static final class PassInput {
+    Set<String> specWindowIds;
+    Set<String> specProcessIds;
+    List<RoleRef> roles;
+  }
+
+  /**
+   * Reads the spec ids and target roles in one transaction. A failure is logged with the step
+   * that failed and rethrown, so {@link SessionAwareStartup} still emits its usual fingerprint.
+   */
+  private PassInput readPassInput() {
+    String step = "spec window ids";
+    try {
+      PassInput input = new PassInput();
+      input.specWindowIds = specTargetIds(activeSpecs("W"), true);
+      step = "spec process ids";
+      input.specProcessIds = specTargetIds(activeSpecs("P"), false);
+      step = "target roles";
+      input.roles = targetRoleRefs();
+      step = "commit";
+      OBDal.getInstance().commitAndClose();
+      return input;
+    } catch (RuntimeException e) {
+      log.error("NeoAccessStartup: reading the {} failed.", step, e);
+      throw e;
+    }
+  }
+
+  /** Rolls back the current role's transaction; a failed rollback is logged, never thrown. */
+  private void rollbackQuietly() {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } catch (RuntimeException rollbackError) {
+      log.warn("NeoAccessStartup: rollback after failure also failed.", rollbackError);
+    }
+  }
+
+  /** Where a role's pass currently is, so a failure can name the operation and the access id. */
+  private static final class RolePass {
+    String phase = "load role";
+    String accessId = "-";
+    final List<String> pending = new ArrayList<>();
+
+    void at(String newPhase, String id) {
+      phase = newPhase;
+      accessId = id;
+    }
+
+    void queued(String kind, String id) {
+      pending.add(kind + ":" + id);
+    }
+  }
+
+  /**
+   * Grants one role its missing access in its own transaction; returns the rows created, or
+   * {@link #ROLE_GONE} when the role no longer exists.
+   */
+  private int grantRole(RoleRef ref, PassInput input, RolePass pass) {
     Role role = OBDal.getInstance().get(Role.class, ref.id);
     if (role == null) {
-      return 0;
+      return ROLE_GONE;
     }
     Organization orgZero = OBDal.getInstance().get(Organization.class, ORG_ZERO);
-    int windowGranted = grantWindowAccess(role, orgZero, specWindowIds);
-    int processGranted = grantProcessAccess(role, orgZero, specProcessIds);
-    int reportGranted = grantReportAccess(role, orgZero);
+    int windowGranted = grantWindowAccess(role, orgZero, input.specWindowIds, pass);
+    int processGranted = grantProcessAccess(role, orgZero, input.specProcessIds, pass);
+    int reportGranted = grantReportAccess(role, orgZero, pass);
+    pass.at("flush", "n/a");
     OBDal.getInstance().flush();
+    pass.at("commit", "n/a");
     OBDal.getInstance().commitAndClose();
     if (windowGranted + processGranted + reportGranted > 0) {
       log.info("NeoAccessStartup: granted {} window + {} process + {} Informes-report access"
@@ -235,11 +298,13 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return specs.list();
   }
 
-  private int grantWindowAccess(Role role, Organization orgZero, Set<String> windowIds) {
+  private int grantWindowAccess(Role role, Organization orgZero, Set<String> windowIds,
+      RolePass pass) {
     Set<String> existing = existingWindowIds(role);
     int granted = 0;
     for (String windowId : windowIds) {
       if (!existing.contains(windowId)) {
+        pass.at("window grant", windowId);
         WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
         wa.setNewOBObject(true);
         wa.setClient(role.getClient());
@@ -248,6 +313,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
         wa.setWindow(OBDal.getInstance().getProxy(Window.class, windowId));
         wa.setEditableField(true);
         OBDal.getInstance().save(wa);
+        pass.queued("window", windowId);
         existing.add(windowId);
         granted++;
       }
@@ -255,11 +321,13 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return granted;
   }
 
-  private int grantProcessAccess(Role role, Organization orgZero, Set<String> processIds) {
+  private int grantProcessAccess(Role role, Organization orgZero, Set<String> processIds,
+      RolePass pass) {
     Set<String> existing = existingProcessIds(role);
     int granted = 0;
     for (String processId : processIds) {
       if (!existing.contains(processId)) {
+        pass.at("process grant", processId);
         ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
         pa.setNewOBObject(true);
         pa.setClient(role.getClient());
@@ -267,6 +335,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
         pa.setRole(role);
         pa.setProcess(OBDal.getInstance().getProxy(Process.class, processId));
         OBDal.getInstance().save(pa);
+        pass.queued("process", processId);
         existing.add(processId);
         granted++;
       }
@@ -288,7 +357,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
    * that one row, same permissive-skip convention {@link #grantWindowAccess}/{@link
    * #grantProcessAccess} already use for a spec with no linked window/process.
    */
-  private int grantReportAccess(Role role, Organization orgZero) {
+  private int grantReportAccess(Role role, Organization orgZero, RolePass pass) {
     Set<String> existingWindowIds = existingWindowIds(role);
     Set<String> existingProcessIds = existingProcessIds(role);
     Set<String> existingObuiappProcessIds = existingObuiappProcessIds(role);
@@ -296,14 +365,15 @@ public class NeoAccessStartup extends SessionAwareStartup {
     for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
       switch (row.kind) {
         case WINDOW:
-          granted += grantWindowAnchor(role, orgZero, row.anchorId, existingWindowIds);
+          granted += grantWindowAnchor(role, orgZero, row.anchorId, existingWindowIds, pass);
           break;
         case CLASSIC_PROCESS:
-          granted += grantClassicProcessAnchor(role, orgZero, row.anchorId, existingProcessIds);
+          granted += grantClassicProcessAnchor(role, orgZero, row.anchorId, existingProcessIds, pass);
           break;
         case OBUIAPP_PROCESS:
         default:
-          granted += grantObuiappProcessAnchor(role, orgZero, row.anchorId, existingObuiappProcessIds);
+          granted += grantObuiappProcessAnchor(role, orgZero, row.anchorId, existingObuiappProcessIds,
+              pass);
           break;
       }
     }
@@ -319,10 +389,11 @@ public class NeoAccessStartup extends SessionAwareStartup {
    * @return {@code 1} if a new grant was created, {@code 0} otherwise
    */
   private int grantWindowAnchor(Role role, Organization orgZero, String windowId,
-      Set<String> existingWindowIds) {
+      Set<String> existingWindowIds, RolePass pass) {
     if (existingWindowIds.contains(windowId)) {
       return 0;
     }
+    pass.at("report-anchor grant", windowId);
     Window window = OBDal.getInstance().get(Window.class, windowId);
     if (window == null) {
       return 0;
@@ -335,6 +406,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     wa.setWindow(window);
     wa.setEditableField(true);
     OBDal.getInstance().save(wa);
+    pass.queued("window", windowId);
     existingWindowIds.add(windowId);
     return 1;
   }
@@ -347,10 +419,11 @@ public class NeoAccessStartup extends SessionAwareStartup {
    * @return {@code 1} if a new grant was created, {@code 0} otherwise
    */
   private int grantClassicProcessAnchor(Role role, Organization orgZero, String processId,
-      Set<String> existingProcessIds) {
+      Set<String> existingProcessIds, RolePass pass) {
     if (existingProcessIds.contains(processId)) {
       return 0;
     }
+    pass.at("report-anchor grant", processId);
     Process process = OBDal.getInstance().get(Process.class, processId);
     if (process == null) {
       return 0;
@@ -362,6 +435,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     pa.setRole(role);
     pa.setProcess(process);
     OBDal.getInstance().save(pa);
+    pass.queued("process", processId);
     existingProcessIds.add(processId);
     return 1;
   }
@@ -375,10 +449,11 @@ public class NeoAccessStartup extends SessionAwareStartup {
    * @return {@code 1} if a new grant was created, {@code 0} otherwise
    */
   private int grantObuiappProcessAnchor(Role role, Organization orgZero, String obuiappProcessId,
-      Set<String> existingObuiappProcessIds) {
+      Set<String> existingObuiappProcessIds, RolePass pass) {
     if (existingObuiappProcessIds.contains(obuiappProcessId)) {
       return 0;
     }
+    pass.at("report-anchor grant", obuiappProcessId);
     org.openbravo.client.application.Process obuiappProcess = OBDal.getInstance()
         .get(org.openbravo.client.application.Process.class, obuiappProcessId);
     if (obuiappProcess == null) {
@@ -392,6 +467,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     opa.setRole(role);
     opa.setObuiappProcess(obuiappProcess);
     OBDal.getInstance().save(opa);
+    pass.queued("obuiapp-process", obuiappProcessId);
     existingObuiappProcessIds.add(obuiappProcessId);
     return 1;
   }
@@ -403,7 +479,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     existing.add(Restrictions.eq(
         org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
-    // Inactive rows still occupy the unique (role, window/process) key: count them as existing.
+    // No unique index here: counting inactive rows avoids an active duplicate.
     existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (org.openbravo.client.application.ProcessAccess opa : existing.list()) {

@@ -17,8 +17,11 @@
 package com.etendoerp.go.startup;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -26,7 +29,15 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.apache.logging.log4j.core.config.LoggerConfig;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -199,9 +210,15 @@ class NeoAccessStartupTest {
     when(obProvider.get(WindowAccess.class)).thenReturn(wa);
     ProcessAccess pa = mock(ProcessAccess.class);
     when(obProvider.get(ProcessAccess.class)).thenReturn(pa);
+    Window windowProxy = mock(Window.class);
+    when(obDal.getProxy(Window.class, "win-new")).thenReturn(windowProxy);
+    Process processProxy = mock(Process.class);
+    when(obDal.getProxy(Process.class, "proc-new")).thenReturn(processProxy);
 
     startup.grantMissingAccess();
 
+    verify(wa).setWindow(windowProxy);
+    verify(pa).setProcess(processProxy);
     verify(wa).setNewOBObject(true);
     verify(wa).setClient(client);
     verify(wa).setOrganization(orgZero);
@@ -539,7 +556,7 @@ class NeoAccessStartupTest {
     stubSpecCriteria(List.of(windowSpec("win-new")), List.of());
     stubExistingAccess(List.of(), List.of());
     when(obProvider.get(WindowAccess.class)).thenReturn(mock(WindowAccess.class));
-    org.mockito.Mockito.doThrow(new RuntimeException("unique violation"))
+    doThrow(new RuntimeException("unique violation"))
         .doNothing().when(obDal).flush();
 
     startup.grantMissingAccess();
@@ -548,5 +565,85 @@ class NeoAccessStartupTest {
     // Initial read + the second role's own commit; the failed role never committed.
     verify(obDal, times(2)).commitAndClose();
     verify(obDal, times(2)).flush();
+  }
+
+  /** Collects the events NeoAccessStartup logs, to assert on the diagnostic context. */
+  private static final class CapturingAppender extends AbstractAppender {
+    final List<LogEvent> events = new ArrayList<>();
+
+    CapturingAppender() {
+      super("neo-access-capture", null, null, true, Property.EMPTY_ARRAY);
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      events.add(event.toImmutable());
+    }
+
+    String messages(Level level) {
+      StringBuilder sb = new StringBuilder();
+      for (LogEvent e : events) {
+        if (e.getLevel() == level) {
+          sb.append(e.getMessage().getFormattedMessage()).append('\n');
+        }
+      }
+      return sb.toString();
+    }
+  }
+
+  private CapturingAppender captureLogs() {
+    LoggerContext ctx = (LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+    CapturingAppender appender = new CapturingAppender();
+    appender.start();
+    LoggerConfig cfg = ctx.getConfiguration().getLoggerConfig(NeoAccessStartup.class.getName());
+    cfg.addAppender(appender, Level.ALL, null);
+    ctx.updateLoggers();
+    logAppender = appender;
+    logConfig = cfg;
+    return appender;
+  }
+
+  private CapturingAppender logAppender;
+  private LoggerConfig logConfig;
+
+  @AfterEach
+  void removeLogCapture() {
+    if (logAppender != null) {
+      logConfig.removeAppender(logAppender.getName());
+      logAppender.stop();
+      logAppender = null;
+    }
+  }
+
+  @Test
+  @DisplayName("a failing role logs the role, the operation and the pending access ids; summary lists it")
+  void failingRoleLogsContext() {
+    CapturingAppender logs = captureLogs();
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(windowSpec("win-new")), List.of());
+    stubExistingAccess(List.of(), List.of());
+    when(obProvider.get(WindowAccess.class)).thenReturn(mock(WindowAccess.class));
+    doThrow(new RuntimeException("unique violation")).when(obDal).flush();
+
+    startup.grantMissingAccess();
+
+    String error = logs.messages(Level.ERROR);
+    assertTrue(error.contains("role-1"), error);
+    assertTrue(error.contains("flush"), error);
+    assertTrue(error.contains("window:win-new"), error);
+    assertTrue(logs.messages(Level.WARN).contains("[role-1]"), logs.messages(Level.WARN));
+  }
+
+  @Test
+  @DisplayName("a failure while reading the targets is logged with its step and rethrown")
+  void readPhaseFailureIsLoggedAndRethrown() {
+    CapturingAppender logs = captureLogs();
+    stubSpecCriteria(List.of(), List.of());
+    when(obDal.createCriteria(Role.class)).thenThrow(new IllegalStateException("db down"));
+
+    assertThrows(IllegalStateException.class, () -> startup.grantMissingAccess());
+
+    assertTrue(logs.messages(Level.ERROR).contains("target roles"), logs.messages(Level.ERROR));
   }
 }
