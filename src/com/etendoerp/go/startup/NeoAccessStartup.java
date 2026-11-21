@@ -92,6 +92,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
   /** Organization assigned to granted access rows, matching onboarding role-access grants (org '0'). */
   private static final String ORG_ZERO = "0";
   private static final String SYSTEM_CLIENT = "0";
+  private static final String PHASE_REPORT_ANCHOR = "report-anchor grant";
 
   @Override
   protected Logger log() {
@@ -393,7 +394,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     if (existingWindowIds.contains(windowId)) {
       return 0;
     }
-    pass.at("report-anchor grant", windowId);
+    pass.at(PHASE_REPORT_ANCHOR, windowId);
     Window window = OBDal.getInstance().get(Window.class, windowId);
     if (window == null) {
       return 0;
@@ -423,7 +424,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     if (existingProcessIds.contains(processId)) {
       return 0;
     }
-    pass.at("report-anchor grant", processId);
+    pass.at(PHASE_REPORT_ANCHOR, processId);
     Process process = OBDal.getInstance().get(Process.class, processId);
     if (process == null) {
       return 0;
@@ -453,7 +454,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     if (existingObuiappProcessIds.contains(obuiappProcessId)) {
       return 0;
     }
-    pass.at("report-anchor grant", obuiappProcessId);
+    pass.at(PHASE_REPORT_ANCHOR, obuiappProcessId);
     org.openbravo.client.application.Process obuiappProcess = OBDal.getInstance()
         .get(org.openbravo.client.application.Process.class, obuiappProcessId);
     if (obuiappProcess == null) {
