@@ -206,6 +206,47 @@ class NeoPrintableRendererTest {
   }
 
   @Test
+  @DisplayName("the phases: prepare reads only, renderPdf needs no database, store re-checks the main file")
+  void phasesRunSeparately() throws Exception {
+    when(templates.get("sales-invoice")).thenReturn(template());
+    when(builder.build(RECORD)).thenReturn(new JSONObject().put("documentNo", "FV/2026 001"));
+    when(jsreport.render(any())).thenReturn("%PDF-1.7".getBytes());
+    NeoResponse created = NeoResponse.created(new JSONObject());
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+        MockedStatic<NeoAttachmentAuthorizer> authorizer = mockStatic(NeoAttachmentAuthorizer.class);
+        MockedStatic<NeoAttachmentStore> store = mockStatic(NeoAttachmentStore.class)) {
+      access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(created);
+
+      NeoPrintableRenderer.Prepared prepared =
+          renderer().prepare(spec, entity, RECORD, "CO");
+      assertNull(prepared.getOutcome());
+      verify(jsreport, never()).render(any());
+      verify(templates, never()).get(anyString());
+
+      byte[] pdf = renderer().renderPdf(prepared, "es_ES");
+      org.junit.jupiter.api.Assertions.assertNotNull(pdf);
+      store.verify(() -> NeoAttachmentStore.store(any()), never());
+
+      assertEquals(NeoPrintableRenderer.Outcome.STORED, renderer().store(prepared, pdf));
+      // the main attachment became a person's file while rendering
+      assertEquals(NeoPrintableRenderer.Outcome.FOREIGN_MAIN,
+          renderer("devolucion_firmada_cliente.pdf").store(prepared, pdf));
+      store.verify(() -> NeoAttachmentStore.store(any()), org.mockito.Mockito.times(1));
+
+      NeoResponse failed = NeoResponse.error(500, "boom");
+      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(failed);
+      assertEquals(NeoPrintableRenderer.Outcome.FAILED, renderer().store(prepared, pdf));
+
+      when(jsreport.render(any())).thenThrow(new NeoJsreportClient.RenderException("502"));
+      assertNull(renderer().renderPdf(prepared, "es_ES"));
+      when(templates.get("sales-invoice")).thenThrow(new NeoPrintableTemplates.ManifestException("manifest"));
+      assertNull(renderer().renderPdf(prepared, "es_ES"));
+    }
+  }
+
+  @Test
   @DisplayName("a failed render stores nothing and says FAILED, never throws")
   void failedRenderStoresNothing() throws Exception {
     when(templates.get("sales-invoice")).thenReturn(template());

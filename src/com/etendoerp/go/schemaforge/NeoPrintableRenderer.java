@@ -127,6 +127,49 @@ public final class NeoPrintableRenderer {
   }
 
   /**
+   * What {@link #prepare} read from the database, as plain values (no entity survives a closed
+   * session): either a terminal {@link #outcome} or everything {@link #renderPdf} and {@link #store}
+   * need.
+   */
+  public static final class Prepared {
+    private final Outcome outcome;
+    private final String document;
+    private final JSONObject data;
+    private final String documentNo;
+    private final String tableName;
+    private final String tableId;
+    private final String tabId;
+    private final String specName;
+    private final String recordId;
+    private volatile String builtAt;
+
+    private Prepared(Outcome outcome, String document, JSONObject data, String documentNo,
+        String tableName, String tableId, String tabId, String specName, String recordId) {
+      this.outcome = outcome;
+      this.document = document;
+      this.data = data;
+      this.documentNo = documentNo;
+      this.tableName = tableName;
+      this.tableId = tableId;
+      this.tabId = tabId;
+      this.specName = specName;
+      this.recordId = recordId;
+    }
+
+    private static Prepared terminal(Outcome outcome, String specName, String recordId) {
+      return new Prepared(outcome, null, null, null, null, null, null, specName, recordId);
+    }
+
+    /**
+     * @return the outcome when there is nothing to render or store, {@code null} when the document
+     *         is ready to render
+     */
+    public Outcome getOutcome() {
+      return outcome;
+    }
+  }
+
+  /**
    * Renders and stores one document's PDF.
    *
    * @param spec           the active spec the record belongs to
@@ -138,60 +181,124 @@ public final class NeoPrintableRenderer {
    */
   public Outcome renderAndStore(SFSpec spec, SFEntity entity, String recordId,
       String documentStatus, String locale) {
+    Prepared prepared = prepare(spec, entity, recordId, documentStatus);
+    if (prepared.outcome != null) {
+      return prepared.outcome;
+    }
+    byte[] pdf = renderPdf(prepared, locale);
+    return pdf == null ? Outcome.FAILED : store(prepared, pdf);
+  }
+
+  /**
+   * Phase 1: every database read of a render — the checks, the printable's data and the main
+   * attachment's name. Never calls jsreport or the manifest.
+   *
+   * @return a {@link Prepared} with a terminal outcome, or ready for {@link #renderPdf}; never throws
+   */
+  public Prepared prepare(SFSpec spec, SFEntity entity, String recordId, String documentStatus) {
+    String specName = spec.getName();
     String document = NeoPdfSourceConfig.printDocumentOf(entity);
     if (document != null && !isConfigured()) {
-      return Outcome.NOT_CONFIGURED;
+      return Prepared.terminal(Outcome.NOT_CONFIGURED, specName, recordId);
     }
     NeoPrintableDataBuilder builder = document == null ? null : builderFor(document);
     if (builder == null) {
       if (document != null) {
         log.warn("[print] {} declares printable '{}' but no NeoPrintableDataBuilder fills it",
-            spec.getName(), document);
+            specName, document);
       }
-      return Outcome.NOT_PRINTABLE;
+      return Prepared.terminal(Outcome.NOT_PRINTABLE, specName, recordId);
     }
     if (!builder.storesFor(documentStatus)) {
-      return Outcome.NOT_FOR_STATUS;
+      return Prepared.terminal(Outcome.NOT_FOR_STATUS, specName, recordId);
     }
     Tab tab = entity.getADTab();
     Table table = tab == null ? null : tab.getTable();
     if (table == null || !mayStore(spec, table.getId())) {
-      log.info("[print] {}/{}: not stored, the role cannot write its attachments", spec.getName(),
+      log.info("[print] {}/{}: not stored, the role cannot write its attachments", specName,
           recordId);
-      return Outcome.NOT_ALLOWED;
+      return Prepared.terminal(Outcome.NOT_ALLOWED, specName, recordId);
     }
     try {
       JSONObject data = builder.build(recordId);
       String documentNo = builder.documentNo(data);
-      // Never replace a file a person marked main (e.g. a customer's own document): storing with
-      // markAsMain would delete it. Only no main file, or one Etendo generated, may be replaced.
-      String currentMain = mainFileName.apply(table.getId(), recordId);
-      if (currentMain != null && !isEtendoPreviewName(currentMain, spec.getName(), documentNo,
-          recordId)) {
-        log.info("[print] {}/{}: not stored, the main attachment is not an Etendo-generated PDF",
-            spec.getName(), recordId);
-        return Outcome.FOREIGN_MAIN;
+      if (isForeignMain(table.getId(), recordId, specName, documentNo)) {
+        return Prepared.terminal(Outcome.FOREIGN_MAIN, specName, recordId);
       }
-      NeoPrintableTemplates.Template template = templates.get(document);
-      byte[] pdf = jsreport.render(template.payload(data, locale));
-      String fileName = previewFileName(spec.getName(), documentNo, recordId);
-      NeoResponse stored = NeoAttachmentStore.store(new NeoAttachmentUpload(table.getDBTableName(),
-          recordId, tab.getId(), fileName, pdf.length, name -> write(pdf, name), true));
-      if (stored.getHttpStatus() >= 300) {
-        log.warn("[print] {}/{}: rendered but not stored (HTTP {})", spec.getName(), recordId,
-            stored.getHttpStatus());
-        return Outcome.FAILED;
-      }
-      log.info("[print] {}/{}: server-rendered PDF stored as the main attachment ({} bytes, "
-          + "printable built at {})", spec.getName(), recordId, pdf.length, template.getBuiltAt());
-      return Outcome.STORED;
+      return new Prepared(null, document, data, documentNo, table.getDBTableName(), table.getId(),
+          tab.getId(), specName, recordId);
+    } catch (Exception e) {
+      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", specName, recordId,
+          failureOf(e));
+      return Prepared.terminal(Outcome.FAILED, specName, recordId);
+    }
+  }
+
+  /**
+   * Phase 2: the printable's manifest and jsreport, over HTTP. Touches no database, so the caller
+   * can (and must) have no transaction open meanwhile.
+   *
+   * @return the PDF, or {@code null} when it could not be rendered; never throws
+   */
+  public byte[] renderPdf(Prepared prepared, String locale) {
+    try {
+      NeoPrintableTemplates.Template template = templates.get(prepared.document);
+      byte[] pdf = jsreport.render(template.payload(prepared.data, locale));
+      prepared.builtAt = String.valueOf(template.getBuiltAt());
+      return pdf;
     } catch (Exception e) {
       // Only the class and message: the message of a render failure names no record data, the
       // record's own content never reaches the log.
-      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", spec.getName(),
-          recordId, failureOf(e));
+      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", prepared.specName,
+          prepared.recordId, failureOf(e));
+      return null;
+    }
+  }
+
+  /**
+   * Phase 3: stores the rendered PDF as the main attachment, after checking again that the main
+   * attachment is not a person's file (it may have changed during the render).
+   *
+   * @return what happened; never throws
+   */
+  public Outcome store(Prepared prepared, byte[] pdf) {
+    try {
+      if (isForeignMain(prepared.tableId, prepared.recordId, prepared.specName,
+          prepared.documentNo)) {
+        return Outcome.FOREIGN_MAIN;
+      }
+      String fileName = previewFileName(prepared.specName, prepared.documentNo, prepared.recordId);
+      NeoResponse stored = NeoAttachmentStore.store(new NeoAttachmentUpload(prepared.tableName,
+          prepared.recordId, prepared.tabId, fileName, pdf.length, name -> write(pdf, name), true));
+      if (stored.getHttpStatus() >= 300) {
+        log.warn("[print] {}/{}: rendered but not stored (HTTP {})", prepared.specName,
+            prepared.recordId, stored.getHttpStatus());
+        return Outcome.FAILED;
+      }
+      log.info("[print] {}/{}: server-rendered PDF stored as the main attachment ({} bytes, "
+          + "printable built at {})", prepared.specName, prepared.recordId, pdf.length,
+          prepared.builtAt);
+      return Outcome.STORED;
+    } catch (Exception e) {
+      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", prepared.specName,
+          prepared.recordId, failureOf(e));
       return Outcome.FAILED;
     }
+  }
+
+  /**
+   * Never replace a file a person marked main (e.g. a customer's own document): storing with
+   * markAsMain would delete it. Only no main file, or one Etendo generated, may be replaced.
+   */
+  private boolean isForeignMain(String tableId, String recordId, String specName,
+      String documentNo) {
+    String currentMain = mainFileName.apply(tableId, recordId);
+    if (currentMain != null && !isEtendoPreviewName(currentMain, specName, documentNo, recordId)) {
+      log.info("[print] {}/{}: not stored, the main attachment is not an Etendo-generated PDF",
+          specName, recordId);
+      return true;
+    }
+    return false;
   }
 
   /**
