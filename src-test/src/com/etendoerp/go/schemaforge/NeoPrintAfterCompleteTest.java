@@ -356,6 +356,42 @@ class NeoPrintAfterCompleteTest {
             .store(any(), any()));
   }
 
+  /** What the stubbed {@code prepare} says (null: ready to render) and {@code renderPdf} returns. */
+  private NeoPrintableRenderer.Outcome preparedOutcome;
+  private byte[] renderedPdf = new byte[] { 1 };
+
+  @Test
+  @DisplayName("ETP-6418 — a failed render is FAILED: one commit, no lock, no store")
+  void failedRenderEndsBeforeTheLock() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    renderedPdf = null;
+
+    runTheWorker(job, NeoDocumentPdf.Status.MISSING, NeoDocumentPdf.Status.MISSING,
+        NeoPrintableRenderer.Outcome.FAILED, NeoPrintableRenderer.Outcome.STORED,
+        MockedStatic::verifyNoInteractions, (dal, session, renderer) -> {
+          verify(dal, times(1)).commitAndClose();
+          verify(session, never()).createNativeQuery(NeoPrintAfterComplete.LOCK_DOCUMENT_SQL);
+          verify(renderer, never()).store(any(), any());
+        });
+  }
+
+  @Test
+  @DisplayName("ETP-6418 — a terminal prepare outcome is returned as is: no commit, no render")
+  void terminalPrepareEndsBeforeTheRender() {
+    NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
+    preparedOutcome = NeoPrintableRenderer.Outcome.FOREIGN_MAIN;
+
+    runTheWorker(job, NeoDocumentPdf.Status.MISSING, NeoDocumentPdf.Status.MISSING,
+        NeoPrintableRenderer.Outcome.FOREIGN_MAIN, NeoPrintableRenderer.Outcome.STORED,
+        MockedStatic::verifyNoInteractions, (dal, session, renderer) -> {
+          verify(dal, never()).commitAndClose();
+          verify(renderer, never()).renderPdf(any(), any());
+          verify(renderer, never()).store(any(), any());
+        });
+  }
+
   private interface WorkerCheck {
     void check(OBDal dal, Session session, NeoPrintableRenderer renderer);
   }
@@ -376,6 +412,7 @@ class NeoPrintAfterCompleteTest {
     NeoDocumentPdf.Result second = mock(NeoDocumentPdf.Result.class);
     when(second.getStatus()).thenReturn(secondCheck);
     NeoPrintableRenderer.Prepared prepared = mock(NeoPrintableRenderer.Prepared.class);
+    when(prepared.getOutcome()).thenReturn(preparedOutcome);
     OBDal dal = mock(OBDal.class);
     Session session = mock(Session.class, RETURNS_DEEP_STUBS);
     when(dal.getSession()).thenReturn(session);
@@ -390,7 +427,7 @@ class NeoPrintAfterCompleteTest {
         MockedConstruction<NeoPrintableRenderer> renderers = mockConstruction(
             NeoPrintableRenderer.class, (renderer, construction) -> {
               when(renderer.prepare(any(), any(), any(), any())).thenReturn(prepared);
-              when(renderer.renderPdf(any(), any())).thenReturn(new byte[] { 1 });
+              when(renderer.renderPdf(any(), any())).thenReturn(renderedPdf);
               when(renderer.store(any(), any())).thenReturn(storeOutcome);
             })) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);

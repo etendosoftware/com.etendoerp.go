@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -226,7 +227,7 @@ class NeoPrintableRendererTest {
       verify(templates, never()).get(anyString());
 
       byte[] pdf = renderer().renderPdf(prepared, "es_ES");
-      org.junit.jupiter.api.Assertions.assertNotNull(pdf);
+      assertNotNull(pdf);
       store.verify(() -> NeoAttachmentStore.store(any()), never());
 
       assertEquals(NeoPrintableRenderer.Outcome.STORED, renderer().store(prepared, pdf));
@@ -234,14 +235,31 @@ class NeoPrintableRendererTest {
       assertEquals(NeoPrintableRenderer.Outcome.FOREIGN_MAIN,
           renderer("devolucion_firmada_cliente.pdf").store(prepared, pdf));
       store.verify(() -> NeoAttachmentStore.store(any()), org.mockito.Mockito.times(1));
+    }
+  }
 
-      NeoResponse failed = NeoResponse.error(500, "boom");
-      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(failed);
-      assertEquals(NeoPrintableRenderer.Outcome.FAILED, renderer().store(prepared, pdf));
+  @Test
+  @DisplayName("the phases fail apart: a store over HTTP 300, a jsreport error or a manifest error")
+  void phaseFailures() throws Exception {
+    when(templates.get("sales-invoice")).thenReturn(template());
+    when(builder.build(RECORD)).thenReturn(new JSONObject().put("documentNo", "FV/2026 001"));
+    when(jsreport.render(any())).thenReturn("%PDF-1.7".getBytes());
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+        MockedStatic<NeoAttachmentAuthorizer> authorizer = mockStatic(NeoAttachmentAuthorizer.class);
+        MockedStatic<NeoAttachmentStore> store = mockStatic(NeoAttachmentStore.class)) {
+      access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      NeoPrintableRenderer.Prepared prepared = renderer().prepare(spec, entity, RECORD, "CO");
+      assertNull(prepared.getOutcome());
+
+      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(NeoResponse.error(500, "boom"));
+      assertEquals(NeoPrintableRenderer.Outcome.FAILED,
+          renderer().store(prepared, "%PDF".getBytes()));
 
       when(jsreport.render(any())).thenThrow(new NeoJsreportClient.RenderException("502"));
       assertNull(renderer().renderPdf(prepared, "es_ES"));
-      when(templates.get("sales-invoice")).thenThrow(new NeoPrintableTemplates.ManifestException("manifest"));
+      when(templates.get("sales-invoice")).thenThrow(
+          new NeoPrintableTemplates.ManifestException("manifest"));
       assertNull(renderer().renderPdf(prepared, "es_ES"));
     }
   }

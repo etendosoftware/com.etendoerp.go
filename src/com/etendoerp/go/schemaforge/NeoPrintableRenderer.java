@@ -70,13 +70,18 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  *
  * <p><b>Transactions.</b> It writes into the current session and does not commit. Its only caller is
  * {@link NeoPrintAfterComplete}'s worker — its own thread and session, after the completion
- * committed — which takes an advisory lock on the document and re-checks the stored PDF first, and
- * commits the store itself. It never runs in an MCP request's (or any business) transaction.</p>
+ * committed — which runs it in three phases: {@link #prepare} (database reads), {@link #renderPdf} (manifest
+ * and jsreport over HTTP, which must run with <b>no transaction open</b>) and {@link #store} (the
+ * only write, which the worker runs in a new transaction under an advisory lock on the document,
+ * after re-checking the stored PDF, and commits itself). {@link #renderAndStore} chains the three in
+ * the caller's session. It never runs in an MCP request's (or any business) transaction.</p>
  */
 public final class NeoPrintableRenderer {
 
   private static final Logger log = LogManager.getLogger(NeoPrintableRenderer.class);
   private static final String METHOD_WRITE = "POST";
+  private static final String MSG_RENDER_FAILED =
+      "[print] {}/{}: server-side render failed, no PDF stored: {}";
 
   /** What a render attempt ended in. */
   public enum Outcome {
@@ -141,7 +146,6 @@ public final class NeoPrintableRenderer {
     private final String tabId;
     private final String specName;
     private final String recordId;
-    private volatile String builtAt;
 
     private Prepared(Outcome outcome, String document, JSONObject data, String documentNo,
         String tableName, String tableId, String tabId, String specName, String recordId) {
@@ -193,6 +197,10 @@ public final class NeoPrintableRenderer {
    * Phase 1: every database read of a render — the checks, the printable's data and the main
    * attachment's name. Never calls jsreport or the manifest.
    *
+   * @param spec           the active spec the record belongs to
+   * @param entity         the spec's root entity holding the record
+   * @param recordId       the document's id
+   * @param documentStatus the document's status after the change that queued it
    * @return a {@link Prepared} with a terminal outcome, or ready for {@link #renderPdf}; never throws
    */
   public Prepared prepare(SFSpec spec, SFEntity entity, String recordId, String documentStatus) {
@@ -228,7 +236,7 @@ public final class NeoPrintableRenderer {
       return new Prepared(null, document, data, documentNo, table.getDBTableName(), table.getId(),
           tab.getId(), specName, recordId);
     } catch (Exception e) {
-      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", specName, recordId,
+      log.warn(MSG_RENDER_FAILED, specName, recordId,
           failureOf(e));
       return Prepared.terminal(Outcome.FAILED, specName, recordId);
     }
@@ -238,18 +246,21 @@ public final class NeoPrintableRenderer {
    * Phase 2: the printable's manifest and jsreport, over HTTP. Touches no database, so the caller
    * can (and must) have no transaction open meanwhile.
    *
+   * @param prepared what {@link #prepare} returned, ready to render
+   * @param locale   the language to print in (an Etendo language code, e.g. {@code es_ES})
    * @return the PDF, or {@code null} when it could not be rendered; never throws
    */
   public byte[] renderPdf(Prepared prepared, String locale) {
     try {
       NeoPrintableTemplates.Template template = templates.get(prepared.document);
       byte[] pdf = jsreport.render(template.payload(prepared.data, locale));
-      prepared.builtAt = String.valueOf(template.getBuiltAt());
+      log.debug("[print] {}/{}: rendered from the printable built at {}", prepared.specName,
+          prepared.recordId, template.getBuiltAt());
       return pdf;
     } catch (Exception e) {
       // Only the class and message: the message of a render failure names no record data, the
       // record's own content never reaches the log.
-      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", prepared.specName,
+      log.warn(MSG_RENDER_FAILED, prepared.specName,
           prepared.recordId, failureOf(e));
       return null;
     }
@@ -259,6 +270,8 @@ public final class NeoPrintableRenderer {
    * Phase 3: stores the rendered PDF as the main attachment, after checking again that the main
    * attachment is not a person's file (it may have changed during the render).
    *
+   * @param prepared what {@link #prepare} returned, ready to render
+   * @param pdf      the rendered PDF
    * @return what happened; never throws
    */
   public Outcome store(Prepared prepared, byte[] pdf) {
@@ -275,12 +288,11 @@ public final class NeoPrintableRenderer {
             prepared.recordId, stored.getHttpStatus());
         return Outcome.FAILED;
       }
-      log.info("[print] {}/{}: server-rendered PDF stored as the main attachment ({} bytes, "
-          + "printable built at {})", prepared.specName, prepared.recordId, pdf.length,
-          prepared.builtAt);
+      log.info("[print] {}/{}: server-rendered PDF stored as the main attachment ({} bytes)",
+          prepared.specName, prepared.recordId, pdf.length);
       return Outcome.STORED;
     } catch (Exception e) {
-      log.warn("[print] {}/{}: server-side render failed, no PDF stored: {}", prepared.specName,
+      log.warn(MSG_RENDER_FAILED, prepared.specName,
           prepared.recordId, failureOf(e));
       return Outcome.FAILED;
     }

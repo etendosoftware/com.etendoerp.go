@@ -569,6 +569,9 @@ public final class NeoPrintAfterComplete {
     }
     // A new transaction: read the definitions again (the first session's are detached).
     entity = OBDal.getInstance().get(SFEntity.class, job.entityId);
+    if (entity == null || entity.getETGOSFSpec() == null) {
+      return NeoPrintableRenderer.Outcome.NOT_PRINTABLE;
+    }
     target = NeoAttachmentTarget.resolve(entity.getETGOSFSpec(), entity, job.recordId, false);
     // Across nodes: one store per document at a time, and none when a current PDF is already there
     // (another node, or the eager render this request did not see in this JVM, stored it meanwhile).
