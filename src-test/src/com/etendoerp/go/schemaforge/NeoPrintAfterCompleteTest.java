@@ -365,7 +365,7 @@ class NeoPrintAfterCompleteTest {
   void failedRenderEndsBeforeTheLock() {
     NeoPrintAfterComplete.Job job = NeoPrintAfterComplete.jobFor(entity, RECORD,
         new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
-    renderedPdf = null;
+    renderedPdf = new byte[0];
 
     runTheWorker(job, NeoDocumentPdf.Status.MISSING, NeoDocumentPdf.Status.MISSING,
         NeoPrintableRenderer.Outcome.FAILED, NeoPrintableRenderer.Outcome.STORED,

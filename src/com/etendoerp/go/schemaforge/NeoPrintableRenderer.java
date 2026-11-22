@@ -141,27 +141,36 @@ public final class NeoPrintableRenderer {
     private final String document;
     private final JSONObject data;
     private final String documentNo;
-    private final String tableName;
-    private final String tableId;
-    private final String tabId;
+    private final String[] attachmentTarget;
     private final String specName;
     private final String recordId;
 
+    /** @param attachmentTarget {table name, table id, tab id} the PDF is attached to */
     private Prepared(Outcome outcome, String document, JSONObject data, String documentNo,
-        String tableName, String tableId, String tabId, String specName, String recordId) {
+        String[] attachmentTarget, String specName, String recordId) {
       this.outcome = outcome;
       this.document = document;
       this.data = data;
       this.documentNo = documentNo;
-      this.tableName = tableName;
-      this.tableId = tableId;
-      this.tabId = tabId;
+      this.attachmentTarget = attachmentTarget;
       this.specName = specName;
       this.recordId = recordId;
     }
 
+    private String tableName() {
+      return attachmentTarget[0];
+    }
+
+    private String tableId() {
+      return attachmentTarget[1];
+    }
+
+    private String tabId() {
+      return attachmentTarget[2];
+    }
+
     private static Prepared terminal(Outcome outcome, String specName, String recordId) {
-      return new Prepared(outcome, null, null, null, null, null, null, specName, recordId);
+      return new Prepared(outcome, null, null, null, null, specName, recordId);
     }
 
     /**
@@ -190,7 +199,7 @@ public final class NeoPrintableRenderer {
       return prepared.outcome;
     }
     byte[] pdf = renderPdf(prepared, locale);
-    return pdf == null ? Outcome.FAILED : store(prepared, pdf);
+    return pdf.length == 0 ? Outcome.FAILED : store(prepared, pdf);
   }
 
   /**
@@ -233,8 +242,8 @@ public final class NeoPrintableRenderer {
       if (isForeignMain(table.getId(), recordId, specName, documentNo)) {
         return Prepared.terminal(Outcome.FOREIGN_MAIN, specName, recordId);
       }
-      return new Prepared(null, document, data, documentNo, table.getDBTableName(), table.getId(),
-          tab.getId(), specName, recordId);
+      return new Prepared(null, document, data, documentNo,
+          new String[] { table.getDBTableName(), table.getId(), tab.getId() }, specName, recordId);
     } catch (Exception e) {
       log.warn(MSG_RENDER_FAILED, specName, recordId,
           failureOf(e));
@@ -248,7 +257,7 @@ public final class NeoPrintableRenderer {
    *
    * @param prepared what {@link #prepare} returned, ready to render
    * @param locale   the language to print in (an Etendo language code, e.g. {@code es_ES})
-   * @return the PDF, or {@code null} when it could not be rendered; never throws
+   * @return the PDF, or an empty array when it could not be rendered; never throws
    */
   public byte[] renderPdf(Prepared prepared, String locale) {
     try {
@@ -262,7 +271,7 @@ public final class NeoPrintableRenderer {
       // record's own content never reaches the log.
       log.warn(MSG_RENDER_FAILED, prepared.specName,
           prepared.recordId, failureOf(e));
-      return null;
+      return new byte[0];
     }
   }
 
@@ -276,13 +285,13 @@ public final class NeoPrintableRenderer {
    */
   public Outcome store(Prepared prepared, byte[] pdf) {
     try {
-      if (isForeignMain(prepared.tableId, prepared.recordId, prepared.specName,
+      if (isForeignMain(prepared.tableId(), prepared.recordId, prepared.specName,
           prepared.documentNo)) {
         return Outcome.FOREIGN_MAIN;
       }
       String fileName = previewFileName(prepared.specName, prepared.documentNo, prepared.recordId);
-      NeoResponse stored = NeoAttachmentStore.store(new NeoAttachmentUpload(prepared.tableName,
-          prepared.recordId, prepared.tabId, fileName, pdf.length, name -> write(pdf, name), true));
+      NeoResponse stored = NeoAttachmentStore.store(new NeoAttachmentUpload(prepared.tableName(),
+          prepared.recordId, prepared.tabId(), fileName, pdf.length, name -> write(pdf, name), true));
       if (stored.getHttpStatus() >= 300) {
         log.warn("[print] {}/{}: rendered but not stored (HTTP {})", prepared.specName,
             prepared.recordId, stored.getHttpStatus());

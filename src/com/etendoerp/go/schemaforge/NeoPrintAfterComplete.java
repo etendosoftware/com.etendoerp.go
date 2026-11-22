@@ -564,7 +564,7 @@ public final class NeoPrintAfterComplete {
     // connection, no advisory lock) may be open meanwhile. The reads above are committed first.
     OBDal.getInstance().commitAndClose();
     byte[] pdf = renderer.renderPdf(prepared, job.language);
-    if (pdf == null) {
+    if (pdf.length == 0) {
       return NeoPrintableRenderer.Outcome.FAILED;
     }
     // A new transaction: read the definitions again (the first session's are detached).

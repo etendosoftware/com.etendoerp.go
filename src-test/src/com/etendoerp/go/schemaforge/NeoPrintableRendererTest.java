@@ -257,10 +257,10 @@ class NeoPrintableRendererTest {
           renderer().store(prepared, "%PDF".getBytes()));
 
       when(jsreport.render(any())).thenThrow(new NeoJsreportClient.RenderException("502"));
-      assertNull(renderer().renderPdf(prepared, "es_ES"));
+      assertEquals(0, renderer().renderPdf(prepared, "es_ES").length);
       when(templates.get("sales-invoice")).thenThrow(
           new NeoPrintableTemplates.ManifestException("manifest"));
-      assertNull(renderer().renderPdf(prepared, "es_ES"));
+      assertEquals(0, renderer().renderPdf(prepared, "es_ES").length);
     }
   }
 
