@@ -157,7 +157,23 @@ public final class ClassicMessageRemap {
       Entry.ofLiteral("siiMissingInvoiceType",
           "La factura debe contener información en el campo Clave tipo factura."),
       Entry.ofLiteral("siiMissingDocumentNo",
-          "La factura de compra debe contener información en el campo Referencia del proveedor."));
+          "La factura de compra debe contener información en el campo Referencia del proveedor."),
+      // ETP-6284: the DUA sentences of the SII module (no AD_MESSAGE). FacturasEventHandler
+      // #checkDUAFields raises the first two on a header save; SIISOAPUtils raises the multi-DUA one
+      // at send; SIIUtils.invoicePreviousValidations the DUA-date one at send. They name Classic
+      // option texts ('Import(DUA)'), the 'Multiple DUA' check and lower-case "fecha DUA".
+      Entry.ofLiteral("siiDuaRequiredImport",
+          "Si la clave tipo factura es 'Import(DUA)' los campos DUA y fecha DUA son obligatorios."),
+      Entry.ofLiteral("siiDuaRequiredCustomsSettlement",
+          "Si la clave tipo factura es 'Aduanas-Liquidación Complementaria' los campos DUA y fecha "
+              + "DUA son obligatorios."),
+      Entry.ofLiteral("siiMultiDuaTaxLineDuaRequired",
+          "Si la clave tipo factura es 'Import(DUA)' o 'Aduanas-Liquidación Complementaria' y está "
+              + "marcado el check 'Multiple DUA' los campos 'DUA' y 'fecha DUA' son obligatorios en "
+              + "las lineas."),
+      Entry.ofLiteral("siiDuaDateAfterAccountingDate",
+          "Una factura de tipo F5 o LC debe tener fecha DUA y ésta no puede ser posterior a la "
+              + "fecha de registro contable."));
 
   /** Templates per AD_MESSAGE key, from the database; {@code null} until read. */
   private static final AtomicReference<Map<String, List<Template>>> AD_TEMPLATES =

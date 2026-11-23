@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,14 +32,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.LockMode;
+import org.hibernate.LockOptions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.module.remittance.Remittance;
 import org.openbravo.module.remittance.RemittanceType;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -96,7 +103,13 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li><b>«Procesar»</b>: declared action {@code process} ({@link RemittanceProcessAction}),
  *       Classic's {@code REMRemittanceProcess}; 422 when already processed, without lines, or
  *       refused by REM. <b>«Reactivar»</b>: {@code reactivate}, the same process with action
- *       {@code R}; 422 when not processed or refused by REM.</li>
+ *       {@code R}; 422 when not processed, collected/paid/voided, or refused by REM.</li>
+ *   <li><b>«Confirmar», «Enviada al banco», «Cobrada»</b> (ETP-6247): {@code confirm} processes the
+ *       remittance WITHOUT the automatic settlement (payments Remitted, invoices unpaid, status
+ *       {@code PR}) and stores its SEPA file; {@code markSent} ({@code PR -> SB}, informational) and
+ *       {@code markCollected} (settles every payment on the due date, {@code CT}/{@code PT}) are
+ *       {@link RemittanceStatusAction}. A remittance created through GO keeps
+ *       {@code EM_Etar_Automaticprocess = N} until collected.</li>
  *   <li><b>Due date</b>: a new or changed {@code dueDate} earlier than today (server calendar day,
  *       JVM default time zone) is refused with 422 {@value #MSG_DUE_DATE_PAST}; an unchanged past
  *       date of an existing remittance is accepted ({@link RemittanceHeaderWrites}).</li>
@@ -108,7 +121,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>The handler keeps the hooks and the seams; the work is split by responsibility into
  * {@link RemittanceHeaderWrites} (writes), {@link RemittanceHeaderSelectors} (selectors),
  * {@link RemittanceNameCallout} (callouts and the suggested name),
- * {@link RemittanceSepaFileDataAction} ({@code sepaFileData}) and {@link RemittanceRequestParams}
+ * {@link RemittanceSepaFileDataAction} ({@code sepaFileData}), {@link RemittanceHeaderActions}
+ * (the action dispatch and the due-items actions) and {@link RemittanceRequestParams}
  * (the query string of an action). Each reads the DAL, the request and the day through the
  * handler's package-private seams, so a test stubs them on the handler as before.
  */
@@ -120,6 +134,17 @@ public class RemittanceHeaderHandler implements NeoHandler {
   static final String FIELD_ACCOUNT = "financialAccount";
   static final String FIELD_TYPE = "remittanceType";
   static final String FIELD_NAME = "name";
+  /** ETP-6247: the remittance's own IBAN ({@code REM_REMITTANCE.IBAN}, DAL {@code iBAN}). */
+  static final String FIELD_IBAN = RemittanceIban.PROPERTY;
+  /** ETP-6247: the direct debit scheme and financed flag of a collection remittance. */
+  static final String FIELD_SCHEME = RemittanceSepaOptions.PROPERTY_SCHEME;
+  static final String FIELD_FINANCED = RemittanceSepaOptions.PROPERTY_FINANCED;
+  /** ETP-6247: the remittance's own SEPA creditor identifier (DAL {@code creditorIdentifier}). */
+  static final String FIELD_CREDITOR_ID = RemittanceCreditorId.REMITTANCE_PROPERTY;
+  static final String MSG_SCHEME_INVALID = "ETGO_RemittanceSchemeInvalid";
+  static final String MSG_OPTIONS_COLLECTION_ONLY = "ETGO_RemittanceOptionsCollectionOnly";
+  /** ETP-6247: the IBAN written on the remittance is not a valid IBAN. */
+  static final String MSG_IBAN_INVALID = "ETGO_RemittanceIbanInvalid";
   static final String FIELD_DUE_DATE = "dueDate";
   static final String COLUMN_DUE_DATE = "Duedate";
   static final String COLUMN_TYPE_FOR_CALLOUT = "REM_Remittance_Type_ID";
@@ -147,8 +172,6 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** The record id the SPA sends for a remittance that is not saved yet. */
   static final String NEW_RECORD_ID = "new";
 
-  private static final int SC_UNPROCESSABLE = 422;
-
   @Override
   public NeoResponse handle(NeoContext context) {
     // Evaluated at request entry, while the request runs as the account owner.
@@ -160,13 +183,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
       return RemittanceNameCallout.answer(this);
     }
     if (endpoint == NeoEndpointType.ACTION
-        && RemittanceSepaFileData.serves(context.getFieldName())) {
-      return RemittanceSepaFileDataAction.handle(this, context);
-    }
-    if (endpoint == NeoEndpointType.ACTION
-        && (RemittanceDueItems.serves(context.getFieldName())
-            || RemittanceProcessAction.serves(context.getFieldName()))) {
-      return handleDueItemsAction(context);
+        && RemittanceHeaderActions.serves(context.getFieldName())) {
+      return RemittanceHeaderActions.dispatch(this, context);
     }
     OBContext.setAdminMode(true);
     try {
@@ -191,6 +209,10 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * AD default, so the generic resolver falls back to the first account it finds, which the
    * account selector would not even offer; the default is dropped then, and the type with it,
    * since the type depends on the account.
+   *
+   * <p>CRUD (ETP-6247): nothing. A remittance created through GO keeps
+   * {@code EM_Etar_Automaticprocess = N}: it is processed without the automatic settlement and
+   * settled by «Cobrada» ({@link RemittanceStatusAction}).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -208,7 +230,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
     try {
       String accountId = idOf(defaults.opt(FIELD_ACCOUNT));
       FIN_FinancialAccount account = accountId != null ? loadAccount(accountId) : null;
-      if (accountId != null && account != null && accountRefusal(account) == null) {
+      if (accountId != null && account != null && eligibilityRefusal(account) == null) {
         return null;
       }
       for (String key : List.of(FIELD_ACCOUNT, FIELD_TYPE)) {
@@ -255,83 +277,15 @@ public class RemittanceHeaderHandler implements NeoHandler {
     RemittanceDueItems.addContracts(contracts);
     RemittanceProcessAction.addContract(contracts);
     RemittanceSepaFileData.addContract(contracts);
+    RemittanceFileAction.addContracts(contracts);
+    RemittanceStatusAction.addContracts(contracts);
+    RemittanceReturnAction.addContracts(contracts);
     return contracts;
   }
 
   @Override
   public boolean servesActions() {
     return true;
-  }
-
-  /**
-   * Runs a due-items action: 404 for an unknown remittance, 422 on a processed one, 405 for a
-   * {@code selectDueItems} that is not a POST, the contract's 422 for a malformed call. Read
-   * parameters come from the body (MCP, POST) or the query string (REST GET).
-   */
-  NeoResponse handleDueItemsAction(NeoContext context) {
-    String action = context.getFieldName();
-    boolean post = "POST".equals(context.getHttpMethod());
-    boolean write = RemittanceDueItems.isWrite(action)
-        || RemittanceProcessAction.serves(action);
-    if (write && !post) {
-      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          action + " only supports POST");
-    }
-    OBContext.setAdminMode(true);
-    try {
-      JSONObject params = actionParams(action, context.getRequestBody() != null
-          ? context.getRequestBody()
-          : RemittanceDueItems.paramsFromQuery(RemittanceRequestParams.of(context,
-              this::currentRequest, RemittanceDueItems.P_SEARCH, RemittanceDueItems.P_PAGE,
-              RemittanceDueItems.P_PAGE_SIZE)));
-      NeoResponse invalid = NeoActionContract.validate(actionContracts(), action, params);
-      if (invalid != null) {
-        return invalid;
-      }
-      Remittance remittance = loadRemittance(context.getRecordId());
-      if (remittance == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Remittance not found");
-      }
-      if (RemittanceProcessAction.ACTION.equals(action)) {
-        return processRemittance(remittance, params);
-      }
-      if (RemittanceProcessAction.ACTION_REACTIVATE.equals(action)) {
-        return reactivateRemittance(remittance);
-      }
-      if (Boolean.TRUE.equals(remittance.isProcessed())) {
-        return NeoMessageText.error(SC_UNPROCESSABLE, MSG_PROCESSED);
-      }
-      if (RemittanceDueItems.ACTION_SYNC.equals(action)) {
-        return syncDueItems(remittance, params);
-      }
-      return RemittanceDueItems.ACTION_AVAILABLE.equals(action)
-          ? availableDueItems(remittance, params)
-          : selectDueItems(remittance, params);
-    } catch (Exception e) {
-      log.error("remittance action {} failed on {}", action, context.getRecordId(), e);
-      // syncDueItems deletes lines before the Classic run: an unexpected failure after that must
-      // not leave the deletes pending in the session (unless a batch owns the transaction).
-      NeoErrorResponses.rollbackUnlessBatchOwned();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not run " + action + ". Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * The parameters of a call, read where its contract says they travel: {@code process} and
-   * {@code reactivate} are pressed from the SPA's process dialog, which posts
-   * {@code {"fieldValues": {...}}}, and {@code etendo_action} wraps the agent's flat parameters
-   * the same way for those contracts. A flat body is still accepted for them.
-   */
-  JSONObject actionParams(String action, JSONObject body) {
-    NeoActionContract contract = action != null ? actionContracts().get(action) : null;
-    if (contract == null || !contract.isFieldValuesBody()) {
-      return body;
-    }
-    JSONObject fieldValues = body.optJSONObject(FIELD_VALUES);
-    return fieldValues != null ? fieldValues : body;
   }
 
   /** Seam over {@link RemittanceProcessAction#process}. */
@@ -375,10 +329,22 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
    */
   String accountRefusal(FIN_FinancialAccount account) {
+    return accountRefusal(account, false);
+  }
+
+  /**
+   * {@link #accountRefusal(FIN_FinancialAccount)}, skipping the IBAN rule when the remittance
+   * itself carries a valid IBAN (ETP-6247: its file uses its own, the account need not have one).
+   *
+   * @param account       the financial account
+   * @param remittanceHasIban whether the write gives the remittance a valid IBAN of its own
+   * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
+   */
+  String accountRefusal(FIN_FinancialAccount account, boolean remittanceHasIban) {
     if (!TYPE_BANK.equals(account.getType())) {
       return MSG_ACCOUNT_NOT_BANK;
     }
-    if (!hasValidIban(account)) {
+    if (!remittanceHasIban && !hasValidIban(account)) {
       return MSG_ACCOUNT_IBAN_REQUIRED;
     }
     if (!hasRemittanceMethods(account)) {
@@ -430,7 +396,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
    * stream itself, later, in the default action. This handler answers every callout itself, so the
    * default action never runs and reading the stream here is safe.
    */
-  JSONObject readCalloutBody() throws java.io.IOException {
+  JSONObject readCalloutBody() throws IOException {
     HttpServletRequest request = currentRequest();
     if (request == null) {
       return null;
@@ -458,6 +424,24 @@ public class RemittanceHeaderHandler implements NeoHandler {
     return StringUtils.isBlank(id) ? null : TenantOwnership.loadOwned(Remittance.class, id);
   }
 
+  /** Refresh after acquiring the row lock so validation sees the latest account and status. */
+  void lockRemittance(Remittance remittance) {
+    OBDal.getInstance().getSession().refresh(remittance,
+        new LockOptions(LockMode.PESSIMISTIC_WRITE));
+  }
+
+  /**
+   * Whether the role may edit financial accounts: write access ({@code PUT}) to the
+   * {@value FinancialAccountHandler#SPEC} spec's window, the same tiered check the servlet applies
+   * to a request on that spec ({@link NeoAccessHelper#hasWindowAccessForSpec}). Guards the
+   * creditor identifier's account default, a write on {@code FIN_FINANCIAL_ACCOUNT} that the
+   * remittance actions run in admin mode (ETP-6247).
+   */
+  boolean canWriteFinancialAccount() {
+    SFSpec spec = NeoServletSupport.findSpec(FinancialAccountHandler.SPEC);
+    return spec != null && NeoAccessHelper.hasWindowAccessForSpec(spec, "PUT");
+  }
+
   FIN_FinancialAccount loadAccount(String id) {
     return TenantOwnership.loadOwned(FIN_FinancialAccount.class, id);
   }
@@ -473,6 +457,23 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** The client's stored creditor business code ({@link RemittanceSepaProvisioning}), raw. */
   String creditorBusinessCode(FIN_FinancialAccount account) {
     return RemittanceSepaProvisioning.creditorBusinessCode(account.getClient());
+  }
+
+  /** The creditor identifier saved on the account, normalized, valid or not; {@code null} when none. */
+  String storedCreditorId(FIN_FinancialAccount account) {
+    return RemittanceCreditorId.stored(account);
+  }
+
+  /** Saves a validated creditor identifier on the remittance, its own copy (ETP-6247). */
+  void storeRemittanceCreditorId(Remittance remittance, String normalized) {
+    remittance.set(RemittanceCreditorId.REMITTANCE_PROPERTY, normalized);
+    OBDal.getInstance().save(remittance);
+    OBDal.getInstance().flush();
+  }
+
+  /** Saves a validated creditor identifier on the account (ETP-6247). */
+  void storeCreditorId(FIN_FinancialAccount account, String normalized) {
+    RemittanceCreditorId.store(account, normalized);
   }
 
   Organization loadOrganization(String id) {
@@ -507,8 +508,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
     if (value == null || JSONObject.NULL.equals(value)) {
       return null;
     }
-    if (value instanceof org.openbravo.base.structure.BaseOBObject) {
-      return (String) ((org.openbravo.base.structure.BaseOBObject) value).getId();
+    if (value instanceof BaseOBObject) {
+      return (String) ((BaseOBObject) value).getId();
     }
     if (value instanceof JSONObject) {
       return StringUtils.trimToNull(((JSONObject) value).optString("id", null));

@@ -59,7 +59,9 @@ final class PaymentTermCreateDefaults {
    * mandatory-defaults pass first and says what it did: a key in
    * {@link NeoContext#getFallbackDefaults()} is a placeholder (ETP-5669, forwarded to the
    * pre-hook since ETP-5680), and when {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} is present
-   * only the keys it lists were sent.
+   * only the keys it lists were sent. {@code etendo_batch} sets that attribute too (ETP-6177, the
+   * keys the agent sent before its preprocessor's injections); it never fills a payment term's
+   * fields, so there the answer is the same as body presence.
    *
    * @param context the request; {@code null} means presence in the body
    */

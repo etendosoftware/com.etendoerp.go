@@ -46,6 +46,7 @@ import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+import com.etendoerp.go.schemaforge.email.render.EmailFooter;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
@@ -175,6 +176,7 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
         .linkFallbackText(EmailMessages.get("link.fallback", language))
         .note(EmailMessages.get(KEY_PREFIX + "note.expiry", language, hours))
         .signature(EmailMessages.get("signature", language))
+        .footer(EmailFooter.etendo(EmailFooter.Piece.LINK_RENEWAL, language))
         .build();
     try {
       JSONObject data = new JSONObject();

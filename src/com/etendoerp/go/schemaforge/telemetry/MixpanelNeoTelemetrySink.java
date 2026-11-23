@@ -24,8 +24,10 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -123,7 +125,10 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
     properties.put("distinct_id", config.getDistinctId());
     properties.put("time", event.getTimestamp().getEpochSecond());
     for (Map.Entry<String, Object> entry : event.getProperties().entrySet()) {
-      properties.put(entry.getKey(), entry.getValue());
+      // ETP-6247: a list property (role_groups) travels as a JSON array, not as its toString().
+      Object value = entry.getValue();
+      properties.put(entry.getKey(),
+          value instanceof Collection ? new JSONArray((Collection<?>) value) : value);
     }
     // ETP-5581: on EVERY backend event, after the caller's properties so none can replace them
     // (neither key is on the allowlist anyway). environment separates production from the test

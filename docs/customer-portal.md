@@ -47,13 +47,15 @@ answers the same 401 as an unknown token at once and cannot be renewed.
 ## 2. Endpoints
 
 All under the portal's own servlet, isolated from NEO (never reachable through `NeoServlet` or the
-CRUD engine), reachable with no Etendo session. Every response is `no-store`.
+CRUD engine), reachable with no Etendo session. Every response is `no-store`, except
+`GET /public-logo/{reference}` (below).
 
 | Endpoint | Answers |
 |---|---|
 | `GET /me[/{token}]` | The link's state: `valid` (Business Partner name, `email` — the customer's address the portal already uses, the first valid To of the link's root send, `""` when none; shown in the user menu —, tenant name, `hasLogo`, `entryDocument` or `null` + `entryKind` when the link's own document left its scope), `expired`, `unavailable`; or the 401 below |
 | `POST /renew` | For an expired link: `{state:"renewed", renewal:"sent"}`, `{state:"renewed", renewal:"recentlySent"}` (cool-down, nothing sent), `{state:"unavailable"}`, `{state:"valid"}` (not expired), `503` when the email could not be sent |
 | `GET /logo` | The issuing company's logo, resolved from the link's organization; served for any sent link, so the expired page keeps the branding |
+| `GET /public-logo/{reference}` | **No portal token** (ETP-6209). The same logo, for the header of the portal emails, where the portal token must never appear in an image URL. Details below |
 | `GET /home?months=` | Pending-payment balances, one tile per kind (count + highlight: quotations awaiting an answer, overdue invoices, orders in progress, shipments this month), recent documents, `paidThisYear` (per currency, `Invoice.totalPaid` of this year's completed/closed invoices), `invoicesThisYear` (`total`, `upToDate`) and `chart` (invoiced per month over `months` = 3, 6 or 12, default 12, in the currency invoiced in most months) — server-side aggregates |
 | `GET /search?q=` | Documents of every kind matching `q` (number, reference, description), newest first, 8 at most; blank `q` answers an empty list |
 | `GET /documents?type=&group=&status=&dateFrom=&dateTo=&q=&limit=&offset=` | One kind's list, filtered and paged (default 50, max 200), with invoice payment fields, a quotation's generated order (`orderId`, `orderNo`) and the kind's `groups`; `group` (one of the kind's status groups, below) replaces `status` |
@@ -101,6 +103,32 @@ is visible) plus, where the status alone cannot say it, a condition on the docum
 
 No group (or an unknown one) is every visible status. The home's tiles count the same sets
 (`awaiting`, `overdue`, `inProgress`), so a tile and its tab always agree.
+
+### The public logo — `GET /public-logo/{reference}` (ETP-6209)
+
+The decision confirmation emails show the issuing company's logo. `GET /logo` needs the portal
+token, and an image URL is fetched and cached by image proxies (Gmail's among them), so the emails
+use a token-free URL built by `PortalLogoReference`:
+
+- **URL:** `{etendo.go.app.baseUrl}/sws/portal/public-logo/{reference}` — the same base the
+  email's own links use (`PublicUrlResolver.resolveConfiguredAppBaseUrl`). No logo, no base URL or
+  no signing secret: the email shows the company's initials instead.
+- **Reference:** `base64url(clientId + "|" + orgId) + "." + HMAC-SHA256`. The MAC is
+  `DocumentDownloadTokenService#signDetached("portal-logo:v1", payload)`, keyed by the existing
+  `etendo.go.email.documentDownloadTokenSecret` (no new secret). Separated at the key: a detached
+  signature uses the per-purpose key `HMAC(secret, "detached:" + purpose)`, never the secret,
+  which only download tokens sign with — so a logo reference can never validate as a download
+  token (or another purpose), however either is encoded. Download tokens are signed exactly as
+  before. Stable per tenant and never expiring (an email is opened long after it was sent).
+- **What it grants:** the bytes of that one tenant's document logo (`CompanyLogoResolver`, the
+  same image `/logo` serves) and nothing else — no data, no session, no other tenant; it cannot be
+  forged without the secret. The payload carries the tenant's internal ids, which grant nothing.
+- **Only PNG or JPEG**, typed from the bytes (`NeoImageHelper.sniffMimeType`), with
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`: a stored SVG
+  or anything else answers 404, so the URL never serves active content. Every failure (forged or
+  malformed reference, no logo, other type) is the same `404 {"error":"Not found"}`.
+- **Cacheable:** `Cache-Control: public, max-age=86400` (a logo change shows within a day). Not
+  rate limited: a signature check plus one logo read, and image proxies cache it.
 
 ## 3. The token header — `X-Portal-Token`
 
@@ -232,6 +260,9 @@ A customer can accept or reject a quotation of their scope, confirmed by email. 
 - **`ETGO_PORTAL_DECISION`** (native SQL, no AD registration): one row per request, the SHA-256 of
   a 256-bit token, `STATUS` `PENDING` / `CONFIRMED` / `VOIDED` / `NOT_APPLIED`, `SENT_AT` (a row is
   usable only once its email left). Single use, never expires.
+- **The confirmation email's design** (card per the Figma, Etendo footer, the Motivo column and
+  why the avatar is the company's initials) is in `transactional-email-contracts.md` → *Portal
+  email design*.
 - **One step from the email (call with the PO).** The confirmation email's button is explicit
   ("Confirmar rechazo" / "Confirmar aceptación", `portal-quotation-decision.confirm.cta.<DECISION>`)
   and opens the landing (`/portal/decision/<token>` in the SPA), whose script sends
@@ -347,17 +378,26 @@ Metric queries, the per-send vs per-document reading and the link-scanner caveat
 These usage events stay as they are.
 
 **PO KPIs (etendo-ai#22, 2026-11-16) — Mixpanel.** The PO's two success metrics are computed from
-three backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; contract
-and Mixpanel recipes in `backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
+backend KPI events emitted by `PortalKpiTelemetry` through `NeoTelemetryService`; marketing's
+portal KPIs (portal reach, emails by piece) from two more. Contract and Mixpanel recipes in
+`backend-observability.md` → *Customer Portal KPIs (ETP-6209)*:
 
 | Event | Hook | "First" / dedup |
 |---|---|---|
 | `backend_portal_document_sent` (`type`) | `PortalLinkService#confirm`, after the link's commit, `SEND` origin only | no other sent `SEND` link of the same record (renewals, decision links and re-sends never emit) |
 | `backend_portal_document_downloaded` (`type`) | `/pdf` after the stream succeeded | atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link (`UPDATE … WHERE first_downloaded IS NULL`): only the request that set it emits; a document never sent with a link emits nothing (it is outside the KPI's denominator) |
-| `backend_quotation_decided` (`decision`, `source`) | portal: `PortalDecisionService#confirm` when applied now; app: `RejectQuotationHandler#reject`, `Convertquotation` and the quotation path of `createDraftInvoice` | the app's conversion of an `ETGO_AC` quotation (accepted from the portal) is not a second decision |
+| `backend_portal_opened` (`third_party`, `entry_doc_type`, `origin`) | `GET /me` answering `valid` | one per **visit**: a link's valid `/me` after 30 minutes without one (sliding, in memory per node), so reloads inside a visit do not count. `third_party` is a keyed HMAC pseudonym of the link's Business Partner (purpose `kpi-third-party:v1`): distinct customers are countable, never identifiable |
+| `backend_portal_email_sent` (`piece`, `doc_type`) | `PortalLinkService#confirm` (`document_send` with `doc_type`, `link_renewal`) and `PortalDecisionService#markSent` (`decision_accept`, `decision_reject`), after the commit | none: every email that left (a throttled, duplicate or failed send never reaches these hooks) |
+| `backend_quotation_decided` (`decision`, `source`) | portal: `PortalDecisionService#confirm` when applied now, through `PortalKpiTelemetry#portalQuotationConfirmed`; app: `RejectQuotationHandler#reject`, `Convertquotation` and the quotation path of `createDraftInvoice` | portal: **once per quotation, and only for a quotation emailed with a portal link** — after the commit, it fires only when the quotation has a confirmed `SEND` link (`sent_at` set) and this decision is the quotation's first `CONFIRMED` one (`ORDER BY confirmed_at, id LIMIT 1`; confirmations of a quotation are serialized by its row lock and a confirmed decision never changes, so exactly one is first). A quotation reached through a shared contact link (`SHARED`) or another document's link, or decided again from the portal after being re-opened, does not count — so the answer rate can no longer exceed 100 %. Read-only, the decision is never affected; no new column. App: the conversion of an `ETGO_AC` quotation (accepted from the portal) is not a second decision |
 
 `type` is the portal kind in lower case (`invoice`, `quotation`, `order`, `shipment`); a credit
-note is an `invoice` (the portal kinds do not tell it apart). **Needs `update.database`** for the
+note is an `invoice` (the portal kinds do not tell it apart). The newer `entry_doc_type` /
+`doc_type` do tell it apart (`credit_note`, from `PortalDocumentKind#copyKey`).
+
+**KPIs computed from them:** customers reached = distinct `third_party` on
+`backend_portal_opened`; visits = its count (by `entry_doc_type`, `origin`); portal emails by piece =
+`backend_portal_email_sent` by `piece`; visits per email = `backend_portal_opened` ÷
+`backend_portal_email_sent`. **Needs `update.database`** for the
 `FIRST_DOWNLOADED` column.
 
 ## 8. Tests

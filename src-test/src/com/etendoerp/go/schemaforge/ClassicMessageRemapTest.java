@@ -803,4 +803,44 @@ public class ClassicMessageRemapTest {
           + "FV-9: NIF no censado", ClassicMessageRemap.remapText(classic, "en_US"));
     }
   }
+
+  /**
+   * ETP-6284: the four DUA sentences the SII module raises (no AD_MESSAGE), copied from
+   * {@code FacturasEventHandler}, {@code SIISOAPUtils} and {@code SIIUtils} as they are thrown —
+   * the last one with its trailing space. Each leaves NEO as its GO text in Spanish and English,
+   * also inside a REST error body.
+   */
+  @Test
+  public void theSiiDuaSentencesAreRemappedToTheirGoTexts() throws Exception {
+    Map<String, String> classicByKey = Map.of(
+        "siiDuaRequiredImport",
+        "Si la clave tipo factura es 'Import(DUA)' los campos DUA y fecha DUA son obligatorios.",
+        "siiDuaRequiredCustomsSettlement",
+        "Si la clave tipo factura es 'Aduanas-Liquidación Complementaria' los campos DUA y fecha "
+            + "DUA son obligatorios.",
+        "siiMultiDuaTaxLineDuaRequired",
+        "Si la clave tipo factura es 'Import(DUA)' o 'Aduanas-Liquidación Complementaria' y está "
+            + "marcado el check 'Multiple DUA' los campos 'DUA' y 'fecha DUA' son obligatorios en "
+            + "las lineas.",
+        "siiDuaDateAfterAccountingDate",
+        "Una factura de tipo F5 o LC debe tener fecha DUA y ésta no puede ser posterior a la "
+            + "fecha de registro contable. ");
+
+    for (Map.Entry<String, String> classic : classicByKey.entrySet()) {
+      String key = classic.getKey();
+      for (String language : List.of("es_ES", "en_US")) {
+        String goText = NeoHints.catalogText(key, language);
+        assertTrue(key + " " + language, goText != null && !goText.isBlank());
+        assertEquals(key + " " + language, goText,
+            ClassicMessageRemap.remapText(classic.getValue(), language).trim());
+      }
+
+      NeoResponse response = NeoResponse.error(422, classic.getValue());
+      ClassicMessageRemap.apply(response, "es_ES");
+      JSONObject error = response.getBody().getJSONObject("error");
+      assertEquals(key, NeoHints.catalogText(key, "es_ES"), error.getString("message").trim());
+      // A literal entry has no AD_MESSAGE identity, so nothing is published in messageKeys.
+      assertFalse(key, error.has("messageKeys"));
+    }
+  }
 }

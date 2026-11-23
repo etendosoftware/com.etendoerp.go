@@ -89,7 +89,7 @@ final class DocumentSendPortalLink {
       String language) {
     return new CallToAction(
         EmailMessages.get(link != null ? "document.portal.cta" : "document.cta", language),
-        link != null ? link.getUrl() : downloadLink);
+        link != null ? link.getUrl() : downloadLink, link != null);
   }
 
   /**
@@ -105,14 +105,27 @@ final class DocumentSendPortalLink {
         EmailMessages.get("document.portal.intro", language, hours)));
   }
 
-  /** The email's one button: its label and where it leads. */
+  /** The email's one button: its label, where it leads and whether that is the portal. */
   static final class CallToAction {
     private final String label;
     private final String url;
+    private final boolean portal;
 
-    CallToAction(String label, String url) {
+    CallToAction(String label, String url, boolean portal) {
       this.label = label;
       this.url = url;
+      this.portal = portal;
+    }
+
+    /**
+     * Whether the button leads to the customer portal, i.e. the email carries a portal link. Only
+     * then does it close with the Etendo footer (ETP-6209); with the {@code bp-portal-link} flag
+     * off no link is minted and the email stays exactly as it was.
+     *
+     * @return {@code true} for the portal button
+     */
+    boolean isPortal() {
+      return portal;
     }
 
     String getLabel() {

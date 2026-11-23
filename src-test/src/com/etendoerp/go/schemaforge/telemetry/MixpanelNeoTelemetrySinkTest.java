@@ -83,6 +83,30 @@ class MixpanelNeoTelemetrySinkTest {
   }
 
   /**
+   * ETP-6247: a list property (role_groups) travels as a JSON array, never as the list's
+   * toString() ({@code "[finance, sales]"}).
+   *
+   * @throws Exception when the body cannot be built
+   */
+  @Test
+  void buildRequestBodySendsAListPropertyAsAJsonArray() throws Exception {
+    MixpanelNeoTelemetrySink sink = new MixpanelNeoTelemetrySink(
+        new MixpanelNeoTelemetryConfig(true, "token-123", null, null, 1000));
+    Map<String, Object> properties = new LinkedHashMap<>();
+    properties.put("role_groups", java.util.List.of("finance", "sales"));
+    properties.put("direction", "AR");
+    NeoTelemetryEvent event = new NeoTelemetryEvent(
+        NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED, properties, Instant.now());
+
+    String decoded = URLDecoder.decode(sink.buildRequestBody(event).substring("data=".length()),
+        StandardCharsets.UTF_8.name());
+
+    assertTrue(decoded.contains("\"role_groups\":[\"finance\",\"sales\"]"), decoded);
+    assertFalse(decoded.contains("[finance, sales]"), decoded);
+    assertTrue(decoded.contains("\"direction\":\"AR\""), decoded);
+  }
+
+  /**
    * ETP-5581: every event carries the deployment environment and a random {@code $insert_id},
    * which a caller property cannot replace.
    *
@@ -165,6 +189,35 @@ class MixpanelNeoTelemetrySinkTest {
           });
 
       assertEquals(expected, MixpanelNeoTelemetryConfig.fromRuntime().getEnvironment());
+    }
+  }
+
+  /**
+   * ETP-5466: backend submission is off unless explicitly enabled — a token alone (a developer
+   * machine) is not configured; {@code true} / {@code Y} switch it on, anything else keeps it off.
+   *
+   * @param enabled {@code etendo.go.mixpanel.enabled}, or empty when unset
+   * @param expected whether the backend submits events
+   */
+  @ParameterizedTest(name = "[{index}] enabled={0} -> configured={1}")
+  @CsvSource({ ", false", "true, true", "Y, true", "TRUE, true", "false, false", "N, false",
+      "yes, false" })
+  void fromRuntimeIsDisabledUnlessExplicitlyEnabled(String enabled, boolean expected) {
+    Map<String, String> properties = new HashMap<>();
+    putIfPresent(properties, MixpanelNeoTelemetryConfig.PROP_ENABLED, enabled);
+    properties.put(MixpanelNeoTelemetryConfig.PROP_TOKEN, "token-123");
+
+    try (MockedStatic<ConfigPropertyReader> reader =
+        Mockito.mockStatic(ConfigPropertyReader.class)) {
+      reader.when(() -> ConfigPropertyReader.readConfigValue(Mockito.anyString(),
+          Mockito.anyString(), Mockito.nullable(String.class))).thenAnswer(inv -> {
+            String fromProperty = trimToNull(properties.get(inv.getArgument(0)));
+            return fromProperty != null ? fromProperty : inv.getArgument(2);
+          });
+
+      MixpanelNeoTelemetryConfig config = MixpanelNeoTelemetryConfig.fromRuntime();
+      assertEquals(expected, config.isEnabled());
+      assertEquals(expected, config.isConfigured());
     }
   }
 
