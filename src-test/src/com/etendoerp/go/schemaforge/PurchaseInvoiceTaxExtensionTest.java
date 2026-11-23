@@ -32,6 +32,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
@@ -122,6 +123,16 @@ public class PurchaseInvoiceTaxExtensionTest {
 
     assertRefused(extension.handle(crud("DELETE", TAX_ID, null)), 409,
         PurchaseInvoiceTaxExtension.MSG_AUTOMATIC);
+  }
+
+  // ── rows the caller cannot see ───────────────────────────────────────────────────────────
+
+  @Test
+  public void aRowTheCallerCannotSeeIsLeftToCrudWithoutAdminMode() throws Exception {
+    when(OBDal.getInstance().get(InvoiceTax.class, TAX_ID)).thenReturn(null);
+
+    assertNull(extension.handle(crud("PATCH", TAX_ID, new JSONObject().put("taxAmount", 5))));
+    obContext.verify(() -> OBContext.setAdminMode(anyBoolean()), Mockito.never());
   }
 
   // ── manual rows are allowed ──────────────────────────────────────────────────────────────

@@ -7880,7 +7880,7 @@ DUA date later than the accounting register date of `invoicePreviousValidations`
 catalogued. Left out: `InvoiceTaxEventHandler`'s "Si la factura es multi-DUA…" (its `showMsg` never
 throws, so no user sees it; GO's own `ETGO_PurchaseInvoiceTaxDuaRequired` replaces it) and the AEAT
 response codes 1270/1271 (AEAT-authored texts naming AEAT XML elements, stored in the SII sub-record,
-not a Classic label; the preview and the tax guards prevent the data that triggers them).
+not a Classic label; the tax guards prevent the data that triggers them).
 
 **Adding an entry.**
 

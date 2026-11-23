@@ -78,15 +78,17 @@ public class PurchaseInvoiceTaxExtension implements NeoHandler {
       return null;
     }
     JSONObject body = dataNode(context.getRequestBody());
+    // Read with the caller's own access (before admin mode), so a row or invoice the role cannot
+    // see is left to the default CRUD path (404) instead of answering 409 and revealing it.
+    InvoiceTax existing = create ? null : readTax(context.getRecordId());
+    Invoice invoice = create ? readInvoice(parentInvoiceId(body))
+        : existing == null ? null : existing.getInvoice();
+    if (invoice == null) {
+      // Unknown or invisible parent or row: the default CRUD path answers it (404 / validation).
+      return null;
+    }
     OBContext.setAdminMode(true);
     try {
-      InvoiceTax existing = create ? null : readTax(context.getRecordId());
-      Invoice invoice = create ? readInvoice(parentInvoiceId(body))
-          : existing == null ? null : existing.getInvoice();
-      if (invoice == null) {
-        // Unknown parent or row: the default CRUD path answers it (404 / validation).
-        return null;
-      }
       if (isLocked(invoice)) {
         return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_LOCKED);
       }

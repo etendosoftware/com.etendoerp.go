@@ -36,7 +36,7 @@ import org.openbravo.dal.service.OBDal;
  * ({@code @InvoicesNeedLines@}) passes when there is EITHER an invoice line OR a tax line.
  *
  * <p>The SPA's Confirm button is disabled on an invoice without lines; with this signal (and the
- * {@code sii-import-dua} flag) it stays enabled when the invoice has at least one manual tax
+ * SPA's DUA import feature switched on) it stays enabled when the invoice has at least one manual tax
  * line. Read-only, per request, single-record GET only — not a list column. Called explicitly by
  * {@link PurchaseInvoiceHeaderHandler} (the purchase-invoice customization), never from shared
  * code.
