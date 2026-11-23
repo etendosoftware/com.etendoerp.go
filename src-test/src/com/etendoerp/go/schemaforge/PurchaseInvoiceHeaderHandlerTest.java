@@ -1727,6 +1727,19 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
   }
 
+  @Test
+  public void siiDeferredVat_isAGetOnlyActionAndRefusesOtherMethods() throws Exception {
+    NeoActionContract contract =
+        new PurchaseInvoiceHeaderHandler().actionContracts().get("siiDeferredVat");
+    assertNotNull("siiDeferredVat is served by handle() and must be declared (ETP-6284)", contract);
+    assertEquals("GET", contract.getHttpMethod());
+
+    NeoResponse response =
+        new PurchaseInvoiceHeaderHandler().handle(purchaseActionCtx("siiDeferredVat"));
+    assertNotNull(response);
+    assertEquals(HttpServletResponse.SC_METHOD_NOT_ALLOWED, response.getHttpStatus());
+  }
+
 
   // ── line import (ETP-5713) ────────────────────────────────────────────────
 

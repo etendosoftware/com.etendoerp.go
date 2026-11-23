@@ -149,7 +149,7 @@ public class PurchaseInvoiceTaxExtension implements NeoHandler {
   /** Múltiple DUA with an import key (F5 / LC): each tax line carries its own DUA. */
   static boolean requiresLineDua(Invoice invoice) {
     return Boolean.TRUE.equals(invoice.isAeatsiiMultiDua())
-        && PurchaseInvoiceSiiRecordsPreview.isImportKey(invoice.getAeatsiiClaveTipoFc());
+        && PurchaseInvoiceSiiDeferredVat.isImportKey(invoice.getAeatsiiClaveTipoFc());
   }
 
   /**
