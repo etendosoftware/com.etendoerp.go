@@ -25,6 +25,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -33,6 +35,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -43,9 +46,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.LazyInitializationException;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
@@ -58,6 +64,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.RejectReason;
@@ -106,6 +113,8 @@ public class PortalDecisionServiceTest {
   private String emailStatus = TransactionalEmailService.STATUS_SENT;
   /** The decision row the table holds (by token or by id), or {@code null}. */
   private Object[] decisionRow;
+  /** A failure the decision row read throws, or {@code null}. */
+  private RuntimeException decisionReadFailure;
   /** Requests made for the quotation inside the cool-down. */
   private long recentRequests;
   /** Other pending requests of the quotation, voided by a confirmation. */
@@ -216,12 +225,12 @@ public class PortalDecisionServiceTest {
   }
 
   @Test
-  public void theConfirmationGoesToTheFirstValidToMaskedAndNeverToCc() throws Exception {
+  public void theConfirmationGoesToTheFirstValidToInFullAndNeverToCc() throws Exception {
     PortalDecisionService.RequestResult result = service().request(session, QUOTATION_ID,
         "REJECT", "PRICE", null);
 
     assertEquals(PortalDecisionService.RequestOutcome.SENT, result.getOutcome());
-    assertEquals("fi•••@customer.test", result.getMaskedEmail());
+    assertEquals("first@customer.test", result.getEmail());
     assertEquals("first@customer.test", service().confirmationRecipient(ROOT_ID));
     JSONObject command = sentCommand(PortalDecisionService.CONFIRM_CONTRACT);
     assertEquals(QUOTATION_ID, command.getString("recordId"));
@@ -291,15 +300,6 @@ public class PortalDecisionServiceTest {
     emailStatus = TransactionalEmailService.STATUS_SENT;
     service().request(session, QUOTATION_ID, "ACCEPT", null, null);
     assertFalse(executed("SET isactive = 'N'"));
-  }
-
-  @Test
-  public void maskShowsTwoCharactersAtMost() {
-    assertEquals("ju•••@example.com", PortalDecisionService.mask("julia@example.com"));
-    assertEquals("j•••@example.com", PortalDecisionService.mask("jo@example.com"));
-    assertEquals("", PortalDecisionService.mask("@example.com"));
-    assertEquals("", PortalDecisionService.mask("not-an-address"));
-    assertEquals("", PortalDecisionService.mask(null));
   }
 
   // ── mint and view ───────────────────────────────────────────────────────────
@@ -384,9 +384,9 @@ public class PortalDecisionServiceTest {
       // The portal's reason never becomes the tenant's internal reject reason.
       verify(rejected, never()).setRejectReason(any(RejectReason.class));
     }
-    // The KPI counts each applied rejection once, for the decision's tenant.
-    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(false, CLIENT_ID),
-        times(cases.length));
+    // Each applied rejection is handed to the KPI gate, for the decision's tenant and quotation.
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationConfirmed(false, CLIENT_ID, DECISION_ID,
+        QUOTATION_ID), times(cases.length));
   }
 
   @Test
@@ -401,7 +401,8 @@ public class PortalDecisionServiceTest {
     verify(quotation, never()).setDescription(anyString());
     assertTrue(executed("SET status = 'CONFIRMED'"));
     assertFalse(view.isCustomerClosed());
-    kpi.verify(() -> PortalKpiTelemetry.portalQuotationDecided(true, CLIENT_ID));
+    kpi.verify(() -> PortalKpiTelemetry.portalQuotationConfirmed(true, CLIENT_ID, DECISION_ID,
+        QUOTATION_ID));
   }
 
   @Test
@@ -463,6 +464,48 @@ public class PortalDecisionServiceTest {
     kpi.verifyNoInteractions();
   }
 
+  /**
+   * Both paths that commit answer after {@code commitAndClose}, with the quotation detached: its
+   * lazy currency then throws, which answered 500 to the first confirmation. The summary must be
+   * read after the decision is applied and before the session closes.
+   */
+  @Test
+  public void aConfirmationThatCommitsCarriesTheSummaryReadBeforeTheSessionCloses() {
+    AtomicBoolean sessionClosed = new AtomicBoolean();
+    doAnswer(inv -> {
+      sessionClosed.set(true);
+      return null;
+    }).when(obDal).commitAndClose();
+    // Columns: label, status when confirming, expected state, applied now, status in the summary.
+    Object[][] cases = {
+        { "applied", QuotationDecisions.STATUS_UNDER_EVALUATION,
+            PortalDecisionService.State.CONFIRMED, true, QuotationDecisions.STATUS_ACCEPTED },
+        { "no longer decidable", "CO", PortalDecisionService.State.NOT_PENDING, false, "CO" },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      sessionClosed.set(false);
+      Date orderDate = day(-3);
+      BigDecimal grandTotal = new BigDecimal("2450.00");
+      Order detachable = quotationDetachedWhenClosed(sessionClosed, (String) c[1], orderDate,
+          grandTotal);
+      when(obDal.get(Order.class, QUOTATION_ID)).thenReturn(detachable);
+      decisionRow = row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, true);
+
+      PortalDecisionService.View view = service().confirm(TOKEN);
+
+      assertTrue(label + ": the session closed", sessionClosed.get());
+      assertEquals(label, c[2], view.getState());
+      assertEquals(label, c[3], view.isAppliedNow());
+      PortalDecisionService.Summary summary = view.getSummary();
+      assertEquals(label, "PR-0042", summary.getDocumentNo());
+      assertEquals(label, orderDate, summary.getDate());
+      assertEquals(label, grandTotal, summary.getGrandTotal());
+      assertEquals(label, "EUR", summary.getCurrency());
+      assertEquals(label, c[4], summary.getDocumentStatus());
+    }
+  }
+
   @Test
   public void aConfirmForAClosedCustomerAppliesNothing() {
     // A decision token never expires: a customer blocked, inactive or out of plan since asking
@@ -499,12 +542,110 @@ public class PortalDecisionServiceTest {
 
     assertTrue(statements.stream().noneMatch(s -> ((String) s[0]).contains("FOR UPDATE")));
     verify(quotation, never()).setDocumentStatus(anyString());
+    // Nothing was applied, so nothing reaches the KPI gate.
+    kpi.verifyNoInteractions();
+  }
+
+  // ── markSent (ETP-6209: the decision email KPI) ─────────────────────────────
+
+  /** With the failure case below: the KPI follows a committed stamp, never a rolled-back one. */
+  @Test
+  public void markSentStampsTheDecisionCommitsAndCountsItsEmail() {
+    // Columns: decision, accepted as the KPI receives it.
+    Object[][] cases = { { "ACCEPT", true }, { "REJECT", false } };
+    for (Object[] c : cases) {
+      decisionRow = row((String) c[0], null, null, PortalDecisionService.STATUS_PENDING, false);
+      boolean accepted = (Boolean) c[1];
+
+      service().markSent(DECISION_ID);
+
+      kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(accepted, CLIENT_ID));
+    }
+    verify(obDal, times(2)).commitAndClose();
+    verify(obDal, never()).rollbackAndClose();
+    assertTrue("the decision is stamped sent", statements.stream().anyMatch(
+        s -> ((String) s[0]).startsWith("UPDATE etgo_portal_decision SET sent_at")
+            && DECISION_ID.equals(((Map<?, ?>) s[1]).get("id"))));
+  }
+
+  @Test
+  public void aMarkSentThatFailsToCommitRollsBackAndCountsNothing() {
+    decisionRow = row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, false);
+    doThrow(new IllegalStateException("could not commit")).when(obDal).commitAndClose();
+
+    service().markSent(DECISION_ID);
+
+    verify(obDal).rollbackAndClose();
+    kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(anyBoolean(), any()), never());
+  }
+
+  /**
+   * The decision is read for the KPI only after the stamp committed: whether that read fails or
+   * finds no row, the stamp stays committed, nothing is counted and nothing escapes.
+   */
+  @Test
+  public void aKpiReadThatFailsOrFindsNothingNeverUndoesTheCommittedStamp() {
+    // Columns: label, decision row, failure of the read.
+    Object[][] cases = {
+        { "the read throws", row("ACCEPT", null, null, PortalDecisionService.STATUS_PENDING, false),
+            new IllegalStateException("session closed") },
+        { "no decision row", null, null },
+    };
+    for (Object[] c : cases) {
+      decisionRow = (Object[]) c[1];
+      decisionReadFailure = (RuntimeException) c[2];
+      statements.clear();
+      List<Integer> statementsAtCommit = new ArrayList<>();
+      doAnswer(inv -> {
+        statementsAtCommit.add(statements.size());
+        return null;
+      }).when(obDal).commitAndClose();
+
+      service().markSent(DECISION_ID);
+
+      String label = (String) c[0];
+      assertEquals(label, 2, statements.size());
+      assertTrue(label, ((String) statements.get(0)[0]).startsWith(
+          "UPDATE etgo_portal_decision SET sent_at"));
+      assertTrue(label, ((String) statements.get(1)[0]).startsWith(
+          "SELECT etgo_portal_decision_id"));
+      assertEquals(label + ": committed once, after the UPDATE and before the read",
+          Collections.singletonList(1), statementsAtCommit);
+    }
+    kpi.verify(() -> PortalKpiTelemetry.decisionEmailSent(anyBoolean(), any()), never());
   }
 
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   private PortalDecisionService service() {
     return new PortalDecisionService(linkService, accessChecks);
+  }
+
+  /**
+   * A quotation whose status follows what the confirmation writes, and whose lazy currency stops
+   * loading once the session has closed, as a detached Hibernate proxy does.
+   */
+  private static Order quotationDetachedWhenClosed(AtomicBoolean sessionClosed, String status,
+      Date orderDate, BigDecimal grandTotal) {
+    Currency currency = mock(Currency.class);
+    when(currency.getISOCode()).thenAnswer(inv -> {
+      if (sessionClosed.get()) {
+        throw new LazyInitializationException("could not initialize proxy - no Session");
+      }
+      return "EUR";
+    });
+    AtomicReference<String> currentStatus = new AtomicReference<>(status);
+    Order detachable = mock(Order.class);
+    when(detachable.getDocumentStatus()).thenAnswer(inv -> currentStatus.get());
+    doAnswer(inv -> {
+      currentStatus.set(inv.getArgument(0));
+      return null;
+    }).when(detachable).setDocumentStatus(anyString());
+    when(detachable.getDocumentNo()).thenReturn("PR-0042");
+    when(detachable.getOrderDate()).thenReturn(orderDate);
+    when(detachable.getGrandTotalAmount()).thenReturn(grandTotal);
+    when(detachable.getCurrency()).thenReturn(currency);
+    return detachable;
   }
 
   private void assertBlocked(PortalDecisionService.Blocked expected) {
@@ -553,6 +694,10 @@ public class PortalDecisionServiceTest {
     }
     if (sql.startsWith("SELECT count(*)")) {
       return Collections.singletonList(recentRequests);
+    }
+    if (sql.startsWith("SELECT etgo_portal_decision_id, ad_client_id")
+        && decisionReadFailure != null) {
+      throw decisionReadFailure;
     }
     if (sql.startsWith("SELECT etgo_portal_decision_id, ad_client_id") && decisionRow != null) {
       boolean byToken = params.containsKey("hash");

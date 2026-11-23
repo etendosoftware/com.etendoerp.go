@@ -23,6 +23,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.A_UNKNOWN;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ADDRESS_STATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CANDIDATES;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_CATEGORY_SOURCE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_DESCRIPTION;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_EXTRACTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_ID;
@@ -33,11 +34,14 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NAME;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_PRODUCT;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_STATE;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRINTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_ID;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UOM_SOURCE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_VENDOR;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MATCHED_MANUAL;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_NEW;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.SRC_MANUAL;
 
 
 import java.util.Iterator;
@@ -48,6 +52,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.ocr.InboxNewProductDefaults;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Address;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
@@ -160,36 +165,63 @@ final class InvoiceInboxApplyResolution {
     boolean wasLinked = product != null && S_LINKED.equals(product.optString(K_STATE));
     boolean wasNew = product != null && S_NEW.equals(product.optString(K_STATE));
     JSONObject stored = product == null ? null : product.optJSONObject(K_NEW);
+    // The base the user's choice is compared with: what is stored when the line already was a new
+    // product, else what the worker would have pre-filled for it (ETP-6051).
+    JSONObject base = wasNew ? stored : preFilled(edit, line);
     String currentName = stored != null && stored.has(K_NAME) ? text(stored, K_NAME)
         : text(line, K_DESCRIPTION);
     String name = op.has(K_NAME) ? cleanText(op.get(K_NAME), K_NAME, index) : currentName;
     JSONObject draft = new JSONObject().put(K_NAME, name);
-    resolveChoice(edit, op, stored, draft, index, true);
-    resolveChoice(edit, op, stored, draft, index, false);
-    boolean nameDiffers = !name.equals(currentName);
-    boolean same = wasNew && stored != null && sameDraft(stored, draft);
-    if (same) {
+    resolveChoice(edit, op, base, draft, index, true);
+    resolveChoice(edit, op, base, draft, index, false);
+    if (wasNew && stored != null && sameDraft(stored, draft, currentName)) {
       return;
     }
+    boolean choiceDiffers = storedValueChanged(base, draft, K_CATEGORY_ID)
+        || storedValueChanged(base, draft, K_UOM_ID);
     line.put(K_PRODUCT, new JSONObject().put(K_STATE, S_NEW).put(K_ID, JSONObject.NULL)
         .put(K_CANDIDATES, candidatesOf(product)).put(K_NEW, draft));
-    edit.changed(InvoiceInboxAdjustedPolicy.newProduct(true, wasLinked, nameDiffers));
+    edit.changed(InvoiceInboxAdjustedPolicy.newProduct(true, wasLinked, !name.equals(currentName),
+        choiceDiffers));
+  }
+
+  /**
+   * Whether a field that HAD a stored value now holds another one or none (owner decision of
+   * 2026-11-17). A field that was empty (the OCR could not define it and no default applies) does
+   * not count when the user fills it: that is completing a mandatory value, not adjusting one.
+   */
+  private static boolean storedValueChanged(JSONObject base, JSONObject draft, String idKey) {
+    String stored = text(base, idKey);
+    return !StringUtils.isBlank(stored) && !stored.equals(text(draft, idKey));
+  }
+
+  /** What the worker pre-fills for a new product of this line: the printed unit, the defaults. */
+  private static JSONObject preFilled(InvoiceInboxApply.Edit edit, JSONObject line)
+      throws JSONException {
+    if (edit.lookups == null) {
+      return new JSONObject();
+    }
+    // The ROW's organization, as the worker used: not the session's, which may differ.
+    String orgId = edit.row == null || edit.row.getOrganization() == null ? null
+        : edit.row.getOrganization().getId();
+    return new InboxNewProductDefaults(edit.lookups, orgId).draftFor(text(line, K_UNIT_PRINTED));
   }
 
   /**
    * Resolves the category (or the unit) of the draft: the one asked for (its id is checked), the
-   * stored id when the operation does not mention it, none when {@code null}. Only the ID is
-   * stored: the name is a display value that {@link InvoiceInboxReview} adds at read time in the
-   * language of the request, so a stored copy can never be stale or in another language. A name
-   * stored by an earlier version is ignored here and dropped on the next write.
+   * base one when the operation does not mention it, none when {@code null}. Only the ID and its
+   * source are stored: the name is a display value that {@link InvoiceInboxReview} adds at read
+   * time in the language of the request, so a stored copy can never be stale or in another
+   * language. A name stored by an earlier version is ignored here and dropped on the next write.
+   * The source ({@code ocr}, {@code default}) is kept while the id is the base one and becomes
+   * {@code manual} as soon as the user picks another.
    */
   private static void resolveChoice(InvoiceInboxApply.Edit edit, JSONObject op,
-      JSONObject stored, JSONObject draft, int index, boolean category) throws JSONException {
+      JSONObject base, JSONObject draft, int index, boolean category) throws JSONException {
     String idKey = category ? K_CATEGORY_ID : K_UOM_ID;
+    String sourceKey = category ? K_CATEGORY_SOURCE : K_UOM_SOURCE;
     if (!op.has(idKey)) {
-      if (stored != null && !StringUtils.isBlank(text(stored, idKey))) {
-        draft.put(idKey, text(stored, idKey));
-      }
+      keepBase(base, draft, idKey, sourceKey);
       return;
     }
     Object value = op.get(idKey);
@@ -203,7 +235,28 @@ final class InvoiceInboxApplyResolution {
           category ? InvoiceInboxMessages.UNKNOWN_CATEGORY : InvoiceInboxMessages.UNKNOWN_UOM,
           InvoiceInboxEditGate.details(K_INDEX, index)));
     }
-    draft.put(idKey, found.get().id());
+    String id = found.get().id();
+    draft.put(idKey, id);
+    if (id.equals(text(base, idKey))) {
+      keepSource(base, draft, sourceKey);
+    } else {
+      draft.put(sourceKey, SRC_MANUAL);
+    }
+  }
+
+  private static void keepBase(JSONObject base, JSONObject draft, String idKey, String sourceKey)
+      throws JSONException {
+    if (!StringUtils.isBlank(text(base, idKey))) {
+      draft.put(idKey, text(base, idKey));
+      keepSource(base, draft, sourceKey);
+    }
+  }
+
+  private static void keepSource(JSONObject base, JSONObject draft, String sourceKey)
+      throws JSONException {
+    if (!StringUtils.isBlank(text(base, sourceKey))) {
+      draft.put(sourceKey, text(base, sourceKey));
+    }
   }
 
   /** The category (or unit) with this id for the session, empty when there is none. */
@@ -215,8 +268,9 @@ final class InvoiceInboxApplyResolution {
     return category ? edit.lookups.productCategoryById(id) : edit.lookups.uomById(id);
   }
 
-  private static boolean sameDraft(JSONObject stored, JSONObject draft) {
-    return text(stored, K_NAME).equals(text(draft, K_NAME))
+  /** The name a stored draft without one has is the line description ({@code currentName}). */
+  private static boolean sameDraft(JSONObject stored, JSONObject draft, String currentName) {
+    return currentName.equals(text(draft, K_NAME))
         && text(stored, K_CATEGORY_ID).equals(text(draft, K_CATEGORY_ID))
         && text(stored, K_UOM_ID).equals(text(draft, K_UOM_ID));
   }

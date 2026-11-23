@@ -32,7 +32,11 @@ name: Mini Pipeline
 #
 # ETP-6328: one job, like the pilot's: the tests, then Sonar with their coverage. Sonar only runs
 # when the tests passed; without the coverage of a full run its analysis says nothing. develop
-# requires this job's check, "Go tests + Sonar + coverage".
+# requires this job's check, "Mini Pipeline: Go tests + Sonar + coverage".
+#
+# ETP-6358: a name of its own. A cut's head is develop's head, which carries this job's run from
+# its push to develop; with the full pipeline's name, that run could meet main's required check
+# before the full pipeline ran on the cut.
 
 on:
   pull_request:
@@ -54,7 +58,7 @@ concurrency:
 
 jobs:
   go-tests:
-    name: Go tests + Sonar + coverage
+    name: 'Mini Pipeline: Go tests + Sonar + coverage'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
@@ -245,7 +249,8 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           projectBaseDir: etendo_core/modules/com.etendoerp.go
-          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
+          # Timeouts from the organization variables, as in the full pipeline (ETP-6390).
+          args: -Dsonar.coverage.jacoco.xmlReportPaths=../../build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml -Dsonar.scanner.socketTimeout=${{ vars.SONAR_SOCKET_TIMEOUT || '60' }} -Dsonar.scanner.responseTimeout=${{ vars.SONAR_RESPONSE_TIMEOUT || '60' }}
 
       # Same rule as Jenkins' Compare Coverage Results; fails the job on a drop, or when the
       # coverage cannot be evaluated (--context ci), and when this analysis's quality gate failed

@@ -68,6 +68,8 @@ import com.etendoerp.go.supportaccess.SupportAccessGuard;
  * closes), per-role user-count and window-list aggregation, the Etendo-GO-window intersection (a
  * role's native {@code AD_Window_Access} rows are filtered down to windows Etendo GO actually
  * exposes), tier resolution (full vs read-only), and exception handling.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.webhooks.SFRolesOverview
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFRolesOverviewTest extends BaseWebhookTest {
@@ -1970,18 +1972,28 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray categories = result.getJSONObject("reportsMatrix").getJSONArray("categories");
-        // "Finance" (8 rows: tax-report + both aging schedules + 5 financial-family) and
-        // "Inventory" (1 row: inventory-stock-report), sorted case-insensitively.
-        assertEquals(2, categories.length());
+        // "Finance" (6 rows: tax-report + 5 financial-family), "Inventory" (1 row:
+        // inventory-stock-report) and "Treasury" (2 rows: both aging schedules), sorted
+        // case-insensitively.
+        assertEquals(3, categories.length());
 
         JSONObject finance = categories.getJSONObject(0);
         assertEquals("Finance", finance.getString("name"));
         JSONArray financeReports = finance.getJSONArray("reports");
-        assertEquals(8, financeReports.length());
+        assertEquals(6, financeReports.length());
 
         JSONObject inventory = categories.getJSONObject(1);
         assertEquals("Inventory", inventory.getString("name"));
         assertEquals(1, inventory.getJSONArray("reports").length());
+
+        JSONObject treasury = categories.getJSONObject(2);
+        assertEquals("Treasury", treasury.getString("name"));
+        JSONArray treasuryReports = treasury.getJSONArray("reports");
+        assertEquals(2, treasuryReports.length());
+        for (int i = 0; i < treasuryReports.length(); i++) {
+            assertEquals("none",
+                treasuryReports.getJSONObject(i).getJSONObject("access").getString(ADMIN_ROLE_ID));
+        }
 
         // Every Finance row except tax-report is unreached by the admin role in this test.
         boolean sawTaxReportFull = false;

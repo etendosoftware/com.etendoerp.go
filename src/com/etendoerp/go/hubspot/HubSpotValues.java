@@ -94,14 +94,18 @@ final class HubSpotValues {
    * recorded falls back to the stored name.
    */
   static String countryName(JSONObject demoPayload) {
-    String code = countryCode(demoPayload);
-    if (code != null) {
-      String name = new Locale("", code).getDisplayCountry(COUNTRY_LANGUAGE);
-      if (StringUtils.isNotBlank(name) && !name.equalsIgnoreCase(code)) {
-        return name;
-      }
+    String name = countryNameOf(countryCode(demoPayload));
+    return name != null ? name
+        : StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY, ""));
+  }
+
+  /** The Spanish name of an ISO two-letter country code, or null when it names no country. */
+  static String countryNameOf(String code) {
+    if (code == null) {
+      return null;
     }
-    return StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY, ""));
+    String name = new Locale("", code).getDisplayCountry(COUNTRY_LANGUAGE);
+    return StringUtils.isNotBlank(name) && !name.equalsIgnoreCase(code) ? name : null;
   }
 
   /** The ISO 3166 two-letter code of the country the owner entered, upper case, or null. */
@@ -139,6 +143,19 @@ final class HubSpotValues {
   /** An ISO 8601 instant, for HubSpot {@code datetime} properties. */
   static String dateTime(Instant instant) {
     return instant.truncatedTo(ChronoUnit.MILLIS).toString();
+  }
+
+  /** One line for the log and the outbox row: the call and what HubSpot answered. */
+  static String describe(String method, String path, HubSpotClient.Response response) {
+    return method + " " + StringUtils.substringBefore(path, "?") + " answered HTTP "
+        + response.status() + ": " + response.body();
+  }
+
+  /** The pipeline of a deal read with its {@code pipeline} property, or {@code null}. */
+  static String pipelineOf(JSONObject deal) {
+    JSONObject properties = deal.optJSONObject("properties");
+    return properties == null || properties.isNull("pipeline") ? null
+        : properties.optString("pipeline", null);
   }
 
   static String encode(String value) {

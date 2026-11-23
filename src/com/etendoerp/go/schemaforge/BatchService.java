@@ -128,7 +128,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  */
 public class BatchService {
 
-  private static final String KEY_ERROR = "error";
+  static final String KEY_ERROR = "error";
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   /**
@@ -230,6 +230,8 @@ public class BatchService {
   /** The record a {@code DELETE} operation removes. */
   static final String FIELD_RECORD_ID = "recordId";
   static final String METHOD_DELETE = NeoMethodPolicy.METHOD_DELETE;
+  private static final String KEY_OPERATIONS = "operations";
+  private static final String MSG_BATCH_FAILED = "Batch failed: ";
   private static final String OPS_PREFIX = "operations[";
   private static final String OPERATION_PREFIX = "Operation '";
 
@@ -286,7 +288,7 @@ public class BatchService {
       return;
     }
 
-    JSONArray operations = body.optJSONArray("operations");
+    JSONArray operations = body.optJSONArray(KEY_OPERATIONS);
     if (operations == null || operations.length() == 0) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing or empty 'operations' array");
@@ -308,7 +310,7 @@ public class BatchService {
     } catch (JSONException e) {
       log.error("[BATCH] JSON error while executing batch", e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage());
+          MSG_BATCH_FAILED + e.getMessage());
       return;
     }
 
@@ -509,7 +511,7 @@ public class BatchService {
       NeoBatchScope.runAfterCommitActions();
       JSONObject ok = new JSONObject();
       ok.put(FIELD_COMMITTED, true);
-      ok.put("operations", opResults);
+      ok.put(KEY_OPERATIONS, opResults);
       return ok;
     } catch (Exception e) {
       if (!commitAttempted) {
@@ -521,9 +523,9 @@ public class BatchService {
       // translation reads AD_Message on a usable session. A 5xx message is sanitized: it used to
       // forward e.getMessage() verbatim.
       NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] batch",
-          "Batch failed: ");
-      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
-          refusalDetail(classified), tracker.durable());
+          MSG_BATCH_FAILED);
+      return failureBody(-1, null, classified.getHttpStatus(), BatchRefusals.messageOf(classified),
+          BatchRefusals.detailOf(classified), tracker.durable());
     } finally {
       // Nested so the transaction claim is released whatever closing the scope does: a claim left
       // on the pooled thread would stop the next, unrelated request from ever committing.
@@ -532,6 +534,50 @@ public class BatchService {
       } finally {
         endCallerOwnedTransaction();
       }
+    }
+  }
+
+  /**
+   * Runs the operations through the very same pipeline as {@link #executeBatch(JSONArray)} but
+   * leaves the transaction to the caller (ETP-6051): nothing is committed, and the result is
+   * {@code {committed:false, operations:[{id, ok, recordId}, ...]}} on success. The caller flushes,
+   * writes whatever else belongs to the unit and commits once (the invoice inbox confirm commits
+   * through the invoice completion).
+   *
+   * <p>On a failure the session is rolled back here (a failed operation leaves it unusable) and the
+   * failure envelope of {@link #executeBatch(JSONArray)} is returned, so the caller never continues
+   * with half a unit. The claim of the transaction is always released, whatever happens: the
+   * request thread is pooled. The batch scope (memo, after-commit actions) belongs to the caller,
+   * who opens it before and closes it after the commit.</p>
+   *
+   * @param operations the ordered list of operation objects (must be non-null)
+   * @return the success or failure envelope
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  JSONObject executeInCallerTransaction(JSONArray operations) throws JSONException {
+    Map<String, String> resolvedIds = new HashMap<>();
+    JSONArray opResults = new JSONArray();
+    TransactionTracker tracker = new TransactionTracker();
+    beginCallerOwnedTransaction();
+    try {
+      for (int i = 0; i < operations.length(); i++) {
+        JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds,
+            opResults, tracker, null);
+        if (failure != null) {
+          rollbackQuietly();
+          NeoErrorResponses.retranslateBatchFailure(failure);
+          return failure;
+        }
+      }
+      return new JSONObject().put(FIELD_COMMITTED, false).put(KEY_OPERATIONS, opResults);
+    } catch (Exception e) {
+      rollbackQuietly();
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] unit",
+          MSG_BATCH_FAILED);
+      return failureBody(-1, null, classified.getHttpStatus(), BatchRefusals.messageOf(classified),
+          BatchRefusals.detailOf(classified), tracker.durable());
+    } finally {
+      endCallerOwnedTransaction();
     }
   }
 
@@ -589,13 +635,15 @@ public class BatchService {
     // ETP-5415: the caller's own body transforms, run here rather than over the whole array up
     // front — this is the first point where $ref placeholders are resolved and the parent exists.
     // See executeBatch(JSONArray, OperationPreprocessor).
-    JSONObject preprocessFailure = runPreprocessor(preprocessor,
-        new OperationContext(i, opId, specName, entityName, opBody, parentId), tracker);
+    OperationContext opContext = new OperationContext(i, opId, specName, entityName, opBody,
+        parentId);
+    JSONObject preprocessFailure = runPreprocessor(preprocessor, opContext, tracker);
     if (preprocessFailure != null) {
       return preprocessFailure;
     }
 
-    NeoResponse rowResp = createRecord(spec, entityName, opBody, parentId);
+    NeoResponse rowResp = createRecord(spec, entityName, opBody, parentId,
+        opContext.hookAttributes());
     String recordId = isSuccess(rowResp) ? extractRecordId(rowResp.getBody()) : null;
     if (StringUtils.isNotBlank(recordId)) {
       resolvedIds.put(opId, recordId);
@@ -641,25 +689,8 @@ public class BatchService {
           "[BATCH] preprocessor on op '" + op.opId() + "' (index " + op.index() + ")",
           "Failed to preprocess operation '" + op.opId() + "': ");
       return failureBody(op.index(), op.opId(), classified.getHttpStatus(),
-          errorMessageOf(classified), refusalDetail(classified), tracker.durable());
+          BatchRefusals.messageOf(classified), BatchRefusals.detailOf(classified), tracker.durable());
     }
-  }
-
-  /**
-   * The body of a classified refusal, as the failure's {@code detail} so its {@code code} and
-   * {@code messageKeys} reach the caller; {@code null} for a 5xx, whose failure carried no detail.
-   */
-  private static JSONObject refusalDetail(NeoResponse classified) {
-    return classified.getHttpStatus() < HttpServletResponse.SC_INTERNAL_SERVER_ERROR
-        ? classified.getBody()
-        : null;
-  }
-
-  /** The {@code error.message} of a NEO error response, or {@code null}. */
-  private static String errorMessageOf(NeoResponse response) {
-    JSONObject body = response.getBody();
-    JSONObject error = body != null ? body.optJSONObject(KEY_ERROR) : null;
-    return error != null ? error.optString("message", null) : null;
   }
 
   /**
@@ -675,9 +706,29 @@ public class BatchService {
    *                   necessarily present in {@code body}: on a {@code parentRef} op it is
    *                   resolved from the earlier operation's result and injected only later, so a
    *                   preprocessor that needs the parent must read it from here.
+   * @param hookAttributes attributes the preprocessor leaves for the operation's pre-hook: each
+   *                   entry is copied into the {@link NeoContext} the customization receives
+   *                   ({@link NeoContext#setAttribute}). Mutable; empty unless a preprocessor
+   *                   fills it. ETP-6177: the MCP preprocessor puts there the keys the agent sent
+   *                   ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}) before its injections ran.
    */
   public record OperationContext(int index, String opId, String specName, String entityName,
-      JSONObject body, String parentId) {
+      JSONObject body, String parentId, Map<String, Object> hookAttributes) {
+
+    /**
+     * An operation with no hook attributes yet.
+     *
+     * @param index      the operation's position in the batch
+     * @param opId       the operation's own id within the batch
+     * @param specName   the spec the operation targets
+     * @param entityName the entity within that spec
+     * @param body       the operation body, with every {@code $ref} already resolved
+     * @param parentId   the resolved parent record id, or {@code null} for a top-level entity
+     */
+    public OperationContext(int index, String opId, String specName, String entityName,
+        JSONObject body, String parentId) {
+      this(index, opId, specName, entityName, body, parentId, new HashMap<>());
+    }
   }
 
   /**
@@ -946,7 +997,7 @@ public class BatchService {
    * use…"), so a bulk delete can tell the user why each row stayed.
    */
   private static String deleteRefusalMessage(String opId, NeoResponse rowResp) {
-    String reason = errorMessageOf(rowResp);
+    String reason = BatchRefusals.messageOf(rowResp);
     return StringUtils.isNotBlank(reason) ? reason
         : OPERATION_PREFIX + opId + "' rejected by server";
   }
@@ -1008,7 +1059,8 @@ public class BatchService {
    * going through HTTP. The OBDal session is shared across all calls within a
    * single batch request, so all writes participate in one transaction.
    */
-  private NeoResponse createRecord(SFSpec spec, String entityName, JSONObject body, String parentId) {
+  private NeoResponse createRecord(SFSpec spec, String entityName, JSONObject body, String parentId,
+      Map<String, Object> hookAttributes) {
     // ETP-5772: /batch runs under admin mode, so DAL's own write check is off; without this the
     // REST batch reached any spec, unlike MCP etendo_batch (authorizeSpecAccess per op).
     if (!NeoAccessHelper.hasWindowAccessForSpec(spec, NeoMethodPolicy.METHOD_POST)) {
@@ -1081,6 +1133,10 @@ public class BatchService {
         .endpointType(NeoEndpointType.CRUD)
         .idsOnlyResponse(isOnlyReturnIds())
         .build();
+    // ETP-6177: what the caller's preprocessor left for the pre-hook (none on REST /batch).
+    if (hookAttributes != null) {
+      hookAttributes.forEach(ctx::setAttribute);
+    }
 
     // Entities with a configured Java_Qualifier own logic the generic CRUD path knows
     // nothing about (e.g. locationAddress creates a nested C_Location from fields the

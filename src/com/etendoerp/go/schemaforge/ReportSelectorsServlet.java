@@ -49,7 +49,7 @@ import com.etendoerp.go.common.CorsUtils;
  *
  * Mapped to /sws/report-selectors/* via AD_MODEL_OBJECT registration.
  * Provides searchable selector data for report parameter inputs (currency,
- * bpartner, product, warehouse, org, account, acctschema, year, tax, project).
+ * bpartner, product, product-all, warehouse, org, account, acctschema, year, tax, project).
  *
  * URL:
  *   GET /sws/report-selectors/{type}?q=&limit=20&offset=0
@@ -57,9 +57,9 @@ import com.etendoerp.go.common.CorsUtils;
  * Optional query params (type-specific):
  *   selectedOrgId         — filter warehouse/product/year by org
  *   selectedAcctSchemaId  — filter account by accounting schema
- *   warehouseIds          — comma-separated warehouse IDs to filter product stock
+ *   warehouseIds          — comma-separated warehouse IDs to filter product stock (not product-all)
  *   roleOrgIds            — comma-separated org IDs accessible to the role
- *   ids                   — comma-separated record IDs (bpartner, product): resolves exactly those
+ *   ids                   — comma-separated record IDs (bpartner, product, product-all): resolves exactly those
  *                           rows (same client/role scoping as the list), ignoring q and paging; used
  *                           to label a selection restored from a link. A blank or invalid list
  *                           returns no rows, never the whole selector; ids beyond 100 are silently dropped; other
@@ -88,7 +88,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   /** The `ids` lookup is capped: a label lookup, not a bulk read. */
   private static final int MAX_IDS = 100;
   /** Selectors that answer `ids`; any other one refuses it rather than ignore it and list everything. */
-  private static final Set<String> IDS_LOOKUP_TYPES = Set.of("bpartner", "product");
+  private static final Set<String> IDS_LOOKUP_TYPES = Set.of("bpartner", "product", "product-all");
   private static final String ACTIVE_CLIENT_NAME_SEARCH = " AND ad_client_id = :"
       + PARAM_CLIENT_ID + " AND name ILIKE :" + PARAM_SEARCH;
 
@@ -309,7 +309,8 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
     switch (type) {
       case "bpartner":   return buildBpartnerQuery(req);
-      case "product":    return buildProductQuery(req);
+      case "product":    return buildProductQuery(req, true);
+      case "product-all": return buildProductQuery(req, false);
       case "warehouse":  return buildWarehouseQuery(req);
       case "product-category": return buildProductCategoryQuery();
       case "project":    return buildProjectQuery();
@@ -345,7 +346,11 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private SelectorQuery buildProductQuery(SelectorRequest req) {
+  /**
+   * @param stockScoped true for "product" (only products with stock, for stock reports); false for
+   *     "product-all" (every product incl. services, scoped by the product's own org).
+   */
+  private SelectorQuery buildProductQuery(SelectorRequest req, boolean stockScoped) {
     // ETP-4967: excludes products classified under a category flagged
     // EM_Etgo_IsSystemCategory='Y' (e.g. ETGO_DTO, category "Discounts") — same exclusion as
     // every other product selector in the app, applied directly in SQL since this servlet builds
@@ -356,23 +361,27 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
         + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"
         + " AND mpc.em_etgo_issystemcategory = 'Y')");
-    if (!req.warehouseIds.isEmpty()) {
+    if (stockScoped && !req.warehouseIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
           + " AND l.m_warehouse_id IN (:warehouseIds))");
     }
-    if (req.selectedOrgId != null) {
+    if (stockScoped && req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
           + " AND ad_isorgincluded(l.ad_org_id, :selectedOrgId, m_product.ad_client_id) <> -1)");
     }
     if (!req.roleOrgIds.isEmpty()) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
-          + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
-          + " WHERE sd.m_product_id = m_product.m_product_id"
-          + " AND l.ad_org_id IN (:roleOrgIds))");
+      if (stockScoped) {
+        fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
+            + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
+            + " WHERE sd.m_product_id = m_product.m_product_id"
+            + " AND l.ad_org_id IN (:roleOrgIds))");
+      } else {
+        fromWhere.append(" AND m_product.ad_org_id IN (:roleOrgIds)");
+      }
     }
     appendIdsFilter(fromWhere, "m_product_id", req);
     return new SelectorQuery(

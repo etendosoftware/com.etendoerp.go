@@ -304,7 +304,7 @@ public class NeoMandatoryDefaultsService {
       // documents to be saved with the wrong business partner when the user clicked Save
       // without choosing one. tryInjectFirstFromLookup is kept because it only fires for
       // combo-style references (TableDir/Table/List), matching legitimate FIC parity.
-      if (!tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
+      if (!tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx)) {
         NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
       }
       // ETP-5669: a placeholder, not a decision: the create's callout cascade may refine it.
@@ -595,8 +595,8 @@ public class NeoMandatoryDefaultsService {
    * for the authoritative guard.</p>
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
-      String propName, Column col, NeoContext ctx) {
-    Object firstId = NeoDefaultsService.resolveFirstComboOption(col, ctx);
+      String propName, Column col, MandatoryDefaultContext mCtx) {
+    Object firstId = NeoDefaultsService.resolveFirstComboOption(col, mCtx.neoCtx, mCtx.parentId);
     if (firstId == null) {
       return false;
     }

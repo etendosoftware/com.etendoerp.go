@@ -170,7 +170,7 @@ public final class NeoReferenceActiveness {
    * a batch forward reference ({@code $ref:op}) BatchService substitutes before the op runs, and
    * placeholder literals no id can match (an unresolved AD default or a sequence preview).
    */
-  private static boolean isNotAReference(String value) {
+  static boolean isNotAReference(String value) {
     return StringUtils.isBlank(value) || JSON_NULL.equals(value) || SENTINEL_ID.equals(value)
         || value.startsWith(BatchService.REF_PREFIX) || isWrapped(value, '@', '@')
         || isWrapped(value, '<', '>');

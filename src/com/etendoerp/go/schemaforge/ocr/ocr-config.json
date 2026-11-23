@@ -4,7 +4,7 @@
       "id": "purchase-invoice",
       "toolName": "SimpleOcrTool",
       "resolver": "purchase-invoice",
-      "question": "Extract all invoice fields: vendor name, vendor tax id, vendor address (street, postal code, city, country), vendor email and phone, document number, invoice date, total amount with taxes, line items (description, quantity, unit price). Return strict JSON.",
+      "question": "Extract all invoice fields: vendor name, vendor tax id, vendor address (street, postal code, city, country), vendor email and phone, document number, invoice date, total amount with taxes, line items (description, quantity, unit of measure, unit price). Return strict JSON.",
       "dataKeys": [
         "vendor_name",
         "tax_id",
@@ -211,6 +211,13 @@
                     "null"
                   ]
                 },
+                "unit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The unit of measure printed for THIS line, exactly as printed (for example 'kg', 'ud', 'h', 'caja'). Null if the line prints none. Do not infer it."
+                },
                 "unit_price": {
                   "type": [
                     "number",
@@ -248,6 +255,7 @@
               "required": [
                 "description",
                 "quantity",
+                "unit",
                 "unit_price",
                 "discount_percent",
                 "discount_amount",

@@ -18,9 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,8 +46,59 @@ import org.openbravo.model.ad.domain.Validation;
 public final class SelectorValidationResolver {
   private static final Logger log = LogManager.getLogger(SelectorValidationResolver.class);
   private static final String UNRESOLVED_MARKER = "__NEO_UNRESOLVED__";
+  /**
+   * Session variable names (lower case, without {@code #} or underscores variants) a caller param
+   * can never replace. Must list every non-{@code #} session variable set in
+   * {@link #buildValidationParamMap}.
+   */
+  private static final Set<String> RESERVED_SESSION_KEYS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+      "ad_org_id",
+      "ad_client_id",
+      "ad_user_id",
+      "ad_role_id",
+      "default_ad_org_id",
+      "default_ad_client_id",
+      "default_ad_role_id",
+      "default_ad_user_id",
+      "product_org",
+      "parent_ad_org",
+      "user_client",
+      "userclient",
+      "user_org",
+      "userorg",
+      "client"
+  )));
 
   private SelectorValidationResolver() {
+  }
+
+  /**
+   * Check whether the given key corresponds to a reserved server-side session parameter.
+   * Client-supplied context parameters matching these keys (case-insensitively, with or
+   * without leading '#') cannot override session values.
+   */
+  static boolean isReservedSessionKey(String key) {
+    if (StringUtils.isBlank(key)) {
+      return false;
+    }
+    String normalized = key.trim().toLowerCase();
+    if (normalized.startsWith("#")) {
+      normalized = normalized.substring(1);
+    }
+    if (RESERVED_SESSION_KEYS.contains(normalized)) {
+      return true;
+    }
+    String noUnderscore = normalized.replace("_", "");
+    return RESERVED_SESSION_KEYS.contains(noUnderscore);
+  }
+
+  private static boolean isSessionCsv(String key, String value) {
+    if (StringUtils.isBlank(key) || value == null) {
+      return false;
+    }
+    String stripped = key.startsWith("#") ? key.substring(1) : key;
+    String lower = stripped.toLowerCase().replace("_", "");
+    return "userclient".equals(lower) || "userorg".equals(lower);
   }
 
   /**
@@ -115,45 +171,33 @@ public final class SelectorValidationResolver {
    * This method applies a best-effort strategy:
    * 1. Splits the validation code into top-level AND clauses
    * 2. For each clause, checks if all @Param@ placeholders can be resolved
-   * 3. Includes clauses where all params are available (or that have no params)
+   * 3. Binds dynamic context parameters as named HQL parameters (:valParamN)
    * 4. Skips clauses with unresolvable params or SQL-only functions
    * 5. Converts TABLE.COLUMN references to DAL property paths (e.property)
-   *
-   * This ensures static filters (e.g., DocBaseType IN ('POO')) are always applied
-   * even when context-dependent clauses cannot be resolved.
    */
-  static String resolveValidationFilter(Column column, String targetEntityName,
+  static SelectorQueryBuilder.HqlWithParams resolveValidationFilter(Column column, String targetEntityName,
       Map<String, String> contextParams) {
-    String resolvedSql = resolveValidationSql(column, contextParams);
-    if (StringUtils.isBlank(resolvedSql)) {
+    if (column == null) {
       return null;
     }
-    // Convert SQL TABLE.COLUMN references to HQL e.property paths
-    String hql = SqlToHqlTranslator.convertSqlToHql(resolvedSql, targetEntityName);
-    // Simplify constant CASE WHEN expressions left by FROM DUAL unwrapping after param substitution.
-    // Hibernate HQL cannot evaluate string-literal CASE predicates reliably — simplify them away.
-    return SqlToHqlTranslator.simplifyConstantCaseExpressions(hql);
-  }
-
-  /**
-   * Resolve validation rules into a SQL clause with context params substituted.
-   * Used by list selectors that execute SQL restrictions directly.
-   */
-  static String resolveValidationSql(Column column, Map<String, String> contextParams) {
     Validation valRule = column.getValidation();
     if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
       return null;
     }
 
     String code = valRule.getValidationCode().trim();
-    Map<String, String> allParams = buildValidationParamMap(contextParams);
+    Map<String, String> allParams = buildValidationParamMap(code, contextParams);
     List<String> clauses = SqlToHqlTranslator.splitTopLevelAnd(code);
 
     List<String> resolvedClauses = new ArrayList<>();
+    Map<String, Object> queryParams = new HashMap<>();
+    AtomicInteger paramIndex = new AtomicInteger(0);
+
     for (String clause : clauses) {
-      String resolved = resolveValidationClause(clause.trim(), allParams);
-      if (resolved != null) {
-        resolvedClauses.add(resolved);
+      SelectorQueryBuilder.HqlWithParams resolved = resolveValidationClause(clause.trim(), allParams, paramIndex);
+      if (resolved != null && !resolved.isBlank()) {
+        resolvedClauses.add(resolved.getHql());
+        queryParams.putAll(resolved.getParams());
       }
     }
 
@@ -162,7 +206,100 @@ public final class SelectorValidationResolver {
     }
     // One group, as Classic's ComboTableData does: a top-level OR in the rule must not escape
     // the AND that joins it with the selector's other filters and the search text.
+    String joined = "(" + String.join(SelectorQueryBuilder.SQL_AND, resolvedClauses) + ")";
+    // Convert SQL TABLE.COLUMN references to HQL e.property paths
+    String hql = SqlToHqlTranslator.convertSqlToHql(joined, targetEntityName);
+    // Simplify constant CASE WHEN expressions left by FROM DUAL unwrapping after param substitution.
+    // Hibernate HQL cannot evaluate string-literal CASE predicates reliably — simplify them away.
+    String simplified = SqlToHqlTranslator.simplifyConstantCaseExpressions(hql);
+    return new SelectorQueryBuilder.HqlWithParams(simplified, queryParams);
+  }
+
+  /**
+   * Resolve validation rules into a SQL clause with context params substituted.
+   * Used by list selectors that execute SQL restrictions directly.
+   */
+  static String resolveValidationSql(Column column, Map<String, String> contextParams) {
+    if (column == null) {
+      return null;
+    }
+    Validation valRule = column.getValidation();
+    if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
+      return null;
+    }
+
+    String code = valRule.getValidationCode().trim();
+    Map<String, String> allParams = buildValidationParamMap(code, contextParams);
+    List<String> clauses = SqlToHqlTranslator.splitTopLevelAnd(code);
+
+    List<String> resolvedClauses = new ArrayList<>();
+    for (String clause : clauses) {
+      String resolved = resolveValidationClauseToSql(clause.trim(), allParams);
+      if (resolved != null) {
+        resolvedClauses.add(resolved);
+      }
+    }
+
+    if (resolvedClauses.isEmpty()) {
+      return null;
+    }
     return "(" + String.join(SelectorQueryBuilder.SQL_AND, resolvedClauses) + ")";
+  }
+
+  private static String resolveValidationClauseToSql(String trimmed, Map<String, String> allParams) {
+    if (StringUtils.isBlank(trimmed)) {
+      return null;
+    }
+    if (SelectorQueryBuilder.SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
+      log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
+      return null;
+    }
+    if (SqlToHqlTranslator.NESTED_SUBQUERY.matcher(trimmed).find()) {
+      log.debug("Skipping validation clause with nested subquery: {}", trimmed);
+      return null;
+    }
+    return substituteValidationParamsSql(trimmed, allParams);
+  }
+
+  private static String substituteValidationParamsSql(String clause, Map<String, String> allParams) {
+    Pattern quotedParam = Pattern.compile("'@#?([^@]+)@'");
+    Matcher m = quotedParam.matcher(clause);
+    StringBuffer sb = new StringBuffer();
+    while (m.find()) {
+      String key = m.group(1);
+      String value = lookupParamValue(allParams, key);
+      String rep;
+      if (value == null) {
+        rep = "NULL";
+      } else if (isSessionCsv(key, value)) {
+        rep = value;
+      } else {
+        rep = "'" + value.replace("'", "''") + "'";
+      }
+      m.appendReplacement(sb, Matcher.quoteReplacement(rep));
+    }
+    m.appendTail(sb);
+
+    String intermediate = sb.toString();
+    Matcher bare = SelectorQueryBuilder.VALIDATION_PARAM.matcher(intermediate);
+    StringBuffer out = new StringBuffer();
+    while (bare.find()) {
+      String key = bare.group(1);
+      String value = lookupParamValue(allParams, key);
+      String rep;
+      if (value == null) {
+        log.debug("Validation param @{}@ not resolvable, substituting NULL in clause: {}",
+            key, clause);
+        rep = "NULL";
+      } else if (isSessionCsv(key, value)) {
+        rep = value;
+      } else {
+        rep = "'" + value.replace("'", "''") + "'";
+      }
+      bare.appendReplacement(out, Matcher.quoteReplacement(rep));
+    }
+    bare.appendTail(out);
+    return out.toString();
   }
 
   /**
@@ -171,40 +308,26 @@ public final class SelectorValidationResolver {
    * <p>Mirrors the session variables Etendo Classic exposes to validation rules so that
    * filters like {@code @#User_Client@}, {@code @Default_AD_Org_ID@} or
    * {@code @Parent_AD_Org@} resolve the same way in FIC and in {@code /defaults}.</p>
+   *
+   * <p>Caller params are accepted only when the validation rule declares them as {@code @Name@}
+   * and they are not session variables: {@code #}-prefixed names and every name set above
+   * (AD_Client_ID, AD_Org_ID, AD_User_ID, AD_Role_ID, ...) keep the session value.</p>
+   *
+   * @param validationCode
+   *     the validation rule code whose {@code @Name@} placeholders caller params may fill
+   * @param contextParams
+   *     caller-provided params; may be null
+   * @return the session variables plus the accepted caller params, with lower and upper case
+   *     variants of every key
    */
-  private static Map<String, String> buildValidationParamMap(Map<String, String> contextParams) {
+  static Map<String, String> buildValidationParamMap(String validationCode,
+      Map<String, String> contextParams) {
     Map<String, String> allParams = new HashMap<>();
     OBContext ctx = OBContext.getOBContext();
-    String currentOrgId = ctx.getCurrentOrganization().getId();
-    String currentClientId = ctx.getCurrentClient().getId();
-    allParams.put("AD_Org_ID", currentOrgId);
-    allParams.put("AD_Client_ID", currentClientId);
-    allParams.put("AD_User_ID", ctx.getUser().getId());
-    allParams.put("AD_Role_ID", ctx.getRole().getId());
-    allParams.put("Default_AD_Org_ID", currentOrgId);
-    allParams.put("Default_AD_Client_ID", currentClientId);
-    allParams.put("Default_AD_Role_ID", ctx.getRole().getId());
-    allParams.put("Default_AD_User_ID", ctx.getUser().getId());
-    allParams.put("Product_Org", currentOrgId);
-    String readableClients = quotedCsv(ctx.getReadableClients());
-    if (readableClients != null) {
-      allParams.put("#User_Client", readableClients);
+    if (ctx != null) {
+      putSessionParams(allParams, ctx);
     }
-    String readableOrgs = quotedCsv(ctx.getReadableOrganizations());
-    if (readableOrgs != null) {
-      allParams.put("#User_Org", readableOrgs);
-    }
-    try {
-      String parentOrg = ctx.getOrganizationStructureProvider().getParentOrg(currentOrgId);
-      if (StringUtils.isNotBlank(parentOrg)) {
-        allParams.put("Parent_AD_Org", parentOrg);
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve Parent_AD_Org for {}: {}", currentOrgId, e.getMessage());
-    }
-    if (contextParams != null) {
-      allParams.putAll(contextParams);
-    }
+    putDeclaredCallerParams(allParams, validationCode, contextParams);
     Map<String, String> normalized = new HashMap<>();
     for (Map.Entry<String, String> entry : allParams.entrySet()) {
       if (entry.getKey() == null || entry.getValue() == null) {
@@ -217,12 +340,92 @@ public final class SelectorValidationResolver {
     return allParams;
   }
 
+  private static void putIfNotNull(Map<String, String> params, String value, String... keys) {
+    if (value == null) {
+      return;
+    }
+    for (String key : keys) {
+      params.put(key, value);
+    }
+  }
+
+  private static void putSessionParams(Map<String, String> allParams, OBContext ctx) {
+    String currentOrgId = ctx.getCurrentOrganization() != null ? ctx.getCurrentOrganization().getId() : null;
+    String currentClientId = ctx.getCurrentClient() != null ? ctx.getCurrentClient().getId() : null;
+    putIfNotNull(allParams, currentOrgId, "AD_Org_ID", "Default_AD_Org_ID", "Product_Org");
+    putIfNotNull(allParams, currentClientId, "AD_Client_ID", "Default_AD_Client_ID");
+    if (ctx.getUser() != null) {
+      putIfNotNull(allParams, ctx.getUser().getId(), "AD_User_ID", "Default_AD_User_ID");
+    }
+    if (ctx.getRole() != null) {
+      putIfNotNull(allParams, ctx.getRole().getId(), "AD_Role_ID", "Default_AD_Role_ID");
+    }
+    putIfNotNull(allParams, quotedCsv(ctx.getReadableClients()), "#User_Client", "User_Client");
+    putIfNotNull(allParams, quotedCsv(ctx.getReadableOrganizations()), "#User_Org", "User_Org");
+    putIfNotNull(allParams, resolveParentOrg(ctx, currentOrgId), "Parent_AD_Org");
+  }
+
+  private static String resolveParentOrg(OBContext ctx, String currentOrgId) {
+    try {
+      if (currentOrgId != null && ctx.getOrganizationStructureProvider() != null) {
+        String parentOrg = ctx.getOrganizationStructureProvider().getParentOrg(currentOrgId);
+        return StringUtils.isNotBlank(parentOrg) ? parentOrg : null;
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve Parent_AD_Org for {}: {}", currentOrgId, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Copy into {@code allParams} the caller params the rule declares as {@code @Name@}. Names with
+   * a {@code #} prefix or reserved session variables are never accepted.
+   */
+  private static void putDeclaredCallerParams(Map<String, String> allParams,
+      String validationCode, Map<String, String> contextParams) {
+    if (contextParams == null) {
+      return;
+    }
+    Set<String> declared = declaredParams(validationCode);
+    for (Map.Entry<String, String> entry : contextParams.entrySet()) {
+      String key = entry.getKey();
+      String lower = key == null ? null : key.toLowerCase();
+      if (lower == null || key.startsWith("#") || isReservedSessionKey(key)
+          || !declared.contains(lower)) {
+        log.debug("Ignoring caller param '{}': reserved or not declared by the rule", key);
+        continue;
+      }
+      allParams.put(key, entry.getValue());
+    }
+  }
+
+  /** Lower-cased names of the non-{@code #} {@code @Name@} placeholders used by the rule. */
+  private static Set<String> declaredParams(String validationCode) {
+    Set<String> declared = new HashSet<>();
+    if (validationCode == null) {
+      return declared;
+    }
+    Matcher m = SelectorQueryBuilder.VALIDATION_PARAM.matcher(validationCode);
+    while (m.find()) {
+      if (!m.group().startsWith("@#")) {
+        declared.add(m.group(1).toLowerCase());
+      }
+    }
+    return declared;
+  }
+
   /**
    * Attempt to resolve a single validation AND-clause by substituting all @Param@ references.
-   * Returns the resolved clause string, or {@code null} if the clause should be skipped
-   * (SQL-only function detected, or a param cannot be resolved).
+   * Returns the resolved HqlWithParams, or {@code null} if the clause should be skipped
+   * (SQL-only function detected, or a nested subquery detected).
    */
-  private static String resolveValidationClause(String trimmed, Map<String, String> allParams) {
+  static SelectorQueryBuilder.HqlWithParams resolveValidationClause(String trimmed,
+      Map<String, String> allParams) {
+    return resolveValidationClause(trimmed, allParams, new AtomicInteger(0));
+  }
+
+  static SelectorQueryBuilder.HqlWithParams resolveValidationClause(String trimmed,
+      Map<String, String> allParams, AtomicInteger paramIndex) {
     if (StringUtils.isBlank(trimmed)) {
       return null;
     }
@@ -245,60 +448,75 @@ public final class SelectorValidationResolver {
     // HQL requires entity/property names. Translate SQL names → HQL names when possible.
     trimmed = SqlToHqlTranslator.translateSqlToHql(trimmed);
 
-    // Substitute @Param@ / @#Param@ with their value, or with literal NULL when the
-    // variable can't be resolved from the current context. This mirrors Etendo Classic's
-    // ComboTableData, which injects NULL for missing session vars: filters relying on a
-    // missing variable naturally return no rows instead of being silently dropped (which
-    // would relax the filter and surface arbitrary records).
-    return substituteValidationParams(trimmed, allParams);
+    // Substitute @Param@ / @#Param@ with their value, binding context params as named :valParamN
+    return substituteValidationParams(trimmed, allParams, paramIndex);
   }
 
   /**
-   * Replace every {@code @Param@} / {@code @#Param@} placeholder in {@code clause} by its
-   * value from {@code allParams}. Unresolved placeholders become the SQL literal
-   * {@code NULL}.
+   * Replace every {@code @Param@} / {@code @#Param@} placeholder in {@code clause} by binding its
+   * value from {@code allParams} as a named parameter (:valParamN). Unresolved placeholders
+   * become the SQL literal {@code NULL}.
    *
    * <p>Placeholders wrapped in single quotes (e.g. {@code ='@Foo@'}) get special handling:
-   * the surrounding quotes are stripped when substituting {@code NULL}, so the output is
-   * {@code =NULL} instead of the string {@code ='NULL'}. Resolved values in that position
-   * keep the surrounding quotes and only have inner quotes escaped.</p>
+   * the surrounding quotes are stripped when substituting {@code NULL} or binding :valParamN.</p>
    */
-  private static String substituteValidationParams(String clause, Map<String, String> allParams) {
+  static SelectorQueryBuilder.HqlWithParams substituteValidationParams(String clause,
+      Map<String, String> allParams) {
+    return substituteValidationParams(clause, allParams, new AtomicInteger(0));
+  }
+
+  static SelectorQueryBuilder.HqlWithParams substituteValidationParams(String clause,
+      Map<String, String> allParams, AtomicInteger paramIndex) {
+    if (clause == null) {
+      return SelectorQueryBuilder.HqlWithParams.empty();
+    }
+    Map<String, Object> queryParams = new HashMap<>();
+
     // First pass: placeholders wrapped in single quotes (e.g. ='@Foo@') — for unresolved
     // vars strip the quotes so the output is =NULL rather than ='NULL'.
-    Pattern quotedParam = Pattern.compile("'@([^@]+)@'");
+    // For resolved vars, bind as :valParamN (without surrounding single quotes).
+    Pattern quotedParam = Pattern.compile("'@#?([^@]+)@'");
     Matcher m = quotedParam.matcher(clause);
     StringBuffer sb = new StringBuffer();
     while (m.find()) {
-      String value = lookupParamValue(allParams, m.group(1));
-      String rep = value == null ? "NULL" : "'" + value.replace("'", "''") + "'";
-      m.appendReplacement(sb, Matcher.quoteReplacement(rep));
+      String key = m.group(1);
+      String value = lookupParamValue(allParams, key);
+      if (value == null) {
+        m.appendReplacement(sb, "NULL");
+      } else if (isSessionCsv(key, value)) {
+        m.appendReplacement(sb, Matcher.quoteReplacement(value));
+      } else {
+        String hqlParamName = "valParam" + paramIndex.getAndIncrement();
+        queryParams.put(hqlParamName, value);
+        m.appendReplacement(sb, Matcher.quoteReplacement(":" + hqlParamName));
+      }
     }
     m.appendTail(sb);
 
     // Second pass: bare placeholders.
     // Pre-formatted CSV session vars like #User_Client ("'0','1'") already contain quotes
-    // — those are emitted raw to preserve the SQL list syntax. Simple scalar values are
-    // wrapped in quotes and have their inner quotes escaped.
+    // — those are emitted raw to preserve the SQL list syntax. Normal parameters are bound
+    // as :valParamN.
     String intermediate = sb.toString();
     Matcher bare = SelectorQueryBuilder.VALIDATION_PARAM.matcher(intermediate);
     StringBuffer out = new StringBuffer();
     while (bare.find()) {
-      String value = lookupParamValue(allParams, bare.group(1));
-      String rep;
+      String key = bare.group(1);
+      String value = lookupParamValue(allParams, key);
       if (value == null) {
         log.debug("Validation param @{}@ not resolvable, substituting NULL in clause: {}",
-            bare.group(1), clause);
-        rep = "NULL";
-      } else if (value.indexOf('\'') >= 0) {
-        rep = value;
+            key, clause);
+        bare.appendReplacement(out, "NULL");
+      } else if (isSessionCsv(key, value)) {
+        bare.appendReplacement(out, Matcher.quoteReplacement(value));
       } else {
-        rep = "'" + value + "'";
+        String hqlParamName = "valParam" + paramIndex.getAndIncrement();
+        queryParams.put(hqlParamName, value);
+        bare.appendReplacement(out, Matcher.quoteReplacement(":" + hqlParamName));
       }
-      bare.appendReplacement(out, Matcher.quoteReplacement(rep));
     }
     bare.appendTail(out);
-    return out.toString();
+    return new SelectorQueryBuilder.HqlWithParams(out.toString(), queryParams);
   }
 
   /**
@@ -327,14 +545,31 @@ public final class SelectorValidationResolver {
     if (allParams == null || StringUtils.isBlank(key)) {
       return null;
     }
+    String stripped = key.startsWith("#") ? key.substring(1) : key;
     String exact = allParams.get(key);
     if (exact != null) {
       return exact;
     }
-    String lower = allParams.get(key.toLowerCase());
+    exact = allParams.get(stripped);
+    if (exact != null) {
+      return exact;
+    }
+    exact = allParams.get("#" + stripped);
+    if (exact != null) {
+      return exact;
+    }
+    String lower = allParams.get(stripped.toLowerCase());
     if (lower != null) {
       return lower;
     }
-    return allParams.get(key.toUpperCase());
+    lower = allParams.get(("#" + stripped).toLowerCase());
+    if (lower != null) {
+      return lower;
+    }
+    String upper = allParams.get(stripped.toUpperCase());
+    if (upper != null) {
+      return upper;
+    }
+    return allParams.get(("#" + stripped).toUpperCase());
   }
 }

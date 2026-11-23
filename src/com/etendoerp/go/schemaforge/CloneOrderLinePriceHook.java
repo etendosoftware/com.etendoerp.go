@@ -70,6 +70,17 @@ public class CloneOrderLinePriceHook extends CloneLinePriceHook {
     clone.setReplacedorder(null);
     clone.setReplacementorder(null);
     clone.setEtvfacReversedInvoice(null);
+    // A copy is a new draft and never inherits a rejection (ETP-6209): a copy of a rejected
+    // quotation kept the tenant's internal reason, which then showed once it was rejected again
+    // from the portal (which sets none).
+    clone.setRejectReason(null);
+    // Nor the customer portal's decision line in its notes (ETP-6209): only those lines go, the
+    // seller's own notes stay. Same detection as the quotation printable.
+    String notes = clone.getDescription();
+    String kept = QuotationPrintableData.withoutPortalNote(notes);
+    if (!java.util.Objects.equals(notes, kept)) {
+      clone.setDescription(kept);
+    }
     for (OrderLine line : clone.getOrderLineList()) {
       line.setDateDelivered(null);
       line.setInvoiceDate(null);

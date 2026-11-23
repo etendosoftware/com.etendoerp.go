@@ -53,6 +53,13 @@ import org.openbravo.model.common.order.OrderLine;
  *   <li>{@link #deriveOrderLineFromInvoiceLine} sets {@code salesOrderLine} from the
  *       {@code invoiceLineId} of a create that sends none (QA BUG-1): the MCP is never offered
  *       that system field, so its lines got no order line while the window's did.</li>
+ *   <li>{@link #handle} caps the quantity against the invoice line it ships
+ *       ({@link ShipmentLineInvoiceCap}, CP-30): a create with {@code invoiceLineId} up to what is
+ *       pending (none sent: the pending), an update of a linked line up to the pending plus what
+ *       it holds. Above it, a 422 {@code importQuantityExceedsPending} and nothing is written. The
+ *       link of a create is written and re-checked under the invoice lock in {@link #afterHandle},
+ *       so of two racing creates that together exceed the pending exactly one keeps its line; the
+ *       other is removed and gets the same 422. A line with no invoice link is not capped.</li>
  * </ul>
  *
  * <p><b>Binding (ETP-6002).</b> {@link NeoExtension} on every channel; the row's
@@ -71,11 +78,15 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
   /** The body key of the shipment line's order line ({@code C_OrderLine_ID}). */
   static final String FIELD_SALES_ORDER_LINE = "salesOrderLine";
 
+  /** What {@link #linkInvoiceLine} refused, read by {@link #afterHandle} on the same thread. */
+  private static final ThreadLocal<NeoResponse> LINK_REFUSAL = new ThreadLocal<>();
+
   @Override
   public NeoResponse handle(NeoContext context) {
     dropQuotationOrderLine(context);
     deriveOrderLineFromInvoiceLine(context);
-    return super.handle(context);
+    NeoResponse refusal = ShipmentLineInvoiceCap.refusalFor(context);
+    return refusal != null ? refusal : super.handle(context);
   }
 
   /**
@@ -160,14 +171,33 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
             + "line's pending quantity drops by what this line moves and a fully shipped invoice "
             + "is no longer offered. The shipment line also takes that invoice line's sales "
             + "order line (salesOrderLine is set for you, never a quotation's), so the order "
-            + "counts the delivery too. An id that is not one of your invoice lines is ignored. "
-            + "Create only.");
+            + "counts the delivery too. movementQuantity must be above 0 and cannot exceed that "
+            + "invoice line's pendingQuantity (422 importQuantityExceedsPending, nothing is "
+            + "created); left out, "
+            + "it takes the pendingQuantity. To ship extra units, create a line without "
+            + "invoiceLineId. An id that is not one of your invoice lines is ignored. Create "
+            + "only.");
   }
 
-  /** The first shipment of the invoice line in its column, a later one in the match table. */
+  /** Answers the refusal of {@link #linkInvoiceLine}, when the new line exceeded the invoice line. */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    LINK_REFUSAL.remove();
+    try {
+      NeoResponse result = super.afterHandle(context);
+      NeoResponse refusal = LINK_REFUSAL.get();
+      return refusal != null ? refusal : result;
+    } finally {
+      LINK_REFUSAL.remove();
+    }
+  }
+
+  /**
+   * The first shipment of the invoice line in its column, a later one in the match table, written
+   * under the invoice lock and re-checked there ({@link ShipmentLineInvoiceCap#linkUnderCap}, CP-30).
+   */
   @Override
   protected void linkInvoiceLine(String invoiceLineId, String newLineId) {
-    InvoiceLineLinker.linkInvoiceLineToInOutLine(invoiceLineId, newLineId,
-        InOutInvoiceLinks.MatchTable.SALES);
+    LINK_REFUSAL.set(ShipmentLineInvoiceCap.linkUnderCap(invoiceLineId, newLineId));
   }
 }

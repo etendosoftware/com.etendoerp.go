@@ -777,4 +777,66 @@ class InvoiceInboxProcessorTest {
 
     verify(dal, never()).createQuery(eq(IncomingDocument.class), anyString());
   }
+
+  // ---------------------------------------------------------------- ETP-6051: the unit, the defaults, the live gaps
+
+  private JSONObject storedDocument() throws Exception {
+    ArgumentCaptor<String> current = ArgumentCaptor.forClass(String.class);
+    verify(row).setCurrentData(current.capture());
+    return new JSONObject(current.getValue());
+  }
+
+  @Test
+  @DisplayName("a new product is pre-filled with the printed unit and the default category of the ROW's organization")
+  void aNewProductIsPreFilledWithTheRowsOrganization() throws Exception {
+    JSONObject answer = answerWith(ORG_TAX_ID);
+    answer.getJSONArray("line_items").getJSONObject(0).put("unit", "kg");
+    when(client.extract(any(File.class), any(OcrDocType.class)))
+        .thenReturn(new JSONObject().put("answer", answer));
+    when(lookups.productCandidates(any())).thenReturn(List.of(List.of()));
+    when(lookups.uomByPrintedUnit("kg")).thenReturn(Optional.of(new Party("U-KG", "Kilogramo")));
+    when(lookups.defaultProductCategory(ORG)).thenReturn(Optional.of(new Party("C-DEF", "General")));
+
+    processor.runOne(ID);
+
+    JSONObject line = storedDocument().getJSONArray("lines").getJSONObject(0);
+    assertEquals("kg", line.getString("unitPrinted"));
+    JSONObject draft = line.getJSONObject("product").getJSONObject("new");
+    assertEquals("U-KG", draft.getString("uomId"));
+    assertEquals("ocr", draft.getString("uomSource"));
+    assertEquals("C-DEF", draft.getString("categoryId"));
+    assertEquals("default", draft.getString("categorySource"));
+    verify(lookups).defaultProductCategory(ORG);
+  }
+
+  @Test
+  @DisplayName("a new vendor whose document prints no address ends MISSING_FIELDS with vendorAddress in the verdict")
+  void aNewVendorWithoutAnAddressIsMissingFields() throws Exception {
+    when(lookups.vendorsByTaxId(anyString(), anyInt())).thenReturn(List.of());
+    when(lookups.searchVendors(anyString(), anyInt())).thenReturn(List.of());
+
+    processor.runOne(ID);
+
+    JSONObject validation = storedDocument().getJSONObject("validation");
+    assertFalse(validation.getBoolean("valid"));
+    assertTrue(validation.getJSONArray("missing").toString().contains("vendorAddress"),
+        validation.toString());
+    ArgumentCaptor<String> code = ArgumentCaptor.forClass(String.class);
+    verify(row, org.mockito.Mockito.atLeastOnce()).setErrorCode(code.capture());
+    assertEquals("MISSING_FIELDS", code.getValue());
+  }
+
+  @Test
+  @DisplayName("the summary columns the confirm needs are written with the document: new products and the total warning")
+  void theSummaryColumnsAreSyncedWithTheDocument() throws Exception {
+    when(lookups.productCandidates(any())).thenReturn(List.of(List.of()));
+    JSONObject answer = answerWith(ORG_TAX_ID).put("total_amount", 500.0);
+    when(client.extract(any(File.class), any(OcrDocType.class)))
+        .thenReturn(new JSONObject().put("answer", answer));
+
+    processor.runOne(ID);
+
+    verify(row).setNewProducts(1L);
+    verify(row).setTotalMismatch(true);
+  }
 }

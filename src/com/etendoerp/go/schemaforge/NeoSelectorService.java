@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 
@@ -217,9 +218,22 @@ public class NeoSelectorService {
 
   private static NeoResponse resolveSelectorResponse(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
+    return resolveSelectorResponse(sourceEntity, column, columnName,
+        new SelectorPaging(search, limit, offset), contextParams, null);
+  }
+
+  /**
+   * The selector answer, optionally narrowed to one record id. The id constraint is applied inside
+   * every route (list: exact search key; classic combo: core's single-record query, which keeps the
+   * whole validation rule; HQL/rich: an id filter next to the validation filter), so the answer
+   * never depends on how many rows the selector holds.
+   */
+  private static NeoResponse resolveSelectorResponse(SFEntity sourceEntity, Column column, String columnName,
+      SelectorPaging paging, Map<String, String> contextParams, String restrictToId) {
+    String search = paging.search;
     try {
-      int safeLimit = normalizeLimit(limit);
-      int safeOffset = normalizeOffset(offset);
+      int safeLimit = normalizeLimit(paging.limit);
+      int safeOffset = normalizeOffset(paging.offset);
 
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
@@ -230,14 +244,14 @@ public class NeoSelectorService {
       }
       if (isList) {
         return ListReferenceSelectorExecutor.resolveListSelector(column, search, safeLimit,
-            safeOffset, contextParams);
+            safeOffset, contextParams, restrictToId);
       }
       if (!isObuisel && !SystemClientSelectorRegistry.isRegisteredColumn(column)
           && ComboReferenceSelectorExecutor.shouldUseCoreComboSelector(sourceEntity, column, refId)) {
         log.info("[ComboSelector] routing {} via core ComboTableData (SQL validation rule)",
             column.getDBColumnName());
         return ComboReferenceSelectorExecutor.resolveClassicSelectorWithCoreCombo(
-            sourceEntity, column, search, safeLimit, safeOffset, contextParams);
+            sourceEntity, column, search, safeLimit, safeOffset, contextParams, restrictToId);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -246,8 +260,10 @@ public class NeoSelectorService {
             "Could not resolve target for: " + columnName);
       }
 
-      String validationFilter = SelectorValidationResolver.resolveValidationFilter(
+      SelectorQueryBuilder.HqlWithParams validationHql = SelectorValidationResolver.resolveValidationFilter(
           column, meta.entityName, contextParams);
+      String validationFilter = validationHql != null ? validationHql.getHql() : null;
+      Map<String, Object> validationParams = validationHql != null ? validationHql.getParams() : Collections.emptyMap();
       if (SystemClientSelectorRegistry.isRegisteredColumn(column)) {
         validationFilter = SystemClientSelectorRegistry.expandClientFilter(validationFilter);
       }
@@ -255,16 +271,87 @@ public class NeoSelectorService {
       String filterAlias = resolveFilterAlias(meta);
       String combinedFilter = buildCombinedFilter(
           column, validationFilter, filterAlias);
+      if (restrictToId != null) {
+        String idProperty = meta.isRich && StringUtils.isNotBlank(meta.valueProperty)
+            ? meta.valueProperty : ID_PROPERTY;
+        combinedFilter = combineFilters(combinedFilter,
+            filterAlias + "." + idProperty + " = '" + restrictToId + "'");
+      }
       Map<String, String> selectorContextParams = withSourceEntityName(contextParams, sourceEntity);
       selectorContextParams = withContextOrganizationId(selectorContextParams, contextOrganizationId);
       NeoResponse selectorResult = executeSelectorQuery(
-          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, selectorContextParams);
+          meta, search, safeLimit, safeOffset, contextOrganizationId,
+          new SelectorFilter(combinedFilter, validationParams), selectorContextParams);
       return enrichProductSelectorIfNeeded(selectorResult, meta, selectorContextParams);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /** Search text and page window of one selector query. */
+  private static final class SelectorPaging {
+    private final String search;
+    private final int limit;
+    private final int offset;
+
+    private SelectorPaging(String search, int limit, int offset) {
+      this.search = search;
+      this.limit = limit;
+      this.offset = offset;
+    }
+  }
+
+  private static final String ID_PROPERTY = "id";
+
+  private static final java.util.regex.Pattern RECORD_ID = java.util.regex.Pattern.compile(
+      "[A-Za-z0-9_\\-]{1,64}");
+
+  /**
+   * Whether the selector of {@code column} offers {@code valueId} in the given context — the same
+   * selector, validation rule and policies the UI uses to fill its drop-down (ETP-6176).
+   *
+   * <p>Deterministic: the selector is asked for that one id, constrained inside its own query (see
+   * {@link #resolveSelectorResponse}), so a large table is checked like a small one — no paging.
+   * A column that has no selector in the app (not a FK, selector or list reference) offers
+   * anything. A selector that fails or answers without the id cannot be verified: the answer is
+   * empty and the caller must refuse (fail closed).
+   *
+   * @param sourceEntity  the Schema Forge entity written; may be {@code null}
+   * @param column        the AD_Column whose selector applies
+   * @param columnName    the field name, for logs
+   * @param valueId       the id the write sets
+   * @param contextParams the merged record, as the validation rule and policies read it
+   * @return {@code TRUE} offered, {@code FALSE} not offered, empty when the selector could not answer
+   */
+  public static Optional<Boolean> offersValue(SFEntity sourceEntity, Column column, String columnName,
+      String valueId, Map<String, String> contextParams) {
+    if (column == null || StringUtils.isBlank(valueId)) {
+      return Optional.empty();
+    }
+    if (!RECORD_ID.matcher(valueId).matches()) {
+      return Optional.of(Boolean.FALSE);
+    }
+    String refId = getBaseReferenceId(column);
+    if (!hasObuiselSelector(column) && !isFkReference(refId) && !isListReference(refId)) {
+      return Optional.of(Boolean.TRUE);
+    }
+    NeoResponse response = resolveSelectorResponse(sourceEntity, column, columnName,
+        new SelectorPaging(null, 1, 0), contextParams, valueId);
+    if (response == null || response.getHttpStatus() >= 400 || response.getBody() == null) {
+      log.warn("Selector for {} could not answer whether it offers {}", columnName, valueId);
+      return Optional.empty();
+    }
+    JSONArray items = response.getBody().optJSONArray("items");
+    int count = items == null ? 0 : items.length();
+    for (int i = 0; i < count; i++) {
+      JSONObject item = items.optJSONObject(i);
+      if (item != null && valueId.equals(item.optString("id", null))) {
+        return Optional.of(Boolean.TRUE);
+      }
+    }
+    return Optional.of(Boolean.FALSE);
   }
 
   /**
@@ -386,6 +473,17 @@ public class NeoSelectorService {
 
   private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
       String contextOrganizationId, String combinedFilter, Map<String, String> contextParams) throws Exception {
+    return executeSelectorQuery(meta, search, limit, offset, contextOrganizationId,
+        new SelectorFilter(combinedFilter, Collections.emptyMap()), contextParams);
+  }
+
+  /** The combined selector filter HQL and the named parameters its validation part binds. */
+  private record SelectorFilter(String hql, Map<String, Object> params) {
+  }
+
+  private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
+      String contextOrganizationId, SelectorFilter filter, Map<String, String> contextParams) throws Exception {
+    Map<String, Object> validationParams = filter.params();
     Map<String, String> safeContextParams = contextParams != null ? contextParams : Collections.emptyMap();
     String ctxAlias = (meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.entityAlias))
         ? meta.entityAlias
@@ -393,6 +491,9 @@ public class NeoSelectorService {
     String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(
         meta.entityName, safeContextParams, ctxAlias);
     Map<String, Object> ctxFilterParams = new HashMap<>();
+    if (validationParams != null) {
+      ctxFilterParams.putAll(validationParams);
+    }
     String priceListId = safeContextParams.get("priceList");
     if (StringUtils.isNotBlank(priceListId) && ctxParamFilter != null
         && ctxParamFilter.contains(":priceListId")) {
@@ -413,6 +514,7 @@ public class NeoSelectorService {
       ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
           SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
     }
+    OrgPreference.putOrgPreference(ctxFilterParams, safeContextParams, contextOrganizationId);
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);
@@ -423,7 +525,7 @@ public class NeoSelectorService {
       ctxFilterParams.put(NeoSelectorExecutionHelper.PARAM_SEARCH_MATCH_IDS, searchMatchIds);
     }
     return SelectorQueryExecutor.execute(
-        meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
+        meta, search, limit, offset, combineFilters(filter.hql(), ctxParamFilter),
         contextOrganizationId, ctxFilterParams);
   }
 

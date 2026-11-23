@@ -44,6 +44,11 @@ final class InOutInvoiceListing {
   private static final String KEY_ORDER = "order";
   private static final String KEY_ORDER_LINE = "orderLine";
   private static final String KEY_MOVEMENT_QUANTITY = "movementQuantity";
+  /**
+   * {@code availableShipmentLines} / {@code availableReceiptLines}: the document numbers of the
+   * OTHER draft invoices holding the line, the key the movement popups already read.
+   */
+  static final String KEY_IN_DRAFT_DOCUMENTS = "inDraftDocuments";
 
   private final ImportInOutLinesIntoInvoiceHandler handler;
 
@@ -266,14 +271,27 @@ final class InOutInvoiceListing {
         : ImportInOutLinesIntoInvoiceHandler.signedPending(linesById,
             handler.pendingQuantities(source.getId()));
     LineDetail detail = listing.detail ? lineDetail(invoice, source, returns, policy) : null;
+    // ETP-5828 QA UI-8: the OTHER draft invoices holding each line, so a taken line can be named.
+    Map<String, Set<String>> drafts = returns ? Map.of()
+        : handler.draftInvoicesHoldingLines(source.getId(), invoice.getId());
     JSONArray rows = new JSONArray();
     for (ShipmentInOutLine line : linesById.values()) {
       BigDecimal left = listedLeft(line, pending, listing.includeCovered);
       if (left != null) {
-        rows.put(lineRowOf(line, left, returns, detail));
+        JSONObject row = lineRowOf(line, left, returns, detail);
+        putDraftDocuments(row, drafts.get(line.getId()));
+        rows.put(row);
       }
     }
     return handler.completePage(rows);
+  }
+
+  /** {@code inDraftDocuments} on a line row, only when another draft invoice holds the line. */
+  private static void putDraftDocuments(JSONObject row, Set<String> documentNos)
+      throws JSONException {
+    if (documentNos != null && !documentNos.isEmpty()) {
+      row.put(KEY_IN_DRAFT_DOCUMENTS, new JSONArray(documentNos));
+    }
   }
 
   /**

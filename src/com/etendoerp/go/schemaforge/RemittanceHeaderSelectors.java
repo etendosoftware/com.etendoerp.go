@@ -58,13 +58,14 @@ final class RemittanceHeaderSelectors {
    * @return the selector answer, or {@code null}
    * @throws JSONException if the answer cannot be built
    */
-  static NeoResponse handle(RemittanceHeaderHandler handler, String field) throws JSONException {
+  static NeoResponse handle(RemittanceHeaderHandler handler, String field,
+      Map<String, String> queryParams) throws JSONException {
     if (matches(field, RemittanceHeaderHandler.FIELD_ACCOUNT,
         RemittanceHeaderHandler.COLUMN_ACCOUNT)) {
       return accountSelector(handler);
     }
     if (matches(field, RemittanceHeaderHandler.FIELD_TYPE, RemittanceHeaderHandler.COLUMN_TYPE)) {
-      return typeSelector(handler);
+      return typeSelector(handler, queryParams);
     }
     return null;
   }
@@ -127,13 +128,20 @@ final class RemittanceHeaderSelectors {
   }
 
   /**
-   * The provisioned remittance types linked to the account the form already holds (request
-   * parameter {@value RemittanceHeaderHandler#PARAM_ACCOUNT}). No account, no types.
+   * The provisioned remittance types linked to the account the form already holds (parameter
+   * {@value RemittanceHeaderHandler#PARAM_ACCOUNT}). No account, no types. Read from the hook
+   * context's query parameters first, then from the HTTP request: the MCP's
+   * {@code etendo_selectors} has no HTTP request of its own and hands its {@code recordContext}
+   * over as query parameters only, so reading the request alone answered no types there (ETP-5850).
    */
-  private static NeoResponse typeSelector(RemittanceHeaderHandler handler) throws JSONException {
+  private static NeoResponse typeSelector(RemittanceHeaderHandler handler,
+      Map<String, String> queryParams) throws JSONException {
     HttpServletRequest request = handler.currentRequest();
     SelectorPage page = SelectorPage.fromRequest(request);
-    String accountId = findParamCaseInsensitive(request, RemittanceHeaderHandler.PARAM_ACCOUNT);
+    String accountId = findCaseInsensitive(queryParams, RemittanceHeaderHandler.PARAM_ACCOUNT);
+    if (accountId == null) {
+      accountId = findParamCaseInsensitive(request, RemittanceHeaderHandler.PARAM_ACCOUNT);
+    }
     if (accountId == null) {
       return page.response(new JSONArray(), 0L);
     }
@@ -161,16 +169,42 @@ final class RemittanceHeaderSelectors {
     List<RemittanceType> types = rows.setFirstResult(page.offset).setMaxResults(page.limit).list();
     JSONArray items = new JSONArray();
     for (RemittanceType type : types) {
-      items.put(item(type.getId(), type.getIdentifier()));
+      JSONObject item = item(type.getId(), type.getIdentifier());
+      // ETP-6247: lets the SPA show the scheme / financed options of a collection before the
+      // first save. A collection is a type whose payment method allows pay-in, as REM decides.
+      boolean collection = type.getPaymentMethod() != null
+          && Boolean.TRUE.equals(type.getPaymentMethod().isPayinAllow());
+      item.put("direction", collection ? DIRECTION_COLLECTION : DIRECTION_PAYMENT);
+      items.put(item);
     }
     return page.response(items, count.uniqueResult());
   }
+
+  /** {@code direction} of a type whose payment method allows pay-in. */
+  static final String DIRECTION_COLLECTION = "collection";
+  /** {@code direction} of any other type. */
+  static final String DIRECTION_PAYMENT = "payment";
 
   private static JSONObject item(String id, String label) throws JSONException {
     JSONObject item = new JSONObject();
     item.put("id", id);
     item.put("label", label);
     return item;
+  }
+
+  private static String findCaseInsensitive(Map<String, String> params, String name) {
+    if (params == null) {
+      return null;
+    }
+    for (Map.Entry<String, String> entry : params.entrySet()) {
+      if (name.equalsIgnoreCase(entry.getKey())) {
+        String value = StringUtils.trimToNull(entry.getValue());
+        if (value != null) {
+          return value;
+        }
+      }
+    }
+    return null;
   }
 
   private static String findParamCaseInsensitive(HttpServletRequest request, String name) {

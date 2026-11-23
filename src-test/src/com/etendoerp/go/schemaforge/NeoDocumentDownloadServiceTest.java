@@ -423,7 +423,8 @@ public class NeoDocumentDownloadServiceTest {
     runHandle(response, claims, dal, stubAttachRoot(attachRoot.getAbsolutePath()), aim);
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
-    verify(response).setContentType("application/xml");
+    // ETP-4571: the type comes from the file name (.pdf), never from the stored type.
+    verify(response).setContentType("application/pdf");
     verify(response).setContentLength(FILE_BYTES.length);
     ArgumentCaptor<String> headerCaptor = ArgumentCaptor.forClass(String.class);
     verify(response).setHeader(eq("Content-Disposition"), headerCaptor.capture());

@@ -45,7 +45,9 @@ import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -311,6 +313,17 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     @Override
     protected String sourceDocumentNos(String returnId) {
       return sourceDocs;
+    }
+
+    /** The OTHER draft invoices holding each movement line (ETP-5828 QA UI-8); empty: none. */
+    final Map<String, Set<String>> draftHolders = new HashMap<>();
+    String draftHoldersExcept;
+
+    @Override
+    protected Map<String, Set<String>> draftInvoicesHoldingLines(String inOutId,
+        String invoiceId) {
+      draftHoldersExcept = invoiceId;
+      return draftHolders;
     }
 
     @Override
@@ -746,17 +759,26 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     assertEquals(0, rows.length());
   }
 
+  /**
+   * The pending, not the movement quantity; ETP-5828 QA UI-8: a line other draft invoices hold
+   * names them in inDraftDocuments (this invoice left out), a line no other draft holds has no
+   * such key.
+   */
   @Test
   public void availableReceiptLines_reportsThePendingNotTheMovement() throws Exception {
     Probe probe = purchase();
     probe.pending.put("rl1", bd("4"));
-    probe.pending.remove("rl2");
+    probe.draftHolders.put("rl1", new LinkedHashSet<>(List.of("FC1000080", "FC1000081")));
 
     JSONArray rows = probe.handle(action("availableReceiptLines", "i1",
         "{\"receiptId\":\"rc1\"}")).getBody().getJSONObject("response").getJSONArray("data");
 
-    assertEquals(List.of("rl1"), ids(rows));
+    assertEquals(List.of("rl1", "rl2"), ids(rows));
     assertEquals(4, rows.getJSONObject(0).getInt("pendingQuantity"));
+    assertEquals("i1", probe.draftHoldersExcept);
+    JSONArray held = rows.getJSONObject(0).getJSONArray("inDraftDocuments");
+    assertEquals(List.of("FC1000080", "FC1000081"), List.of(held.getString(0), held.getString(1)));
+    assertFalse(rows.getJSONObject(1).has("inDraftDocuments"));
     assertNull("reading changes nothing", probe.nativeSelection);
   }
 

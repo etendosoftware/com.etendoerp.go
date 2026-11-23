@@ -2,8 +2,8 @@
 """Coverage-decrease gate: this module's one implementation of the rule Jenkins' "Compare Coverage
 Results" stage enforces (sonarUtils.compareCoverage in com.etendoerp.jenkins.pipelines).
 
-Called by run-sonar.sh --compare-coverage (by hand, before a push) and by the
-"Go tests + Sonar + coverage" job of .github/workflows/mini-pipeline.yml. etendo_schema_forge has
+Called by run-sonar.sh --compare-coverage (by hand, before a push) and by the Go tests + Sonar +
+coverage jobs of .github/workflows/mini-pipeline.yml and full-pipeline-pilot.yml. etendo_schema_forge has
 the same gate in scripts/compare-sonar-coverage.js; this is its counterpart, with the same options and rules.
 
 Rule, on the OVERALL coverage read live from SonarQube:

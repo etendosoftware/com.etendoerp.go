@@ -38,6 +38,7 @@ import org.openbravo.database.ExternalConnectionPool;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryIdentity;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
@@ -58,7 +59,10 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
  *       therefore cannot roll back the user's order — the hazard D25 names.</li>
  *   <li><b>Its own thread.</b> {@link #record(McpUsageRow)} only enqueues; the INSERT happens on a
  *       single daemon writer thread. The caller pays a queue offer, not a database round-trip, so a
- *       slow or unreachable database slows telemetry and nothing else.</li>
+ *       slow or unreachable database slows telemetry and nothing else. One exception (ETP-6228):
+ *       the Mixpanel identity is resolved in {@link McpSessionManager#executeInContext}, on the
+ *       request thread, while its DAL session is live, so a resolver cache miss (once per client
+ *       per minute) may cost a lookup there; the writer thread never touches {@code OBDal}.</li>
  *   <li><b>It cannot throw.</b> {@link #record(McpUsageRow)} catches {@link Throwable}; so does the
  *       writer task. A full queue drops the row and logs at debug. There is no code path from a
  *       telemetry failure back to the caller or to the tool result.</li>
@@ -230,16 +234,45 @@ final class McpUsageLogger {
    * @param row the already-resolved row; ignored when null or when telemetry is disabled
    */
   static void enqueue(McpUsageRow row) {
+    enqueue(row, NeoTelemetryIdentity.NONE);
+  }
+
+  /**
+   * Enqueue one row with the identity its Mixpanel projection carries (ETP-6228), captured earlier
+   * by {@link #captureIdentity}; the writer thread has no session and never touches {@code OBDal}.
+   *
+   * @param row      the already-resolved row; ignored when null or when telemetry is disabled
+   * @param identity the identity captured for the call, {@code null} for none
+   */
+  static void enqueue(McpUsageRow row, NeoTelemetryIdentity identity) {
     if (row == null || !isEnabled()) {
       return;
     }
     try {
-      WRITER.execute(() -> write(row));
+      WRITER.execute(() -> write(row, identity));
     } catch (RejectedExecutionException e) {
       noteDrop("queue full or writer shut down", row.toolName());
     } catch (Throwable t) { // NOSONAR — telemetry must not escalate anything to the caller.
       noteDrop("could not enqueue", row.toolName());
       log.debug("Could not enqueue MCP telemetry row.", t);
+    }
+  }
+
+  /**
+   * The identity a call's Mixpanel projection will carry, captured on a thread that still has the
+   * call's context and DAL session ({@link McpSessionManager#executeInContext}); none when the
+   * projection is off, so no lookup is made for a row that is never projected. A resolver cache
+   * miss costs two queries on that thread, once per client per minute. Never throws.
+   */
+  static NeoTelemetryIdentity captureIdentity(String clientId, String userId) {
+    if (!isMixpanelEnabled()) {
+      return NeoTelemetryIdentity.NONE;
+    }
+    try {
+      return telemetry().captureIdentity(clientId, userId);
+    } catch (Throwable t) { // NOSONAR — telemetry must not escalate anything to the caller.
+      log.debug("Could not capture the MCP telemetry identity.", t);
+      return NeoTelemetryIdentity.NONE;
     }
   }
 
@@ -304,7 +337,7 @@ final class McpUsageLogger {
    * Insert one row on the writer thread, in its own transaction on its own pooled connection.
    * Swallows every failure by design (see the class javadoc, rule 1).
    */
-  private static void write(McpUsageRow row) {
+  private static void write(McpUsageRow row, NeoTelemetryIdentity identity) {
     ExternalConnectionPool pool = ExternalConnectionPool.getInstance();
     if (pool == null) {
       noteDrop("no external connection pool", row.toolName());
@@ -320,7 +353,7 @@ final class McpUsageLogger {
       }
       connection.commit();
       // D24 made literal: the authoritative row is committed BEFORE the projection is attempted.
-      project(row);
+      project(row, identity);
     } catch (Throwable t) { // NOSONAR — a telemetry failure is logged and forgotten, never raised.
       rollbackQuietly(connection);
       noteDrop("insert failed", row.toolName());
@@ -342,7 +375,7 @@ final class McpUsageLogger {
    * <p>Never throws: {@code NeoTelemetryService.emit} swallows sink failures, and this method
    * swallows anything else. A projection failure must not cost us the committed row.
    */
-  private static void project(McpUsageRow row) {
+  private static void project(McpUsageRow row, NeoTelemetryIdentity identity) {
     if (!isMixpanelEnabled()) {
       return;
     }
@@ -360,8 +393,12 @@ final class McpUsageLogger {
       props.put("reqBytes", row.reqBytes());
       props.put("respBytes", row.respBytes());
       // row.payload() is deliberately absent and must stay absent.
-      // The tenant goes to the server log only, not into props (which Mixpanel receives).
-      telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props, row.clientId());
+      // The tenant is not one of props: it names the server log, and Mixpanel gets the common
+      // identity (ad_client_id, ad_user_id, ...) that the sink adds from `identity`, captured on
+      // the request thread (ETP-6228).
+      NeoTelemetryIdentity.runWith(identity,
+          () -> telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props,
+              row.clientId()));
     } catch (Throwable t) { // NOSONAR — the projection is best-effort by construction.
       log.debug("Could not project MCP telemetry for tool '{}'.", row.toolName(), t);
     }

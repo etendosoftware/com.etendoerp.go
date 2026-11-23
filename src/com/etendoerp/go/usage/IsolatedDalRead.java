@@ -116,14 +116,18 @@ public final class IsolatedDalRead {
   }
 
   /**
-   * {@link #call(Supplier)} with another caller wait: the seam its timeout tests use.
+   * {@link #call(Supplier)} with another caller wait: for a caller that must not wait the default
+   * {@value #TIMEOUT_SECONDS} s (the backend telemetry identity waits 5 s) and for the tests of the
+   * timeout. Same contract otherwise, including the {@link IllegalStateException} on a timeout.
+   * Statements stay capped at {@value #STATEMENT_TIMEOUT_MS} ms whatever the wait.
    *
    * @param read the read
    * @param timeoutMillis how long the caller waits
    * @param <T> the result type
    * @return what {@code read} returned
+   * @throws IllegalStateException as {@link #call(Supplier)}
    */
-  static <T> T call(Supplier<T> read, long timeoutMillis) {
+  public static <T> T call(Supplier<T> read, long timeoutMillis) {
     return submit(read, timeoutMillis);
   }
 
@@ -162,9 +166,10 @@ public final class IsolatedDalRead {
       return read.get();
     }
     WorkerContext context = WorkerContext.of(OBContext.getOBContext());
+    ThreadPoolExecutor pool = executor();
     Future<T> future;
     try {
-      future = executor().submit(() -> runIsolated(read, context));
+      future = pool.submit(() -> runIsolated(read, context));
     } catch (RejectedExecutionException e) {
       throw new IllegalStateException("Isolated read refused: all " + WORKER_THREADS
           + " workers busy and " + QUEUE_CAPACITY + " reads queued", e);
@@ -180,14 +185,24 @@ public final class IsolatedDalRead {
     } catch (CancellationException e) {
       throw new IllegalStateException("Isolated read cancelled: the pool shut down", e);
     } catch (TimeoutException e) {
-      future.cancel(true);
+      abandon(pool, future);
       throw new IllegalStateException("Isolated read timed out after " + timeoutMillis + " ms",
           e);
     } catch (InterruptedException e) {
-      future.cancel(true);
+      abandon(pool, future);
       Thread.currentThread().interrupt();
       throw new IllegalStateException("Interrupted while waiting for an isolated read", e);
     }
+  }
+
+  /**
+   * Cancels a read whose caller stopped waiting and takes it out of the queue: a cancelled task
+   * still occupies its slot until a worker reaches it, so repeated timeouts would fill the queue
+   * and make every report get "refused".
+   */
+  private static void abandon(ThreadPoolExecutor pool, Future<?> future) {
+    future.cancel(true);
+    pool.remove((Runnable) future);
   }
 
   private static <T> T runIsolated(Supplier<T> read, WorkerContext context) {

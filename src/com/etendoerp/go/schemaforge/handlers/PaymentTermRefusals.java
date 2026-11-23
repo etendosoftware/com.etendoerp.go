@@ -56,6 +56,8 @@ final class PaymentTermRefusals {
   private static final String KEY_HINT = "hint";
   private static final String KEY_MESSAGE_KEYS = "messageKeys";
   private static final String KEY_MESSAGE_PARAMS = "messageParams";
+  /** The allowed range as every message words it: "0 and 365". */
+  private static final String DAYS_RANGE = MIN_DAYS + " and " + MAX_DAYS;
 
   private PaymentTermRefusals() {
   }
@@ -63,7 +65,7 @@ final class PaymentTermRefusals {
   static NeoResponse invalidDays(Object value) throws JSONException {
     JSONObject params = rangeParams().put("value", value == null ? JSONObject.NULL : value);
     String message = "The number of days (" + F_DAYS + ") is required and must be a whole number"
-        + " between " + MIN_DAYS + " and " + MAX_DAYS
+        + " between " + DAYS_RANGE
         + (value == null ? "." : "; got '" + value + "'.");
     return refusal(HttpServletResponse.SC_BAD_REQUEST, CODE_DAYS_INVALID, MSG_DAYS_INVALID,
         message, params, null);
@@ -71,10 +73,14 @@ final class PaymentTermRefusals {
 
   static NeoResponse daysOutOfRange(long days) throws JSONException {
     JSONObject params = rangeParams().put("value", days);
-    String message = "The number of days (" + F_DAYS + ") must be between " + MIN_DAYS + " and "
-        + MAX_DAYS + "; got " + days + ".";
+    String message = "The number of days (" + F_DAYS + ") must be between " + DAYS_RANGE + "; got "
+        + days + ".";
+    // ETP-5850: refused without a hint, an agent stored the 400 days in the contact's unrelated
+    // consumptionDays as a "workaround". The term cannot exist; the user decides what to do.
+    String hint = "No payment term can have " + days + " days. Tell the user and ask for a term "
+        + "between " + DAYS_RANGE + " days; do not store the number in any other field.";
     return refusal(HttpServletResponse.SC_BAD_REQUEST, CODE_DAYS_OUT_OF_RANGE,
-        MSG_DAYS_OUT_OF_RANGE, message, params, null);
+        MSG_DAYS_OUT_OF_RANGE, message, params, hint);
   }
 
   static NeoResponse duplicate(long days, PaymentTerm existing) throws JSONException {

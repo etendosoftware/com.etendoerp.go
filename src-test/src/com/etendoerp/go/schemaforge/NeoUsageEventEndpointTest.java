@@ -764,6 +764,17 @@ class NeoUsageEventEndpointTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = { UsageEventTypes.AI_TOOL_EXECUTE, UsageEventTypes.AI_SUPPORT_MESSAGE })
+    void aCostedAiEventFromTheBrowserIsDroppedWhateverSourceItClaims(String type)
+        throws Exception {
+      for (String source : new String[] { "backend", "ui", "ai-bff", "mcp", "" }) {
+        assertAccepted(postEvents(event(type).put("source", source).put("costUsd", 99.0)), 0, 1);
+      }
+
+      assertTrue(sunk.isEmpty(), "a browser cannot add to the AI spend with " + type);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = { "backend", "ui", "ai-bff", "mcp", "garbage", "" })
     void whateverSourceTheBodyClaimsItIsDropped(String source) throws Exception {
       assertAccepted(postEvents(event(BILLED).put("source", source)), 0, 1);
@@ -826,6 +837,74 @@ class NeoUsageEventEndpointTest {
         assertAccepted(postEvents(rotating), perRequest, 0);
       }
       assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+    }
+  }
+
+  // ── generated document PDFs (ETP-5993) ────────────────────────────────
+
+  @Nested
+  @DisplayName("generated document PDFs")
+  class GeneratedDocumentPdfs {
+
+    private static final String PDF = UsageEventTypes.DOCUMENT_PDF_GENERATE;
+
+    private final List<String> lookups = new ArrayList<>();
+
+    @BeforeEach
+    void savedCompact() {
+      endpoint = new NeoUsageEventEndpoint(sunk::add, clock::get, (org, docType) -> {
+        lookups.add(docType);
+        return "compact";
+      });
+    }
+
+    private JSONObject pdf(String docType, String channel) throws Exception {
+      return event(PDF).put("target", docType).put("action", channel);
+    }
+
+    @Test
+    void aDownloadIsRecordedWithOnlyTypeChannelAndTemplate() throws Exception {
+      UsageEvent recorded = single(pdf("sales-invoice", "download")
+          .put("errorCode", "boom").put("durationMs", 12).put("properties", new JSONObject()
+              .put("variant", "modern").put("documentNo", "FV-0001").put("total", 121.0)));
+
+      assertAll(
+          () -> assertEquals(PDF, recorded.eventType()),
+          () -> assertEquals("sales-invoice", recorded.target()),
+          () -> assertEquals("download", recorded.action()),
+          () -> assertEquals(UsageEvent.OUTCOME_OK, recorded.outcome()),
+          () -> assertNull(recorded.errorCode()),
+          () -> assertNull(recorded.durationMs()),
+          () -> assertEquals("{\"variant\":\"modern\"}", recorded.properties()));
+      assertTrue(lookups.isEmpty(), "a valid variant from the client needs no lookup");
+    }
+
+    @Test
+    void aMissingVariantIsTheOrganizationsSavedOne() throws Exception {
+      UsageEvent recorded = single(pdf("goods-shipment", "print"));
+
+      assertEquals("{\"variant\":\"compact\"}", recorded.properties());
+      assertEquals(List.of("goods-shipment"), lookups);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "preview", "open", "", "server_render" })
+    void aPreviewOrAnyOtherChannelIsDropped(String channel) throws Exception {
+      assertAccepted(postEvents(pdf("sales-invoice", channel)), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "listing", "purchase-invoice", "" })
+    void aTypeThatIsNotADocumentIsDropped(String docType) throws Exception {
+      assertAccepted(postEvents(pdf(docType, "email")), 0, 1);
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void aFailedGenerationIsNotCounted() throws Exception {
+      assertAccepted(postEvents(pdf("sales-order", "email").put("outcome", "error")), 0, 1);
+      assertTrue(sunk.isEmpty());
     }
   }
 

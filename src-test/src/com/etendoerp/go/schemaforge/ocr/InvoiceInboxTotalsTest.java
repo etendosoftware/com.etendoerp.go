@@ -22,13 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import java.io.File;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -36,15 +33,16 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The amounts of an inbox document (ETP-6050): the GO rule of two roundings, HALF_UP, tax per rate
- * on the sum of the nets. The cases of the SPA's shared fixture
- * ({@code invoice-inbox-totals.json}) are run here too, so both sides compute the same cents.
+ * on the sum of the nets. The cases of this module's own file
+ * ({@code invoice-inbox-totals-cases.json}, scales 0/2/3, both tax modes, signs, rounding order)
+ * are run here too.
  *
  * @covers com.etendoerp.go.schemaforge.ocr.InvoiceInboxTotals
  */
 class InvoiceInboxTotalsTest {
 
-  private static final String FIXTURE =
-      "etendo_schema_forge/tools/app-shell/__tests__/fixtures/invoice-inbox-totals.json";
+  private static final String CASES =
+      "/com/etendoerp/go/schemaforge/ocr/invoice-inbox-totals-cases.json";
 
   private static BigDecimal d(String value) {
     return new BigDecimal(value);
@@ -54,34 +52,20 @@ class InvoiceInboxTotalsTest {
     return new JSONArray(json);
   }
 
-  // ------------------------------------------------------------------ the shared fixture
+  // ------------------------------------------------------------------ the cases file
 
-  /** The fixture of the SPA repo, or {@code null} when it is not checked out beside the module. */
-  private static File fixture() {
-    String base = System.getProperty("user.dir");
-    for (String relative : new String[] { "../../", "../", "", "../../../" }) {
-      File candidate = new File(base, relative + FIXTURE);
-      if (candidate.isFile()) {
-        return candidate;
-      }
+  private static JSONArray cases() throws Exception {
+    try (InputStream in = InvoiceInboxTotalsTest.class.getResourceAsStream(CASES)) {
+      assertNotNull(in, "the cases file " + CASES + " is on the test classpath");
+      return new JSONObject(new String(in.readAllBytes(), StandardCharsets.UTF_8))
+          .getJSONArray("cases");
     }
-    return null;
   }
 
   @Test
-  void everyCaseOfTheSharedFixtureGivesTheSameCents() throws Exception {
-    File file = fixture();
-    if (file == null && (Boolean.getBoolean("etgo.requireSpaFixture")
-        || "true".equals(System.getenv("ETGO_REQUIRE_SPA_FIXTURE")))) {
-      // A pipeline that has the SPA repo checked out sets the flag: a missing fixture is then a
-      // failure, not a skip that nobody sees.
-      fail("The shared fixture " + FIXTURE + " was not found and the SPA repo is required");
-    }
-    assumeTrue(file != null, "SKIPPED: the SPA repo is not beside the module, so the shared "
-        + "fixture " + FIXTURE + " was not compared (the inline cases below still run; set "
-        + "ETGO_REQUIRE_SPA_FIXTURE=true to make this a failure)");
-    JSONArray cases = new JSONObject(new String(Files.readAllBytes(file.toPath()),
-        StandardCharsets.UTF_8)).getJSONArray("cases");
+  void everyCaseOfTheCasesFileGivesTheExpectedCents() throws Exception {
+    JSONArray cases = cases();
+    assertTrue(cases.length() > 0, "the cases file has cases");
 
     for (int c = 0; c < cases.length(); c++) {
       JSONObject current = cases.getJSONObject(c);

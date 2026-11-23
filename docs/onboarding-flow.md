@@ -22,10 +22,23 @@ alongside the environment/role-list payload, for backend-only flags that must be
 tenant or role exists — the signup wizard runs ahead of both, so it cannot use the role-scoped
 `capabilities` map `SFWindowAccessMap` serves elsewhere (§8c of `docs/neo-headless.md`). Today it
 carries a single key, `structuredAddressForSepa` (`GoFeatureFlags.isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)`,
-environment-wide, no per-account targeting), which the wizard's Company step reads to decide
-whether to render the structured Street/Number/Building Name/City block or the legacy single
-address field. Add future onboarding-time backend-only flags to this same object rather than
-inventing a second capabilities endpoint.
+per-account targeted, see the ETP-5806 follow-up in `docs/feature-flags-and-tenant-upgrade.md`), which
+the wizard's Company step reads to decide whether to render the structured Street/Number/Building
+Name/City block or the legacy single address field. Add future onboarding-time backend-only flags to
+this same object rather than inventing a second capabilities endpoint.
+
+**`buildSessionCapabilities` is called from every session-creation path, not only session restore
+(ETP-5806 follow-up).** `EtendoGoJwtServlet#writeSessionResponse` — the shared tail of register,
+login and SSO — populates `capabilities` exactly the same way `handleSessionRestore` does. Before
+this fix, only session restore (`GET /sws/go/session`) carried the key: register/login/SSO responses
+omitted it entirely, so `capabilities.structuredAddressForSepa` stayed stuck at its frontend "unknown"
+default (`{}`) for the **entire** onboarding session of a brand-new account — the mount-time
+session-restore call 401s for a not-yet-authenticated visitor, and nothing ever refreshed it after the
+account actually signed up or logged in. Every fresh sign-up therefore saw the legacy single-line
+address field in the Company step regardless of the flag's real value. The frontend
+(`OnboardingFlow.jsx`, `postAuth.js`, `LoginStep.jsx`, `RegisterStep.jsx`) now forwards the
+`capabilities` object from both register (password + SSO) and login (password + SSO) responses into
+`setCapabilities`, matching what session-restore already did.
 
 Client resolution never uses the company name (ETP-5548). The classic path
 creates the client under a **provisioning name** (`ProvisioningClientName`,
@@ -244,24 +257,34 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
   transaction: `ETGO_InitialPeriodStatePending` (value: org, admin user and admin role the step
   runs as; deleted on success) and, for a productive signup only, `ETGO_CalendarReviewRequired`
   (`Y`). Tenants created before ETP-5577 have neither, so nothing here ever touches them and they
-  never see the calendar review.
+  never see the calendar review. Like every `Preferences.setPreferenceValue` row, both are owned
+  by client `0` and point at the tenant through `VISIBLEAT_CLIENT_ID`. The step runs with the
+  tenant as the current client, and the DAL write check refuses deleting a client-0 row from
+  there, so the pending marker is removed as system (`SystemContext`, the same as
+  `TenantPlanService.retireProductivePreference`). Until ETP-6212 it was removed in admin mode
+  with the client check on, and the step failed on every onboarding.
 - **Where.** `EtendoGoJwtServlet.applyInitialPeriodStateBestEffort`, right after the onboarding
   commit and before `completeCommittedOnboarding`, for pooled and classic onboardings alike.
-- **Best effort, retried on login.** Own transaction, commit inside the try: a failure rolls back
-  only this step, the onboarding still succeeds, and the pending marker survives;
-  `retryInitialPeriodStateOnLogin` re-runs it on the next environment login while the marker
-  exists. Log markers: `ETP-5577 initial period state started|done|failed for client <id>`.
+- **Best effort, retried on environment entry.** Own transaction, commit inside the try: a
+  failure rolls back only this step, the onboarding still succeeds, and the pending marker
+  survives. `retryInitialPeriodStateOnLogin` re-runs it while the marker exists, but only when
+  someone enters the environment: `handleSessionEnvironment` (cookie session) or the legacy
+  environment login (`writeEnvironmentLoginResponse`). Two cases never retry it: a support
+  session (`SupportHandoffService` creates the session already inside the tenant) and a session
+  that already carries the environment. Log markers:
+  `ETP-5577 initial period state started|done|failed for client <id>`.
 - **Runbook — tenants whose initial state never applied:**
 
   ```sql
   SELECT c.ad_client_id, c.name, p.value AS pending_args, p.updated
-  FROM ad_preference p JOIN ad_client c ON c.ad_client_id = p.ad_client_id
+  FROM ad_preference p JOIN ad_client c ON c.ad_client_id = p.visibleat_client_id
   WHERE p.attribute = 'ETGO_InitialPeriodStatePending';
   ```
 
-  A row older than a few minutes means the post-commit step failed and nobody has logged in since
-  (search the logs for `ETP-5577 initial period state failed`). The next login of any user of the
-  environment retries it.
+  Join on `visibleat_client_id`: the row's own `ad_client_id` is always `0`. A row older than a
+  few minutes means the post-commit step failed and nobody has entered the environment since
+  (search the logs for `ETP-5577 initial period state failed`). The next environment entry by
+  any user retries it.
 
 **Default contact category, after the commit (ETP-5791).** The GOClient dataset
 (`referencedata/sampledata/GOClient/C_BP_GROUP.xml`) ships four contact categories with their

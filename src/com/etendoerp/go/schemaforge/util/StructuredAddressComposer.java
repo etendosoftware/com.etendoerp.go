@@ -51,16 +51,27 @@ public final class StructuredAddressComposer {
   private static final int ADDRESS_LINE_MAX_LENGTH = 60;
 
   /**
-   * Field lengths of the 3 structured SEPA columns themselves ({@code org.openbravo.sepa.iso20022}'s
-   * {@code AD_COLUMN.FIELDLENGTH} for {@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm}:
-   * VARCHAR(70)/(16)/(35) respectively). ETP-5806 follow-up: neither the UI nor this handler
-   * enforced them before a value was written, so a value longer than the DB column reached
-   * {@code OBDal.flush()} as a raw data-truncation SQL exception — surfaced to the caller as an
-   * opaque 500 with no indication of which field or why. {@link #fieldsExceedingMaxLength} turns
-   * that into a clean 400 before the write is attempted, on both create and update, for both
-   * handlers that call into this composer.
+   * Field lengths of the 3 structured SEPA columns themselves. Building Number and Building Name
+   * mirror {@code org.openbravo.sepa.iso20022}'s own {@code AD_COLUMN.FIELDLENGTH} for
+   * {@code EM_OBSEPA_BldgNb}/{@code BldgNm}: VARCHAR(16)/(35). ETP-5806 follow-up: neither the UI
+   * nor this handler enforced them before a value was written, so a value longer than the DB
+   * column reached {@code OBDal.flush()} as a raw data-truncation SQL exception — surfaced to the
+   * caller as an opaque 500 with no indication of which field or why. {@link
+   * #fieldsExceedingMaxLength} turns that into a clean 400 before the write is attempted, on both
+   * create and update, for every handler that calls into this composer.
+   *
+   * <p><b>Street Name is 60, NOT the SEPA column's 70 (CP-6, agreed with product + QA).</b> The
+   * underlying column, {@code EM_OBSEPA_StrtNm}, legitimately stays {@code VARCHAR(70)} — it is a
+   * real SEPA/ISO20022 field other consumers may fill up to that width, and shrinking the column
+   * itself would both break existing 61-70 char data on {@code update.database} and wrongly
+   * restrict SEPA export for callers unrelated to this composer. The composer's OWN cap is 60,
+   * stricter than the column, specifically so {@link #composeAddressLines}'s street-truncating
+   * branches become structurally unreachable for valid input: a street that cannot fit on the
+   * 60-char {@link #ADDRESS_LINE_MAX_LENGTH} line is now rejected here with a clean 400 before
+   * {@code composeAddressLines} ever sees it, instead of being silently cut mid-word when composed
+   * into {@code Address1}/{@code Address2}.
    */
-  private static final int STREET_NAME_MAX_LENGTH = 70;
+  private static final int STREET_NAME_MAX_LENGTH = 60;
   private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
   private static final int BUILDING_NAME_MAX_LENGTH = 35;
 
@@ -127,6 +138,22 @@ public final class StructuredAddressComposer {
    * <p>Separators: {@code ", "} between street and number; {@code " - "} (space-dash-space)
    * between street+number and building name in Line 1. {@code append} only inserts a separator
    * when both sides are non-blank.
+   *
+   * <p><b>The street-truncating branches below are dead code in practice (CP-6, re-fixed).</b> An
+   * earlier revision of this javadoc required truncation because the composer's own validation cap
+   * matched the SEPA column's 70 chars, letting a 61-70 char street pass {@link
+   * #fieldsExceedingMaxLength} and then overflow the 60-char {@code Address1}/{@code Address2}
+   * line, forcing a silent mid-word cut. {@link #STREET_NAME_MAX_LENGTH} is now 60 — tighter than
+   * the SEPA column — so any street that reaches this method has already been validated to fit
+   * {@link #ADDRESS_LINE_MAX_LENGTH} on its own: the branches that truncate the street itself
+   * ({@code streetAndNumber.length() > ADDRESS_LINE_MAX_LENGTH}) can no longer be taken by valid
+   * input. They are left in place anyway, unchanged, as correct defensive behavior for a street
+   * that somehow reaches this method without going through {@link #fieldsExceedingMaxLength} first
+   * (a future caller that forgets the check, or a pre-existing record edited around the
+   * validation), and because they still match Classic's {@code LocationSEPA.java::fillAddressLines}
+   * ({@code org.openbravo.sepa.iso20022}) exactly, which this method is a direct port of. The
+   * building-name-only truncation path (street+number fits, the composed whole does not) stays
+   * fully reachable — Building Name has no line-width cap of its own.
    *
    * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
    * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
@@ -255,6 +282,53 @@ public final class StructuredAddressComposer {
       tooLong.add("buildingName");
     }
     return tooLong;
+  }
+
+  /**
+   * ETP-5806 CP-12b (QA finding) — whether an update's write path should merge the stored record
+   * into the body before validating mandatory fields: always for a PATCH, and for a PUT whenever
+   * the body alone (with the flag on) cannot satisfy them on its own.
+   *
+   * <p>Kept here, not in the calling handler, specifically so the handler's own update method
+   * stays a straight sequence of calls with no extra branching of its own — {@code
+   * ContactsLocationAddressHandler#handleUpdate} already carries plenty of control flow, and
+   * every {@code &&}/{@code ||} added to it directly raises its own Cognitive Complexity. The
+   * branching that decides this one boolean belongs in a single-purpose method instead, the same
+   * way {@link #missingMandatoryFields} and {@link #fieldsExceedingMaxLength} already centralize
+   * the other mandatory-field decisions this composer owns.
+   *
+   * <p>MCP's {@code etendo_update} always maps to HTTP PUT ({@code McpToolRouter#handleUpdate}),
+   * so gating the merge purely on PATCH vs PUT meant a single-field MCP edit (e.g. only {@code
+   * buildingName}) reached validation with the rest of the structured fields genuinely absent
+   * from the body and a clean 400, even though they already existed on the stored record. A true
+   * full-replace PUT (the UI form, a REST client resending the complete address) is unaffected:
+   * it already satisfies every mandatory field, so this returns {@code false} and the merge is
+   * skipped exactly as before.
+   *
+   * @param httpMethod               the request's HTTP method
+   * @param structuredAddressEnabled whether {@code structured-address-for-sepa} is on for the
+   *                                 caller's account; with it off, only a PATCH merges
+   * @param streetName               the raw body value, before any merge — see
+   *                                 {@code ContactsLocationAddressHandler#readAlias}
+   * @param buildingNumber           the raw body value, before any merge
+   * @param cityName                 the raw body value, before any merge
+   * @param countryId                the raw body value, before any merge — NOT falling back to
+   *                                 the stored record's own country, unlike
+   *                                 {@code effectiveCountryForValidation}: this method asks
+   *                                 whether the body is self-sufficient, so a country the body
+   *                                 never mentions must count as missing here
+   * @return {@code true} when the stored record should be merged into the body first
+   */
+  public static boolean requiresMergeOnUpdate(String httpMethod, boolean structuredAddressEnabled,
+      String streetName, String buildingNumber, String cityName, String countryId) {
+    if ("PATCH".equals(httpMethod)) {
+      return true;
+    }
+    if (!structuredAddressEnabled) {
+      return false;
+    }
+    return !missingMandatoryFields(streetName, effectiveBuildingNumber(streetName, buildingNumber),
+        cityName, countryId).isEmpty();
   }
 
   private static String append(String base, String separator, String part) {

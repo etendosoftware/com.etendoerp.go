@@ -79,6 +79,7 @@ import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.invoicing.PaymentLedger;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
@@ -116,6 +117,7 @@ import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.telemetry.AccountingKpiTelemetry;
+import com.etendoerp.go.schemaforge.util.OwnerAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.payment.CheckoutPromotionTerms;
@@ -263,6 +265,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_CSRF_TOKEN = "csrfToken";
   private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ETGO_ACCOUNT_ID = "etgoAccountId";
   private static final String FIELD_ROLE_LIST = "roleList";
   private static final String HEADER_USER_AGENT = "User-Agent";
   private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
@@ -466,6 +469,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_PHONE = "phone";
   private static final String FIELD_SECTOR = "sector";
   private static final String FIELD_SECTOR_MISSING = "sectorMissing";
+  /** ETP-6363 — the account's first qualification milestone, on {@code /me}. */
+  static final String FIELD_FIRST_KEY_ACTION = "firstKeyAction";
+  static final String FIELD_FIRST_KEY_ACTION_NAME = "action";
+  static final String FIELD_FIRST_KEY_ACTION_AT = "at";
+  /** ETP-6363 — the lead attribution a sign-up sends (HubSpot's visitor cookie and page). */
+  private static final String FIELD_HUBSPOT_CONTEXT = "hubspotContext";
+  /** ETP-6363 — whether a single sign-on created the account (a sign-up) or found it (a login). */
+  private static final String FIELD_ACCOUNT_CREATED = "accountCreated";
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -566,6 +577,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
+  /** ETP-6322 — records each paid invoice for the ERP to invoice; package-visible for tests. */
+  PaymentLedger paymentLedger = new PaymentLedger();
   /**
    * ETP-5047 — one guard for the servlet's life. It reads {@link #tenantEnvironmentLifecycleService}
    * at every check, so a test that replaces that field keeps working.
@@ -2447,6 +2460,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Recorded in this event's transaction, which the result mark below commits: if applying
     // fails, it is rolled back with it and the redelivery records it again. Never throws.
     HubSpotOutbox.stripeEvent(type, event);
+    // ETP-6322 — the payment the ERP invoices, in the same transaction. Unlike the HubSpot row it
+    // may throw: the event is then marked failed and redelivered, so no payment is ever
+    // acknowledged without being kept.
+    paymentLedger.recordPayment(type, event);
     if (CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
       applyCheckoutPaid(eventId, type, event);
       return;
@@ -2933,6 +2950,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     handleRegister(request, response, true);
   }
 
+  /**
+   * The optional marketing data of the register form, for HubSpot: the phone (ETP-6081), the
+   * business sector (ETP-6082), the country and the lead attribution (ETP-6363). A value that is
+   * not valid is dropped rather than refusing the sign-up over a marketing field.
+   */
+  private static void recordSignupMarketingData(Account account, JSONObject body) {
+    // ETP-6081: the optional phone of the register form. A value that is not a phone is dropped
+    // rather than refusing the sign-up over a marketing field (the form already validates it).
+    String phone = SignupPhone.normalize(body.optString(FIELD_PHONE, null));
+    if (phone != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
+    }
+    // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
+    // value outside the list is dropped rather than refusing the sign-up over a marketing field.
+    String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
+    if (sector != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+    }
+    // ETP-6363: the country of the register form, for HubSpot. Marketing data only: the
+    // organization keeps its own country. The form requires it; a code that names no country is
+    // dropped rather than refusing the sign-up over a marketing field.
+    String countryCode = HubSpotOutbox.countryCode(body.optString(FIELD_COUNTRY_CODE, null));
+    if (countryCode != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_COUNTRY_CODE, countryCode);
+    }
+    // ETP-6363: the lead attribution, kept until the address is confirmed and the sign-up goes
+    // to HubSpot's form. Absent when the visitor refused the cookies; never a reason to refuse.
+    String hubspotContext = HubSpotOutbox.signupContext(
+        body.optJSONObject(FIELD_HUBSPOT_CONTEXT));
+    if (hubspotContext != null) {
+      account.set(EtendoGoJwtDalHelper.PROPERTY_HUBSPOT_CONTEXT, hubspotContext);
+    }
+  }
+
   private void handleRegister(HttpServletRequest request, HttpServletResponse response,
       boolean createCookieSession) throws IOException {
     JSONObject body;
@@ -3003,18 +3054,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
-      // ETP-6081: the optional phone of the register form. A value that is not a phone is dropped
-      // rather than refusing the sign-up over a marketing field (the form already validates it).
-      String phone = SignupPhone.normalize(body.optString(FIELD_PHONE, null));
-      if (phone != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
-      }
-      // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
-      // value outside the list is dropped rather than refusing the sign-up over a marketing field.
-      String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
-      if (sector != null) {
-        account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
-      }
+      recordSignupMarketingData(account, body);
       // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
       // older screen) gave none.
       TermsAndConditionsService.recordMarketingConsent(account,
@@ -3076,12 +3116,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return passwordHash == null ? AUTH_METHOD_LINK : FIELD_PASSWORD;
   }
 
+  /** Work done for an authenticated login/session-create request, still in admin mode. */
+  @FunctionalInterface
+  private interface AuthenticatedLoginAction {
+    void run(Account account) throws JSONException, IOException;
+  }
+
   /**
-   * POST /sws/go/login
-   * Body: { "email": "...", "password": "..." }
-   * Returns 200 with new session token on success, 401 on invalid credentials.
+   * Shared flow of /login and /session: parses the JSON body, checks email and local password
+   * (coded 400/401 on failure so the front maps them to the right message) and runs the action
+   * in admin mode for the matching account.
    */
-  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+  private void handleCredentialLogin(HttpServletRequest request, HttpServletResponse response,
+      String label, String serverErrorMessage, AuthenticatedLoginAction action)
       throws IOException {
     JSONObject body;
     try {
@@ -3091,7 +3138,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
-
     String email;
     String password;
     try {
@@ -3114,30 +3160,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             INVALID_CREDENTIALS, INVALID_CREDENTIALS);
         return;
       }
-
-      String sessionToken = generateToken();
-      EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
-
-      JSONObject accountJson = buildAccountJson(account);
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_TOKEN, sessionToken);
-      result.put(FIELD_ACCOUNT, accountJson);
-
-      writeResponse(response, HttpServletResponse.SC_OK, result);
+      action.run(account);
     } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("login", e, log);
-      log.error("Database error during login", e);
+      EtendoGoDalHelper.rollbackDalChanges(label, e, log);
+      log.error("Database error during {}", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_LOGIN_SERVER_ERROR,
-          "Login failed due to a server error", "Login failed due to a server error");
+          serverErrorMessage, serverErrorMessage);
     } catch (JSONException e) {
-      log.error("JSON error building login response", e);
+      log.error("JSON error building {} response", label, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
           INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * POST /sws/go/login
+   * Body: { "email": "...", "password": "..." }
+   * Returns 200 with new session token on success, 401 on invalid credentials.
+   */
+  private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    handleCredentialLogin(request, response, "login", "Login failed due to a server error",
+        account -> {
+          String sessionToken = generateToken();
+          EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
+
+          JSONObject result = new JSONObject();
+          result.put(FIELD_STATUS, STATUS_SUCCESS);
+          result.put(FIELD_TOKEN, sessionToken);
+          result.put(FIELD_ACCOUNT, buildAccountJson(account));
+
+          writeResponse(response, HttpServletResponse.SC_OK, result);
+        });
   }
 
   /**
@@ -3220,6 +3276,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return signupFieldsOf(rawBody).optBoolean(FIELD_MARKETING_CONSENT, false);
   }
 
+  /** ETP-6363 — the lead attribution an SSO body carries, kept only if it creates the account. */
+  static String hubspotContextOf(String rawBody) {
+    return HubSpotOutbox.signupContext(
+        signupFieldsOf(rawBody).optJSONObject(FIELD_HUBSPOT_CONTEXT));
+  }
+
   /** The JSON object of an SSO body, or an empty one when the body is not a JSON object. */
   private static JSONObject signupFieldsOf(String rawBody) {
     if (StringUtils.isBlank(rawBody) || !rawBody.trim().startsWith("{")) {
@@ -3253,19 +3315,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       String sessionToken = generateToken();
-      Account account = resolveSsoAccount(assertion, sessionToken, termsVersionOf(rawBody),
-          marketingConsentOf(rawBody), response);
-      if (account == null) {
+      SsoAccount resolved = resolveSsoAccount(assertion, sessionToken, termsVersionOf(rawBody),
+          marketingConsentOf(rawBody), hubspotContextOf(rawBody), response);
+      if (resolved == null) {
         return;
       }
 
-      JSONObject accountJson = buildAccountJson(account);
+      JSONObject accountJson = buildAccountJson(resolved.account());
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_TOKEN, sessionToken);
       result.put(FIELD_AUTH_METHOD, "sso");
       result.put(FIELD_ACCOUNT, accountJson);
+      result.put(FIELD_ACCOUNT_CREATED, resolved.created());
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -3287,9 +3350,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * admin context, storing {@code sessionToken} as its platform token. Writes a 409 and returns
    * {@code null} on a linking conflict. Shared by the legacy SSO login and the cookie SSO create.
    */
-  private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
-      String sentTermsVersion, boolean marketingConsent, HttpServletResponse response)
-      throws IOException {
+  private SsoAccount resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
+      String sentTermsVersion, boolean marketingConsent, String hubspotContext,
+      HttpServletResponse response) throws IOException {
     // ETP-5351: nobody signs in as the technical support account, whatever the provider asserts.
     if (SupportAccessGuard.isSupportEmail(assertion.getEmail())) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
@@ -3324,9 +3387,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       TermsAndConditionsService.recordMarketingConsent(created, marketingConsent);
       EtendoGoJwtDalHelper.recordTermsAcceptance(created,
           termsService.resolveAcceptedVersion(sentTermsVersion, null), loginAt);
+      // ETP-6363: the lead attribution, reported at once with the account (the provider vouched
+      // for the address).
+      if (hubspotContext != null) {
+        created.set(EtendoGoJwtDalHelper.PROPERTY_HUBSPOT_CONTEXT, hubspotContext);
+      }
       HubSpotOutbox.accountCreated(created);
       EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
-      return created;
+      return new SsoAccount(created, true);
     }
     boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
@@ -3335,7 +3403,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // provider is a lead from now on, as if it had followed the mailed link.
       reportConfirmedAccount(account);
     }
-    return account;
+    return new SsoAccount(account, false);
+  }
+
+  /**
+   * The account a single sign-on resolved, and whether it created it: the frontend tells a
+   * sign-up from a login with it (ETP-6363, marketing's {@code sign_up} / {@code login}).
+   */
+  private record SsoAccount(Account account, boolean created) {
   }
 
   /**
@@ -3358,14 +3433,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = resolveSsoAccount(assertion, generateToken(), termsVersionOf(rawBody),
-          marketingConsentOf(rawBody), response);
-      if (account == null) {
+      SsoAccount resolved = resolveSsoAccount(assertion, generateToken(),
+          termsVersionOf(rawBody), marketingConsentOf(rawBody), hubspotContextOf(rawBody),
+          response);
+      if (resolved == null) {
         return;
       }
-      IssuedGoSession issued = goSessionService.create(account.getId(), "sso",
+      IssuedGoSession issued = goSessionService.create(resolved.account().getId(), "sso",
           request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, resolved.account(), issued,
+          resolved.created());
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session SSO create", e, log);
       log.error("Database error during SSO session create", e);
@@ -3533,6 +3610,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   static boolean isSectorMissing(Account account) {
     return account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR) == null;
+  }
+
+  /**
+   * ETP-6363 — the account's first key action ({@code {"action", "at"}}), absent while it has
+   * reached no milestone: the browser reports it to marketing's tag container once
+   * ({@code first_key_action}), since it cannot see the milestones itself.
+   */
+  static void putFirstKeyAction(JSONObject result, String accountId) throws JSONException {
+    Optional<HubSpotOutbox.FirstKeyAction> first = HubSpotOutbox.firstKeyAction(accountId);
+    if (first.isPresent()) {
+      result.put(FIELD_FIRST_KEY_ACTION, new JSONObject()
+          .put(FIELD_FIRST_KEY_ACTION_NAME, first.get().action())
+          .put(FIELD_FIRST_KEY_ACTION_AT, first.get().at().toString()));
+    }
   }
 
   static void storeMissingSector(Account account, String sector) {
@@ -4033,6 +4124,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
       // ETP-6082: the onboarding asks the business sector only when the account has none yet.
       result.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
+      putFirstKeyAction(result, account.getId());
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -7630,49 +7722,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionCreate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    JSONObject body;
-    try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
-      return;
-    }
-
-    String email;
-    String password;
-    try {
-      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString(FIELD_PASSWORD);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_EMAIL_PASSWORD);
-      return;
-    }
-
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
-      if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
-          || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
-        return;
-      }
-
-      IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-          request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
-    } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
-      log.error("Database error during session create", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Session creation failed due to a server error");
-    } catch (JSONException e) {
-      log.error("JSON error building session response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    handleCredentialLogin(request, response, "session create",
+        "Session creation failed due to a server error", account -> {
+          IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
+              request.getHeader(HEADER_USER_AGENT), null);
+          writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+        });
   }
 
   /**
@@ -8090,7 +8145,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Build the environment block of a restore response: the selected {@code user/role/client/org/
    * warehouse}, or {@code null} when no environment has been entered yet on this session.
    */
-  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+  static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
     if (sessionRecord.getUserId() == null) {
       return JSONObject.NULL;
     }
@@ -8100,7 +8155,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     env.put(FIELD_CLIENT_ID, sessionRecord.getCtxClientId());
     env.put("orgId", sessionRecord.getCtxOrgId());
     env.put("warehouseId", sessionRecord.getWarehouseId());
+    // ETP-6228: the account that OWNS the environment, for analytics; not `account.id`, which is
+    // whoever is signed in. Left out when it cannot be resolved, never guessed.
+    String ownerAccountId = ownerAccountIdOf(sessionRecord.getCtxClientId());
+    if (ownerAccountId != null) {
+      env.put(FIELD_ETGO_ACCOUNT_ID, ownerAccountId);
+    }
     return env;
+  }
+
+  private static String ownerAccountIdOf(String clientId) {
+    if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) {
+      return null;
+    }
+    try {
+      return OwnerAccountResolver.findOwnerAccountId(clientId);
+    } catch (RuntimeException e) {
+      log.debug("Owner account of client {} not resolved: {}", clientId, e.getMessage());
+      return null;
+    }
   }
 
   private static JSONArray loadSessionRoleList(GoSessionRecord sessionRecord) throws JSONException {
@@ -8321,11 +8394,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
-   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
-   * is never placed in the body.
+   * {@code nosniff} headers, and returns { status, account, csrfToken, capabilities }. The session
+   * token itself is never placed in the body.
+   *
+   * <p>ETP-5806 follow-up: {@code capabilities} must be populated here too, not only on session
+   * restore ({@link #handleSessionRestore}). This method is the shared tail of all three
+   * session-creation paths — register, login and SSO — so without it the onboarding/login frontend
+   * never learns the real flag value for a brand-new session and falls back to its "capability
+   * unknown" default on every one of them, not just register.
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
+    writeSessionResponse(response, status, account, issued, null);
+  }
+
+  /**
+   * As {@link #writeSessionResponse(HttpServletResponse, int, Account, IssuedGoSession)}, also
+   * saying whether a single sign-on created the account ({@code accountCreated}, ETP-6363).
+   * {@code null} leaves the field out.
+   */
+  private void writeSessionResponse(HttpServletResponse response, int status, Account account,
+      IssuedGoSession issued, Boolean accountCreated) throws IOException, JSONException {
     commitAndSetSessionCookies(response, issued);
     response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
@@ -8336,6 +8425,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put(FIELD_STATUS, STATUS_SUCCESS);
     result.put(FIELD_ACCOUNT, accountJson);
     result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+    result.put(FIELD_CAPABILITIES, buildSessionCapabilities(account.getEmail()));
+    if (accountCreated != null) {
+      result.put(FIELD_ACCOUNT_CREATED, accountCreated.booleanValue());
+    }
     writeResponse(response, status, result);
   }
 

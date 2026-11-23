@@ -138,12 +138,13 @@ class InboxLineMatcherTest {
   // ---------------------------------------------------------------- products
 
   @Test
-  @DisplayName("ETP-5654: a lookalike that shares only a code is NOT linked (Mosquetón vs Arnés ... QA5289)")
-  void aLookalikeIsNeverLinked() throws Exception {
+  @DisplayName("ETP-6051: a lookalike that shares only a code is never linked as a match, only suggested (Mosquetón vs Arnés ... QA5289)")
+  void aLookalikeIsOnlySuggested() throws Exception {
     JSONObject product = product("Mosquetón HMS QA5289", new Candidate("P9", HARNESS, "72"));
 
-    assertEquals("ambiguous", product.getString(STATE));
-    assertFalse(product.has("id") && !product.isNull("id"), "no product is chosen");
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("suggested", product.getString("matchedBy"), "chosen for the user, not matched");
+    assertEquals("P9", product.getString("id"));
     assertEquals("P9", product.getJSONArray("candidates").getJSONObject(0).getString("id"));
     assertEquals("72", product.getJSONArray("candidates").getJSONObject(0).getString("similarity"));
   }
@@ -162,22 +163,28 @@ class InboxLineMatcherTest {
   }
 
   @Test
-  @DisplayName("two candidates tied at 93 % are only suggested")
+  @DisplayName("ETP-6051: two candidates tied at 93 % are only suggested: the first is chosen, both stay listed")
   void aTieIsOnlySuggested() throws Exception {
     JSONObject product = product("Servicio web", new Candidate("P1", "Servicios web", "93"),
         new Candidate("P2", "Servicio webs", "93"));
 
-    assertEquals("ambiguous", product.getString(STATE));
-    assertTrue(product.isNull("id"));
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("suggested", product.getString("matchedBy"));
+    assertEquals("P1", product.getString("id"));
+    assertEquals("Servicios web", product.getString("name"));
+    assertEquals(2, product.getJSONArray("candidates").length());
   }
 
   @Test
-  @DisplayName("the threshold is 90 %: 90 links, 89.9 does not")
+  @DisplayName("the threshold is 90 %: 90 is a match by similarity, 89.9 only a suggestion")
   void theThresholdIsNinety() throws Exception {
-    assertEquals("linked", product("Servicio web", new Candidate("P1", "Servicios web", "90"))
-        .getString(STATE));
-    assertEquals("ambiguous", product("Servicio web", new Candidate("P1", "Servicios web", "89.9"))
-        .getString(STATE));
+    JSONObject atNinety = product("Servicio web", new Candidate("P1", "Servicios web", "90"));
+    JSONObject belowNinety = product("Servicio web", new Candidate("P1", "Servicios web", "89.9"));
+
+    assertEquals("linked", atNinety.getString(STATE));
+    assertEquals("similarity", atNinety.getString("matchedBy"));
+    assertEquals("linked", belowNinety.getString(STATE));
+    assertEquals("suggested", belowNinety.getString("matchedBy"));
   }
 
   @Test
@@ -192,12 +199,26 @@ class InboxLineMatcherTest {
   }
 
   @Test
-  @DisplayName("two exact names are not decided for the user: ambiguous")
-  void twoExactNamesAreAmbiguous() throws Exception {
+  @DisplayName("ETP-6051: two exact names are only suggested: the first listed is chosen, the other stays a candidate")
+  void twoExactNamesAreOnlySuggested() throws Exception {
     JSONObject product = product(HARNESS, new Candidate("P8", "Arnes escalada QA5289 talla M", "99"),
         new Candidate("P9", HARNESS, "99"));
 
-    assertEquals("ambiguous", product.getString(STATE));
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("suggested", product.getString("matchedBy"));
+    assertEquals("P8", product.getString("id"));
+    assertEquals("P9", product.getJSONArray("candidates").getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("ETP-6051: the chosen suggestion is the first candidate with an id, in the order the search gave")
+  void theSuggestionIsTheFirstCandidateWithAnId() throws Exception {
+    JSONObject product = product("Servicio web", new Candidate(null, "Sin id", "80"),
+        new Candidate("P2", "Servicio webs", "70"), new Candidate("P3", "Servicios", "60"));
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("suggested", product.getString("matchedBy"));
+    assertEquals("P2", product.getString("id"));
   }
 
   @Test
@@ -210,6 +231,116 @@ class InboxLineMatcherTest {
 
     assertEquals("new", product("Brand new thing", new Candidate(null, "ghost", "99"))
         .getString(STATE));
+  }
+
+  // ---------------------------------------------------------------- the unit and the new-product defaults (ETP-6051)
+
+  private static JSONArray itemsWithUnit(String description, Object unit) throws JSONException {
+    return new JSONArray().put(new JSONObject().put(DESCRIPTION, description).put("quantity", 1)
+        .put("unit_price", 5).put("unit", unit));
+  }
+
+  private JSONObject lineWithUnit(Object unit) throws Exception {
+    lookups.products = List.of(List.of());
+    return matcher.review(itemsWithUnit("Brand new thing", unit), LOCATION, DATE).getJSONObject(0);
+  }
+
+  @Test
+  @DisplayName("the printed unit is kept on the line only when it is not blank")
+  void theUnitPrintedIsKeptOnlyWhenFilled() throws Exception {
+    assertEquals("kg", lineWithUnit("kg").getString("unitPrinted"));
+    assertFalse(lineWithUnit("  ").has("unitPrinted"));
+    assertFalse(lineWithUnit(JSONObject.NULL).has("unitPrinted"));
+    assertFalse(matcher.review(items("Widget"), LOCATION, DATE).getJSONObject(0)
+        .has("unitPrinted"));
+  }
+
+  @Test
+  @DisplayName("a new product takes the unit it printed (ocr) and the default category (default)")
+  void aNewProductIsPreFilledFromThePrintedUnitAndTheDefaultCategory() throws Exception {
+    lookups.unitsByPrinted.put("kg", new OcrLookups.Party("U-KG", "Kilogramo"));
+    lookups.defaultUom = java.util.Optional.of(new OcrLookups.Party("U-DEF", "Unit"));
+    lookups.defaultCategory = java.util.Optional.of(new OcrLookups.Party("C-DEF", "General"));
+
+    JSONObject draft = lineWithUnit("kg").getJSONObject(PRODUCT).getJSONObject("new");
+
+    assertEquals("U-KG", draft.getString("uomId"));
+    assertEquals("ocr", draft.getString("uomSource"));
+    assertEquals("C-DEF", draft.getString("categoryId"));
+    assertEquals("default", draft.getString("categorySource"));
+    assertFalse(draft.has("uom"), "display names are never stored");
+  }
+
+  @Test
+  @DisplayName("a printed unit that matches none, or no printed unit, gives the default unit")
+  void anUnmatchedOrAbsentUnitFallsBackToTheDefaultUnit() throws Exception {
+    lookups.defaultUom = java.util.Optional.of(new OcrLookups.Party("U-DEF", "Unit"));
+
+    JSONObject unmatched = lineWithUnit("zzz").getJSONObject(PRODUCT).getJSONObject("new");
+    JSONObject absent = lineWithUnit(JSONObject.NULL).getJSONObject(PRODUCT).getJSONObject("new");
+
+    assertEquals("U-DEF", unmatched.getString("uomId"));
+    assertEquals("default", unmatched.getString("uomSource"));
+    assertEquals("U-DEF", absent.getString("uomId"));
+    assertEquals("default", absent.getString("uomSource"));
+    assertEquals(List.of("zzz"), lookups.printedUnitAsks, "a blank unit is never asked");
+  }
+
+  @Test
+  @DisplayName("without a default unit or category the new block carries none of them, and is omitted when empty")
+  void nothingFoundOmitsTheNewBlock() throws Exception {
+    assertFalse(lineWithUnit(JSONObject.NULL).getJSONObject(PRODUCT).has("new"));
+
+    lookups.defaultCategory = java.util.Optional.of(new OcrLookups.Party("C-DEF", "General"));
+    // the defaults are asked once per matcher: a new matcher sees the category
+    matcher = new InboxLineMatcher(lookups);
+    JSONObject onlyCategory = lineWithUnit(JSONObject.NULL).getJSONObject(PRODUCT)
+        .getJSONObject("new");
+    assertEquals("C-DEF", onlyCategory.getString("categoryId"));
+    assertFalse(onlyCategory.has("uomId"));
+    assertFalse(onlyCategory.has("uomSource"));
+  }
+
+  @Test
+  @DisplayName("a linked product ignores the unit: no new block, the printed unit is kept")
+  void aLinkedProductHasNoNewBlock() throws Exception {
+    lookups.unitsByPrinted.put("kg", new OcrLookups.Party("U-KG", "Kilogramo"));
+    lookups.defaultCategory = java.util.Optional.of(new OcrLookups.Party("C-DEF", "General"));
+    lookups.products = List.of(List.of(new Candidate("P1", "Widget", "99")));
+
+    JSONObject line = matcher.review(itemsWithUnit("Widget", "kg"), LOCATION, DATE)
+        .getJSONObject(0);
+
+    assertEquals("linked", line.getJSONObject(PRODUCT).getString(STATE));
+    assertFalse(line.getJSONObject(PRODUCT).has("new"));
+    assertEquals("kg", line.getString("unitPrinted"));
+    assertTrue(lookups.printedUnitAsks.isEmpty());
+  }
+
+  @Test
+  @DisplayName("a suggested product never gets a new block")
+  void aSuggestedProductHasNoNewBlock() throws Exception {
+    lookups.defaultCategory = java.util.Optional.of(new OcrLookups.Party("C-DEF", "General"));
+    lookups.products = List.of(List.of(new Candidate("P1", "Widget", "99"),
+        new Candidate("P2", "Widget", "99")));
+
+    JSONObject product = matcher.review(itemsWithUnit("Widget", "kg"), LOCATION, DATE)
+        .getJSONObject(0).getJSONObject(PRODUCT);
+
+    assertEquals("linked", product.getString(STATE));
+    assertEquals("suggested", product.getString("matchedBy"));
+    assertFalse(product.has("new"));
+  }
+
+  @Test
+  @DisplayName("the default category is asked with the organization the matcher was given")
+  void theDefaultCategoryUsesTheGivenOrganization() throws Exception {
+    InboxLineMatcher forOrg = new InboxLineMatcher(lookups, "ROW-ORG");
+    lookups.products = List.of(List.of());
+
+    forOrg.review(itemsWithUnit("Brand new thing", "kg"), LOCATION, DATE);
+
+    assertEquals(List.of("ROW-ORG"), lookups.categoryOrganizations);
   }
 
   // ---------------------------------------------------------------- taxes

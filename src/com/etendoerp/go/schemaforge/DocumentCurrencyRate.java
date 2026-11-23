@@ -88,6 +88,10 @@ final class DocumentCurrencyRate {
    * for the shared {@link CurrencyOptionsHandler} it routes {@code currencyOptions} to.
    */
   static final String ATTR_RATE_TYPE = "etgo.documentRateType";
+  /** Core's {@code AD_MESSAGE} "Document posted/processed" (ETP-6177 rate lock). */
+  static final String MSG_PROCESSED = "20501";
+  /** {@code error.code} of the refusal of a rate change on a processed document (ETP-6177). */
+  static final String CODE_PROCESSED = "document_processed";
 
   private static final String PROP_CURRENCY = "currency";
   private static final String PROP_ORGANIZATION = "organization";
@@ -301,7 +305,7 @@ final class DocumentCurrencyRate {
     boolean create = StringUtils.isBlank(context.getRecordId());
     BaseOBObject stored = create ? null : load(context.getRecordId());
     if (!create && (stored == null || isProcessed(stored))) {
-      return null;
+      return stored == null ? null : refuseRateChangeOnProcessed(body, stored);
     }
     String bodyCurrency = idOf(body.opt(PROP_CURRENCY));
     LocalDate bodyDate = parseDate(body.opt(type.referenceDateProperty()));
@@ -329,17 +333,79 @@ final class DocumentCurrencyRate {
     if (finalRate != null && finalRate.signum() > 0) {
       return null;
     }
+    return missingRateRefusal(completing, changed, inputs, orgCurrencyId);
+  }
+
+  /**
+   * The refusal of a write whose rate to save is empty: missing on complete, emptied by the caller
+   * on a save that did not change the currency or the date, or missing from the rate range.
+   */
+  private NeoResponse missingRateRefusal(boolean completing, boolean changed, RateInputs inputs,
+      String orgCurrencyId) {
+    String currencyId = inputs.currencyId();
     if (completing) {
       return DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId));
     }
     // A write that changes neither the currency nor the date never looked the rate up: the rate is
     // empty because the caller cleared it (or it was stored empty), which says nothing about the
     // range. Only claim the range is missing when it really is (ETP-5840 QA CP-12a).
-    if (!changed && lookupRate(orgCurrencyId, currencyId, date, orgId, clientId) != null) {
+    if (!changed && lookupRate(orgCurrencyId, currencyId, inputs.referenceDate(), inputs.orgId(),
+        inputs.clientId()) != null) {
       return DocumentRateMessages.emptyOnSave(isoCode(orgCurrencyId), isoCode(currencyId));
     }
-    return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
-        type.referenceDateLabelKey(), type.referenceDateProperty());
+    return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId),
+        inputs.referenceDate(), type.referenceDateLabelKey(), type.referenceDateProperty());
+  }
+
+  /**
+   * ETP-6177: a write that changes the rate of a processed document is refused (422, nothing saved),
+   * whatever the document's currency — the organization's own included. The window locks its rate
+   * picker once the document is processed ({@code @Processed@='Y'}), and core's header restriction
+   * triggers do not cover the rate column, so without this an API, REST or MCP write changed the
+   * rate of a completed document. The refusal reuses core's {@code AD_MESSAGE} 20501 ("Document
+   * posted/processed"), the key core's own triggers answer for the other columns, so clients and
+   * the MCP recovery hint already know it. A body that does not send the rate, or sends the stored
+   * value, is not a change and keeps today's behaviour.
+   *
+   * @return the refusal, or {@code null}
+   */
+  private NeoResponse refuseRateChangeOnProcessed(JSONObject body, BaseOBObject stored)
+      throws JSONException {
+    if (!body.has(type.rateProperty())) {
+      return null;
+    }
+    // "Empty" means what it means in the rest of this class: absent, null, blank or non-positive
+    // (parseRate). Empty re-sent over an empty stored rate is no change; an unreadable value is.
+    Object sent = body.opt(type.rateProperty());
+    boolean sentBlank = sent == null || sent == JSONObject.NULL
+        || StringUtils.isBlank(String.valueOf(sent));
+    BigDecimal sentRate = sentBlank ? null : decimalOrNull(sent);
+    boolean sentEmpty = sentBlank || (sentRate != null && sentRate.signum() <= 0);
+    BigDecimal storedRate = (BigDecimal) stored.get(type.rateProperty());
+    if (storedRate != null && storedRate.signum() <= 0) {
+      storedRate = null;
+    }
+    boolean unchanged = sentEmpty ? storedRate == null
+        : sentRate != null && storedRate != null && sentRate.compareTo(storedRate) == 0;
+    if (unchanged) {
+      return null;
+    }
+    NeoResponse refusal = NeoMessageText.error(422, MSG_PROCESSED);
+    JSONObject error = refusal.getBody() != null ? refusal.getBody().optJSONObject("error") : null;
+    if (error != null) {
+      error.put("code", CODE_PROCESSED);
+    }
+    return refusal;
+  }
+
+  /** A sent rate as a number, or {@code null} when it is not one. */
+  private static BigDecimal decimalOrNull(Object value) {
+    try {
+      return value instanceof BigDecimal b ? b
+          : new BigDecimal(StringUtils.trimToEmpty(String.valueOf(value)));
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   /**

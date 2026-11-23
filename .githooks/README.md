@@ -49,6 +49,19 @@ estructural del modo PR para issues (0 siempre) corriendo un análisis paralelo
 en modo branch. Ninguno de los dos se cachea — su veredicto depende del
 servidor Sonar, no solo del árbol de trabajo.
 
+### Standalone or adopted worktrees
+
+Set `GO_CORE_DIR` to the absolute path of the Etendo core used for validation.
+Its `modules/com.etendoerp.go` directory must resolve to this same worktree
+(use `local-env` adoption). The hook refuses another checkout, even if it is
+clean, because Gradle would test different code. Both Sonar scripts use the
+same core for configuration. Without `GO_CORE_DIR`, the conventional layout
+`<core>/modules/com.etendoerp.go` remains the default.
+
+```bash
+GO_CORE_DIR=/absolute/path/to/core PRE_PUSH_TARGET=develop .githooks/pre-push
+```
+
 ## El trailer `Hooks-Verified`
 
 Se agrega automáticamente al final del mensaje del commit:
