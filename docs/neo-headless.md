@@ -7156,6 +7156,58 @@ is absent and a warning is logged. The reverse direction (order → invoices, `l
 `OrderInvoiceListSupport`) already joins through the invoice lines, for sales and purchase alike.
 Not declared in `responseEnrichedFields()`, like the other detail-only keys (§4.12.5).
 
+
+##### Manual tax lines of a purchase invoice — `hasManualTaxLines` (ETP-6284)
+
+A single-record `GET` of `purchase-invoice/header` carries `hasManualTaxLines` (boolean): whether the invoice has at least one active `C_InvoiceTax` row with `Recalculate = 'N'` — Classic's way of declaring an import with DUA (`PurchaseInvoiceManualTaxLines`, called explicitly by the `@NeoExtension(spec="purchase-invoice", entity="header")` customization; declared in its `responseEnrichedFields`). Fail-safe `false` on a DB error. Lists do not carry it.
+
+Why: a customs / forwarder import invoice (SII `F5`) usually has **no invoice lines**, only manual tax lines, and the core completes it — `C_Invoice_Post`'s `@InvoicesNeedLines@` check passes with an invoice line **or** a tax line. Nothing in NEO refuses that completion on any channel (REST single, batch, MCP all reach the same core process; `InvoiceCompletionLineGuard` only inspects existing lines). The only block was the SPA's Confirm button (`draftMode.disableWhenEmpty`); behind the `sii-import-dua` flag the purchase-invoice window lets it through when this field is true. No backend flag: the field is read-only and the completion rule is the core's.
+
+##### Deferred VAT of an import — `siiDeferredVat` (ETP-6284)
+
+```
+GET /sws/neo/purchase-invoice/header/{id}/action/siiDeferredVat
+```
+
+A read-only GET action of the purchase-invoice header (`PurchaseInvoiceSiiDeferredVat`, called first thing in `PurchaseInvoiceHeaderHandler.handle`, before any guard with side effects; declared in `actionContracts()` as a `read` contract with `httpMethod: GET`, so MCP agents reach it through `etendo_action`). It follows the established GET-action pattern (`currencyOptions`). The body is `{ "deferredVat": true|false }` at the top level (no `response.data` wrapper).
+
+`deferredVat` is `true` when the invoice is sent to SII (purchase invoice with `aeatsiiClaveTipoFc`, organization with an SII configuration with `AcogidaAlSII='Y'` and an adoption date, not left out by `SIIUtils.notSendingByDateCause`), its type is F5 or LC, the organization declares IVA, and `SIIUtils.isDeferredVATInvoice` classifies it as deferred VAT (`false` when the partner address has no location, or the SII module throws) — the rule the Classic send uses to pick `createDeferredVATInvoicesRegistry`. The SPA uses it to offer the compensatory import-tax line. An unknown or invisible invoice (read with the caller's access) is a 404, any other method a 405. Same answer on REST and MCP.
+
+##### Tax lines of a purchase invoice — guards (ETP-6284)
+
+**Flag:** the tax-line writes below and the `siiDeferredVat` action belong to the backend-only
+`sii-import-dua` flag (`SiiImportDuaFlag`, per account; `docs/feature-flags-and-tenant-upgrade.md`).
+Off, they answer 403 `feature_disabled` (`ETGO_SiiImportDuaDisabled`) before any other rule, on
+every channel; reads of the tax entity, `hasManualTaxLines` and the header DUA fields are not
+gated.
+
+`PurchaseInvoiceTaxExtension`, `@NeoExtension(spec = "purchase-invoice", entity = "tax")` (`C_InvoiceTax`, writable since this ticket), runs on every channel (REST single, `/batch`, MCP) through `NeoExtensionDispatcher`:
+
+| Write | Rule | Answer |
+|---|---|---|
+| any (POST/PUT/PATCH/DELETE) | the invoice is not `DR`, is `Processed`, or `aeatsiiIssent = 'Y'` (backend form of the SPA's `siiFieldReadOnly` + draft check) | 409 `ETGO_PurchaseInvoiceTaxLocked` |
+| PUT/PATCH/DELETE | the row has `Recalculate = 'Y'` (automatic, derived from the invoice lines) | 409 `ETGO_PurchaseInvoiceTaxAutomatic` |
+| POST | `recalculate` forced to `false` (every created row is a manual import-tax line) | — |
+| POST/PUT/PATCH | invoice `aeatsiiMultiDua = 'Y'` and key F5/LC, and the row would end without `aeatsiiDua` or `aeatsiiFechaDua` (body value when sent, else the stored one) | 400 `ETGO_PurchaseInvoiceTaxDuaRequired` |
+
+The parent of a create is `parentId` (SPA) or the `invoice` link (an agent; id or `{id}`). Nothing checks the sign of the base or the rate: the SPA's compensatory rows (negative base, tax amount 0, a `…=0%` import tax) are accepted, and on a multi-DUA invoice they carry the DUA of the group they compensate. The DUA rule is stricter than Classic on purpose: Classic's `InvoiceTaxEventHandler` check never throws, so a missing DUA there only surfaces at send time (a row without DUA is silently left out of the send).
+
+`ETGO_SF_ENTITY.AGENT_PROMPT` of `header` and `tax` tells agents how to register an import with DUA (single vs multiple DUA, manual rows). **Declare the same text in `decisions.json`** (`entities.header.agentPrompt`, `entities.tax.agentPrompt`): `push-to-neo` writes the entity prompt unconditionally and would clear it otherwise.
+
+##### Every SII record of an invoice — `aeatsiiFacturaIds` (ETP-6284)
+
+`SifSubRecordAttachments.enrich` (called from the `afterHandle` of both `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler`) stamps the fiscal sub-record ids a single-record header `GET` needs for the SIF tab's Adjuntos section: `aeatsiiFacturaId`, `invoiceVerifactuId`, `tbaiSyncInvoiceId` (most recent active row each, `ORDER BY created DESC`). Since ETP-6284 SII also gets `aeatsiiFacturaIds`: **every** active `aeatsii_facturas` id of the invoice, oldest first (`ORDER BY created ASC`), as a JSON array.
+
+```json
+{
+  "id": "…",
+  "aeatsiiFacturaId": "C3…",
+  "aeatsiiFacturaIds": ["A1…", "B2…", "C3…"]
+}
+```
+
+Why: an invoice sent with DUA is registered as several SII records (one F1 plus one F5 per DUA), each with its own request/response XML, and the single most-recent id hid all but the last one's files — Classic already lists them all. The row carries nothing that tells F1 from F5 (that lives only in the XML), so plain ids are returned. `aeatsiiFacturaId` is kept for compatibility; TBAI and Verifactu are unchanged. Fail-safe: a missing table (module not installed), no rows or any error leaves the key absent. **Not behind any flag** — it applies to every SII invoice, sales and purchase; the SPA merges the files of all the records into one table.
+
 ##### Document exchange rate (ETP-5840)
 
 Five headers — `sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`,
@@ -8513,9 +8565,17 @@ A client that needs its own wording keys on `messageKeys`, never on the prose.
 | Names Classic-only UI | `ETVFAC_invoice_type_rectifying`, `ETVFAC_reversed_invoice`, `AEAT349_CINVREV_CHECK`, `AEATSII_EmptyCertificatePath`, `TBAI_CertificateNotValid`, `AEATSII_InvoiceManualSending`, `AEAT390_MARSHALLERROR`, `AEAT303_Periodicity_NotValid`, `AEAT349_Periodicity_NotValid`, `AEAT303_Period_NotDetected`, `AEAT349_Period_NotDetected`, `ETVFAC_Missing_DocType_Config`, `AEATSII_SII_ACCRUAL_DATE_EMPTY`, `TBAI_ConfigNotFound` |
 | Field named differently in GO | `ETVFAC_error_code_idtype`, `TBAI_EmptyNifCode`, `TBAI_EmptyPostalCode`, `TBAI_EmptyDir` |
 | Misleading in both products, corrected in GO only | `TBAI_SetKey`, `TBAI_NullCertificate` |
-| Literal (no `AD_MESSAGE`) | `siiMissingInvoiceType`, `siiMissingDocumentNo` |
+| Literal (no `AD_MESSAGE`) | `siiMissingInvoiceType`, `siiMissingDocumentNo`, `siiDuaRequiredImport`, `siiDuaRequiredCustomsSettlement`, `siiMultiDuaTaxLineDuaRequired`, `siiDuaDateAfterAccountingDate` (ETP-6284) |
 
 `ENTRIES` is the source of truth; keep this table in step with it.
+
+ETP-6284 inventory of the import-with-DUA flow: the four DUA literals above (header save
+`FacturasEventHandler#checkDUAFields` F5 and LC, multi-DUA tax-line check of `SIISOAPUtils` at send,
+DUA date later than the accounting register date of `invoicePreviousValidations` at send) are
+catalogued. Left out: `InvoiceTaxEventHandler`'s "Si la factura es multi-DUA…" (its `showMsg` never
+throws, so no user sees it; GO's own `ETGO_PurchaseInvoiceTaxDuaRequired` replaces it) and the AEAT
+response codes 1270/1271 (AEAT-authored texts naming AEAT XML elements, stored in the SII sub-record,
+not a Classic label; the tax guards prevent the data that triggers them).
 
 **Adding an entry.**
 
