@@ -24,6 +24,7 @@ import java.sql.ResultSet;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
@@ -56,6 +57,7 @@ final class SifSubRecordAttachments {
   private static final Logger log = LogManager.getLogger(SifSubRecordAttachments.class);
 
   private static final String FIELD_AEATSII_FACTURA_ID = "aeatsiiFacturaId";
+  private static final String FIELD_AEATSII_FACTURA_IDS = "aeatsiiFacturaIds";
   private static final String FIELD_TBAI_SYNC_INVOICE_ID = "tbaiSyncInvoiceId";
   private static final String FIELD_INVOICE_VERIFACTU_ID = "invoiceVerifactuId";
 
@@ -69,6 +71,13 @@ final class SifSubRecordAttachments {
    * respectively, for the given invoice. Only meaningful in detail view (single record); do not
    * call for list responses.
    *
+   * <p>ETP-6284: SII additionally gets {@code aeatsiiFacturaIds} — every active
+   * {@code aeatsii_facturas} id of the invoice, oldest first. A purchase invoice with DUA import
+   * lines is sent as one F1 plus one F5 per DUA, each its own row with its own request/response
+   * XML, so the single most-recent id hid all but the last record's files. The row itself
+   * carries nothing that tells F1 from F5 (that lives only in the XML), so plain ids are returned.
+   * {@code aeatsiiFacturaId} is kept for compatibility. TBAI and Verifactu are unchanged.
+   *
    * @param rec       the invoice record JSON object; modified in-place
    * @param invoiceId the C_Invoice id
    */
@@ -77,6 +86,7 @@ final class SifSubRecordAttachments {
       return;
     }
     injectLatestId(rec, FIELD_AEATSII_FACTURA_ID, "aeatsii_facturas", "aeatsii_facturas_id", invoiceId);
+    injectAllIds(rec, FIELD_AEATSII_FACTURA_IDS, "aeatsii_facturas", "aeatsii_facturas_id", invoiceId);
     injectLatestId(rec, FIELD_TBAI_SYNC_INVOICE_ID, "tbai_syncinvoice", "tbai_syncinvoice_id", invoiceId);
     injectLatestId(rec, FIELD_INVOICE_VERIFACTU_ID, "etvfac_c_invoice_verifactu",
         "etvfac_c_invoice_verifactu_id", invoiceId);
@@ -100,6 +110,36 @@ final class SifSubRecordAttachments {
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             rec.put(jsonKey, rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve {} for invoice {} (table may not be installed): {}",
+          jsonKey, invoiceId, e.getMessage());
+    }
+  }
+
+  /**
+   * Looks up every active row of {@code tableName} for {@code invoiceId}, oldest first, and, if
+   * any is found, writes their primary keys as an array under {@code jsonKey} in {@code rec}.
+   * Fails safe like {@link #injectLatestId}: a missing table or any error leaves the key absent.
+   */
+  @SuppressWarnings("java:S2077")
+  private static void injectAllIds(JSONObject rec, String jsonKey, String tableName,
+      String pkColumn, String invoiceId) {
+    String sql = "SELECT " + pkColumn + " FROM " + tableName
+        + " WHERE c_invoice_id = ? AND isactive = 'Y' ORDER BY created ASC";
+    try {
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          JSONArray ids = new JSONArray();
+          while (rs.next()) {
+            ids.put(rs.getString(1));
+          }
+          if (ids.length() > 0) {
+            rec.put(jsonKey, ids);
           }
         }
       }
