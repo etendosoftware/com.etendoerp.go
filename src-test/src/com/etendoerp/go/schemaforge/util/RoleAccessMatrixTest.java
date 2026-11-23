@@ -244,14 +244,14 @@ class RoleAccessMatrixTest {
     JSONObject reportsMatrix = RoleAccessMatrix.buildReportsMatrix(Map.of("r1", Map.of()));
 
     JSONArray categories = reportsMatrix.getJSONArray("categories");
-    assertEquals(3, categories.length());
+    assertEquals(4, categories.length());
     assertEquals(ReportAccessCatalog.FINANCE_CATEGORY, categories.getJSONObject(0).getString("name"));
-    assertEquals(6, categories.getJSONObject(0).getJSONArray("reports").length());
+    assertEquals(5, categories.getJSONObject(0).getJSONArray("reports").length());
     assertEquals(ReportAccessCatalog.INVENTORY_CATEGORY,
         categories.getJSONObject(1).getString("name"));
     assertEquals(1, categories.getJSONObject(1).getJSONArray("reports").length());
 
-    JSONObject treasury = categories.getJSONObject(2);
+    JSONObject treasury = categories.getJSONObject(3);
     assertEquals(ReportAccessCatalog.TREASURY_CATEGORY, treasury.getString("name"));
     JSONArray treasuryReports = treasury.getJSONArray("reports");
     assertEquals(2, treasuryReports.length());
@@ -260,5 +260,25 @@ class RoleAccessMatrixTest {
     assertEquals("aging-receivable", treasuryReports.getJSONObject(1).getString("id"));
     assertEquals(RoleAccessMatrix.NONE,
         treasuryReports.getJSONObject(0).getJSONObject("access").getString("r1"));
+  }
+
+  @Test
+  @DisplayName("reportsMatrix groups the Tax Report under Taxes, apart from Finance (ETP-6380)")
+  void testReportsMatrixGroupsTaxReportUnderTaxes() throws Exception {
+    // The SPA matches this string against its menu.json group name and i18n key verbatim.
+    assertEquals("Taxes", ReportAccessCatalog.TAXES_CATEGORY);
+
+    JSONObject reportsMatrix = RoleAccessMatrix.buildReportsMatrix(
+        Map.of("r1", Map.of("tax-report", RoleAccessMatrix.FULL)));
+
+    JSONArray categories = reportsMatrix.getJSONArray("categories");
+    JSONObject taxes = categories.getJSONObject(2);
+    assertEquals(ReportAccessCatalog.TAXES_CATEGORY, taxes.getString("name"));
+    JSONArray taxesReports = taxes.getJSONArray("reports");
+    assertEquals(1, taxesReports.length());
+    assertEquals("tax-report", taxesReports.getJSONObject(0).getString("id"));
+    // Grouping only: the role keeps the tier it already had on the report.
+    assertEquals(RoleAccessMatrix.FULL,
+        taxesReports.getJSONObject(0).getJSONObject("access").getString("r1"));
   }
 }
