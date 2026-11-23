@@ -6545,6 +6545,20 @@ The parent of a create is `parentId` (SPA) or the `invoice` link (an agent; id o
 
 `ETGO_SF_ENTITY.AGENT_PROMPT` of `header` and `tax` tells agents how to register an import with DUA (single vs multiple DUA, manual rows). **Declare the same text in `decisions.json`** (`entities.header.agentPrompt`, `entities.tax.agentPrompt`): `push-to-neo` writes the entity prompt unconditionally and would clear it otherwise.
 
+##### Every SII record of an invoice — `aeatsiiFacturaIds` (ETP-6284)
+
+`SifSubRecordAttachments.enrich` (called from the `afterHandle` of both `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler`) stamps the fiscal sub-record ids a single-record header `GET` needs for the SIF tab's Adjuntos section: `aeatsiiFacturaId`, `invoiceVerifactuId`, `tbaiSyncInvoiceId` (most recent active row each, `ORDER BY created DESC`). Since ETP-6284 SII also gets `aeatsiiFacturaIds`: **every** active `aeatsii_facturas` id of the invoice, oldest first (`ORDER BY created ASC`), as a JSON array.
+
+```json
+{
+  "id": "…",
+  "aeatsiiFacturaId": "C3…",
+  "aeatsiiFacturaIds": ["A1…", "B2…", "C3…"]
+}
+```
+
+Why: an invoice sent with DUA is registered as several SII records (one F1 plus one F5 per DUA), each with its own request/response XML, and the single most-recent id hid all but the last one's files — Classic already lists them all. The row carries nothing that tells F1 from F5 (that lives only in the XML), so plain ids are returned. `aeatsiiFacturaId` is kept for compatibility; TBAI and Verifactu are unchanged. Fail-safe: a missing table (module not installed), no rows or any error leaves the key absent. **Not behind any flag** — it applies to every SII invoice, sales and purchase; the SPA merges the files of all the records into one table.
+
 ##### Document exchange rate (ETP-5840)
 
 Five headers — `sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`,
