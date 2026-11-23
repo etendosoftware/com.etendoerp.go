@@ -72,45 +72,64 @@ public class PurchaseInvoiceTaxExtension implements NeoHandler {
     }
     String method = context.getHttpMethod();
     boolean create = METHOD_POST.equals(method);
-    boolean update = "PUT".equals(method) || "PATCH".equals(method);
     boolean delete = METHOD_DELETE.equals(method);
-    if (!create && !update && !delete) {
+    if (!create && !delete && !isUpdate(method)) {
       return null;
     }
     JSONObject body = dataNode(context.getRequestBody());
     // Read with the caller's own access (before admin mode), so a row or invoice the role cannot
     // see is left to the default CRUD path (404) instead of answering 409 and revealing it.
     InvoiceTax existing = create ? null : readTax(context.getRecordId());
-    Invoice invoice = create ? readInvoice(parentInvoiceId(body))
-        : existing == null ? null : existing.getInvoice();
+    Invoice invoice = targetInvoice(create, body, existing);
     if (invoice == null) {
       // Unknown or invisible parent or row: the default CRUD path answers it (404 / validation).
       return null;
     }
     OBContext.setAdminMode(true);
     try {
-      if (isLocked(invoice)) {
-        return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_LOCKED);
-      }
-      if (existing != null && Boolean.TRUE.equals(existing.isRecalculate())) {
-        return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_AUTOMATIC);
-      }
-      if (delete) {
-        return null;
-      }
-      if (create && body != null) {
-        body.put(FIELD_RECALCULATE, false);
-      }
-      if (requiresLineDua(invoice) && !hasDuaAndDate(body, existing)) {
-        return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_DUA_REQUIRED);
-      }
-      return null;
+      return checkWrite(invoice, existing, body, create, delete);
     } catch (JSONException e) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Invalid tax line body: " + e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private static boolean isUpdate(String method) {
+    return "PUT".equals(method) || "PATCH".equals(method);
+  }
+
+  /** The invoice the write touches: the create's parent, else the existing row's invoice. */
+  private static Invoice targetInvoice(boolean create, JSONObject body, InvoiceTax existing) {
+    if (create) {
+      return readInvoice(parentInvoiceId(body));
+    }
+    return existing == null ? null : existing.getInvoice();
+  }
+
+  /**
+   * The guards of a write on a visible invoice: locked invoice, automatic row, then (create and
+   * update only) the forced manual flag and the per-line DUA rule. {@code null} lets CRUD run.
+   */
+  private static NeoResponse checkWrite(Invoice invoice, InvoiceTax existing, JSONObject body,
+      boolean create, boolean delete) throws JSONException {
+    if (isLocked(invoice)) {
+      return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_LOCKED);
+    }
+    if (existing != null && Boolean.TRUE.equals(existing.isRecalculate())) {
+      return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_AUTOMATIC);
+    }
+    if (delete) {
+      return null;
+    }
+    if (create && body != null) {
+      body.put(FIELD_RECALCULATE, false);
+    }
+    if (requiresLineDua(invoice) && !hasDuaAndDate(body, existing)) {
+      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_DUA_REQUIRED);
+    }
+    return null;
   }
 
   /** A write body may come wrapped in {@code data} (as {@code NeoFieldFilter} also accepts). */
