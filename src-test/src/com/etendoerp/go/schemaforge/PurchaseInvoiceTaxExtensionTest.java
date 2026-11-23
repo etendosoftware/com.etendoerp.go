@@ -212,4 +212,72 @@ public class PurchaseInvoiceTaxExtensionTest {
 
     assertNull(extension.handle(crud("POST", null, newRow())));
   }
+
+  // ── a sent or processed draft is locked too ──────────────────────────────────────────────
+
+  @Test
+  public void aDraftAlreadySentToSiiIsLocked() throws Exception {
+    when(invoice.isAeatsiiIssent()).thenReturn(true);
+
+    assertRefused(extension.handle(crud("PATCH", TAX_ID, new JSONObject().put("taxAmount", 5))),
+        409, PurchaseInvoiceTaxExtension.MSG_LOCKED);
+  }
+
+  @Test
+  public void aProcessedDraftIsLocked() throws Exception {
+    when(invoice.isProcessed()).thenReturn(true);
+
+    assertRefused(extension.handle(crud("DELETE", TAX_ID, null)), 409,
+        PurchaseInvoiceTaxExtension.MSG_LOCKED);
+  }
+
+  // ── where a create finds its parent invoice ──────────────────────────────────────────────
+
+  @Test
+  public void aCreateResolvesTheParentFromAnInvoiceObject() throws Exception {
+    when(invoice.getDocumentStatus()).thenReturn("CO");
+    JSONObject body = new JSONObject()
+        .put(PurchaseInvoiceTaxExtension.FIELD_INVOICE, new JSONObject().put("id", INVOICE_ID));
+
+    assertRefused(extension.handle(crud("POST", null, body)), 409,
+        PurchaseInvoiceTaxExtension.MSG_LOCKED);
+  }
+
+  @Test
+  public void aCreateResolvesTheParentFromAnInvoiceId() throws Exception {
+    when(invoice.getDocumentStatus()).thenReturn("CO");
+    JSONObject body = new JSONObject().put(PurchaseInvoiceTaxExtension.FIELD_INVOICE, INVOICE_ID);
+
+    assertRefused(extension.handle(crud("POST", null, body)), 409,
+        PurchaseInvoiceTaxExtension.MSG_LOCKED);
+  }
+
+  @Test
+  public void aCreateWrappedInDataResolvesItsParentAndIsAManualRow() throws Exception {
+    JSONObject row = newRow();
+    JSONObject body = new JSONObject().put("data", row);
+
+    assertNull(extension.handle(crud("POST", null, body)));
+    assertFalse(row.getBoolean(PurchaseInvoiceTaxExtension.FIELD_RECALCULATE));
+    Mockito.verify(OBDal.getInstance()).get(Invoice.class, INVOICE_ID);
+  }
+
+  // ── requests that are not tax-row writes pass through ────────────────────────────────────
+
+  @Test
+  public void aGetPassesThroughWithoutReading() {
+    assertNull(extension.handle(crud("GET", TAX_ID, null)));
+    Mockito.verify(OBDal.getInstance(), Mockito.never()).get(InvoiceTax.class, TAX_ID);
+  }
+
+  @Test
+  public void aNonCrudEndpointPassesThroughWithoutReading() throws Exception {
+    NeoContext action = NeoContext.builder()
+        .specName("purchase-invoice").entityName("tax")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("anything")
+        .recordId(TAX_ID).requestBody(newRow()).build();
+
+    assertNull(extension.handle(action));
+    Mockito.verifyNoInteractions(OBDal.getInstance());
+  }
 }
