@@ -33,6 +33,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.Location;
@@ -56,6 +57,7 @@ public class PurchaseInvoiceSiiDeferredVatTest {
 
   private MockedStatic<OBDal> obDal;
   private MockedStatic<OBContext> obContext;
+  private MockedStatic<SiiImportDuaFlag> siiImportDua;
   private MockedStatic<SIIUtils> siiUtils;
 
   private OBDal dal;
@@ -65,6 +67,9 @@ public class PurchaseInvoiceSiiDeferredVatTest {
 
   @Before
   public void setUp() {
+    // ETP-6284: the feature flag on, so the existing cases exercise the feature itself.
+    siiImportDua = mockStatic(SiiImportDuaFlag.class, Mockito.CALLS_REAL_METHODS);
+    siiImportDua.when(SiiImportDuaFlag::isEnabled).thenReturn(true);
     obDal = mockStatic(OBDal.class);
     obContext = mockStatic(OBContext.class);
     siiUtils = mockStatic(SIIUtils.class);
@@ -100,6 +105,7 @@ public class PurchaseInvoiceSiiDeferredVatTest {
 
   @After
   public void tearDown() {
+    siiImportDua.close();
     siiUtils.close();
     obContext.close();
     obDal.close();

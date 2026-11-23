@@ -76,6 +76,11 @@ public class PurchaseInvoiceTaxExtension implements NeoHandler {
     if (!create && !delete && !isUpdate(method)) {
       return null;
     }
+    // ETP-6284: writes are part of the imports-with-DUA feature (reads are not gated). Evaluated
+    // at request entry, while the request runs as the account owner.
+    if (!SiiImportDuaFlag.isEnabled()) {
+      return SiiImportDuaFlag.featureDisabled();
+    }
     JSONObject body = dataNode(context.getRequestBody());
     // Read with the caller's own access (before admin mode), so a row or invoice the role cannot
     // see is left to the default CRUD path (404) instead of answering 409 and revealing it.

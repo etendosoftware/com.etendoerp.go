@@ -7175,6 +7175,12 @@ A read-only GET action of the purchase-invoice header (`PurchaseInvoiceSiiDeferr
 
 ##### Tax lines of a purchase invoice — guards (ETP-6284)
 
+**Flag:** the tax-line writes below and the `siiDeferredVat` action belong to the backend-only
+`sii-import-dua` flag (`SiiImportDuaFlag`, per account; `docs/feature-flags-and-tenant-upgrade.md`).
+Off, they answer 403 `feature_disabled` (`ETGO_SiiImportDuaDisabled`) before any other rule, on
+every channel; reads of the tax entity, `hasManualTaxLines` and the header DUA fields are not
+gated.
+
 `PurchaseInvoiceTaxExtension`, `@NeoExtension(spec = "purchase-invoice", entity = "tax")` (`C_InvoiceTax`, writable since this ticket), runs on every channel (REST single, `/batch`, MCP) through `NeoExtensionDispatcher`:
 
 | Write | Rule | Answer |

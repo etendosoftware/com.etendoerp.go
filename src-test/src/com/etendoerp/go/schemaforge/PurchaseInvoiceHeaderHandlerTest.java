@@ -1820,10 +1820,14 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertNotNull("siiDeferredVat is served by handle() and must be declared (ETP-6284)", contract);
     assertEquals("GET", contract.getHttpMethod());
 
-    NeoResponse response =
-        new PurchaseInvoiceHeaderHandler().handle(purchaseActionCtx("siiDeferredVat"));
-    assertNotNull(response);
-    assertEquals(HttpServletResponse.SC_METHOD_NOT_ALLOWED, response.getHttpStatus());
+    try (MockedStatic<SiiImportDuaFlag> flag =
+        Mockito.mockStatic(SiiImportDuaFlag.class, Mockito.CALLS_REAL_METHODS)) {
+      flag.when(SiiImportDuaFlag::isEnabled).thenReturn(true);
+      NeoResponse response =
+          new PurchaseInvoiceHeaderHandler().handle(purchaseActionCtx("siiDeferredVat"));
+      assertNotNull(response);
+      assertEquals(HttpServletResponse.SC_METHOD_NOT_ALLOWED, response.getHttpStatus());
+    }
   }
 
 

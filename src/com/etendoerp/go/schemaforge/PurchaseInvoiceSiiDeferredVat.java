@@ -79,6 +79,10 @@ final class PurchaseInvoiceSiiDeferredVat {
         || !ACTION_NAME.equals(context.getFieldName())) {
       return null;
     }
+    // Part of the imports-with-DUA feature: judged first, at request entry.
+    if (!SiiImportDuaFlag.isEnabled()) {
+      return SiiImportDuaFlag.featureDisabled();
+    }
     if (!"GET".equals(context.getHttpMethod())) {
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           ACTION_NAME + " only supports GET");

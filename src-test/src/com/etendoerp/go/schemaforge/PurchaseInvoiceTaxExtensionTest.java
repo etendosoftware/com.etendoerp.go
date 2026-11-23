@@ -53,6 +53,7 @@ public class PurchaseInvoiceTaxExtensionTest {
 
   private MockedStatic<OBDal> obDal;
   private MockedStatic<OBContext> obContext;
+  private MockedStatic<SiiImportDuaFlag> siiImportDua;
 
   private Invoice invoice;
   private InvoiceTax taxRow;
@@ -61,6 +62,9 @@ public class PurchaseInvoiceTaxExtensionTest {
 
   @Before
   public void setUp() {
+    // ETP-6284: the feature flag on, so the existing cases exercise the feature itself.
+    siiImportDua = mockStatic(SiiImportDuaFlag.class, Mockito.CALLS_REAL_METHODS);
+    siiImportDua.when(SiiImportDuaFlag::isEnabled).thenReturn(true);
     obDal = mockStatic(OBDal.class);
     obContext = mockStatic(OBContext.class);
     obContext.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
@@ -84,6 +88,7 @@ public class PurchaseInvoiceTaxExtensionTest {
 
   @After
   public void tearDown() {
+    siiImportDua.close();
     obContext.close();
     obDal.close();
   }
