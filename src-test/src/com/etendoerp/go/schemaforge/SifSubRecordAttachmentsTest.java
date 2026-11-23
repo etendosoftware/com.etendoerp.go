@@ -54,6 +54,8 @@ import org.openbravo.dal.service.OBDal;
  *   <li>when {@code OBDal} is entirely unavailable (bare unit-test context, no live
  *       database), the exception is swallowed and no key is added</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.SifSubRecordAttachments
  */
 public class SifSubRecordAttachmentsTest {
 
@@ -175,7 +177,6 @@ public class SifSubRecordAttachmentsTest {
       when(allRs.next()).thenReturn(true, true, true, false);
       when(allRs.getString(1)).thenReturn("sii-f1", "sii-f5-a", "sii-f5-b");
       when(allPs.executeQuery()).thenReturn(allRs);
-      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
       when(conn.prepareStatement(
           Mockito.argThat(sql -> sql.contains("aeatsii_facturas") && sql.contains("ORDER BY created ASC"))))
           .thenReturn(allPs);
