@@ -89,6 +89,39 @@ public class CurrencyOptionsHandler implements NeoHandler {
   static final String FIELD_CURRENCY = "currency";
 
   /**
+   * The direct rates (organization currency to X) touching the reference day. ETP-6365: the day
+   * rule of {@link ConversionRateLookup} (ValidFrom before the next day, ValidTo on or after the
+   * day). Last row per currency wins: rows are read System first, then the client's, each by
+   * ascending start — the client's own over the system's, then the latest range touching the day,
+   * the precedence {@code NeoExchangeRateService#queryRate} applies (ETP-5840: the list and the
+   * saved rate must agree). A compile-time constant: every value is a bound parameter.
+   */
+  static final String DIRECT_RATES_SQL =
+      "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
+          + " FROM c_conversion_rate cr"
+          + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
+          + " WHERE cr.c_currency_id = ?"
+          + " AND cr.ad_client_id IN ('0', ?)"
+          + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+          + " AND cr.isactive = 'Y'"
+          + " AND c.isactive = 'Y'"
+          + ConversionRateLookup.DAY_PREDICATE
+          + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
+
+  /** The reverse rates (X to the organization currency), same rule and order as the direct ones. */
+  static final String INVERSE_RATES_SQL =
+      "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
+          + " FROM c_conversion_rate cr"
+          + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
+          + " WHERE cr.c_currency_id_to = ?"
+          + " AND cr.ad_client_id IN ('0', ?)"
+          + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+          + " AND cr.isactive = 'Y'"
+          + " AND c.isactive = 'Y'"
+          + ConversionRateLookup.DAY_PREDICATE
+          + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
+
+  /**
    * The contract a document header that routes {@code currencyOptions} here publishes for agents
    * (ETP-5558). Served over {@code GET} only — {@link #handle} refuses any other method — so the
    * contract says so, and the MCP calls it that way.
@@ -395,23 +428,9 @@ public class CurrencyOptionsHandler implements NeoHandler {
     // Include the client's own rates and the shared system ('0') rates. Rows are collected into a
     // map keyed by currency (last write wins), so ad_client_id ASC writes the '0' row first and the
     // client-specific row last, letting a tenant rate override the system rate for the same currency.
-    String sql =
-        "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
-      + " WHERE cr.c_currency_id = ?"
-      + " AND cr.ad_client_id IN ('0', ?)"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      // ETP-6365: the day rule of ConversionRateLookup (ValidFrom before the next day, ValidTo on
-      // or after the day). Last row per currency wins: rows are read System first, then the
-      // client's, each by ascending start — the client's own over the system's, then the latest
-      // range touching the day, the precedence NeoExchangeRateService#queryRate applies (ETP-5840:
-      // the list and the saved rate must agree). Same answer as before on 00:00 data.
-      + ConversionRateLookup.DAY_PREDICATE
-      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    // ETP-6365: the day rule of ConversionRateLookup, read System first then the client's (see
+    // DIRECT_RATES_SQL).
+    try (PreparedStatement ps = conn.prepareStatement(DIRECT_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);
@@ -431,18 +450,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
     Map<String, double[]> inverseMap = new LinkedHashMap<>();
     // Include the client's own rates and the shared system ('0') rates; ad_client_id ASC lets a
     // tenant rate override the system rate for the same currency (map keyed by currency, last wins).
-    String sql =
-        "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
-      + " WHERE cr.c_currency_id_to = ?"
-      + " AND cr.ad_client_id IN ('0', ?)"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      + ConversionRateLookup.DAY_PREDICATE
-      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(INVERSE_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);

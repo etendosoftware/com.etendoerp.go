@@ -78,6 +78,11 @@ final class HeaderCurrencySelector {
   private static final String KEY_ISO = "isoCode";
   private static final String KEY_NAME = "name";
   private static final String KEY_LABEL = "label";
+  /** ISO code and name (request language) of the active currencies among the ids (array param). */
+  private static final String ISO_AND_NAMES_SQL =
+      "SELECT c.c_currency_id, c.iso_code, COALESCE(t.description, c.description)"
+          + " FROM c_currency c LEFT JOIN c_currency_trl t ON t.c_currency_id = c.c_currency_id"
+          + " AND t.ad_language = ? WHERE c.isactive = 'Y' AND c.c_currency_id = ANY(?)";
 
   private HeaderCurrencySelector() {
   }
@@ -163,10 +168,7 @@ final class HeaderCurrencySelector {
   private static Map<String, String[]> isoAndNames(Connection conn, List<String> ids)
       throws SQLException {
     Map<String, String[]> named = new HashMap<>();
-    String sql = "SELECT c.c_currency_id, c.iso_code, COALESCE(t.description, c.description)"
-        + " FROM c_currency c LEFT JOIN c_currency_trl t ON t.c_currency_id = c.c_currency_id"
-        + " AND t.ad_language = ? WHERE c.isactive = 'Y' AND c.c_currency_id = ANY(?)";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(ISO_AND_NAMES_SQL)) {
       ps.setString(1, language());
       ps.setArray(2, conn.createArrayOf("varchar", ids.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {

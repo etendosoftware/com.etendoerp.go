@@ -83,6 +83,37 @@ class ConversionRateStore {
   private static final String CURRENCY_TRL_JOIN = " LEFT JOIN c_currency_trl t"
       + " ON t.c_currency_id = c.c_currency_id AND t.ad_language = ?";
 
+  // SQL of the reads: compile-time constants, every value a bound parameter.
+  private static final String AUTO_CURRENCIES_SQL =
+      "SELECT CASE WHEN r.c_currency_id_from = ? THEN r.c_currency_id_to"
+      + " ELSE r.c_currency_id_from END FROM smfcr_rule r"
+      + " WHERE r.isactive = 'Y' AND r.ad_client_id IN (?, '0')"
+      + " AND (r.c_currency_id_from = ? OR r.c_currency_id_to = ?)";
+  private static final String CURRENCIES_WITH_RATES_SQL =
+      "SELECT DISTINCT CASE WHEN cr.c_currency_id = ? THEN cr.c_currency_id_to"
+      + " ELSE cr.c_currency_id END FROM c_conversion_rate cr"
+      + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y'"
+      + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)";
+  private static final String ACTIVE_CURRENCIES_SQL =
+      "SELECT " + CURRENCY_COLUMNS + " FROM c_currency c" + CURRENCY_TRL_JOIN
+      + " WHERE c.isactive = 'Y' AND c.ad_client_id IN ('0', ?) AND c.c_currency_id <> ?"
+      + " ORDER BY c.iso_code";
+  private static final String CURRENT_RATES_SQL =
+      "SELECT " + CURRENCY_COLUMNS + ", cr.c_currency_id AS from_id, cr.multiplyrate,"
+      + " cr.dividerate, cr.validfrom, cr.updated"
+      + " FROM c_conversion_rate cr"
+      + " JOIN c_currency c ON c.c_currency_id = CASE WHEN cr.c_currency_id = ?"
+      + " THEN cr.c_currency_id_to ELSE cr.c_currency_id END" + CURRENCY_TRL_JOIN
+      + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y' AND c.isactive = 'Y'"
+      + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)"
+      + " AND cr.validfrom <= now()"
+      + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= now()"
+      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + ", cr.validfrom DESC,"
+      + " CASE WHEN cr.c_currency_id = ? THEN 0 ELSE 1 END";
+  private static final String LATEST_DOWNLOAD_SQL = "SELECT MAX(l.sync_date) FROM smfcr_sync_log l"
+      + " WHERE l.ad_client_id IN (?, '0') AND l.status = 'SUCCESS'";
+  private static final String STATUS_SQL = "SELECT etgo_convrate_status(?)";
+
   /** A currency as the actions publish it. */
   record CurrencyInfo(String id, String isoCode, String name, String symbol) {
   }
@@ -149,11 +180,7 @@ class ConversionRateStore {
     if (!hasTable(TABLE_RULE)) {
       return ids;
     }
-    String sql = "SELECT CASE WHEN r.c_currency_id_from = ? THEN r.c_currency_id_to"
-        + " ELSE r.c_currency_id_from END FROM smfcr_rule r"
-        + " WHERE r.isactive = 'Y' AND r.ad_client_id IN (?, '0')"
-        + " AND (r.c_currency_id_from = ? OR r.c_currency_id_to = ?)";
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+    try (PreparedStatement ps = connection().prepareStatement(AUTO_CURRENCIES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgCurrencyId);
@@ -175,11 +202,7 @@ class ConversionRateStore {
    */
   Set<String> currenciesWithRates(String clientId, String orgCurrencyId) {
     Set<String> ids = new HashSet<>();
-    String sql = "SELECT DISTINCT CASE WHEN cr.c_currency_id = ? THEN cr.c_currency_id_to"
-        + " ELSE cr.c_currency_id END FROM c_conversion_rate cr"
-        + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y'"
-        + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)";
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+    try (PreparedStatement ps = connection().prepareStatement(CURRENCIES_WITH_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgCurrencyId);
@@ -200,11 +223,8 @@ class ConversionRateStore {
    * named in the request language.
    */
   List<CurrencyInfo> activeCurrencies(String clientId, String excludedId) {
-    String sql = "SELECT " + CURRENCY_COLUMNS + " FROM c_currency c" + CURRENCY_TRL_JOIN
-        + " WHERE c.isactive = 'Y' AND c.ad_client_id IN ('0', ?) AND c.c_currency_id <> ?"
-        + " ORDER BY c.iso_code";
     List<CurrencyInfo> currencies = new ArrayList<>();
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+    try (PreparedStatement ps = connection().prepareStatement(ACTIVE_CURRENCIES_SQL)) {
       ps.setString(1, language());
       ps.setString(2, clientId);
       ps.setString(3, excludedId);
@@ -227,19 +247,8 @@ class ConversionRateStore {
    * expressed as "1 organization currency = rate X".
    */
   List<CurrentRate> currentRates(String clientId, String orgCurrencyId) {
-    String sql = "SELECT " + CURRENCY_COLUMNS + ", cr.c_currency_id AS from_id, cr.multiplyrate,"
-        + " cr.dividerate, cr.validfrom, cr.updated"
-        + " FROM c_conversion_rate cr"
-        + " JOIN c_currency c ON c.c_currency_id = CASE WHEN cr.c_currency_id = ?"
-        + " THEN cr.c_currency_id_to ELSE cr.c_currency_id END" + CURRENCY_TRL_JOIN
-        + " WHERE" + CLIENT_OR_SYSTEM + " AND cr.isactive = 'Y' AND c.isactive = 'Y'"
-        + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)"
-        + " AND cr.validfrom <= now()"
-        + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= now()"
-        + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + ", cr.validfrom DESC,"
-        + " CASE WHEN cr.c_currency_id = ? THEN 0 ELSE 1 END";
     Map<String, CurrentRate> byCurrency = new LinkedHashMap<>();
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+    try (PreparedStatement ps = connection().prepareStatement(CURRENT_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, language());
       ps.setString(3, clientId);
@@ -272,9 +281,7 @@ class ConversionRateStore {
     if (!hasTable(TABLE_SYNC_LOG)) {
       return null;
     }
-    String sql = "SELECT MAX(l.sync_date) FROM smfcr_sync_log l"
-        + " WHERE l.ad_client_id IN (?, '0') AND l.status = 'SUCCESS'";
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+    try (PreparedStatement ps = connection().prepareStatement(LATEST_DOWNLOAD_SQL)) {
       ps.setString(1, clientId);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getTimestamp(1) : null;
@@ -358,7 +365,7 @@ class ConversionRateStore {
 
   /** {@code ETGO_CONVRATE_STATUS}: CURRENT or HISTORIC. */
   String statusOf(String rateId) {
-    String status = callFunction("SELECT etgo_convrate_status(?)", rateId);
+    String status = callFunction(rateId);
     return status != null ? status : STATUS_HISTORIC;
   }
 
@@ -367,8 +374,8 @@ class ConversionRateStore {
     return LocalDateTime.now();
   }
 
-  private String callFunction(String sql, String rateId) {
-    try (PreparedStatement ps = connection().prepareStatement(sql)) {
+  private String callFunction(String rateId) {
+    try (PreparedStatement ps = connection().prepareStatement(STATUS_SQL)) {
       ps.setString(1, rateId);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getString(1) : null;
