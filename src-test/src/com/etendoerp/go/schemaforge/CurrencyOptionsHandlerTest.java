@@ -491,7 +491,7 @@ public class CurrencyOptionsHandlerTest {
     }
 
     java.util.Optional<Boolean> offersHeaderCurrency(String property, String candidate,
-        Map<String, String> record) {
+        Map<String, String> mergedRecord) {
       try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
            MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
            MockedStatic<OBCurrencyUtils> currencies = Mockito.mockStatic(OBCurrencyUtils.class)) {
@@ -499,7 +499,7 @@ public class CurrencyOptionsHandlerTest {
         obDal.when(OBDal::getInstance).thenReturn(dal);
         currencies.when(() -> OBCurrencyUtils.getOrgCurrency(anyString())).thenReturn("EUR-ID");
         java.util.Optional<Boolean> answer =
-            CurrencyOptionsHandler.offersHeaderCurrency(property, candidate, record);
+            CurrencyOptionsHandler.offersHeaderCurrency(property, candidate, mergedRecord);
         ArgumentCaptor<String> org = ArgumentCaptor.forClass(String.class);
         currencies.verify(() -> OBCurrencyUtils.getOrgCurrency(org.capture()), atMostOnce());
         resolvedOrg = org.getAllValues().isEmpty() ? null : org.getValue();
@@ -613,7 +613,7 @@ public class CurrencyOptionsHandlerTest {
    */
   @Test
   public void testOffersHeaderCurrencyMatchesTheListedCurrencies() throws Exception {
-    Map<String, String> record = Map.of("organization", "doc-org", "client", "doc-client");
+    Map<String, String> mergedRecord = Map.of("organization", "doc-org", "client", "doc-client");
     Object[][] cases = {
         // name, property, candidate, ranged currency the query lists (or null), expected
         { "ranged non-allowlisted currency is offered", "currency", "CHF-ID", "CHF-ID",
@@ -634,11 +634,12 @@ public class CurrencyOptionsHandlerTest {
       when(listed.getString(2)).thenReturn("ISO");
       when(run.ps.executeQuery()).thenReturn(listed);
 
-      assertEquals(name, c[4], run.offersHeaderCurrency((String) c[1], (String) c[2], record));
+      assertEquals(name, c[4],
+          run.offersHeaderCurrency((String) c[1], (String) c[2], mergedRecord));
     }
 
     HandleRun scoped = new HandleRun();
-    scoped.offersHeaderCurrency("currency", "CHF-ID", record);
+    scoped.offersHeaderCurrency("currency", "CHF-ID", mergedRecord);
     assertEquals("doc-org", scoped.resolvedOrg);
     verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-client"));
     verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-org"));
