@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -95,8 +96,9 @@ public class ConversionRateHandlerTest {
     assertEquals(409, refusal.getHttpStatus());
     assertEquals(ConversionRateRefusal.SYNCED_LOCKED, refusal.getBody().getJSONObject("error")
         .getJSONArray("messageKeys").getString(0));
-    obContext.verify(() -> OBContext.setAdminMode(true));
-    obContext.verify(OBContext::restorePreviousMode);
+    // Admin mode is entered and left; resolving the refusal's message enters it once more.
+    obContext.verify(() -> OBContext.setAdminMode(true), atLeastOnce());
+    obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
   }
 
   @Test

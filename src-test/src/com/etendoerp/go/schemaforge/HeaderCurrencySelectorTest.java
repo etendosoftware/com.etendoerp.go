@@ -191,6 +191,10 @@ public class HeaderCurrencySelectorTest {
     try (MockedStatic<PaymentMethodSelectorSupport> payment =
         mockStatic(PaymentMethodSelectorSupport.class);
         MockedStatic<HeaderCurrencySelector> currency = mockStatic(HeaderCurrencySelector.class)) {
+      // The handlers call handleIfHeaderSelector (payment method, then currency): keep it real so
+      // the chain is exercised, with the payment-method selector declining (mocked: null).
+      currency.when(() -> HeaderCurrencySelector.handleIfHeaderSelector(context))
+          .thenCallRealMethod();
       currency.when(() -> HeaderCurrencySelector.handleIfCurrencySelector(context))
           .thenReturn(served);
       for (NeoHandler header : headers) {
