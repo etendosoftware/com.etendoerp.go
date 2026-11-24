@@ -213,7 +213,7 @@ public class SFRolesOverview extends BaseWebhookService {
 
   /**
    * ETP-5402 — the "Informes" (Reports) subsection: the exact 9 reports the real
-   * `report-viewer` gallery shows (6 Finance, 2 Treasury, 1 Inventory — see {@link
+   * `report-viewer` gallery shows (5 Finance, 2 Treasury, 1 Taxes, 1 Inventory — see {@link
    * ReportAccessCatalog}'s own class javadoc for the corrected, live-QA-verified inventory; only 4
    * of the 9 even have an
    * {@code ETGO_SF_SPEC} row at all, so none is a candidate for {@link
