@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -203,6 +204,64 @@ class NeoPrintableRendererTest {
     }
     // a skipped document is not even rendered: jsreport ran once per stored case only
     verify(jsreport, org.mockito.Mockito.times(4)).render(any());
+  }
+
+  @Test
+  @DisplayName("the phases: prepare reads only, renderPdf needs no database, store re-checks the main file")
+  void phasesRunSeparately() throws Exception {
+    when(templates.get("sales-invoice")).thenReturn(template());
+    when(builder.build(RECORD)).thenReturn(new JSONObject().put("documentNo", "FV/2026 001"));
+    when(jsreport.render(any())).thenReturn("%PDF-1.7".getBytes());
+    NeoResponse created = NeoResponse.created(new JSONObject());
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+        MockedStatic<NeoAttachmentAuthorizer> authorizer = mockStatic(NeoAttachmentAuthorizer.class);
+        MockedStatic<NeoAttachmentStore> store = mockStatic(NeoAttachmentStore.class)) {
+      access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(created);
+
+      NeoPrintableRenderer.Prepared prepared =
+          renderer().prepare(spec, entity, RECORD, "CO");
+      assertNull(prepared.getOutcome());
+      verify(jsreport, never()).render(any());
+      verify(templates, never()).get(anyString());
+
+      byte[] pdf = renderer().renderPdf(prepared, "es_ES");
+      assertNotNull(pdf);
+      store.verify(() -> NeoAttachmentStore.store(any()), never());
+
+      assertEquals(NeoPrintableRenderer.Outcome.STORED, renderer().store(prepared, pdf));
+      // the main attachment became a person's file while rendering
+      assertEquals(NeoPrintableRenderer.Outcome.FOREIGN_MAIN,
+          renderer("devolucion_firmada_cliente.pdf").store(prepared, pdf));
+      store.verify(() -> NeoAttachmentStore.store(any()), org.mockito.Mockito.times(1));
+    }
+  }
+
+  @Test
+  @DisplayName("the phases fail apart: a store over HTTP 300, a jsreport error or a manifest error")
+  void phaseFailures() throws Exception {
+    when(templates.get("sales-invoice")).thenReturn(template());
+    when(builder.build(RECORD)).thenReturn(new JSONObject().put("documentNo", "FV/2026 001"));
+    when(jsreport.render(any())).thenReturn("%PDF-1.7".getBytes());
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+        MockedStatic<NeoAttachmentAuthorizer> authorizer = mockStatic(NeoAttachmentAuthorizer.class);
+        MockedStatic<NeoAttachmentStore> store = mockStatic(NeoAttachmentStore.class)) {
+      access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      NeoPrintableRenderer.Prepared prepared = renderer().prepare(spec, entity, RECORD, "CO");
+      assertNull(prepared.getOutcome());
+
+      store.when(() -> NeoAttachmentStore.store(any())).thenReturn(NeoResponse.error(500, "boom"));
+      assertEquals(NeoPrintableRenderer.Outcome.FAILED,
+          renderer().store(prepared, "%PDF".getBytes()));
+
+      when(jsreport.render(any())).thenThrow(new NeoJsreportClient.RenderException("502"));
+      assertEquals(0, renderer().renderPdf(prepared, "es_ES").length);
+      when(templates.get("sales-invoice")).thenThrow(
+          new NeoPrintableTemplates.ManifestException("manifest"));
+      assertEquals(0, renderer().renderPdf(prepared, "es_ES").length);
+    }
   }
 
   @Test
