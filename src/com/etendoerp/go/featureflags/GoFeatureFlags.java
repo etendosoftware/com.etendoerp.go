@@ -496,6 +496,28 @@ public final class GoFeatureFlags {
   public static final String FLAG_SEPA_REMITTANCES = "sepa-remittances";
 
   /**
+   * ETP-6284 — purchase invoice <b>imports with DUA</b> for SII. Positive polarity: {@code true} =
+   * enabled. Strictly off by default: an unconfigured flag, an unreachable control plane and any
+   * evaluation error all read as {@code false}.
+   *
+   * <p><b>What it gates.</b> The writes (POST/PUT/PATCH/DELETE) on the purchase-invoice {@code tax}
+   * entity and the {@code siiDeferredVat} header action — off, 403 {@code feature_disabled} on
+   * every channel (REST single, batch, MCP). <b>Not gated:</b> the reads of the tax entity, the
+   * header DUA fields (Classic columns), {@code hasManualTaxLines} and {@code aeatsiiFacturaIds}.
+   *
+   * <p><b>One reader.</b> Only {@code SiiImportDuaFlag} reads this key, evaluated per request and
+   * never cached. <b>Targeted per account</b>: the context carries the {@code ETGO_ACCOUNT} email
+   * of the request user (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; a Datadog rule must be written on the lowercase {@code email} attribute alone.
+   * Locally {@code etendo.go.flags.sii-import-dua} / {@code ETGO_FLAG_SII_IMPORT_DUA}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. The web client reads
+   * {@code capabilities.siiImportDua} off {@code SFWindowAccessMap} and never evaluates the flag.
+   * TTL 2027-03-31 (placeholder).
+   */
+  public static final String FLAG_SII_IMPORT_DUA = "sii-import-dua";
+
+  /**
    * ETP-6151 — the <b>PSD2 statement import settings</b> of bank-connected financial accounts.
    * Positive polarity: {@code true} = the new behaviour; the default and every failure read
    * {@code false}, which is the behaviour before ETP-6151.

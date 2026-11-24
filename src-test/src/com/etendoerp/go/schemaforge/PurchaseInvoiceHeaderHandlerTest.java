@@ -102,9 +102,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>{@code linkedOrders} wiring — detail-only, best-effort (ETP-5828).</li>
  *   <li>{@code followUpFlows()} — the one goods-receipt follow-up and its purchase-side wiring,
  *       and the {@code followUp} annotation written on every GET row (ETP-5576).</li>
+ *   <li>{@code hasManualTaxLines} ({@link PurchaseInvoiceManualTaxLines}) on the detail GET, so
+ *       an import with DUA can be confirmed with no invoice lines (ETP-6284).</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceManualTaxLines
  */
 public class PurchaseInvoiceHeaderHandlerTest {
 
@@ -758,6 +761,89 @@ public class PurchaseInvoiceHeaderHandlerTest {
         assertNull(handler.afterHandle(ctx));
       }
       sifMock.verifyNoInteractions();
+    }
+  }
+
+  // ── afterHandle — hasManualTaxLines (ETP-6284) ───────────────────────────
+
+  /**
+   * Runs a detail GET of {@code invoiceId} where every statement reads an empty result except
+   * the manual-tax-lines query of {@link PurchaseInvoiceManualTaxLines}, answered by
+   * {@code manualTaxPs}. Returns the enriched record.
+   */
+  private JSONObject detailWithManualTaxQuery(String invoiceId, PreparedStatement manualTaxPs)
+      throws Exception {
+    JSONObject rec = new JSONObject().put("id", invoiceId);
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray().put(rec)));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET").recordId(invoiceId)
+        .previousResult(new NeoResponse(200, body)).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      Connection conn = stubConnectionWithLinkedOrders(dalMock, mock(PreparedStatement.class));
+      when(conn.prepareStatement(Mockito.argThat(
+          (String sql) -> sql != null && sql.contains("c_invoicetax") && sql.contains("recalculate"))))
+          .thenReturn(manualTaxPs);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      return result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    }
+  }
+
+  /**
+   * ETP-6284: an import with DUA carries manual tax rows and often no invoice lines; the detail
+   * GET says so, so the SPA keeps Confirm enabled on an invoice without lines.
+   */
+  @Test
+  public void afterHandle_singleRecord_withAManualTaxRow_hasManualTaxLines() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+
+    JSONObject enriched = detailWithManualTaxQuery("pinv-dua", ps);
+
+    assertTrue(enriched.getBoolean(PurchaseInvoiceManualTaxLines.FIELD));
+    Mockito.verify(ps).setString(1, "pinv-dua");
+  }
+
+  /** ETP-6284: without manual tax rows the SPA keeps its previous rule (no lines, no Confirm). */
+  @Test
+  public void afterHandle_singleRecord_withoutManualTaxRows_hasNoManualTaxLines() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    assertFalse(detailWithManualTaxQuery("pinv-plain", ps)
+        .getBoolean(PurchaseInvoiceManualTaxLines.FIELD));
+  }
+
+  /** ETP-6284: a failing query is fail-safe — {@code false}, and the response stays OK. */
+  @Test
+  public void afterHandle_singleRecord_manualTaxQueryFailure_hasNoManualTaxLines()
+      throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenThrow(new SQLException("boom"));
+
+    assertFalse(detailWithManualTaxQuery("pinv-fail", ps)
+        .getBoolean(PurchaseInvoiceManualTaxLines.FIELD));
+  }
+
+  /** ETP-6284: a blank invoice id answers {@code false} without touching the database. */
+  @Test
+  public void manualTaxLines_blankInvoiceId_isFalseWithoutQuerying() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      JSONObject rec = new JSONObject();
+
+      PurchaseInvoiceManualTaxLines.enrich(rec, " ");
+
+      assertFalse(rec.getBoolean(PurchaseInvoiceManualTaxLines.FIELD));
+      dalMock.verifyNoInteractions();
     }
   }
 
@@ -1705,11 +1791,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
    * ETP-5576 (MCP obs. 11): the keys this header injects on every GET record without a spec field
    * behind them — {@code followUp} and the subtype key — are declared, so an MCP
    * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
-   * response carries them.
+   * response carries them. ETP-6284 adds {@code hasManualTaxLines} (single-record GET).
    */
   @Test
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
-    assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype"),
+    assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype", "hasManualTaxLines"),
         new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
   }
 
@@ -1725,6 +1811,23 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertTrue("the existing declarations are kept",
         contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost")));
     assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
+  }
+
+  @Test
+  public void siiDeferredVat_isAGetOnlyActionAndRefusesOtherMethods() throws Exception {
+    NeoActionContract contract =
+        new PurchaseInvoiceHeaderHandler().actionContracts().get("siiDeferredVat");
+    assertNotNull("siiDeferredVat is served by handle() and must be declared (ETP-6284)", contract);
+    assertEquals("GET", contract.getHttpMethod());
+
+    try (MockedStatic<SiiImportDuaFlag> flag =
+        Mockito.mockStatic(SiiImportDuaFlag.class, Mockito.CALLS_REAL_METHODS)) {
+      flag.when(SiiImportDuaFlag::isEnabled).thenReturn(true);
+      NeoResponse response =
+          new PurchaseInvoiceHeaderHandler().handle(purchaseActionCtx("siiDeferredVat"));
+      assertNotNull(response);
+      assertEquals(HttpServletResponse.SC_METHOD_NOT_ALLOWED, response.getHttpStatus());
+    }
   }
 
 

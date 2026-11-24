@@ -32,9 +32,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
+import java.util.function.BiFunction;
+
+import org.apache.commons.lang3.StringUtils;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -44,11 +50,14 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.common.NeoCurrencyFormatConfig;
 import com.etendoerp.go.portal.PortalDecisionService;
 import com.etendoerp.go.portal.PortalLink;
 import com.etendoerp.go.portal.PortalLinkService;
+import com.etendoerp.go.portal.PortalLogoReference;
 import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractCommand;
@@ -67,6 +76,7 @@ import com.etendoerp.go.schemaforge.email.EmailSendContext;
  *
  * @covers com.etendoerp.go.schemaforge.email.contracts.PortalDecisionConfirmEmailContract
  * @covers com.etendoerp.go.schemaforge.email.contracts.PortalDecisionNoticeEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.render.EmailCardLayout
  */
 public class PortalDecisionEmailContractsTest {
 
@@ -89,8 +99,15 @@ public class PortalDecisionEmailContractsTest {
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
     BusinessPartner customer = mock(BusinessPartner.class);
     when(customer.getName()).thenReturn("Cliente SL");
+    Currency euro = mock(Currency.class);
+    when(euro.getISOCode()).thenReturn("EUR");
+    when(euro.getSymbol()).thenReturn("€");
+    when(euro.isCurrencySymbolAtTheRight()).thenReturn(true);
+    when(euro.getStandardPrecision()).thenReturn(2L);
     Order quotation = mock(Order.class);
     when(quotation.getDocumentNo()).thenReturn("PR-7");
+    when(quotation.getGrandTotalAmount()).thenReturn(new BigDecimal("2450.00"));
+    when(quotation.getCurrency()).thenReturn(euro);
     when(quotation.getBusinessPartner()).thenReturn(customer);
     when(obDal.get(Order.class, QUOTATION_ID)).thenReturn(quotation);
     linkService = mock(PortalLinkService.class);
@@ -158,10 +175,10 @@ public class PortalDecisionEmailContractsTest {
   public void theConfirmationButtonNamesTheDecisionInTheLinksLanguage() throws Exception {
     // Columns: decision, language, button, subject.
     String[][] cases = {
-        { "ACCEPT", "es_ES", "Confirmar aceptación", "Confirme su decisión sobre el presupuesto PR-7" },
-        { "REJECT", "es_ES", "Confirmar rechazo", "Confirme su decisión sobre el presupuesto PR-7" },
-        { "ACCEPT", "en_US", "Confirm acceptance", "Confirm your decision on quotation PR-7" },
-        { "REJECT", "en_US", "Confirm rejection", "Confirm your decision on quotation PR-7" },
+        { "ACCEPT", "es_ES", "Confirmar aceptación", "Confirma la aceptación del presupuesto PR-7" },
+        { "REJECT", "es_ES", "Confirmar rechazo", "Confirma el rechazo del presupuesto PR-7" },
+        { "ACCEPT", "en_US", "Confirm acceptance", "Confirm the acceptance of quotation PR-7" },
+        { "REJECT", "en_US", "Confirm rejection", "Confirm the rejection of quotation PR-7" },
     };
     PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
     when(minted.getId()).thenReturn(DECISION_ID);
@@ -188,7 +205,36 @@ public class PortalDecisionEmailContractsTest {
   }
 
   @Test
-  public void aRejectionShowsItsReasonAndTheFreeTextOnlyForOther() throws Exception {
+  public void aRejectionShowsTheCustomersReasonAndForOtherTheTextTheyTyped() throws Exception {
+    PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
+    when(minted.getId()).thenReturn(DECISION_ID);
+    when(minted.getUrl()).thenReturn(DECISION_URL);
+    when(decisionService.mint(anyString(), anyString(), anyString(), any(), any(), anyString(),
+        any())).thenReturn(Optional.of(minted));
+    PortalLink session = link();
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
+    String tooLong = String.join("", Collections.nCopies(100, "x"));
+
+    String price = resolveConfirmation("REJECT", "PRICE", null).getData().getString("body");
+    String other = resolveConfirmation("REJECT", "OTHER", "Plazo <demasiado> largo")
+        .getData().getString("body");
+    String blank = resolveConfirmation("REJECT", "OTHER", "   ").getData().getString("body");
+    String cut = resolveConfirmation("REJECT", "OTHER", tooLong).getData().getString("body");
+
+    assertTrue(price, price.contains(">Precio<"));
+    // "Otros": the customer's own text, escaped, in place of the label.
+    assertTrue(other, other.contains(">Plazo &lt;demasiado&gt; largo<"));
+    assertFalse(other, other.contains(">Otros<"));
+    assertTrue("an empty text falls back to the label: " + blank, blank.contains(">Otros<"));
+    int max = PortalDecisionConfirmEmailContract.MAX_REASON_TEXT_CHARS;
+    assertTrue(cut, cut.contains(">" + tooLong.substring(0, max - 1) + "\u2026<"));
+    assertFalse(cut, cut.contains(tooLong.substring(0, max)));
+    // A rejection shows no amount (PO decision: exactly as the design).
+    assertFalse(price, price.contains("Importe total"));
+  }
+
+  @Test
+  public void anAcceptanceShowsTheCompanyTheNumberAndTheTotalAsTheAppShowsIt() throws Exception {
     PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
     when(minted.getId()).thenReturn(DECISION_ID);
     when(minted.getUrl()).thenReturn(DECISION_URL);
@@ -197,12 +243,82 @@ public class PortalDecisionEmailContractsTest {
     PortalLink session = link();
     when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
 
-    String price = resolveConfirmation("REJECT", "PRICE", null).getData().getString("body");
-    String other = resolveConfirmation("REJECT", "OTHER", "Plazo demasiado largo")
-        .getData().getString("body");
+    String body = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
 
-    assertTrue(price, price.contains("Precio"));
-    assertTrue(other, other.contains("Otros — Plazo demasiado largo"));
+    assertTrue(body, body.contains(">Acme<"));
+    assertTrue(body, body.contains(">PR-7<"));
+    assertTrue(body, body.contains("Importe total"));
+    // As the app shows it (the pinned "." and "," separators; symbol on its side).
+    assertTrue(body, body.contains(">2.450,00\u00A0€<"));
+    assertFalse(body, body.contains(">Motivo<"));
+    // The Etendo footer closes the card.
+    assertTrue(body, body.contains("Creado con Etendo"));
+  }
+
+  @Test
+  public void theIssuerAvatarIsTheTenantsPublicLogoFittedAndEscapedElseItsInitials()
+      throws Exception {
+    stubMint();
+    PortalLink session = link();
+    when(session.getClientName()).thenReturn("Acme & <Co> Ltd");
+    when(session.getClientId()).thenReturn("CLIENT-1");
+    when(session.getOrganizationId()).thenReturn("ORG-1");
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
+    PortalLogoReference.PublicLogo logo = mock(PortalLogoReference.PublicLogo.class);
+    when(logo.getUrl()).thenReturn("https://app.example.test/sws/portal/public-logo/a\"b&c");
+    when(logo.getWidth()).thenReturn(300);
+    when(logo.getHeight()).thenReturn(100);
+    List<String> asked = new ArrayList<>();
+    PortalDecisionConfirmEmailContract withLogo = confirm((clientId, orgId) -> {
+      asked.add(clientId + "/" + orgId);
+      return Optional.of(logo);
+    });
+
+    String logoBody = resolveConfirmation(withLogo, "ACCEPT", null, null)
+        .getData().getString("body");
+    String initialsBody = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
+
+    // 300x100 fitted into the round avatar: aspect kept, 42x14.
+    assertTrue(logoBody, logoBody.contains("<img src=\"https://app.example.test/sws/portal/"
+        + "public-logo/a&quot;b&amp;c\" width=\"42\" height=\"14\" alt=\"Acme &amp; &lt;Co&gt;"
+        + " Ltd\""));
+    assertFalse(logoBody, logoBody.contains(">AL</td>"));
+    assertEquals(Collections.singletonList("CLIENT-1/ORG-1"), asked);
+    assertTrue(initialsBody, initialsBody.contains(">AL</td>"));
+    assertFalse(initialsBody, initialsBody.contains("public-logo"));
+  }
+
+  @Test
+  public void anAcceptanceWithoutATotalDrawsTwoEvenColumnsInsteadOfAnEmptyThird()
+      throws Exception {
+    stubMint();
+    // Built before the stubbing: link() stubs its own mock (no nested stubbing).
+    PortalLink session = link();
+    when(linkService.findLink(LINK_ID)).thenReturn(Optional.of(session));
+    Order quotation = OBDal.getInstance().get(Order.class, QUOTATION_ID);
+
+    String withTotal = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
+    when(quotation.getGrandTotalAmount()).thenReturn(null);
+    String withoutTotal = resolveConfirmation("ACCEPT", null, null).getData().getString("body");
+
+    assertEquals(3, StringUtils.countMatches(withTotal, "class=\"sf-col"));
+    assertTrue(withTotal, withTotal.contains("width=\"33%\""));
+    assertEquals(2, StringUtils.countMatches(withoutTotal, "class=\"sf-col"));
+    assertTrue(withoutTotal, withoutTotal.contains("width=\"50%\""));
+    assertFalse(withoutTotal, withoutTotal.contains("Importe total"));
+  }
+
+  @Test
+  public void theOtrosTextIsCutByCodePointsSoAnEmojiAtTheCutStaysWhole() {
+    int max = PortalDecisionConfirmEmailContract.MAX_REASON_TEXT_CHARS;
+    String emoji = "\uD83D\uDE00";
+    String fits = String.join("", Collections.nCopies(max - 1, "x")) + emoji;
+    String head = String.join("", Collections.nCopies(max - 2, "x")) + emoji;
+    // Columns: text, expected. The first is max code points but max + 1 chars: not cut.
+    String[][] cases = { { fits, fits }, { head + "yyyy", head + "\u2026" } };
+    for (String[] c : cases) {
+      assertEquals(c[1], PortalDecisionConfirmEmailContract.truncate(c[0]));
+    }
   }
 
   @Test
@@ -266,7 +382,22 @@ public class PortalDecisionEmailContractsTest {
   // ── fixtures ────────────────────────────────────────────────────────────────
 
   private PortalDecisionConfirmEmailContract confirm() {
-    return new PortalDecisionConfirmEmailContract(linkService, decisionService, () -> true);
+    return confirm((clientId, orgId) -> Optional.empty());
+  }
+
+  private PortalDecisionConfirmEmailContract confirm(
+      BiFunction<String, String, Optional<PortalLogoReference.PublicLogo>> logoFinder) {
+    // Separators and logo pinned: the test must not depend on Openbravo.properties or the DAL.
+    return new PortalDecisionConfirmEmailContract(linkService, decisionService, () -> true,
+        () -> new NeoCurrencyFormatConfig(".", ","), logoFinder);
+  }
+
+  private void stubMint() {
+    PortalDecisionService.MintedDecision minted = mock(PortalDecisionService.MintedDecision.class);
+    when(minted.getId()).thenReturn(DECISION_ID);
+    when(minted.getUrl()).thenReturn(DECISION_URL);
+    when(decisionService.mint(anyString(), anyString(), anyString(), any(), any(), anyString(),
+        any())).thenReturn(Optional.of(minted));
   }
 
   private PortalDecisionNoticeEmailContract notice() {
@@ -275,6 +406,11 @@ public class PortalDecisionEmailContractsTest {
 
   private EmailProviderRequest resolveConfirmation(String decision, String reasonCode,
       String reasonText) throws Exception {
+    return resolveConfirmation(confirm(), decision, reasonCode, reasonText);
+  }
+
+  private EmailProviderRequest resolveConfirmation(PortalDecisionConfirmEmailContract contract,
+      String decision, String reasonCode, String reasonText) throws Exception {
     JSONObject body = new JSONObject().put(PortalDecisionService.FIELD_DECISION, decision);
     if (reasonCode != null) {
       body.put(PortalDecisionService.FIELD_REASON_CODE, reasonCode);
@@ -282,7 +418,7 @@ public class PortalDecisionEmailContractsTest {
     if (reasonText != null) {
       body.put(PortalDecisionService.FIELD_REASON_TEXT, reasonText);
     }
-    EmailContractResolution resolution = confirm().resolve(command(body),
+    EmailContractResolution resolution = contract.resolve(command(body),
         EmailRecipientResolution.serverResolved(EmailRecipientSet.singleTo(
             "billing@customer.test")));
     assertTrue("expected a ready resolution, got: " + resolution.getMessage(),

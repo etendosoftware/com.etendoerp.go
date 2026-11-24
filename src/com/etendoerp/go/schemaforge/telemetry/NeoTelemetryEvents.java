@@ -157,6 +157,22 @@ public final class NeoTelemetryEvents {
   public static final String BACKEND_QUOTATION_DECIDED = "backend_quotation_decided";
 
   /**
+   * ETP-6209 — a customer portal visit opened from a link (the first valid {@code /me} of a link
+   * after 30 minutes without one). Emitted by {@code PortalKpiTelemetry}; properties
+   * {@code account_id}, {@code third_party} (keyed pseudonym of the customer),
+   * {@code entry_doc_type}, {@code origin}. Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_OPENED = "backend_portal_opened";
+
+  /**
+   * ETP-6209 — a portal-related email left: {@code piece} {@code document_send} (with
+   * {@code doc_type}), {@code link_renewal}, {@code decision_accept} or {@code decision_reject}.
+   * Emitted by {@code PortalKpiTelemetry}; properties {@code account_id}, {@code piece},
+   * {@code doc_type}. Never a record identifier.
+   */
+  public static final String BACKEND_PORTAL_EMAIL_SENT = "backend_portal_email_sent";
+
+  /**
    * ETP-6230 — a productive tenant finished onboarding (emitted after the onboarding commit).
    * Emitted by {@code AccountingKpiTelemetry}; properties {@code account_id}, {@code internal}.
    */

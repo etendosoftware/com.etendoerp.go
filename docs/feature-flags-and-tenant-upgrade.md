@@ -188,6 +188,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
 | `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | `sepa-remittances` | `etendo.go.flags.sepa-remittances` | `ETGO_FLAG_SEPA_REMITTANCES` | absent ⇒ **`false`** (no SEPA remittances: settings and the `remittance` spec refused, mandate keys dropped; per account on a hosted arm only; TTL 2027-03-31, provisional) — see its section below |
+| `sii-import-dua` | `etendo.go.flags.sii-import-dua` | `ETGO_FLAG_SII_IMPORT_DUA` | absent ⇒ **`false`** (no imports with DUA: purchase-invoice tax-line writes and `siiDeferredVat` refused with 403 `feature_disabled`; per account on a hosted arm only; TTL 2027-03-31, placeholder) — see its section below |
 | `psd2-statement-import-settings` | `etendo.go.flags.psd2-statement-import-settings` | `ETGO_FLAG_PSD2_STATEMENT_IMPORT_SETTINGS` | absent ⇒ **`false`** (PSD2 import settings, `maxFetchInterval` on `accounts` and deleting statements of connected accounts all as before ETP-6151; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | `mcp-routines` | `etendo.go.flags.mcp-routines` | `ETGO_FLAG_MCP_ROUTINES` | absent ⇒ **`false`** (`etendo_routine` neither listed nor routed: the MCP as before ETP-6236; per account on a hosted arm only; placeholder TTL 2027-03-31) — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
@@ -931,6 +932,28 @@ setting. Keep the registry feature entry in `etendo_schema_forge`. Retiring the 
 the Bank accounts created before (or with the flag off): they still answer
 `ETGO_RemittanceAccountNotAllowed` in the remittance window. Whether they get a data-fix then is a
 product decision; none exists today.
+
+### `sii-import-dua` (ETP-6284) — backend-only, per account, off by default
+
+Gates purchase-invoice **imports with DUA** for SII, never their schema. Positive polarity:
+`true` = enabled. Default and every failure = `false`. One evaluator, `SiiImportDuaFlag`, at
+request entry: `FeatureFlagContext.forAccount(GoAccountResolver.currentAccountEmail())` plus the
+tenant as `clientId`; write Datadog/ConfigCat rules on the lowercase `email` attribute. Locally
+`etendo.go.flags.sii-import-dua=true` / `ETGO_FLAG_SII_IMPORT_DUA=true` (Tomcat restart).
+
+**What it gates** (403 `feature_disabled`, `messageKeys = [ETGO_SiiImportDuaDisabled]`, the
+envelope of the SEPA remittances / invoice inbox refusals, on every channel — REST single, batch,
+MCP):
+- the writes (POST/PUT/PATCH/DELETE) on the purchase-invoice `tax` entity
+  (`PurchaseInvoiceTaxExtension`, judged before any read);
+- the `siiDeferredVat` header action (`PurchaseInvoiceSiiDeferredVat`);
+- `SFWindowAccessMap`, which publishes `capabilities.siiImportDua` for the UI (the DUA and
+  import-taxes cards of the SIF tab, the deferred-VAT check, Confirm of an import invoice without
+  lines). The SPA never evaluates the flag and has no key for it.
+
+**Not gated:** the reads of the tax entity, the header DUA fields (Classic columns),
+`hasManualTaxLines` and `aeatsiiFacturaIds` (the SII attachments of every record, for every
+invoice).
 
 ### `mcp-routines` (ETP-6236) — backend-only, per account, off by default
 

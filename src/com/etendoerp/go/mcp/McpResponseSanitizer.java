@@ -259,8 +259,13 @@ final class McpResponseSanitizer {
    * string instead (the previous approach) under-counts matches on a run of repeated separators,
    * because consecutive {@code " - "} tokens share boundary characters and the literal split
    * finds fewer matches than there are blank segments — see ETP-5806 CP-8b follow-up.
+   *
+   * <p>Written as {@code " (?:- )++"} rather than the equivalent {@code "(?: -)+ "}: both match
+   * exactly the same strings ({@code (" -")^k + " "} equals {@code " " + ("- ")^k}), but with the
+   * repetition last and possessive the engine has nothing to backtrack into, which is what the
+   * regex-DoS rule (Sonar S5852) asks for. Behaviour is unchanged.
    */
-  private static final Pattern DASH_RUN_PATTERN = Pattern.compile("(?: -)+ ");
+  private static final Pattern DASH_RUN_PATTERN = Pattern.compile(" (?:- )++");
 
   /**
    * Drops empty segments from a {@code " - "}-joined identifier string, so a blank address
