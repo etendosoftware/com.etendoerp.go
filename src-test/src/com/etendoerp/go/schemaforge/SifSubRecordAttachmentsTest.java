@@ -30,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -49,9 +50,12 @@ import org.openbravo.dal.service.OBDal;
  *   <li>a query that finds no row for a table simply omits that table's key</li>
  *   <li>one table's query failing (module not installed) does not prevent the other
  *       two from being injected</li>
+ *   <li>SII also gets every {@code aeatsii_facturas} id, oldest first (ETP-6284)</li>
  *   <li>when {@code OBDal} is entirely unavailable (bare unit-test context, no live
  *       database), the exception is swallowed and no key is added</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.SifSubRecordAttachments
  */
 public class SifSubRecordAttachmentsTest {
 
@@ -105,6 +109,7 @@ public class SifSubRecordAttachmentsTest {
       SifSubRecordAttachments.enrich(rec, "inv-001");
 
       assertEquals("sii-row-001", rec.getString("aeatsiiFacturaId"));
+      assertEquals("sii-row-001", rec.getJSONArray("aeatsiiFacturaIds").getString(0));
       assertEquals("tbai-row-001", rec.getString("tbaiSyncInvoiceId"));
       assertEquals("vf-row-001", rec.getString("invoiceVerifactuId"));
     }
@@ -134,24 +139,58 @@ public class SifSubRecordAttachmentsTest {
       when(dal.getConnection()).thenReturn(conn);
 
       PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(rs.next()).thenReturn(true);
-      when(rs.getString(1)).thenReturn("some-id");
-      when(ps.executeQuery()).thenReturn(rs);
+      when(ps.executeQuery()).thenAnswer(inv -> singleRowResultSet("some-id"));
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
       when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
 
       JSONObject rec = new JSONObject().put("id", "inv-004");
       SifSubRecordAttachments.enrich(rec, "inv-004");
 
-      java.util.List<String> queries = sqlCaptor.getAllValues();
+      // 3 latest-row lookups + the SII all-rows lookup (ETP-6284), checked separately below.
+      java.util.List<String> queries = sqlCaptor.getAllValues().stream()
+          .filter(sql -> !sql.contains("ORDER BY created ASC"))
+          .collect(java.util.stream.Collectors.toList());
       assertEquals(3, queries.size());
+      assertEquals(4, sqlCaptor.getAllValues().size());
       for (String sql : queries) {
         assertTrue("Query must order by created DESC to pick the most recent retry: " + sql,
             sql.contains("ORDER BY created DESC"));
         assertTrue("Query must be limited to 1 row: " + sql, sql.contains("LIMIT 1"));
         assertTrue("Query must filter to active rows only: " + sql, sql.contains("isactive = 'Y'"));
       }
+    }
+  }
+
+  // ── every SII sub-record (F1 + one F5 per DUA) — ETP-6284 ────────────────
+
+  @Test
+  public void testEnrichInjectsEveryAeatsiiFacturaIdOldestFirst() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenAnswer(inv -> emptyStatement());
+
+      PreparedStatement allPs = mock(PreparedStatement.class);
+      ResultSet allRs = mock(ResultSet.class);
+      when(allRs.next()).thenReturn(true, true, true, false);
+      when(allRs.getString(1)).thenReturn("sii-f1", "sii-f5-a", "sii-f5-b");
+      when(allPs.executeQuery()).thenReturn(allRs);
+      when(conn.prepareStatement(
+          Mockito.argThat(sql -> sql.contains("aeatsii_facturas") && sql.contains("ORDER BY created ASC"))))
+          .thenReturn(allPs);
+
+      JSONObject rec = new JSONObject().put("id", "inv-005");
+      SifSubRecordAttachments.enrich(rec, "inv-005");
+
+      JSONArray ids = rec.getJSONArray("aeatsiiFacturaIds");
+      assertEquals(3, ids.length());
+      assertEquals("sii-f1", ids.getString(0));
+      assertEquals("sii-f5-a", ids.getString(1));
+      assertEquals("sii-f5-b", ids.getString(2));
+      assertFalse("TBAI has no list key", rec.has("tbaiSyncInvoiceIds"));
+      assertFalse("Verifactu has no list key", rec.has("invoiceVerifactuIds"));
     }
   }
 
@@ -175,6 +214,7 @@ public class SifSubRecordAttachmentsTest {
       SifSubRecordAttachments.enrich(rec, "inv-002");
 
       assertFalse(rec.has("aeatsiiFacturaId"));
+      assertFalse(rec.has("aeatsiiFacturaIds"));
       assertFalse(rec.has("tbaiSyncInvoiceId"));
       assertFalse(rec.has("invoiceVerifactuId"));
     }
@@ -211,10 +251,23 @@ public class SifSubRecordAttachmentsTest {
   private static void stubTableQuery(Connection conn, String tableName, String returnedId)
       throws SQLException {
     PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(rs.next()).thenReturn(true);
-    when(rs.getString(1)).thenReturn(returnedId);
-    when(ps.executeQuery()).thenReturn(rs);
+    when(ps.executeQuery()).thenAnswer(inv -> singleRowResultSet(returnedId));
     when(conn.prepareStatement(contains(tableName))).thenReturn(ps);
+  }
+
+  /** A fresh one-row result set per query, so a reader that loops on next() terminates. */
+  private static ResultSet singleRowResultSet(String returnedId) throws SQLException {
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn(returnedId);
+    return rs;
+  }
+
+  private static PreparedStatement emptyStatement() throws SQLException {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(false);
+    when(ps.executeQuery()).thenReturn(rs);
+    return ps;
   }
 }

@@ -1,4 +1,4 @@
-# HubSpot sync (ETP-5847, ETP-6082)
+# HubSpot sync (ETP-5847, ETP-6082, ETP-6363)
 
 Marketing follows every self-serve signup in HubSpot, from the confirmed account through the trial
 to a paying customer or a lost deal, and then every paying environment's subscription. Etendo GO reports the account lifecycle events and
@@ -51,8 +51,9 @@ takes it from Cliente perdido straight to Primer cobro pagado: a charge above ze
 
 | Event | When | HubSpot |
 |---|---|---|
-| `ACCOUNT_CREATED` | the owner confirms the address: the welcome mail's login link (`/session/link`, the usual path since ETP-6081), the confirmation link (`/verify-email`), or a later SSO sign-in on that address. An SSO sign-up at once, since its provider vouched for it | contact upserted by email: `firstname`/`lastname` (the account name split at its first space), `etendo_camino_entrada=self_serve`, `phone` and `sector` when the account has them. Deal `{account name} — Self-serve` in MQL, with `etendo_account_id`, `etendo_camino_entrada_deal=self_serve` and `etendo_estado_suscripcion=trial`, associated with the contact |
-| `DEMO_READY` | the onboarding creates the demo (`markDemoReady`) | contact: `etendo_inicio_prueba`, `etendo_fin_prueba` (`yyyy-MM-dd`, UTC), `country`. The deal is renamed `{company} — Self-serve` and gets the company (`name`, `country`), unless it has one. An account confirmed before ETP-6082 has no deal yet: it is created here, in MQL. A booked demo's deal only gets `etendo_account_id` (see [Booked demos](#booked-demos)) |
+| `SIGNUP_FORM` | with `ACCOUNT_CREATED`, just before it (ETP-6363) | the sign-up submitted to marketing's form "Alta app – onboarding" through the Forms API (`secure/submit`), so HubSpot creates the contact with its original source (Google, LinkedIn, an ad) instead of "Offline". Fields: `email`, `firstname`, `lastname`, `country`, `etendo_camino_entrada=self_serve`; context: the visitor cookie `hutk` (only when the visitor accepted the cookies), `pageUri` and `pageName`, kept in `ETGO_ACCOUNT.HUBSPOT_CONTEXT` since the register form or the SSO sign-in. Sent once; a refusal (`400`, usually a field the form lacks) is final and logged. `SKIPPED` when no form is configured |
+| `ACCOUNT_CREATED` | the owner confirms the address: the welcome mail's login link (`/session/link`, the usual path since ETP-6081), the confirmation link (`/verify-email`), or a later SSO sign-in on that address. An SSO sign-up at once, since its provider vouched for it | contact upserted by email (after a sent `SIGNUP_FORM`, only once HubSpot has created the form's contact: the event retries while `GET` of the contact answers 404, for at most 3 attempts, so a contact is never created without its source): `firstname`/`lastname` (the account name split at its first space), `etendo_camino_entrada=self_serve`, `phone`, `sector` and `country`/`hs_country_region_code` when the account has them. Deal `{account name} — Self-serve` in MQL, with `etendo_account_id`, `etendo_camino_entrada_deal=self_serve` and `etendo_estado_suscripcion=trial`, associated with the contact |
+| `DEMO_READY` | the onboarding creates the demo (`markDemoReady`) | contact: `etendo_inicio_prueba`, `etendo_fin_prueba` (`yyyy-MM-dd`, UTC), `country`, and `company` (ETP-6363: the sign-up form has none; an update does not change the contact's source). The deal is renamed `{company} — Self-serve` and gets the company (`name`, `country`), unless it has one. An account confirmed before ETP-6082 has no deal yet: it is created here, in MQL. A booked demo's deal only gets `etendo_account_id` (see [Booked demos](#booked-demos)) |
 | `DEMO_ENTERED` | first entry into the demo | contact: `etendo_prueba_activada=si`. The deal does not move: entering is not using |
 | `MILESTONE` | each qualification milestone, once (see below) | deal to SQL, and the milestone's date property |
 | `PAID` | a paid checkout of the account after its demo, also after the trial ended | `etendo_plan` (the plan's `ETGO_PLAN.VALUE`) and `etendo_periodicidad` (the bought price's `ETGO_PLAN.BILLING_INTERVAL`) on any deal; on one the sync moves, the stage to Tarjeta añadida, or to Primer cobro pagado when the plan is annual |
@@ -72,9 +73,14 @@ takes it from Cliente perdido straight to Primer cobro pagado: a charge above ze
   because HubSpot would refuse the whole contact. Listed in `HubSpotOutbox.SECTORS` and
   `onboarding/businessSectors.js` in `etendo-go-core`: keep both in step.
 - **`country`** (HubSpot's standard "Country/Region", on the contact and the company) is the Spanish
-  name of the country the owner entered at onboarding ("España", from its ISO code), as the portal's
-  existing records have it; the contact also gets the code in `hs_country_region_code` ("ES"). A
-  demo reported before ETP-6082 has no code and sends the stored country name instead. Not `ip_country`: HubSpot keeps
+  name of a country ("España", from its ISO code), as the portal's existing records have it; the
+  contact also gets the code in `hs_country_region_code` ("ES"). Since ETP-6363 it is the country
+  chosen in the register form (`ETGO_ACCOUNT.COUNTRYCODE`, required there), sent from
+  `ACCOUNT_CREATED` on. It is marketing data only: the onboarding keeps the organization in Spain,
+  so `DEMO_READY` sends the organization's country (contact and company) only for an account
+  without a sign-up country (an SSO sign-up, or one created before ETP-6363); otherwise the
+  company gets the sign-up country too. A demo reported before ETP-6082 has no code and sends the
+  stored country name instead. Not `ip_country`: HubSpot keeps
   it read-only for its own IP geolocation and answers 400 `READ_ONLY_VALUE` for the whole contact.
 
 ### Qualification milestones
@@ -98,6 +104,10 @@ first reached. The first one moves the deal to SQL.
   every row it inserts there, so a demo created with sample data is not activated by it: its
   partners, products, orders and completed, posted invoices count for nothing. The sample data is
   imported after the demo is reported ready, so the date alone would not exclude it.
+- **The first one is also the browser's `first_key_action`** (ETP-6363): `GET /sws/go/me` answers
+  `firstKeyAction: {"action", "at"}`, the earliest `MILESTONE` row of the account whatever its send
+  status, read inside a savepoint so a failed read answers nothing. The app pushes it to marketing's
+  tag container (see schema_forge `docs/ops/app-shell-observability.md`).
 - **Each milestone dates the deal**: marketing created the date properties as `datetime` deal
   properties on 2026-11-05, and each gets the instant the milestone was first reached (ISO 8601,
   UTC). A later milestone only writes its date: the deal is already past MQL.
@@ -243,6 +253,9 @@ Read as a system property, then `Openbravo.properties`, then the environment
 |---|---|---|
 | `etendo.go.hubspot.token` | `ETGO_HUBSPOT_TOKEN` | none: **without it nothing is sent**, and events stay `PENDING` until one is set |
 | `etendo.go.hubspot.api.base.url` | `ETGO_HUBSPOT_API_BASE_URL` | `https://api.hubapi.com` |
+| `etendo.go.hubspot.signup.form` | `ETGO_HUBSPOT_SIGNUP_FORM` | `7b98a4a2-a93d-412a-87d0-0d7c2bdc4925` ("Alta app – onboarding"). `none` disables the sign-up form: the contact is then created through the CRM API as before. The token needs the `forms` scope |
+| `etendo.go.hubspot.signup.portal` | `ETGO_HUBSPOT_SIGNUP_PORTAL` | `52086088` |
+| `etendo.go.hubspot.signup.forms.base.url` | `ETGO_HUBSPOT_SIGNUP_FORMS_BASE_URL` | `https://api.hsforms.com` |
 | `etendo.go.hubspot.pipeline` | `ETGO_HUBSPOT_PIPELINE` | `952774980` (Self-Serve, portal 52086088) |
 | `etendo.go.hubspot.stage.account` | `ETGO_HUBSPOT_STAGE_ACCOUNT` | `1471483196` (MQL — Alta la cuenta) |
 | `etendo.go.hubspot.stage.activated` | `ETGO_HUBSPOT_STAGE_ACTIVATED` | `1471483197` (SQL — Cuenta activada) |

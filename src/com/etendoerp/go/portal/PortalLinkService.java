@@ -318,6 +318,7 @@ public class PortalLinkService {
         PortalUsageEvents.sent(link, sendLogId, recipientCount);
         PortalKpiTelemetry.linkSent(link);
       }
+      PortalKpiTelemetry.linkEmailSent(link);
     } catch (RuntimeException e) {
       log.error("Could not confirm portal link {} after its email was sent", linkId, e);
       discardFailedWrite();

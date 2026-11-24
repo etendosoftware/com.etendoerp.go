@@ -35,7 +35,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_LABEL;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_TAX_RATE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRICE;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.K_UNIT_PRINTED;
-import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_AMBIGUOUS;
+import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MATCHED_SUGGESTED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_NEW;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.T_NO_TAX_AT_RATE;
@@ -200,7 +200,10 @@ public final class InboxLineMatcher {
             .put(K_MATCHED_BY, matchedBy(match, description));
         break;
       case SUGGESTED:
-        out.put(K_STATE, S_AMBIGUOUS).put(K_ID, JSONObject.NULL);
+        // ETP-6051: the best of several doubtful candidates is chosen for the user, so the line is
+        // complete and the review shows it collapsed; the candidates stay to pick another one.
+        out.put(K_STATE, S_LINKED).put(K_ID, match.chosen().id()).put(K_NAME, match.chosen().name())
+            .put(K_MATCHED_BY, MATCHED_SUGGESTED);
         break;
       default:
         out.put(K_STATE, S_NEW).put(K_ID, JSONObject.NULL);

@@ -98,8 +98,9 @@ final class SelectorQueryExecutor {
     @SuppressWarnings("unchecked")
     Set<String> searchMatchIds = extraFilterParams != null
         ? (Set<String>) extraFilterParams.get(PARAM_SEARCH_MATCH_IDS) : null;
-    Map<String, Object> safeExtraParams = withoutKey(withoutKey(extraFilterParams, PARAM_LANGUAGE),
-        PARAM_SEARCH_MATCH_IDS);
+    SelectorQueryBuilder.HqlWithParams orgOrder = OrgPreference.orgPreferenceOrder(meta, "e", extraFilterParams);
+    Map<String, Object> safeExtraParams = withoutKey(withoutKey(withoutKey(extraFilterParams,
+        PARAM_LANGUAGE), PARAM_SEARCH_MATCH_IDS), OrgPreference.PARAM_PREFER_ORG);
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
@@ -148,9 +149,10 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = whereStr + " ORDER BY e." + meta.displayProperty + ", e.id";
+    String dataWhere = whereStr + OrgPreference.orderBy(orgOrder, "e", meta.displayProperty);
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
+    OrgPreference.bindOrgOrder(dataQuery, orgOrder);
     if (StringUtils.isNotBlank(search)) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));
       dataQuery.setNamedParameter(PARAM_SEARCH_LOOSE, SelectorOrgFilter.searchLoosePattern(search));
@@ -196,6 +198,8 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    SelectorQueryBuilder.HqlWithParams orgOrder = OrgPreference.orgPreferenceOrder(meta, "e", extraFilterParams);
+    extraFilterParams = withoutKey(extraFilterParams, OrgPreference.PARAM_PREFER_ORG);
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
       return executeCustomHqlQuery(meta, search, limit, offset, validationFilter,
           contextOrganizationId, extraFilterParams);
@@ -230,10 +234,10 @@ final class SelectorQueryExecutor {
     int totalCount = countQuery.count();
 
     // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
-    String dataWhere = effectiveWhere + ORDER_BY + alias + "." + meta.displayProperty + ", " + alias
-        + ".id";
+    String dataWhere = effectiveWhere + OrgPreference.orderBy(orgOrder, alias, meta.displayProperty);
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
+    OrgPreference.bindOrgOrder(dataQuery, orgOrder);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, SelectorOrgFilter.searchPattern(search));

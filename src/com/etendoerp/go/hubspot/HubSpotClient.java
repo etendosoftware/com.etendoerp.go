@@ -19,7 +19,7 @@ package com.etendoerp.go.hubspot;
 
 import org.codehaus.jettison.json.JSONObject;
 
-/** One authenticated call to the HubSpot CRM API. */
+/** One authenticated call to the HubSpot CRM API (or, for the sign-up form, the Forms API). */
 public interface HubSpotClient {
 
   /**
@@ -32,6 +32,23 @@ public interface HubSpotClient {
    * @throws HubSpotUnreachableException when no answer came back at all
    */
   Response send(String method, String path, JSONObject body) throws HubSpotUnreachableException;
+
+  /**
+   * ETP-6363 — sends one request to another HubSpot API root with the same token: the Forms API
+   * ({@code api.hsforms.com}) for the sign-up form.
+   *
+   * @param baseUrl the API root, without a trailing slash
+   * @param method  {@code GET}, {@code POST} or {@code PATCH}
+   * @param path    the path after that root, starting with {@code /}
+   * @param body    the JSON body, or {@code null} for none
+   * @return HubSpot's answer, whatever its status
+   * @throws HubSpotUnreachableException when no answer came back at all, or this client cannot
+   *                                     call another root
+   */
+  default Response send(String baseUrl, String method, String path, JSONObject body)
+      throws HubSpotUnreachableException {
+    throw new HubSpotUnreachableException("This HubSpot client calls only the CRM API", null);
+  }
 
   /**
    * HubSpot's answer.

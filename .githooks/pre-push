@@ -5,7 +5,8 @@ set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
+CORE_DIR="${GO_CORE_DIR:-$(cd -- "$MODULE_DIR/../.." && pwd)}"
+export GO_CORE_DIR="$CORE_DIR"
 
 echo "==> Running pre-push checks..."
 
@@ -333,6 +334,20 @@ if [ -n "$BASE_REF" ] && CHANGED_FILES="$(git diff --name-only "$BASE_REF"...HEA
 else
   RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1; RUN_SCRIPTS=1
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
+fi
+
+# A standalone/adopted worktree needs an explicit core. Gradle must read this
+# very module, rather than silently testing another branch installed in the core.
+if [ "$RUN_STEP2" = "1" ]; then
+  if [ ! -x "$CORE_DIR/gradlew" ] || [ ! -d "$CORE_DIR/modules/com.etendoerp.go" ]; then
+    echo "ERROR: set GO_CORE_DIR to an Etendo core containing this GO worktree."
+    exit 1
+  fi
+  if [ "$(cd -- "$CORE_DIR/modules/com.etendoerp.go" && pwd -P)" != "$(cd -- "$MODULE_DIR" && pwd -P)" ]; then
+    echo "ERROR: GO_CORE_DIR/modules/com.etendoerp.go must point to this GO worktree."
+    echo "Use local-env adoption; testing another checkout would validate different code."
+    exit 1
+  fi
 fi
 
 # 0. Conventions (ETP-5695): what CI's Git Police, Test Hygiene and Unit Test Classification

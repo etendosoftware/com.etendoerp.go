@@ -20,6 +20,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -340,6 +341,8 @@ public class EtendoGoJwtServletTest {
     body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
     body.put("sector", "servicios");
+    body.put("countryCode", "ar");
+    body.put("hubspotContext", new JSONObject().put("hutk", "cookie"));
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
     Account account = mock(Account.class);
@@ -363,9 +366,16 @@ public class EtendoGoJwtServletTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
           anyString(), anyString(), anyString(), anyString()))
           .thenReturn(account);
+      hubSpot.when(() -> HubSpotOutbox.countryCode("ar")).thenReturn("AR");
+      hubSpot.when(() -> HubSpotOutbox.signupContext(any(JSONObject.class)))
+          .thenReturn("{\"hutk\":\"kept\"}");
 
       servletWithEmailSender.doPost(req, resp.response);
 
+      // ETP-6363: the country of the register form is kept on the account, for HubSpot.
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_COUNTRY_CODE, "AR");
+      // ETP-6363: and the lead attribution, until the confirmed sign-up reaches HubSpot's form.
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_HUBSPOT_CONTEXT, "{\"hutk\":\"kept\"}");
       // The token is stored before the mail goes out, so a click can be honoured.
       verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
           eq(account), anyString(), any(Date.class)));
@@ -430,6 +440,37 @@ public class EtendoGoJwtServletTest {
     verify(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
     // ETP-6081: a body without the consent to promotional mail gave none.
     verify(account).set("marketingConsent", false);
+  }
+
+  @Test
+  public void anSsoBodyCarriesTheLeadAttributionOfTheVisitor() throws Exception {
+    // ETP-6363: kept only when the sign-in creates the account; nothing usable, nothing kept.
+    JSONObject kept = new JSONObject(EtendoGoJwtServlet.hubspotContextOf("{\"credential\":\"x\","
+        + "\"hubspotContext\":{\"hutk\":\"0123456789abcdef0123456789abcdef\"}}"));
+    assertEquals("0123456789abcdef0123456789abcdef", kept.getString("hutk"));
+    assertNull(EtendoGoJwtServlet.hubspotContextOf("{\"credential\":\"x\"}"));
+    assertNull(EtendoGoJwtServlet.hubspotContextOf("credential=x"));
+    assertNull(EtendoGoJwtServlet.hubspotContextOf(null));
+  }
+
+  @Test
+  public void theAccountTellsItsFirstKeyActionOnlyOnceOneWasReached() throws Exception {
+    // ETP-6363: the browser reports it to marketing's tag container; it cannot see the milestones.
+    try (MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      hubSpot.when(() -> HubSpotOutbox.firstKeyAction("A1")).thenReturn(Optional.of(
+          new HubSpotOutbox.FirstKeyAction("product", Instant.parse("2026-11-02T09:30:00Z"))));
+      hubSpot.when(() -> HubSpotOutbox.firstKeyAction("A2")).thenReturn(Optional.empty());
+
+      JSONObject reached = new JSONObject();
+      EtendoGoJwtServlet.putFirstKeyAction(reached, "A1");
+      JSONObject none = new JSONObject();
+      EtendoGoJwtServlet.putFirstKeyAction(none, "A2");
+
+      JSONObject first = reached.getJSONObject("firstKeyAction");
+      assertEquals("product", first.getString("action"));
+      assertEquals("2026-11-02T09:30:00Z", first.getString("at"));
+      assertFalse(none.has("firstKeyAction"));
+    }
   }
 
   @Test

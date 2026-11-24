@@ -343,6 +343,40 @@ public class BatchServiceTest {
   }
 
   /**
+   * ETP-6177: what a preprocessor leaves in {@code hookAttributes} reaches that operation's write
+   * context, and only that one; REST's null preprocessor leaves nothing.
+   */
+  @Test
+  public void executeBatchHandsThePreprocessorHookAttributesToTheWrite() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    List<NeoContext> seen = new ArrayList<>();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acct =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubWritableEntity(obDal, support, access, acct);
+      answerCreated(support, seen);
+
+      JSONObject result = BatchService.forBatchOnly().executeBatch(productOps(2), op -> {
+        if (op.index() == 0) {
+          op.hookAttributes().put(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,
+              Collections.singleton("name"));
+        }
+        return null;
+      });
+
+      assertTrue(result.getBoolean("committed"));
+      assertEquals(2, seen.size());
+      assertEquals(Collections.singleton("name"),
+          seen.get(0).getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS));
+      assertNull("an op the preprocessor left alone carries nothing",
+          seen.get(1).getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS));
+    }
+  }
+
+  /**
    * The option reaches every operation's write context, and the scope that carries it is gone
    * once the batch returns. The one- and two-argument overloads keep it off.
    */

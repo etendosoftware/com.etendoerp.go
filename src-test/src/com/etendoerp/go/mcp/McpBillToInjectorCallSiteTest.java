@@ -157,6 +157,36 @@ class McpBillToInjectorCallSiteTest {
             + " Move the injectIfMissing call after McpFkResolver.resolveFkNames.");
   }
 
+  /**
+   * ETP-6177: the batch op's pre-hook must see the keys the agent sent, taken before the injectors
+   * run — otherwise it reads McpLinePriceInjector's price as the agent's and never converts it into
+   * the order's currency. The router method is private and needs a live DAL, so the call site is
+   * what can be guarded.
+   */
+  @Test
+  @DisplayName("etendo_batch hands the agent's keys to the op's hook attributes before injecting")
+  void batchPathPublishesTheClientProvidedFieldsBeforeTheInjectors() {
+    String body = routerMethod("preprocessBatchOperation");
+
+    int publish = indexOfOrFail(body,
+        Pattern.compile("hookAttributes\\s*\\(\\s*\\)\\s*\\.\\s*put\\s*\\(\\s*"
+            + "NeoContext\\s*\\.\\s*ATTR_CLIENT_PROVIDED_FIELDS\\s*,"),
+        "preprocessBatchOperation",
+        "op.hookAttributes().put(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, agentProvided)");
+    int snapshot = indexOfOrFail(body,
+        Pattern.compile("NeoCrudHelper\\s*\\.\\s*snapshotBodyFields\\s*\\("),
+        "preprocessBatchOperation", "NeoCrudHelper.snapshotBodyFields(body)");
+    int priceInjector = indexOfOrFail(body,
+        Pattern.compile("McpLinePriceInjector\\s*\\.\\s*injectIfMissing\\s*\\("),
+        "preprocessBatchOperation", "McpLinePriceInjector.injectIfMissing(...)");
+
+    assertTrue(snapshot < publish,
+        "preprocessBatchOperation publishes the key set before taking the snapshot of the body.");
+    assertTrue(publish < priceInjector,
+        "preprocessBatchOperation publishes the agent's keys after the price injector ran, so the"
+            + " set already counts the injected price as the agent's (ETP-6177).");
+  }
+
   private static String routerMethod(String name) {
     return McpSourceScanner.methodBody(McpSourceScanner.read(ROUTER), name);
   }

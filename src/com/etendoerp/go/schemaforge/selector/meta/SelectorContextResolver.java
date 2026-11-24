@@ -141,7 +141,16 @@ public final class SelectorContextResolver {
     target.put(key, value);
   }
 
-  private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
+  /**
+   * Organization of the record {@code parentId} names for {@code sourceEntity}'s tab: the parent
+   * tab's record for a child tab, the record itself for a header tab. Unlike
+   * {@link #resolveContextOrganizationId}, organization {@code 0} is returned as is.
+   *
+   * @param sourceEntity Schema Forge entity whose tab the record is created in
+   * @param parentId id of the parent tab's record (of the record itself for a header tab)
+   * @return the organization id, or {@code null} when it cannot be resolved
+   */
+  public static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
     if (sourceEntity == null || StringUtils.isBlank(parentId)) {
       return null;
     }

@@ -147,6 +147,11 @@ public class NeoDefaultsServiceTest {
     return col;
   }
 
+  /** A defaults request for {@code column} with no parent, session or window context. */
+  private static NeoDefaultsService.FieldDefaultRequest fieldRequest(Column column) {
+    return new NeoDefaultsService.FieldDefaultRequest(column, null, null, null, null, null);
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // injectLineNetAmountIfMissing tests (original)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3054,8 +3059,8 @@ public class NeoDefaultsServiceTest {
     // When resolved is non-null it must be returned verbatim, without touching the selector.
     try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
       Object result = invokePrivate("resolveOrFirstComboOption",
-          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
-          ctx, column, "ALREADY-RESOLVED");
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class, String.class },
+          ctx, column, "ALREADY-RESOLVED", null);
 
       assertEquals("ALREADY-RESOLVED", result);
       selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(any(Column.class)),
@@ -3089,8 +3094,8 @@ public class NeoDefaultsServiceTest {
           .thenReturn(selectorResp);
 
       Object result = invokePrivate("resolveOrFirstComboOption",
-          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
-          ctx, column, null);
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class, String.class },
+          ctx, column, null, null);
 
       assertEquals("FIRST-OPTION-ID", result);
     }
@@ -3907,7 +3912,7 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoDefaultsService> defaultsMock =
              mockStatic(NeoDefaultsService.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
       // ETP-5669: the first-combo branch fills the key (GL_Journal.C_Period_ID's case).
-      defaultsMock.when(() -> NeoDefaultsService.resolveFirstComboOption(eq(flagCol), any()))
+      defaultsMock.when(() -> NeoDefaultsService.resolveFirstComboOption(eq(flagCol), any(), any()))
           .thenReturn("FIRST-ROW");
       defaultsMock.when(() -> NeoDefaultsService.tryInjectIdentifier(any(), any(), anyString(),
           anyString())).thenAnswer(inv -> null);
@@ -5834,7 +5839,7 @@ public class NeoDefaultsServiceTest {
 
       try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
         Object result = invokePrivate("resolveFirstComboOption",
-            new Class<?>[]{ Column.class, NeoContext.class }, adColumn, null);
+            new Class<?>[]{ Column.class, NeoContext.class, String.class }, adColumn, null, null);
 
         assertNull("resolveFirstComboOption must refuse to resolve a value for the excluded "
             + "column " + columnName + " — the primitive itself is now the guard, not a "
@@ -5874,7 +5879,7 @@ public class NeoDefaultsServiceTest {
           .thenReturn(selectorResp);
 
       Object result = invokePrivate("resolveFirstComboOption",
-          new Class<?>[]{ Column.class, NeoContext.class }, column, null);
+          new Class<?>[]{ Column.class, NeoContext.class, String.class }, column, null, null);
 
       assertEquals("A non-excluded column must still resolve via the normal combo "
           + "first-option mechanism — the guard must not weaken it for everyone else",
@@ -5911,9 +5916,9 @@ public class NeoDefaultsServiceTest {
 
     try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
       invokePrivate("applyDefaultWithComboFallback",
-          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+          new Class<?>[]{ NeoDefaultsService.FieldDefaultRequest.class, SFField.class, Object.class,
               JSONObject.class, String.class, Entity.class },
-          null, sfField, null, adColumn, defaults, "aeatsiiMotivoRectif", dalEntity);
+          fieldRequest(adColumn), sfField, null, defaults, "aeatsiiMotivoRectif", dalEntity);
 
       assertFalse("an OPTIONAL List-reference column with no genuine default must stay absent "
               + "from /defaults — never an arbitrarily-ordered 'first' AD_Ref_List row",
@@ -5959,9 +5964,9 @@ public class NeoDefaultsServiceTest {
           .thenReturn(selectorResp);
 
       invokePrivate("applyDefaultWithComboFallback",
-          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+          new Class<?>[]{ NeoDefaultsService.FieldDefaultRequest.class, SFField.class, Object.class,
               JSONObject.class, String.class, Entity.class },
-          null, sfField, null, adColumn, defaults, "paymentMethod", dalEntity);
+          fieldRequest(adColumn), sfField, null, defaults, "paymentMethod", dalEntity);
 
       assertEquals("an OPTIONAL TABLE-reference column must still fall back to the first combo "
               + "option — the mandatory gate only applies to List-reference columns",
@@ -5994,9 +5999,9 @@ public class NeoDefaultsServiceTest {
           .thenReturn(selectorResp);
 
       invokePrivate("applyDefaultWithComboFallback",
-          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+          new Class<?>[]{ NeoDefaultsService.FieldDefaultRequest.class, SFField.class, Object.class,
               JSONObject.class, String.class, Entity.class },
-          null, sfField, null, adColumn, defaults, "transactionDocument", dalEntity);
+          fieldRequest(adColumn), sfField, null, defaults, "transactionDocument", dalEntity);
 
       assertEquals("a MANDATORY (NOT NULL) column with no genuine default must still fall back "
               + "to the first combo option, to avoid a NOT NULL violation on save",

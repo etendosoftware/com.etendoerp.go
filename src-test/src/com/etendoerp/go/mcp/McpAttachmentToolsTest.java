@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -69,6 +70,7 @@ import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
  * through it with the right tier, that nothing is done once it refuses, and the shape of the answers.
  *
  * @covers com.etendoerp.go.mcp.McpAttachmentTools
+ * @covers com.etendoerp.go.mcp.McpAttachmentLinks
  * @covers com.etendoerp.go.mcp.McpAttachmentToolDefinitions
  * @covers com.etendoerp.go.mcp.McpStagedAttachment
  */
@@ -928,6 +930,38 @@ class McpAttachmentToolsTest {
 
     private List<String> names(List<McpToolDefinition> tools) {
       return tools.stream().map(McpToolDefinition::getName).collect(java.util.stream.Collectors.toList());
+    }
+  }
+
+  /**
+   * ETP-6247 — the signed link, public since the remittance SEPA file hands it out: bound to the
+   * spec, record, tenant and attachment, served by the document-download path; {@code null} when
+   * the signing secret is not configured.
+   */
+  @Nested
+  @DisplayName("McpAttachmentLinks.downloadUrl")
+  class DownloadLinks {
+
+    @Test
+    @DisplayName("the link carries the record, the tenant and the attachment")
+    void signsTheAttachment() throws Exception {
+      String url = McpAttachmentLinks.downloadUrl("remittance", "REM-1", "ATT-1");
+
+      assertTrue(url.startsWith("http://host:8080/etendo/sws/neo/document-download/"), url);
+      DocumentDownloadTokenService.Claims claims = DocumentDownloadTokenService
+          .validate(url.substring(url.lastIndexOf('/') + 1)).orElseThrow();
+      assertEquals("remittance", claims.getSpecName());
+      assertEquals("REM-1", claims.getRecordId());
+      assertEquals(CLIENT, claims.getClientId());
+      assertEquals("ATT-1", claims.getAttachmentId());
+    }
+
+    @Test
+    @DisplayName("without the signing secret there is no link")
+    void isNullWithoutTheSecret() {
+      System.clearProperty(SECRET_PROP);
+
+      assertNull(McpAttachmentLinks.downloadUrl("remittance", "REM-1", "ATT-1"));
     }
   }
 }

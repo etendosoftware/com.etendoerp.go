@@ -514,6 +514,7 @@ public class NeoSelectorService {
       ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
           SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
     }
+    OrgPreference.putOrgPreference(ctxFilterParams, safeContextParams, contextOrganizationId);
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);

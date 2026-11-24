@@ -24,8 +24,13 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -82,6 +87,29 @@ public final class HubSpotOutbox {
     return sector != null && SECTORS.contains(sector) ? sector : null;
   }
 
+  private static final Set<String> ISO_COUNTRIES = Set.of(Locale.getISOCountries());
+
+  /** ETP-6363 — the account property holding the sign-up's lead attribution. */
+  static final String PROPERTY_HUBSPOT_CONTEXT = "hubSpotContext";
+  /** The fields of the lead attribution, as the frontend sends them and the form takes them. */
+  static final String FIELD_HUTK = "hutk";
+  static final String FIELD_PAGE_URI = "pageUri";
+  static final String FIELD_PAGE_NAME = "pageName";
+  private static final Pattern HUTK = Pattern.compile("[0-9a-f]{32}");
+  private static final int MAX_PAGE_URI = 2000;
+  private static final int MAX_PAGE_NAME = 255;
+
+  /**
+   * Reads the country sent by the register form (ETP-6363): an ISO 3166-1 alpha-2 code.
+   *
+   * @param value what the form sent, in any case
+   * @return the code in upper case, or {@code null} when it is not a known country
+   */
+  public static String countryCode(String value) {
+    String code = StringUtils.upperCase(StringUtils.trimToNull(value), Locale.ROOT);
+    return code != null && ISO_COUNTRIES.contains(code) ? code : null;
+  }
+
   // clock_timestamp(), not now(): now() is the transaction's start, so two events reported in one
   // transaction (a first entry and a payment detected in the same pass) would tie, and the sync
   // sends an account's events in CREATED order.
@@ -123,6 +151,11 @@ public final class HubSpotOutbox {
       + " from etgo_checkout_request where request_id = ? or stripe_subscription_id = ?"
       + " order by created desc";
 
+  // Every milestone the sync detected for the account, whatever became of its send: the action
+  // happened even when HubSpot refused the event.
+  private static final String MILESTONES_OF_ACCOUNT_SQL = "select event_key, payload"
+      + " from etgo_hubspot_outbox where etgo_account_id = ? and event_type = ?";
+
   /** One write against the open connection. */
   @FunctionalInterface
   interface JdbcWrite {
@@ -151,9 +184,54 @@ public final class HubSpotOutbox {
       return;
     }
     String accountId = account.getId();
-    write("account " + accountId + " created",
-        connection -> enqueue(connection, accountId, HubSpotOutboxStore.ACCOUNT_CREATED, null,
-            null));
+    // ETP-6363: the sign-up form goes first, with the lead attribution the sign-up kept, so
+    // HubSpot creates the contact with its source; the account's event then waits for that
+    // contact (HubSpotEventSender) instead of creating it without one.
+    String signupContext = signupContextOf(account);
+    write("account " + accountId + " created", connection -> {
+      enqueue(connection, accountId, HubSpotOutboxStore.SIGNUP_FORM, null, signupContext);
+      enqueue(connection, accountId, HubSpotOutboxStore.ACCOUNT_CREATED, null, null);
+    });
+  }
+
+  private static String signupContextOf(Account account) {
+    Object stored = account.get(PROPERTY_HUBSPOT_CONTEXT);
+    return stored instanceof String && StringUtils.isNotBlank((String) stored) ? (String) stored
+        : null;
+  }
+
+  /**
+   * ETP-6363 — the lead attribution a sign-up sends ({@code hubspotContext}), kept as it may reach
+   * HubSpot: the visitor cookie only when it is one (32 hex characters), a web address, a title.
+   * Anything else is dropped, never refused: attribution is not worth a failed sign-up.
+   *
+   * @param raw what the register form or the single sign-on sent
+   * @return the JSON to keep with the account, or {@code null} when nothing is left
+   */
+  public static String signupContext(JSONObject raw) {
+    if (raw == null) {
+      return null;
+    }
+    try {
+      JSONObject kept = new JSONObject();
+      String hutk = StringUtils.lowerCase(StringUtils.trimToNull(raw.optString(FIELD_HUTK, null)),
+          Locale.ROOT);
+      if (hutk != null && HUTK.matcher(hutk).matches()) {
+        kept.put(FIELD_HUTK, hutk);
+      }
+      String pageUri = StringUtils.trimToNull(raw.optString(FIELD_PAGE_URI, null));
+      if (pageUri != null && pageUri.length() <= MAX_PAGE_URI
+          && (pageUri.startsWith("https://") || pageUri.startsWith("http://"))) {
+        kept.put(FIELD_PAGE_URI, pageUri);
+      }
+      String pageName = StringUtils.trimToNull(raw.optString(FIELD_PAGE_NAME, null));
+      if (pageName != null) {
+        kept.put(FIELD_PAGE_NAME, StringUtils.left(pageName, MAX_PAGE_NAME));
+      }
+      return kept.length() == 0 ? null : kept.toString();
+    } catch (JSONException e) {
+      return null;
+    }
   }
 
   /**
@@ -239,6 +317,75 @@ public final class HubSpotOutbox {
       enqueue(connection, accountId, row.eventType(), row.eventKey(), null, row.payload(),
           row.occurredAt());
     });
+  }
+
+  /**
+   * ETP-6363 — the account's first key action, for marketing's {@code first_key_action} in the
+   * browser: the earliest qualification milestone the sync detected in its demo
+   * ({@link HubSpotOutboxStore#MILESTONES}), with the instant it was reached. The browser cannot
+   * see the milestones itself, so it reads this off {@code /me}.
+   *
+   * <p>Read like the writes, inside a savepoint: a failed read is logged and answers nothing,
+   * and never marks the caller's transaction rollback-only.
+   *
+   * @param accountId the account
+   * @return the milestone, or empty when none was reached or it could not be read
+   */
+  public static Optional<FirstKeyAction> firstKeyAction(String accountId) {
+    if (StringUtils.isBlank(accountId)) {
+      return Optional.empty();
+    }
+    List<String[]> rows = new ArrayList<>();
+    write("the first key action of account " + accountId, connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(MILESTONES_OF_ACCOUNT_SQL)) {
+        statement.setString(1, accountId);
+        statement.setString(2, HubSpotOutboxStore.MILESTONE);
+        try (ResultSet result = statement.executeQuery()) {
+          while (result.next()) {
+            rows.add(new String[] { result.getString(1), result.getString(2) });
+          }
+        }
+      }
+    });
+    return earliestMilestone(rows);
+  }
+
+  /**
+   * The earliest of an account's milestone rows.
+   *
+   * @param rows each one its {@code EVENT_KEY} (the milestone) and its payload
+   * @return it, or empty when no row names a known milestone with a readable date
+   */
+  static Optional<FirstKeyAction> earliestMilestone(List<String[]> rows) {
+    FirstKeyAction first = null;
+    for (String[] row : rows) {
+      Instant at = milestoneDate(row[1]);
+      if (HubSpotOutboxStore.MILESTONES.contains(row[0]) && at != null
+          && (first == null || at.isBefore(first.at()))) {
+        first = new FirstKeyAction(row[0], at);
+      }
+    }
+    return Optional.ofNullable(first);
+  }
+
+  private static Instant milestoneDate(String payload) {
+    if (StringUtils.isBlank(payload)) {
+      return null;
+    }
+    try {
+      return Instant.parse(new JSONObject(payload).getString(StripeSubscriptionEvents.FIELD_AT));
+    } catch (JSONException | DateTimeParseException e) {
+      return null;
+    }
+  }
+
+  /**
+   * An account's first key action.
+   *
+   * @param action the milestone, one of {@link HubSpotOutboxStore#MILESTONES}
+   * @param at     when it was reached
+   */
+  public record FirstKeyAction(String action, Instant at) {
   }
 
   static boolean enqueue(Connection connection, String accountId, String eventType,

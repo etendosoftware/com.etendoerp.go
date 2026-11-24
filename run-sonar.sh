@@ -12,7 +12,7 @@ FAIL_ON_GATE="false"
 COMPARE_COVERAGE="false"
 JACOCO_XML=""
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+CLASSIC_ROOT="${GO_CORE_DIR:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 
 # projectKey is declared in sonar-project.properties (single source of truth);
 # read it here instead of duplicating the value across the script.

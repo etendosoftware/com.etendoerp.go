@@ -122,7 +122,7 @@ final class NeoAttachmentStore {
         : findForCorrection(tableId, recordId, tempFile.getName());
     correctDataType(uploaded, tempFile);
     if (upload.isMarkAsMain() && uploaded != null) {
-      NeoAttachmentsHelper.markAsMain(uploaded);
+      NeoAttachmentsHelper.markAsMain(uploaded, false);
       body.put("id", uploaded.getId());
       body.put("isMain", true);
     }

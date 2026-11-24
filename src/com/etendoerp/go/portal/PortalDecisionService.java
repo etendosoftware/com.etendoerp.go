@@ -597,8 +597,40 @@ public class PortalDecisionService {
     } catch (RuntimeException e) {
       log.error("Could not mark the decision {} as sent", decisionId, e);
       OBDal.getInstance().rollbackAndClose();
+      return;
+    }
+    decisionEmailSentKpi(decisionId);
+  }
+
+  /**
+   * The {@code backend_portal_email_sent} KPI of a delivered confirmation, read after
+   * {@link #markSent} committed: a failure here only logs, it can never keep the decision's link
+   * from becoming usable.
+   */
+  private void decisionEmailSentKpi(String decisionId) {
+    try {
+      Decision decision;
+      OBContext.setAdminMode(true);
+      try {
+        decision = findById(decisionId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (decision != null) {
+        PortalKpiTelemetry.decisionEmailSent(DECISION_ACCEPT.equals(decision.action),
+            decision.clientId);
+      }
+    } catch (RuntimeException e) {
+      log.debug("Portal KPI telemetry: the decision email could not be read: {}",
+          e.getMessage());
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } catch (RuntimeException closeFailure) {
+        log.debug("Portal KPI telemetry: rollback failed: {}", closeFailure.getMessage());
+      }
     }
   }
+
 
   // ─── Landing ─────────────────────────────────────────────────────────────
 
@@ -642,8 +674,9 @@ public class PortalDecisionService {
         () -> confirmInTransaction(decision, voided));
     if (result.isAppliedNow()) {
       PortalDecisionEvents.confirmed(decision.id, decision.quotationId, decision.action);
-      PortalKpiTelemetry.portalQuotationDecided(DECISION_ACCEPT.equals(decision.action),
-          decision.clientId);
+      // Counted once per quotation and only for one emailed with a link: checked after the commit.
+      PortalKpiTelemetry.portalQuotationConfirmed(DECISION_ACCEPT.equals(decision.action),
+          decision.clientId, decision.id, decision.quotationId);
       if (!voided.isEmpty()) {
         PortalDecisionEvents.voided(decision.quotationId, voided.size());
       }
