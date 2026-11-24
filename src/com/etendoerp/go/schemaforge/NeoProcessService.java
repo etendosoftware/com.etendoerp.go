@@ -101,6 +101,7 @@ public class NeoProcessService {
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
+  static final String BUNDLE_RECORD_ID = "recordID";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -496,7 +497,7 @@ public class NeoProcessService {
       String key = keys.next();
       Object value = params.isNull(key) ? null : params.get(key);
       if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", value);
+        bundleParams.put(BUNDLE_RECORD_ID, value);
       } else if (INP_TAB_ID.equals(key)) {
         bundleParams.put("tabId", value);
       } else {
@@ -814,7 +815,7 @@ public class NeoProcessService {
    *
    * These processes are called via {@link Process#execute(ProcessBundle)}.
    * The bundle params include both generic keys (recordID, inpRecordId) and
-   * the table-specific key injected by the caller (e.g. M_Inventory_ID).
+   * the table-specific key injected by this service (e.g. M_Inventory_ID, see NeoSchedulingKeyColumn).
    */
   private static NeoResponse executeSchedulingProcess(
       org.openbravo.model.ad.ui.Process adProcess,
@@ -829,7 +830,9 @@ public class NeoProcessService {
     // ETP-5809 — same bundle as the classic path: context and connection, params kept after init.
     // Scheduling processes (e.g. InventoryCountProcess, RMCreateInvoice) call getContext() and
     // getConnection() internally.
-    ProcessBundle bundle = newClassicBundle(adProcess.getId(), buildBundleParams(params));
+    Map<String, Object> bundleParams = buildBundleParams(params);
+    NeoSchedulingKeyColumn.addKeyColumnParam(bundleParams, params, adProcess);
+    ProcessBundle bundle = newClassicBundle(adProcess.getId(), bundleParams);
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, adProcess);
