@@ -204,7 +204,7 @@ jobs:
       - name: Checkout etendo_core
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_core
+          repository: etendo-ai/etendo_core
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: ${{ env.CORE_BRANCH }}
           path: etendo_core
@@ -387,7 +387,7 @@ jobs:
       - name: Checkout etendo_core
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_core
+          repository: etendo-ai/etendo_core
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: ${{ env.CORE_BRANCH }}
           path: etendo_core
@@ -567,7 +567,7 @@ jobs:
       - name: Checkout etendo_core
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_core
+          repository: etendo-ai/etendo_core
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: ${{ env.CORE_BRANCH }}
           path: etendo_core
@@ -684,7 +684,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/schema_forge_core
+          repository: etendo-ai/schema_forge_core
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: refs/tags/${{ steps.core.outputs.version }}
           path: schema_forge_core
@@ -772,7 +772,7 @@ jobs:
       - name: Checkout the schema_forge cell map
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_schema_forge
+          repository: etendo-ai/etendo_schema_forge
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: ${{ needs.go-tests.outputs.schema_forge_branch || needs.integration.outputs.schema_forge_branch || 'develop' }}
           path: sf

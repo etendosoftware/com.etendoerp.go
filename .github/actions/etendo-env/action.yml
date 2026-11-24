@@ -104,7 +104,7 @@ runs:
         MODULE_BRANCH: ${{ inputs.module_branch }}
         BASE_REF: ${{ inputs.base_ref }}
       run: |
-        repo="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/etendosoftware/etendo_schema_forge.git"
+        repo="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/etendo-ai/etendo_schema_forge.git"
         case "$BASE_REF:$MODULE_BRANCH" in
           main:*|*:main|*:hotfix/*) fallback=main ;;
           *) fallback=develop ;;
@@ -121,7 +121,7 @@ runs:
     - name: Checkout etendo_schema_forge
       uses: actions/checkout@v4
       with:
-        repository: etendosoftware/etendo_schema_forge
+        repository: etendo-ai/etendo_schema_forge
         token: ${{ inputs.etendobot_token }}
         ref: ${{ steps.sf.outputs.branch }}
         path: etendo_core/schema_forge
@@ -129,7 +129,7 @@ runs:
     - name: Checkout etendo-localenv
       uses: actions/checkout@v4
       with:
-        repository: etendosoftware/etendo-localenv
+        repository: etendo-ai/etendo-localenv
         token: ${{ inputs.etendobot_token }}
         ref: main
         path: etendo-localenv
