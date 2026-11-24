@@ -295,6 +295,69 @@ class McpFkResolverTest {
       }
     }
 
+    /**
+     * ETP-6365: a value the generic selector does not find is looked up in the list the entity's
+     * own SELECTOR customization serves for the field (a header currency picked from
+     * currencyOptions, e.g. "CHF"). One candidate, or the one whose label equals the value ignoring
+     * case, resolves; no customization, no match or several unlabelled matches stay not_found, as
+     * does a write with no SF entity (the customization is then never asked).
+     */
+    @Test
+    @DisplayName("a value only the entity's own selector lists resolves through it (ETP-6365)")
+    void ownSelectorFallbackResolvesWhatTheFieldsPickerLists() throws Exception {
+      com.etendoerp.go.schemaforge.data.SFEntity sfEntity =
+          mock(com.etendoerp.go.schemaforge.data.SFEntity.class);
+      Column column = mock(Column.class);
+      NeoResponse single = labelledHits(UUID_ID, "CHF");
+      NeoResponse twoWithExactLabel = labelledHits(OTHER_ID, "CHFX", UUID_ID, "chf");
+      NeoResponse twoWithoutExactLabel = labelledHits(OTHER_ID, "CHFX", UUID_ID, "CHFY");
+      NeoResponse empty = selectorHits();
+      NeoResponse none = selectorHits();
+      // name, SF entity passed, own selector answer, expected id (null = not_found)
+      Object[][] cases = {
+          { "single own match", sfEntity, single, UUID_ID },
+          { "exact label among several", sfEntity, twoWithExactLabel, UUID_ID },
+          { "several, no exact label", sfEntity, twoWithoutExactLabel, null },
+          { "own selector lists nothing", sfEntity, empty, null },
+          { "no customization serves the field", sfEntity, null, null },
+          { "no SF entity", null, single, null },
+      };
+      for (Object[] c : cases) {
+        String name = (String) c[0];
+        JSONObject body = bodyWith("CHF");
+        try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+            MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+            MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+          obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+          fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity))
+              .thenReturn(column);
+          selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(),
+              anyString(), anyInt(), anyInt(), any())).thenReturn(none);
+          selector.when(() -> NeoSelectorService.queryCustomizedSelector(eq(sfEntity), eq(KEY),
+              eq("CHF"), anyInt(), any())).thenReturn((NeoResponse) c[2]);
+
+          JSONObject error = McpFkResolver.resolveFkNames(body,
+              new McpFkResolver.Target(dalEntity, adTab,
+                  (com.etendoerp.go.schemaforge.data.SFEntity) c[1]),
+              Map.of(), log, value -> false);
+
+          if (c[3] != null) {
+            assertNull(error, name);
+            assertEquals(c[3], body.getString(KEY), name);
+          } else {
+            assertNotNull(error, name);
+            assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR),
+                name);
+            assertEquals("CHF", body.getString(KEY), name);
+          }
+          if (c[1] == null) {
+            selector.verify(() -> NeoSelectorService.queryCustomizedSelector(any(), any(), any(),
+                anyInt(), any()), org.mockito.Mockito.never());
+          }
+        }
+      }
+    }
+
     @Test
     @DisplayName("the exact label of an ambiguous_fk candidate resolves to that candidate's id")
     void candidateLabelResolvesToItsId() throws Exception {

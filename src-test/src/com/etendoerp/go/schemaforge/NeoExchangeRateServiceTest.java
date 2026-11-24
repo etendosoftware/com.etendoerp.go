@@ -27,10 +27,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.LocalDate;
 
 import javax.servlet.http.HttpServletRequest;
@@ -48,6 +50,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * and {@code resolveToDbId} (reached via reflection) and the public
  * {@code handleValidateExchangeRate} entry point with OBContext/OBDal statics mocked. JDBC objects
  * are Mockito mocks; no real database is touched.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoExchangeRateService
  */
 public class NeoExchangeRateServiceTest {
 
@@ -89,7 +93,7 @@ public class NeoExchangeRateServiceTest {
     ResultSet rs = mock(ResultSet.class);
     wirePreparedStatement(conn, rs);
     when(rs.next()).thenReturn(true);
-    when(rs.getDouble("multiplyrate")).thenReturn(1.09);
+    when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("1.09"));
 
     Double rate = invokeQueryRate(conn, "from", "to", "client", "org", LocalDate.of(2026, 1, 15));
     assertEquals(Double.valueOf(1.09), rate);
@@ -106,12 +110,14 @@ public class NeoExchangeRateServiceTest {
   }
 
   @Test
-  public void testQueryRateSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
+  public void testQueryRateAppliesTheDayRuleWithTenantPriority() throws Exception {
     // ETP-4474 regression: queryRate must include both the tenant's rates and the shared system
-    // ('0') rates, ordering ad_client_id DESC so the tenant row wins under LIMIT 1.
+    // ('0') rates, the tenant row first under LIMIT 1. ETP-6365: through ConversionRateLookup's
+    // day rule — ranges that start before the next day and end on or after the day, the latest
+    // start winning (the last range of the day) — over organization 0 and the given one.
     Connection conn = mock(Connection.class);
     ResultSet rs = mock(ResultSet.class);
-    wirePreparedStatement(conn, rs);
+    PreparedStatement ps = wirePreparedStatement(conn, rs);
     when(rs.next()).thenReturn(false);
 
     invokeQueryRate(conn, "from", "to", "client", "org", LocalDate.of(2026, 1, 15));
@@ -119,8 +125,13 @@ public class NeoExchangeRateServiceTest {
     ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
     verify(conn).prepareStatement(sqlCaptor.capture());
     String sql = sqlCaptor.getValue();
-    assertTrue(sql.contains("ad_client_id IN ('0', ?)"));
-    assertTrue(sql.contains("ORDER BY ad_client_id DESC"));
+    assertTrue(sql, sql.contains("ad_client_id IN ('0', ?)"));
+    assertTrue(sql, sql.contains(ConversionRateLookup.DAY_PREDICATE));
+    assertTrue(sql, sql.contains("ORDER BY " + ConversionRateLookup.SYSTEM_LAST
+        + ", cr.validfrom DESC LIMIT 1"));
+    verify(conn).createArrayOf("varchar", new Object[] { "0", "org" });
+    verify(ps).setTimestamp(5, Timestamp.valueOf("2026-01-16 00:00:00"));
+    verify(ps).setTimestamp(6, Timestamp.valueOf("2026-01-15 00:00:00"));
   }
 
   // ---------------------------------------------------------------
@@ -207,7 +218,7 @@ public class NeoExchangeRateServiceTest {
     when(rsTo.getString(1)).thenReturn("EUR-ID");
     ResultSet rsRate = mock(ResultSet.class);
     when(rsRate.next()).thenReturn(true);
-    when(rsRate.getDouble("multiplyrate")).thenReturn(1.16);
+    when(rsRate.getBigDecimal(1)).thenReturn(new BigDecimal("1.16"));
     when(ps.executeQuery()).thenReturn(rsFrom, rsTo, rsRate);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -245,7 +256,7 @@ public class NeoExchangeRateServiceTest {
     // inverse query → 2.0 → response rate = 0.5
     ResultSet rsInverse = mock(ResultSet.class);
     when(rsInverse.next()).thenReturn(true);
-    when(rsInverse.getDouble("multiplyrate")).thenReturn(2.0);
+    when(rsInverse.getBigDecimal(1)).thenReturn(new BigDecimal("2.0"));
     when(ps.executeQuery()).thenReturn(rsFrom, rsTo, rsDirect, rsInverse);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -330,7 +341,7 @@ public class NeoExchangeRateServiceTest {
     ResultSet rs = mock(ResultSet.class);
     wirePreparedStatement(conn, rs);
     when(rs.next()).thenReturn(true);
-    when(rs.getDouble("multiplyrate")).thenReturn(0.87);
+    when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("0.87"));
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -359,7 +370,7 @@ public class NeoExchangeRateServiceTest {
     when(rsDirect.next()).thenReturn(false);
     ResultSet rsInverse = mock(ResultSet.class);
     when(rsInverse.next()).thenReturn(true);
-    when(rsInverse.getDouble("multiplyrate")).thenReturn(1.15);
+    when(rsInverse.getBigDecimal(1)).thenReturn(new BigDecimal("1.15"));
     when(ps.executeQuery()).thenReturn(rsDirect, rsInverse);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -429,13 +440,17 @@ public class NeoExchangeRateServiceTest {
     return request;
   }
 
-  /** Runs a rate lookup over a mocked connection and returns the organization it bound (4th). */
-  private static String boundOrg(java.util.concurrent.Callable<Double> lookup) throws Exception {
+  /**
+   * Runs a rate lookup over a mocked connection and asserts the organizations it admitted: {@code 0}
+   * and {@code expectedOrg}, bound as one array (ETP-6365, {@link ConversionRateLookup}).
+   */
+  private static void assertBindsOrg(String expectedOrg,
+      java.util.concurrent.Callable<Double> lookup) throws Exception {
     Connection conn = mock(Connection.class);
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(true);
-    when(rs.getDouble("multiplyrate")).thenReturn(1.17);
-    PreparedStatement ps = wirePreparedStatement(conn, rs);
+    when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("1.17"));
+    wirePreparedStatement(conn, rs);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       stubContext(ctxMock);
@@ -444,23 +459,21 @@ public class NeoExchangeRateServiceTest {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
       assertEquals(1.17, lookup.call(), 0.0001);
     }
-    ArgumentCaptor<String> bound = ArgumentCaptor.forClass(String.class);
-    verify(ps).setString(org.mockito.ArgumentMatchers.eq(4), bound.capture());
-    return bound.getValue();
+    verify(conn).createArrayOf("varchar", new Object[] { "0", expectedOrg });
   }
 
   // ETP-5558: the funds-transfer action asks for the SOURCE account's organization.
   @Test
   public void testRateForAnOrganizationBindsThatOrganization() throws Exception {
-    assertEquals("org-account", boundOrg(() -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
-        LocalDate.of(2026, 10, 1), "org-account")));
+    assertBindsOrg("org-account", () -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
+        LocalDate.of(2026, 10, 1), "org-account"));
   }
 
   // ETP-5558: the endpoint (and so the SPA modal) keeps the session's organization.
   @Test
   public void testRateWithoutOrganizationKeepsTheSessionOrganization() throws Exception {
-    assertEquals("org-1", boundOrg(() -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
-        LocalDate.of(2026, 10, 1))));
+    assertBindsOrg("org-1", () -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
+        LocalDate.of(2026, 10, 1)));
   }
 
   private static void stubContext(MockedStatic<OBContext> ctxMock) {

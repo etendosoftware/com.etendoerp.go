@@ -28,6 +28,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -64,6 +65,10 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * <p>ETP-6062 — {@code updateRefusalFor}: an update the customization declares consumed into
  * tenant-owned storage only needs a READABLE target (a System row); every other case keeps the
  * strict answer, and a waived request that reaches the default step is refused.</p>
+ *
+ * <p>ETP-6365 — {@code deleteRefusalFor}: a delete is refused like any write; on a row the caller
+ * can read, the customization ({@code refusalForReadOnlyTarget}) may only replace the 404 with another
+ * error, never allow the delete.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
  */
@@ -495,6 +500,74 @@ class NeoActionRecordGuardTest {
     assertRecordNotFound(NeoActionRecordGuard.refusalForUndeliveredDelegation(waived));
     assertNull(NeoActionRecordGuard.refusalForUndeliveredDelegation(update("PATCH", null)));
     assertNull(NeoActionRecordGuard.refusalForUndeliveredDelegation(null));
+  }
+
+  // ── ETP-6365: deleteRefusalFor — the customization may only word the refusal ──
+
+  private static NeoHandler refusingDelete(NeoResponse answer) {
+    NeoHandler customization = mock(NeoHandler.class);
+    when(customization.refusalForReadOnlyTarget(any())).thenReturn(answer);
+    return customization;
+  }
+
+  @Test
+  @DisplayName("ETP-6365: a readable System row stays refused; only an error answer replaces the 404")
+  void deleteOfReadableRowIsRefusedWhateverTheCustomizationAnswers() throws Exception {
+    SFEntity entity = paymentEntity();
+    readableSystemRow();
+    NeoResponse locked = NeoResponse.error(409, "synced rate locked");
+    NeoHandler throwing = mock(NeoHandler.class);
+    when(throwing.refusalForReadOnlyTarget(any())).thenThrow(new IllegalStateException("broken"));
+    // name, customization, expected status: only the 409 replaces the guard's 404
+    Object[][] cases = {
+        { "no customization", null, 404 },
+        { "customization answers null", refusingDelete(null), 404 },
+        { "customization answers 409", refusingDelete(locked), 409 },
+        { "customization answers 200", refusingDelete(NeoResponse.ok(new JSONObject())), 404 },
+        { "customization throws", throwing, 404 },
+    };
+    for (Object[] c : cases) {
+      try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+        lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn((NeoHandler) c[1]);
+
+        NeoResponse refusal = NeoActionRecordGuard.deleteRefusalFor(entity,
+            update("DELETE", entity));
+
+        assertEquals((int) c[2], refusal.getHttpStatus(), (String) c[0]);
+        if ((int) c[2] == 404) {
+          assertRecordNotFound(refusal);
+        } else {
+          assertEquals(locked, refusal, (String) c[0]);
+        }
+      }
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6365: an unknown id or another tenant's row is a 404 without asking")
+  void deleteOfForeignOrMissingRowNeverAsksTheCustomization() throws Exception {
+    SFEntity entity = paymentEntity();
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      payment(OTHER_CLIENT, OWN_ORG);
+      assertRecordNotFound(NeoActionRecordGuard.deleteRefusalFor(entity, update("DELETE", entity)));
+
+      when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+      assertRecordNotFound(NeoActionRecordGuard.deleteRefusalFor(entity, update("DELETE", entity)));
+
+      assertRecordNotFound(NeoActionRecordGuard.deleteRefusalFor(entity, null));
+      lookup.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6365: a delete of the caller's own writable row passes without asking")
+  void deleteOfWritableRowPassesWithoutAsking() {
+    SFEntity entity = paymentEntity();
+    payment(OWN_CLIENT, OWN_ORG);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      assertNull(NeoActionRecordGuard.deleteRefusalFor(entity, update("DELETE", entity)));
+      lookup.verifyNoInteractions();
+    }
   }
 
   // ── ETP-5715: refusalForMissingDocument ──────────────────────────────────

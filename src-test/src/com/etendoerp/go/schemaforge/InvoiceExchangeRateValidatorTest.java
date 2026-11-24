@@ -39,7 +39,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
@@ -50,7 +50,10 @@ import org.openbravo.model.common.invoice.Invoice;
  *
  * <p>Covers every early-exit guard (null invoice/currency/organization, no functional currency,
  * same currency) and the three rate-resolution outcomes (document rate present, general rate
- * present, and no rate at all → blocking message).
+ * present, and no rate at all → blocking message). The general rate is the day rule of
+ * {@link ConversionRateLookup} (ETP-6365), asked for the invoice's pair, organization and client.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceExchangeRateValidator
  */
 public class InvoiceExchangeRateValidatorTest {
 
@@ -67,9 +70,12 @@ public class InvoiceExchangeRateValidatorTest {
     when(from.getISOCode()).thenReturn(isoCode);
     Organization org = mock(Organization.class);
     when(org.getId()).thenReturn(orgId);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("CLIENT1");
     Invoice invoice = mock(Invoice.class);
     when(invoice.getCurrency()).thenReturn(from);
     when(invoice.getOrganization()).thenReturn(org);
+    when(invoice.getClient()).thenReturn(client);
     return invoice;
   }
 
@@ -156,11 +162,12 @@ public class InvoiceExchangeRateValidatorTest {
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class);
         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-        MockedStatic<FinancialUtils> finUtils = Mockito.mockStatic(FinancialUtils.class)) {
+        MockedStatic<ConversionRateLookup> lookup = Mockito.mockStatic(ConversionRateLookup.class)) {
       currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("EUR");
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       Currency to = mock(Currency.class);
+      when(to.getId()).thenReturn("EUR");
       when(dal.get(Currency.class, "EUR")).thenReturn(to);
 
       // No document rate: rows present but rate is zero (must be ignored).
@@ -168,8 +175,9 @@ public class InvoiceExchangeRateValidatorTest {
       when(zeroDoc.getRate()).thenReturn(BigDecimal.ZERO);
       stubDocRateCriteria(dal, Collections.singletonList(zeroDoc));
 
-      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(Currency.class),
-          eq(to), any(), any())).thenReturn(mock(org.openbravo.model.common.currency.ConversionRate.class));
+      // The day-rule lookup answers only for the invoice's own pair, organization and client.
+      lookup.when(() -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(Date.class),
+          eq("USD"), eq("EUR"), eq("ORG1"), eq("CLIENT1"))).thenReturn(new BigDecimal("1.10"));
 
       assertNull(InvoiceExchangeRateValidator.checkRateForCompletion(invoice));
     }
@@ -182,7 +190,7 @@ public class InvoiceExchangeRateValidatorTest {
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class);
         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-        MockedStatic<FinancialUtils> finUtils = Mockito.mockStatic(FinancialUtils.class);
+        MockedStatic<ConversionRateLookup> lookup = Mockito.mockStatic(ConversionRateLookup.class);
         MockedStatic<OBMessageUtils> msgUtils = Mockito.mockStatic(OBMessageUtils.class)) {
       currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("EUR");
       OBDal dal = mock(OBDal.class);
@@ -192,8 +200,8 @@ public class InvoiceExchangeRateValidatorTest {
       when(dal.get(Currency.class, "EUR")).thenReturn(to);
 
       stubDocRateCriteria(dal, Collections.emptyList());
-      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(Currency.class),
-          any(Currency.class), any(), any())).thenReturn(null);
+      lookup.when(() -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(), any(), any(), any(),
+          any())).thenReturn(null);
       msgUtils.when(() -> OBMessageUtils.messageBD("SMFCR_NoRateOnComplete")).thenReturn(NO_RATE_MSG);
 
       String result = InvoiceExchangeRateValidator.checkRateForCompletion(invoice);
@@ -212,7 +220,7 @@ public class InvoiceExchangeRateValidatorTest {
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class);
         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-        MockedStatic<FinancialUtils> finUtils = Mockito.mockStatic(FinancialUtils.class);
+        MockedStatic<ConversionRateLookup> lookup = Mockito.mockStatic(ConversionRateLookup.class);
         MockedStatic<OBMessageUtils> msgUtils = Mockito.mockStatic(OBMessageUtils.class)) {
       currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("EUR");
       OBDal dal = mock(OBDal.class);
@@ -227,8 +235,8 @@ public class InvoiceExchangeRateValidatorTest {
       when(zeroRate.getRate()).thenReturn(BigDecimal.ZERO);
       stubDocRateCriteria(dal, Arrays.asList(nullRate, zeroRate));
 
-      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(Currency.class),
-          any(Currency.class), any(), any())).thenReturn(null);
+      lookup.when(() -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(), any(), any(), any(),
+          any())).thenReturn(null);
       msgUtils.when(() -> OBMessageUtils.messageBD("SMFCR_NoRateOnComplete")).thenReturn(NO_RATE_MSG);
 
       // Neither the null nor the zero rate counts as a document rate → blocking message.
@@ -274,8 +282,8 @@ public class InvoiceExchangeRateValidatorTest {
       stubDocRateCriteria(dal, Collections.emptyList());
       msgUtils.when(() -> OBMessageUtils.messageBD("SMFCR_NoRateOnComplete")).thenReturn(NO_RATE_MSG);
 
-      // FinancialUtils is intentionally NOT mocked: the null-date guard must short-circuit before
-      // FinancialUtils.getConversionRate is ever reached.
+      // ConversionRateLookup is intentionally NOT mocked: the null-date guard must short-circuit
+      // before the general-rate lookup (which needs a connection) is ever reached.
       assertEquals(NO_RATE_MSG + " USD → EUR",
           InvoiceExchangeRateValidator.checkRateForCompletion(invoice));
     }

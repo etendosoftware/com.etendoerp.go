@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -53,7 +54,9 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 /**
  * Unit tests for {@link NeoCustomizedSelectorCheck} (ETP-6377): the write check asks the entity's
  * own SELECTOR customization, through the same pre/post hook chain the REST selector runs, and
- * leaves the caller's request context as it found it.
+ * leaves the caller's request context as it found it. ETP-6365 — {@code query}: the same chain
+ * answers the customization's own list for a field, searched by {@code q}, for the MCP name
+ * resolution.
  *
  * @covers com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck
  */
@@ -203,6 +206,42 @@ public class NeoCustomizedSelectorCheckTest {
     }
 
     assertEquals(NeoCustomizedSelectorCheck.Answer.UNVERIFIABLE, offers());
+  }
+
+  // ── ETP-6365: query — the customization's own list, searched ──────────────
+
+  /**
+   * The customization's list for the field, searched by {@code q}, on one page of the requested
+   * size, through the pre/post hook chain; the context travels as parameters and the caller's
+   * request context is restored.
+   */
+  @Test
+  public void queryAnswersTheCustomizationsListSearchedOnOnePage() throws Exception {
+    NeoResponse listed = page(false, VALUE);
+    preAnswers.add(listed);
+
+    assertEquals(listed, NeoCustomizedSelectorCheck.query(entity, FIELD, "CHF", 25, CONTEXT));
+
+    assertEquals("the pre and the post hook run", 2, dispatched.size());
+    Map<String, String> params = dispatched.get(0).context().getQueryParams();
+    assertEquals("CHF", params.get("q"));
+    assertEquals("25", params.get("limit"));
+    assertEquals("0", params.get("offset"));
+    assertEquals("Y", params.get("IsSOTrx"));
+    assertEquals(FIELD, dispatched.get(0).context().getFieldName());
+    assertRequestContextRestored();
+  }
+
+  /** A blank search sends no {@code q}; no customization, or no entity, answers {@code null}. */
+  @Test
+  public void queryWithoutSearchOrCustomization() throws Exception {
+    assertNull(NeoCustomizedSelectorCheck.query(entity, FIELD, "  ", 10, CONTEXT));
+    assertNull(dispatched.get(0).context().getQueryParams().get("q"));
+    assertRequestContextRestored();
+
+    assertNull(NeoCustomizedSelectorCheck.query(null, FIELD, "CHF", 10, CONTEXT));
+    assertNull(NeoCustomizedSelectorCheck.query(entity, " ", "CHF", 10, CONTEXT));
+    assertEquals("no dispatch without an entity or a field", 1, dispatched.size());
   }
 
   private NeoCustomizedSelectorCheck.Answer offers() {
