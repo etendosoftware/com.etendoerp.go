@@ -1450,7 +1450,7 @@ organization = the request's `organization` when the role can read it, else the 
 `…/selectors/currency`, MCP `etendo_selectors` and the write check read one list. **Names on MCP
 writes:** `McpFkResolver` now carries the SF entity (`McpFkResolver.Target`) and, when the generic
 selector finds nothing, looks the value up in the list the entity's own SELECTOR customization
-serves (`NeoSelectorService.queryCustomizedSelector` → `NeoCustomizedSelectorCheck.query`, the same
+serves (`NeoCustomizedSelectorCheck.query`, public for this, the same
 hook chain and synthetic request as the write check): `currency: "CHF"` or `"Franco Suizo"` resolves
 to the id. Structural: it applies to every field an entity serves itself, only for values the
 generic selector did not find, so nothing that resolved before resolves differently. Other Currency
@@ -10230,9 +10230,9 @@ follow. The function is total (every edge case answers `HISTORIC`).
 | `serverClock` | — | `{now: "yyyy-MM-dd'T'HH:mm:00"}` — the server's current minute, server-local wall clock (the zone `validFromDate` is read in); the default start of a new rate |
 | `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now, of the client or of System (the downloader's rows): the client's row wins over the System one, as in `ConversionRateLookup`, then the latest start; `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client or of System, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
 
-On MCP `etendo_create`, `resolveServerCreateFields` fills `currency`, `conversionRateType` and
-`divideRateBy` before the mandatory pre-check, and `etendo_schema(view:"create")` lists them as
-server-defaulted while `toCurrency`, `multipleRateBy` and `validFromDate` are `userRequired`.
+A generic create or update on `conversion-rates` (REST `POST`/`PUT`/`PATCH`, MCP `etendo_create` /
+`etendo_update`) is refused with 405 `ETGO_ConvRateUseActions`: rates are written only through the
+actions `createManualCurrency`, `createManualRate` and `updateManualRate` (above).
 
 **The rate a document picks — `ConversionRateLookup` (shared, names no window).** For a document
 of day `D`, among the active rows of the pair with `ValidFrom < D+1 00:00` and `ValidTo ≥ D 00:00`

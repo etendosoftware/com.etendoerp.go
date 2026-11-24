@@ -35,6 +35,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -115,43 +116,6 @@ final class McpFkResolver {
   }
 
   /**
-   * Resolves every FK-by-name value in {@code body}, replacing it in place with the matched
-   * record id. Values that are not FK fields, not strings, empty, or already an id are left
-   * untouched.
-   *
-   * @param body          the create/update body, keyed by canonical DAL property name (already
-   *                      passed through {@code mapFieldsToDalProperties})
-   * @param dalEntity     the DAL entity backing the tab's table
-   * @param adTab         the tab, used to resolve each FK's {@code AD_Column}
-   * @param contextParams selector context params (see the class-level limitation note)
-   * @param log           caller's logger, for warn/debug tracing
-   * @return {@code null} on success (body updated in place, possibly unchanged), or a structured
-   *         {@code not_found}/{@code ambiguous_fk} error object the caller must return as-is
-   */
-  static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
-      Map<String, String> contextParams, Logger log) throws JSONException {
-    return resolveFkNames(body, dalEntity, adTab, contextParams, log, value -> false);
-  }
-
-  /**
-   * Same as {@link #resolveFkNames(JSONObject, Entity, Tab, Map, Logger)}, but skips values the
-   * caller knows are not resolvable yet.
-   * <p>
-   * Added for {@code etendo_batch} (IMP-15): a batch body may carry {@code "$ref:<opId>"} placeholders
-   * that {@code BatchService} substitutes with a real recordId only once the referenced op has run.
-   * Sending those to the selector would report a spurious {@code not_found} for a value that is
-   * about to become a valid id.
-   *
-   * @param skipValue predicate over the raw string value; {@code true} leaves it untouched
-   */
-  static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
-      Map<String, String> contextParams, Logger log, Predicate<String> skipValue)
-      throws JSONException {
-    return resolveFkNames(body, new Target(dalEntity, adTab, null), contextParams, log,
-        skipValue);
-  }
-
-  /**
    * The entity written, as the lookups need it: its DAL entity and tab, and its Schema Forge
    * entity, whose own SELECTOR customization may serve a field (ETP-6365); {@code null} when the
    * caller has none.
@@ -160,12 +124,27 @@ final class McpFkResolver {
   }
 
   /**
-   * Same as {@link #resolveFkNames(JSONObject, Entity, Tab, Map, Logger, Predicate)}, for a
-   * write on {@code target.sfEntity()}: a value the generic selector does not find is also looked
-   * up in the list the entity's own SELECTOR customization serves for the field — the list the
-   * app's picker and {@code etendo_selectors} show (ETP-6365: a header currency picked from
-   * {@code currencyOptions}, e.g. {@code "CHF"}). A value the generic selector resolves is
-   * resolved as before.
+   * Resolves every FK-by-name value in {@code body}, replacing it in place with the matched
+   * record id. Values that are not FK fields, not strings, empty, or already an id are left
+   * untouched. A value the generic selector does not find is also looked up in the list the
+   * entity's own SELECTOR customization serves for the field — the list the app's picker and
+   * {@code etendo_selectors} show (ETP-6365: a header currency picked from {@code currencyOptions},
+   * e.g. {@code "CHF"}); a value the generic selector resolves is resolved as before.
+   * <p>
+   * {@code skipValue} was added for {@code etendo_batch} (IMP-15): a batch body may carry
+   * {@code "$ref:<opId>"} placeholders that {@code BatchService} substitutes with a real recordId
+   * only once the referenced op has run; sending those to the selector would report a spurious
+   * {@code not_found}. Other callers pass {@code value -> false}.
+   *
+   * @param body          the create/update body, keyed by canonical DAL property name (already
+   *                      passed through {@code mapFieldsToDalProperties})
+   * @param target        the DAL entity, the tab (to resolve each FK's {@code AD_Column}) and the
+   *                      SF entity ({@code null} disables the customization lookup)
+   * @param contextParams selector context params (see the class-level limitation note)
+   * @param log           caller's logger, for warn/debug tracing
+   * @param skipValue     predicate over the raw string value; {@code true} leaves it untouched
+   * @return {@code null} on success (body updated in place, possibly unchanged), or a structured
+   *         {@code not_found}/{@code ambiguous_fk} error object the caller must return as-is
    */
   static JSONObject resolveFkNames(JSONObject body, Target target,
       Map<String, String> contextParams, Logger log, Predicate<String> skipValue)
@@ -368,7 +347,7 @@ final class McpFkResolver {
     if (sfEntity == null) {
       return null;
     }
-    NeoResponse response = NeoSelectorService.queryCustomizedSelector(sfEntity, key, search,
+    NeoResponse response = NeoCustomizedSelectorCheck.query(sfEntity, key, search,
         SELECTOR_LIMIT, contextParams);
     if (response == null || response.getHttpStatus() >= 400 || response.getBody() == null) {
       return null;

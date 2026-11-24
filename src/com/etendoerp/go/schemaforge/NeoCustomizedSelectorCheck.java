@@ -49,7 +49,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p>Only a pre-hook that produces the candidate list decides. When the customization declines
  * the field (returns {@code null}) the generic selector stays the judge, as before.
  */
-final class NeoCustomizedSelectorCheck {
+public final class NeoCustomizedSelectorCheck {
 
   /** What the customization said about the value. */
   enum Answer {
@@ -106,6 +106,8 @@ final class NeoCustomizedSelectorCheck {
    * searched by {@code search} (ETP-6365) — the first page of {@code limit} — or {@code null} when
    * no customization serves the field. Runs the same hook chain as {@link #offers}, with the same
    * synthetic request (the context, {@code q}, {@code limit} and {@code offset} as parameters).
+   * Public for the MCP name resolution ({@code McpFkResolver}), which must read the list the
+   * field's own picker shows; structural, it names no entity or field.
    *
    * @param sfEntity  the Schema Forge entity; {@code null} means no customization
    * @param fieldName the DAL property name of the reference
@@ -114,7 +116,7 @@ final class NeoCustomizedSelectorCheck {
    * @param context   the selector context (sibling fields, organization…)
    * @return the customization's response, or {@code null}
    */
-  static NeoResponse query(SFEntity sfEntity, String fieldName, String search, int limit,
+  public static NeoResponse query(SFEntity sfEntity, String fieldName, String search, int limit,
       Map<String, String> context) {
     if (sfEntity == null || sfEntity.getETGOSFSpec() == null || StringUtils.isBlank(fieldName)) {
       return null;

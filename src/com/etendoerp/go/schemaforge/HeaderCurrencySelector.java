@@ -40,6 +40,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 
 /**
@@ -112,6 +113,21 @@ final class HeaderCurrencySelector {
       log.error("[ETP-6365] header currency selector failed: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Error querying the document currencies");
     }
+  }
+
+  /**
+   * The selectors a document header serves itself, in order: the payment method
+   * ({@link PaymentMethodSelectorSupport}, direction from the window) and the currency
+   * ({@link #handleIfCurrencySelector}). One call for the header customizations, so each keeps a
+   * single early return.
+   *
+   * @param context the request context
+   * @return the selector response, or {@code null} when the request is neither selector
+   */
+  static NeoResponse handleIfHeaderSelector(NeoContext context) {
+    NeoResponse paymentMethod = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    return paymentMethod != null ? paymentMethod : handleIfCurrencySelector(context);
   }
 
   private static boolean isCurrencyField(String fieldName) {

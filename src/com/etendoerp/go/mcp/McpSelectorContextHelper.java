@@ -46,6 +46,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  */
 final class McpSelectorContextHelper {
 
+  /** The selector search parameter of the REST endpoint ({@code NeoSelectorEndpoint}). */
+  private static final String SELECTOR_SEARCH_PARAM = "q";
+
   private static final DateTimeFormatter CLASSIC_DATE_FORMATTER =
       DateTimeFormatter.ofPattern("dd-MM-yyyy");
   private static final String KEY_MESSAGE = "message";
@@ -78,6 +81,24 @@ final class McpSelectorContextHelper {
   private static final String COLUMN_REGION = "C_Region_ID";
 
   private McpSelectorContextHelper() {
+  }
+
+  /**
+   * The selector context a customization receives, with the search as {@code q} — the parameter
+   * the REST selector endpoint reads ({@code NeoSelectorEndpoint}) — so a field served by the
+   * entity's own SELECTOR customization is searched on MCP as on REST (ETP-6365). Before, the
+   * {@code query} argument reached the generic selector only, and a customization listed every
+   * candidate whatever was searched. The generic query keeps its own copy without it.
+   */
+  static Map<String, String> withSearch(Map<String, String> contextParams, String query) {
+    Map<String, String> params = new HashMap<>();
+    if (contextParams != null) {
+      params.putAll(contextParams);
+    }
+    if (StringUtils.isNotBlank(query)) {
+      params.put(SELECTOR_SEARCH_PARAM, query);
+    }
+    return params;
   }
 
   /**

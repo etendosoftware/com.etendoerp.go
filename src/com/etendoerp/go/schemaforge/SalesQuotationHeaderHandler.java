@@ -270,12 +270,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse ownSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
-        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
-    if (ownSelector == null) {
-      // ETP-6365: the header currency's selector lists what currencyOptions lists, on every channel
-      ownSelector = HeaderCurrencySelector.handleIfCurrencySelector(context);
-    }
+    // ETP-6365: the header's own selectors — payment method, and the currency currencyOptions lists
+    NeoResponse ownSelector = HeaderCurrencySelector.handleIfHeaderSelector(context);
     if (ownSelector != null) {
       return ownSelector;
     }
