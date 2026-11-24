@@ -379,12 +379,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         // session, which also picks up the DocumentNo the completion may have reassigned from the
         // document type's sequence. On failure the internal rollback reverts the whole creation.
         String invoiceId = invoice.getId();
-        // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
-        // own accounting date; a foreign-currency one without a rate is refused before completing,
-        // and the generation rolled back (catch below) — nothing is left behind.
-        if (!SPEC_GOODS_SHIPMENT.equals(specName)) {
-          DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
-        }
+        // ETP-5840: an invoice generated from an order, a quotation or (ETP-6365) shipments got its
+        // rate recomputed for its own accounting date; a foreign-currency one without a rate is
+        // refused before completing, and the generation rolled back (catch below) — nothing is
+        // left behind.
+        DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
         // ETP-6179: the SIF fields the caller chose (or their defaults) and the rectification
         // guard, which this one-step creation never reached through the header's completion.
         InvoiceSifPreset.applyBeforeCompletion(invoice, body);
@@ -1503,6 +1502,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
+    // ETP-6365: the invoice's own rate for its accounting date (last range of the day), as the
+    // order route stores it in finishFromOrder; null when none is configured — refused below.
+    getSupport().propagateOrderRateToInvoice(null, invoice);
     return invoice;
   }
 

@@ -241,10 +241,10 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
-        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
-    if (paymentMethodSelector != null) {
-      return paymentMethodSelector;
+    // ETP-6365: the header's own selectors — payment method, and the currency currencyOptions lists
+    NeoResponse ownSelector = HeaderCurrencySelector.handleIfHeaderSelector(context);
+    if (ownSelector != null) {
+      return ownSelector;
     }
     // ETP-5704: Reactivate is refused when the order has linked shipments or invoices — the rule
     // the SPA already applies by hiding the action, now enforced for every channel.

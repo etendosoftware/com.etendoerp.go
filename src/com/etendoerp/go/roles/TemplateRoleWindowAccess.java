@@ -302,7 +302,7 @@ public final class TemplateRoleWindowAccess {
         full("252"),                                          // Grupo de activos — Asset Group
         full("800026"),                                       // Amortización — Amortization
         full("B917E8A7B0864ACEA9D941E3B7494E53"),              // Asientos manuales — Simple G/L Journal (decision 2)
-        full("116"),                                          // Rangos de conversión — Conversion Rates
+        full("116"),                                          // Conversión de divisas — Currency Conversion
         full("146"),                                          // Tarifa — Price List
         full("141"),                                          // Condiciones de pago — Payment Term
         full("137"),                                          // Impuesto — Tax Rate

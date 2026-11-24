@@ -1972,21 +1972,35 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray categories = result.getJSONObject("reportsMatrix").getJSONArray("categories");
-        // "Finance" (6 rows: tax-report + 5 financial-family), "Inventory" (1 row:
-        // inventory-stock-report) and "Treasury" (2 rows: both aging schedules), sorted
-        // case-insensitively.
-        assertEquals(3, categories.length());
+        // "Finance" (5 financial-family rows), "Inventory" (1 row: inventory-stock-report),
+        // "Taxes" (1 row: tax-report, ETP-6380) and "Treasury" (2 rows: both aging schedules),
+        // sorted case-insensitively.
+        assertEquals(4, categories.length());
 
         JSONObject finance = categories.getJSONObject(0);
         assertEquals("Finance", finance.getString("name"));
         JSONArray financeReports = finance.getJSONArray("reports");
-        assertEquals(6, financeReports.length());
+        assertEquals(5, financeReports.length());
+        // Every Finance row is unreached by the admin role in this test.
+        for (int i = 0; i < financeReports.length(); i++) {
+            assertEquals("none",
+                financeReports.getJSONObject(i).getJSONObject("access").getString(ADMIN_ROLE_ID));
+        }
 
         JSONObject inventory = categories.getJSONObject(1);
         assertEquals("Inventory", inventory.getString("name"));
         assertEquals(1, inventory.getJSONArray("reports").length());
 
-        JSONObject treasury = categories.getJSONObject(2);
+        // The Tax Report moved to its own category without changing its grant.
+        JSONObject taxes = categories.getJSONObject(2);
+        assertEquals("Taxes", taxes.getString("name"));
+        JSONArray taxesReports = taxes.getJSONArray("reports");
+        assertEquals(1, taxesReports.length());
+        assertEquals("tax-report", taxesReports.getJSONObject(0).getString("id"));
+        assertEquals("full",
+            taxesReports.getJSONObject(0).getJSONObject("access").getString(ADMIN_ROLE_ID));
+
+        JSONObject treasury = categories.getJSONObject(3);
         assertEquals("Treasury", treasury.getString("name"));
         JSONArray treasuryReports = treasury.getJSONArray("reports");
         assertEquals(2, treasuryReports.length());
@@ -1994,20 +2008,6 @@ class SFRolesOverviewTest extends BaseWebhookTest {
             assertEquals("none",
                 treasuryReports.getJSONObject(i).getJSONObject("access").getString(ADMIN_ROLE_ID));
         }
-
-        // Every Finance row except tax-report is unreached by the admin role in this test.
-        boolean sawTaxReportFull = false;
-        for (int i = 0; i < financeReports.length(); i++) {
-            JSONObject row = financeReports.getJSONObject(i);
-            String access = row.getJSONObject("access").getString(ADMIN_ROLE_ID);
-            if ("tax-report".equals(row.getString("id"))) {
-                assertEquals("full", access);
-                sawTaxReportFull = true;
-            } else {
-                assertEquals("none", access);
-            }
-        }
-        assertTrue(sawTaxReportFull, "tax-report row must be present in the Finance category");
     }
 
     // ── exception handling ───────────────────────────────────────────────

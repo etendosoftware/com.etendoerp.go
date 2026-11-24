@@ -49,7 +49,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p>Only a pre-hook that produces the candidate list decides. When the customization declines
  * the field (returns {@code null}) the generic selector stays the judge, as before.
  */
-final class NeoCustomizedSelectorCheck {
+public final class NeoCustomizedSelectorCheck {
 
   /** What the customization said about the value. */
   enum Answer {
@@ -67,6 +67,7 @@ final class NeoCustomizedSelectorCheck {
   static final int MAX_PAGES = 20;
   private static final String PARAM_LIMIT = "limit";
   private static final String PARAM_OFFSET = "offset";
+  private static final String PARAM_SEARCH = "q";
   private static final String ITEMS = "items";
   private static final String HAS_MORE = "hasMore";
 
@@ -92,6 +93,46 @@ final class NeoCustomizedSelectorCheck {
         : requestContext.getVariablesSecureApp();
     try {
       return readPages(requestContext, sfEntity, fieldName, valueId, context);
+    } finally {
+      requestContext.setRequest(previousRequest);
+      if (previousVars != null) {
+        requestContext.setVariableSecureApp(previousVars);
+      }
+    }
+  }
+
+  /**
+   * The candidate list the entity's own SELECTOR customization serves for {@code fieldName},
+   * searched by {@code search} (ETP-6365) — the first page of {@code limit} — or {@code null} when
+   * no customization serves the field. Runs the same hook chain as {@link #offers}, with the same
+   * synthetic request (the context, {@code q}, {@code limit} and {@code offset} as parameters).
+   * Public for the MCP name resolution ({@code McpFkResolver}), which must read the list the
+   * field's own picker shows; structural, it names no entity or field.
+   *
+   * @param sfEntity  the Schema Forge entity; {@code null} means no customization
+   * @param fieldName the DAL property name of the reference
+   * @param search    the search string ({@code q}); may be {@code null}
+   * @param limit     the page size
+   * @param context   the selector context (sibling fields, organization…)
+   * @return the customization's response, or {@code null}
+   */
+  public static NeoResponse query(SFEntity sfEntity, String fieldName, String search, int limit,
+      Map<String, String> context) {
+    if (sfEntity == null || sfEntity.getETGOSFSpec() == null || StringUtils.isBlank(fieldName)) {
+      return null;
+    }
+    RequestContext requestContext = RequestContext.get();
+    HttpServletRequest previousRequest = requestContext.getRequest();
+    VariablesSecureApp previousVars = previousRequest == null ? null
+        : requestContext.getVariablesSecureApp();
+    try {
+      Map<String, String> params = pageParams(context, 0);
+      params.put(PARAM_LIMIT, String.valueOf(limit));
+      if (StringUtils.isNotBlank(search)) {
+        params.put(PARAM_SEARCH, search);
+      }
+      requestContext.setRequest(new SyntheticHttpServletRequest(asArrays(params), new HashMap<>()));
+      return dispatch(sfEntity, fieldName, params);
     } finally {
       requestContext.setRequest(previousRequest);
       if (previousVars != null) {

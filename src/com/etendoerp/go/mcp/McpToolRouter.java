@@ -846,10 +846,12 @@ public class McpToolRouter {
     // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
     // ETP-5535: a child's selectors also see its parent record, as etendo_selectors' parentContext
     // would carry it — a line's tax rule reads the header's order date.
-    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+    // ETP-6365: with the SF entity, so a name the field's own picker lists resolves too.
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
         McpSelectorContextHelper.buildSelectorContextParams(
             McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, filteredBody, null, null),
-            adTab), log);
+            adTab), log, value -> false);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
     }
@@ -1139,8 +1141,9 @@ public class McpToolRouter {
       return wrapAsErrorContent(imageError);
     }
 
-    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
-        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log, value -> false);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
     }
@@ -1290,7 +1293,9 @@ public class McpToolRouter {
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
-    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
+    // ETP-6365: same guard as REST (NeoWritePreflight), so both answer a refused delete alike.
+    NeoResponse targetRefusal = NeoActionRecordGuard.deleteRefusalFor(sfEntity, hookCtx);
     if (targetRefusal != null) {
       return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
     }
@@ -1312,7 +1317,6 @@ public class McpToolRouter {
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     // ETP-5415: routed through NeoExtensionDispatcher. Note this surface has NO post-hook — the
     // delete returns its own payload and never calls afterHandle. Preserved as-is; see D14.
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -1410,7 +1414,8 @@ public class McpToolRouter {
         .surface(NeoExtensionSurface.SELECTOR)
         .channel(NeoExtensionChannel.MCP)
         .context(McpHookExecutor.buildSelectorHookContext(
-            specName, entityName, columnName, contextParams, adTab, sfEntity))
+            specName, entityName, columnName,
+            McpSelectorContextHelper.withSearch(contextParams, query), adTab, sfEntity))
         .build();
 
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(selectorRequest);
@@ -2043,7 +2048,8 @@ public class McpToolRouter {
     // parent nowhere in the body yet — BatchService injects it only when the record is created —
     // exactly the reason McpLinePriceInjector below takes op.parentId() too. A placeholder that is
     // somehow still unresolved is skipped and the op resolves with the pre-ETP-5535 context.
-    JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
+    JSONObject fkError = McpFkResolver.resolveFkNames(body,
+        new McpFkResolver.Target(dalEntity, adTab, sfEntity),
         McpSelectorContextHelper.buildSelectorContextParams(
             McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, body, op.parentId(),
                 value -> value.startsWith(BatchService.REF_PREFIX)),

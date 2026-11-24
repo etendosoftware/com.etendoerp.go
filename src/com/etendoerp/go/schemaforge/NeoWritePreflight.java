@@ -139,7 +139,9 @@ final class NeoWritePreflight {
    * <p>An update goes through {@link NeoActionRecordGuard#updateRefusalFor}, which lets a
    * customization that stores the whole update in tenant-owned rows declare so
    * ({@link NeoHandler#consumesTargetWrite}, ETP-6062) — the target then only has to be readable.
-   * A delete always gets the strict answer.</p>
+   * A delete goes through {@link NeoActionRecordGuard#deleteRefusalFor}: always refused when the
+   * tenant cannot write the row, the customization may only word the refusal of a row it can read
+   * ({@link NeoHandler#refusalForReadOnlyTarget}, ETP-6365).</p>
    *
    * @param context the CRUD request context, possibly {@code null}
    * @return the response to send instead of dispatching, or {@code null}
@@ -153,7 +155,7 @@ final class NeoWritePreflight {
       return NeoActionRecordGuard.updateRefusalFor(context.getSfEntity(), context);
     }
     if ("DELETE".equals(method)) {
-      return NeoActionRecordGuard.writeRefusalFor(context.getSfEntity(), context.getRecordId());
+      return NeoActionRecordGuard.deleteRefusalFor(context.getSfEntity(), context);
     }
     return null;
   }

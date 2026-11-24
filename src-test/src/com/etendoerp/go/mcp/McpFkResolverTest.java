@@ -36,6 +36,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -53,6 +54,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
 /**
@@ -139,6 +141,12 @@ class McpFkResolverTest {
     private Entity dalEntity;
     private Tab adTab;
     private Logger log;
+
+    /** resolveFkNames without an SF entity and without skipped values. */
+    private JSONObject resolvePlain(JSONObject body) throws JSONException {
+      return McpFkResolver.resolveFkNames(body, new McpFkResolver.Target(dalEntity, adTab, null),
+          Map.of(), log, value -> false);
+    }
     private OBDal obDalInstance;
 
     @BeforeEach
@@ -192,7 +200,7 @@ class McpFkResolverTest {
       JSONObject body = bodyWith(UUID_ID);
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
           MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class)) {
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(UUID_ID, body.getString(KEY));
         obDal.verifyNoInteractions();
         selector.verifyNoInteractions();
@@ -208,7 +216,7 @@ class McpFkResolverTest {
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
           MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class)) {
         obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         // Untouched: it was already the id, which is exactly what etendo_defaults hands back.
         assertEquals(LEGACY_ID, body.getString(KEY));
         selector.verifyNoInteractions();
@@ -243,10 +251,8 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
             anyInt(), anyInt(), any())).thenReturn(selectorHits());
 
-        JSONObject foreign = McpFkResolver.resolveFkNames(bodyWith(foreignId), dalEntity, adTab,
-            Map.of(), log);
-        JSONObject missing = McpFkResolver.resolveFkNames(bodyWith(missingId), dalEntity, adTab,
-            Map.of(), log);
+        JSONObject foreign = resolvePlain(bodyWith(foreignId));
+        JSONObject missing = resolvePlain(bodyWith(missingId));
 
         assertNotNull(foreign);
         assertEquals(missing.toString(), foreign.toString().replace(foreignId, missingId));
@@ -266,7 +272,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("EUR"),
             anyInt(), anyInt(), any())).thenReturn(selectorHits(UUID_ID));
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(UUID_ID, body.getString(KEY));
       }
     }
@@ -284,7 +290,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
             anyInt(), anyInt(), any())).thenReturn(selectorHits());
 
-        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+        JSONObject error = resolvePlain(body);
         assertNotNull(error);
         assertEquals(McpConstants.STATUS_UNPROCESSABLE, error.getInt(McpConstants.KEY_STATUS));
         assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
@@ -292,6 +298,71 @@ class McpFkResolverTest {
         // The id path already ran, so this advice would send the agent back to what it just did.
         assertFalse(error.getString(McpConstants.KEY_DETAIL).contains("exact record id"));
         assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("etendo_selectors"));
+      }
+    }
+
+    /**
+     * ETP-6365: a value the generic selector does not find is looked up in the list the entity's
+     * own SELECTOR customization serves for the field (a header currency picked from
+     * currencyOptions, e.g. "CHF"). One candidate, or the one whose label equals the value ignoring
+     * case, resolves; no customization, no match or several unlabelled matches stay not_found, as
+     * does a write with no SF entity (the customization is then never asked).
+     */
+    @Test
+    @DisplayName("a value only the entity's own selector lists resolves through it (ETP-6365)")
+    void ownSelectorFallbackResolvesWhatTheFieldsPickerLists() throws Exception {
+      com.etendoerp.go.schemaforge.data.SFEntity sfEntity =
+          mock(com.etendoerp.go.schemaforge.data.SFEntity.class);
+      Column column = mock(Column.class);
+      NeoResponse single = labelledHits(UUID_ID, "CHF");
+      NeoResponse twoWithExactLabel = labelledHits(OTHER_ID, "CHFX", UUID_ID, "chf");
+      NeoResponse twoWithoutExactLabel = labelledHits(OTHER_ID, "CHFX", UUID_ID, "CHFY");
+      NeoResponse empty = selectorHits();
+      NeoResponse none = selectorHits();
+      // name, SF entity passed, own selector answer, expected id (null = not_found)
+      Object[][] cases = {
+          { "single own match", sfEntity, single, UUID_ID },
+          { "exact label among several", sfEntity, twoWithExactLabel, UUID_ID },
+          { "several, no exact label", sfEntity, twoWithoutExactLabel, null },
+          { "own selector lists nothing", sfEntity, empty, null },
+          { "no customization serves the field", sfEntity, null, null },
+          { "no SF entity", null, single, null },
+      };
+      for (Object[] c : cases) {
+        String name = (String) c[0];
+        JSONObject body = bodyWith("CHF");
+        try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+            MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+            MockedStatic<NeoCustomizedSelectorCheck> custom =
+                mockStatic(NeoCustomizedSelectorCheck.class);
+            MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+          obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+          fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity))
+              .thenReturn(column);
+          selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(),
+              anyString(), anyInt(), anyInt(), any())).thenReturn(none);
+          custom.when(() -> NeoCustomizedSelectorCheck.query(eq(sfEntity), eq(KEY),
+              eq("CHF"), anyInt(), any())).thenReturn((NeoResponse) c[2]);
+
+          JSONObject error = McpFkResolver.resolveFkNames(body,
+              new McpFkResolver.Target(dalEntity, adTab,
+                  (com.etendoerp.go.schemaforge.data.SFEntity) c[1]),
+              Map.of(), log, value -> false);
+
+          if (c[3] != null) {
+            assertNull(error, name);
+            assertEquals(c[3], body.getString(KEY), name);
+          } else {
+            assertNotNull(error, name);
+            assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR),
+                name);
+            assertEquals("CHF", body.getString(KEY), name);
+          }
+          if (c[1] == null) {
+            custom.verify(() -> NeoCustomizedSelectorCheck.query(any(), any(), any(),
+                anyInt(), any()), org.mockito.Mockito.never());
+          }
+        }
       }
     }
 
@@ -315,7 +386,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY),
             eq("Entregas IVA 21%"), anyInt(), anyInt(), any())).thenReturn(byLabel);
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(UUID_ID, body.getString(KEY));
       }
     }
@@ -341,7 +412,7 @@ class McpFkResolverTest {
           selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Foo"),
               anyInt(), anyInt(), any())).thenReturn(prefixHits);
 
-          JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+          JSONObject error = resolvePlain(body);
           assertNotNull(error);
           assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
           assertEquals(label, body.getString(KEY));
@@ -364,7 +435,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
             anyInt(), anyInt(), any())).thenReturn(selectorHits());
 
-        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+        JSONObject error = resolvePlain(body);
 
         assertNotNull(error);
         assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
@@ -387,7 +458,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
             anyInt(), anyInt(), any())).thenReturn(selectorHits(UUID_ID, LEGACY_ID));
 
-        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+        JSONObject error = resolvePlain(body);
         assertEquals(McpConstants.ERROR_AMBIGUOUS_FK, error.getString(McpConstants.KEY_ERROR));
         assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("id or its exact label"));
       }
@@ -411,7 +482,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Agua"),
             anyInt(), anyInt(), any())).thenReturn(twoRowsOneRecord);
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(UUID_ID, body.getString(KEY));
       }
     }
@@ -434,7 +505,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("agua"),
             anyInt(), anyInt(), any())).thenReturn(hits);
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(UUID_ID, body.getString(KEY));
       }
     }
@@ -471,7 +542,8 @@ class McpFkResolverTest {
       JSONObject body = bodyWith("$ref:h1");
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
           MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class)) {
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log,
+        assertNull(McpFkResolver.resolveFkNames(body,
+            new McpFkResolver.Target(dalEntity, adTab, null), Map.of(), log,
             value -> value.startsWith("$ref:")));
         assertEquals("$ref:h1", body.getString(KEY));
         obDal.verifyNoInteractions();
@@ -504,6 +576,12 @@ class McpFkResolverTest {
     private Entity dalEntity;
     private Tab adTab;
     private Logger log;
+
+    /** resolveFkNames without an SF entity and without skipped values. */
+    private JSONObject resolvePlain(JSONObject body) throws JSONException {
+      return McpFkResolver.resolveFkNames(body, new McpFkResolver.Target(dalEntity, adTab, null),
+          Map.of(), log, value -> false);
+    }
     private OBDal obDalInstance;
     private Column column;
 
@@ -563,7 +641,7 @@ class McpFkResolverTest {
               return hits(ADDR_ID);
             });
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(ADDR_ID, body.getString(ADDR_KEY));
         assertEquals(BP_ID, body.getString(BP_KEY));
         // The point of the item: the parent id reached the selector as context.
@@ -599,7 +677,7 @@ class McpFkResolverTest {
               return BP_ID.equals(context.get(BP_PARAM)) ? hits(ADDR_ID) : hits();
             });
 
-        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertNull(resolvePlain(body));
         assertEquals(BP_ID, body.getString(BP_KEY));
         assertEquals(ADDR_ID, body.getString(ADDR_KEY));
         // Whichever order the body happened to iterate in, no attempt was ever made with the raw
@@ -626,7 +704,7 @@ class McpFkResolverTest {
         selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
             anyInt(), anyInt(), any())).thenAnswer(invocation -> hits());
 
-        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+        JSONObject error = resolvePlain(body);
         assertNotNull(error);
         assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
         // Deferring failures must not cost termination: a pass that resolves nothing ends the loop.

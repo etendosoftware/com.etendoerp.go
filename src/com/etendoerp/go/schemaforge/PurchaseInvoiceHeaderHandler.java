@@ -30,6 +30,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -145,6 +146,18 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   }
 
   /**
+   * {@inheritDoc} ETP-6365: the header currency is picked from {@code currencyOptions} (routed by this header),
+   * so it is accepted when that action would list it ({@link
+   * CurrencyOptionsHandler#offersHeaderCurrency}) rather than through the generic
+   * {@code Currency} selector and its EUR/USD/GBP allowlist.
+   */
+  @Override
+  public Optional<Boolean> offersReference(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    return CurrencyOptionsHandler.offersHeaderCurrency(propertyName, candidateId, mergedRecord);
+  }
+
+  /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
    * invoice payment actions, {@code currencyOptions}, the follow-up document actions
    * ({@link FollowUpSupport#actionContracts()}, ETP-5576), {@code post} / {@code unpost}
@@ -208,10 +221,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (siiDeferredVat != null) {
       return siiDeferredVat;
     }
-    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
-        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
-    if (paymentMethodSelector != null) {
-      return paymentMethodSelector;
+    // ETP-6365: the header's own selectors — payment method, and the currency currencyOptions lists
+    NeoResponse ownSelector = HeaderCurrencySelector.handleIfHeaderSelector(context);
+    if (ownSelector != null) {
+      return ownSelector;
     }
     // ETP-5692: completed-invoice write fence + unpost status gate, before anything is captured.
     NeoResponse invoiceGuard =

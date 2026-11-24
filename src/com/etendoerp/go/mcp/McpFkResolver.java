@@ -35,9 +35,11 @@ import org.openbravo.base.model.Property;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoCustomizedSelectorCheck;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
+import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
  * Resolves FK-by-name values in a {@code etendo_create}/{@code etendo_update} body (IMP-4).
@@ -114,38 +116,40 @@ final class McpFkResolver {
   }
 
   /**
-   * Resolves every FK-by-name value in {@code body}, replacing it in place with the matched
-   * record id. Values that are not FK fields, not strings, empty, or already an id are left
-   * untouched.
-   *
-   * @param body          the create/update body, keyed by canonical DAL property name (already
-   *                      passed through {@code mapFieldsToDalProperties})
-   * @param dalEntity     the DAL entity backing the tab's table
-   * @param adTab         the tab, used to resolve each FK's {@code AD_Column}
-   * @param contextParams selector context params (see the class-level limitation note)
-   * @param log           caller's logger, for warn/debug tracing
-   * @return {@code null} on success (body updated in place, possibly unchanged), or a structured
-   *         {@code not_found}/{@code ambiguous_fk} error object the caller must return as-is
+   * The entity written, as the lookups need it: its DAL entity and tab, and its Schema Forge
+   * entity, whose own SELECTOR customization may serve a field (ETP-6365); {@code null} when the
+   * caller has none.
    */
-  static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
-      Map<String, String> contextParams, Logger log) throws JSONException {
-    return resolveFkNames(body, dalEntity, adTab, contextParams, log, value -> false);
+  record Target(Entity dalEntity, Tab adTab, SFEntity sfEntity) {
   }
 
   /**
-   * Same as {@link #resolveFkNames(JSONObject, Entity, Tab, Map, Logger)}, but skips values the
-   * caller knows are not resolvable yet.
+   * Resolves every FK-by-name value in {@code body}, replacing it in place with the matched
+   * record id. Values that are not FK fields, not strings, empty, or already an id are left
+   * untouched. A value the generic selector does not find is also looked up in the list the
+   * entity's own SELECTOR customization serves for the field — the list the app's picker and
+   * {@code etendo_selectors} show (ETP-6365: a header currency picked from {@code currencyOptions},
+   * e.g. {@code "CHF"}); a value the generic selector resolves is resolved as before.
    * <p>
-   * Added for {@code etendo_batch} (IMP-15): a batch body may carry {@code "$ref:<opId>"} placeholders
-   * that {@code BatchService} substitutes with a real recordId only once the referenced op has run.
-   * Sending those to the selector would report a spurious {@code not_found} for a value that is
-   * about to become a valid id.
+   * {@code skipValue} was added for {@code etendo_batch} (IMP-15): a batch body may carry
+   * {@code "$ref:<opId>"} placeholders that {@code BatchService} substitutes with a real recordId
+   * only once the referenced op has run; sending those to the selector would report a spurious
+   * {@code not_found}. Other callers pass {@code value -> false}.
    *
-   * @param skipValue predicate over the raw string value; {@code true} leaves it untouched
+   * @param body          the create/update body, keyed by canonical DAL property name (already
+   *                      passed through {@code mapFieldsToDalProperties})
+   * @param target        the DAL entity, the tab (to resolve each FK's {@code AD_Column}) and the
+   *                      SF entity ({@code null} disables the customization lookup)
+   * @param contextParams selector context params (see the class-level limitation note)
+   * @param log           caller's logger, for warn/debug tracing
+   * @param skipValue     predicate over the raw string value; {@code true} leaves it untouched
+   * @return {@code null} on success (body updated in place, possibly unchanged), or a structured
+   *         {@code not_found}/{@code ambiguous_fk} error object the caller must return as-is
    */
-  static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
+  static JSONObject resolveFkNames(JSONObject body, Target target,
       Map<String, String> contextParams, Logger log, Predicate<String> skipValue)
       throws JSONException {
+    Entity dalEntity = target.dalEntity();
     if (body == null || dalEntity == null) {
       return null;
     }
@@ -162,8 +166,7 @@ final class McpFkResolver {
     for (String key : keys) {
       classify(body, dalEntity, log, key, skipValue, pending, unusableAsContext);
     }
-    return resolveByDependencyOrder(body, dalEntity, adTab, contextParams, log, pending,
-        unusableAsContext);
+    return resolveByDependencyOrder(body, target, contextParams, log, pending, unusableAsContext);
   }
 
   /**
@@ -210,7 +213,7 @@ final class McpFkResolver {
    * of resolution order. Reporting it on the first pass — the pre-IMP-22 behaviour — is what turned a
    * resolvable {@code partnerAddress} into a 422.
    */
-  private static JSONObject resolveByDependencyOrder(JSONObject body, Entity dalEntity, Tab adTab,
+  private static JSONObject resolveByDependencyOrder(JSONObject body, Target target,
       Map<String, String> contextParams, Logger log, Set<String> pending,
       Set<String> unusableAsContext) throws JSONException {
     while (!pending.isEmpty()) {
@@ -222,8 +225,7 @@ final class McpFkResolver {
       boolean progressed = false;
       JSONObject firstError = null;
       for (String key : new ArrayList<>(pending)) {
-        JSONObject error = lookupOneField(body, dalEntity, adTab, passContext, log, key,
-            unusableAsContext);
+        JSONObject error = lookupOneField(body, target, passContext, log, key, unusableAsContext);
         if (error == null) {
           pending.remove(key);
           progressed = true;
@@ -245,11 +247,11 @@ final class McpFkResolver {
    *         nothing can be done with it (no {@code AD_Column}, selector unavailable), in which case
    *         it is recorded as unusable context since its value is still a search string
    */
-  private static JSONObject lookupOneField(JSONObject body, Entity dalEntity, Tab adTab,
+  private static JSONObject lookupOneField(JSONObject body, Target target,
       Map<String, String> contextParams, Logger log, String key, Set<String> unusableAsContext)
       throws JSONException {
     String search = body.optString(key);
-    Column column = McpSchemaFieldBuilder.findColumn(adTab, key, dalEntity);
+    Column column = McpSchemaFieldBuilder.findColumn(target.adTab(), key, target.dalEntity());
     if (column == null) {
       log.debug("FK-by-name: no AD_Column resolved for '{}', leaving value as-is", key);
       unusableAsContext.add(key);
@@ -273,6 +275,9 @@ final class McpFkResolver {
     switch (decideOutcome(matchCount)) {
       case NOT_FOUND:
         String labelMatchId = resolveByExactLabel(column, key, search, contextParams);
+        if (labelMatchId == null) {
+          labelMatchId = resolveByOwnSelector(target.sfEntity(), key, search, contextParams);
+        }
         if (labelMatchId != null) {
           body.put(key, labelMatchId);
           return null;
@@ -326,6 +331,32 @@ final class McpFkResolver {
       sep = search.indexOf(LABEL_SEPARATOR, sep + 1);
     }
     return null;
+  }
+
+  /**
+   * Resolves a value against the list the entity's own SELECTOR customization serves for the
+   * field (ETP-6365), when the generic selector found nothing: the field's picker in the app is
+   * the customization's, so a value it lists — {@code "CHF"} for a header currency picked from
+   * {@code currencyOptions} — is one the caller may name. One match, or the one whose label equals
+   * the value ignoring case; anything else stays not found.
+   *
+   * @return the record id, or {@code null}
+   */
+  private static String resolveByOwnSelector(SFEntity sfEntity, String key, String search,
+      Map<String, String> contextParams) {
+    if (sfEntity == null) {
+      return null;
+    }
+    NeoResponse response = NeoCustomizedSelectorCheck.query(sfEntity, key, search,
+        SELECTOR_LIMIT, contextParams);
+    if (response == null || response.getHttpStatus() >= 400 || response.getBody() == null) {
+      return null;
+    }
+    JSONArray items = distinctById(response.getBody().optJSONArray(KEY_ITEMS));
+    if (items.length() == 1) {
+      return items.optJSONObject(0).optString(KEY_ID, null);
+    }
+    return uniqueLabelMatchIgnoreCase(items, search);
   }
 
   /** @return the id of the only item having a string property equal to {@code label}, else null. */

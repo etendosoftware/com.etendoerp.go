@@ -183,6 +183,39 @@ public final class NeoActionRecordGuard {
   }
 
   /**
+   * {@link #writeRefusalFor} for a {@code DELETE}, letting the entity's customization word the
+   * refusal of a row the current tenant can read but not delete
+   * ({@link NeoHandler#refusalForReadOnlyTarget}, ETP-6365). The row stays refused whatever the
+   * customization answers: only an error response replaces the 404, never a success or a
+   * {@code null}. An unknown id and another tenant's row get the 404 without asking.
+   *
+   * @param entity  the SchemaForge entity whose tab holds the targeted row
+   * @param context the delete request context; its record id names the row
+   * @return the refusal, or {@code null} when the delete may proceed
+   */
+  public static NeoResponse deleteRefusalFor(SFEntity entity, NeoContext context) {
+    String recordId = context == null ? null : context.getRecordId();
+    NeoResponse strict = writeRefusalFor(entity, recordId);
+    if (strict == null || !isReadableRow(entity, recordId)) {
+      return strict;
+    }
+    NeoResponse precise = customizationRefusal(entity, context);
+    return precise != null && precise.getHttpStatus() >= 400 ? precise : strict;
+  }
+
+  /** The customization's {@link NeoHandler#refusalForReadOnlyTarget}; {@code null} on failure. */
+  private static NeoResponse customizationRefusal(SFEntity entity, NeoContext context) {
+    try {
+      NeoHandler customization = NeoHandlerLookup.forEntityQuietly(entity);
+      return customization != null ? customization.refusalForReadOnlyTarget(context) : null;
+    } catch (RuntimeException e) {
+      log.warn("CRUD delete guard kept its 404 for entity '{}': refusalForReadOnlyTarget failed"
+          + " ({})", entity.getName(), e.getClass().getSimpleName());
+      return null;
+    }
+  }
+
+  /**
    * The refusal for a request whose target-row guard was waived by {@link #updateRefusalFor} but
    * which reached a step that writes the target row anyway — the customization declined after
    * declaring the update consumed. The same 404 the guard would have given, or {@code null} when

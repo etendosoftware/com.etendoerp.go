@@ -3,7 +3,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=financiero [-Pkind=mock|integration|all]
 
-# --- con mocks (126)
+# --- con mocks (128)
 com.etendoerp.go.schemaforge.AccountTargetedFlagTest
 com.etendoerp.go.schemaforge.AddPaymentServiceTest
 com.etendoerp.go.schemaforge.AutoMatchSupportRuleDimensionsTest
@@ -123,6 +123,8 @@ com.etendoerp.go.schemaforge.SepaCreditorIdTest
 com.etendoerp.go.schemaforge.SepaRemittancesFlagTest
 com.etendoerp.go.schemaforge.StatementLineFilterTest
 com.etendoerp.go.schemaforge.TransactionTypeHandlerTest
+com.etendoerp.go.schemaforge.handlers.ConversionRateHandlerTest
+com.etendoerp.go.schemaforge.handlers.ConversionRateWritesTest
 com.etendoerp.go.schemaforge.handlers.DocumentActionHandlerTest
 com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupportTest
 com.etendoerp.go.schemaforge.handlers.PaymentListSummaryTest
@@ -131,8 +133,9 @@ com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.CurrencyIsoAllowlistSelectorPolicyTest
 com.etendoerp.go.schemaforge.selector.policy.FinancialAccountPaymentMethodSelectorPolicyTest
 
-# --- integración (BD) (12)
+# --- integración (BD) (14)
 com.etendoerp.go.schemaforge.ConversionRateDocumentSavepointIntegrationTest
+com.etendoerp.go.schemaforge.ConversionRateLookupIntegrationTest
 com.etendoerp.go.schemaforge.FinancialAccountIbanCountryIntegrationTest
 com.etendoerp.go.schemaforge.FinancialAccountRemittanceProvisioningIntegrationTest
 com.etendoerp.go.schemaforge.RemittanceDueItemsQueryIntegrationTest
@@ -142,5 +145,6 @@ com.etendoerp.go.schemaforge.RemittanceReturnIntegrationTest
 com.etendoerp.go.schemaforge.RemittanceFileGeneratorIntegrationTest
 com.etendoerp.go.schemaforge.RemittanceSepaProvisioningIdempotencyIntegrationTest
 com.etendoerp.go.schemaforge.RemittanceTriggerIntegrationTest
+com.etendoerp.go.schemaforge.handlers.ConversionRateStoreIntegrationTest
 com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerDraftRemoveIntegrationTest
 com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerRemoveIntegrationTest

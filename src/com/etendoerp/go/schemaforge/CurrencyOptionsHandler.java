@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -84,6 +85,51 @@ public class CurrencyOptionsHandler implements NeoHandler {
   private static final String PARAM_DATE = "date";
   private static final String PARAM_ORGANIZATION = "organization";
   private static final String KEY_RATE = "rate";
+  /** The header property {@code currencyOptions} lists the values of (ETP-6365). */
+  static final String FIELD_CURRENCY = "currency";
+
+  /**
+   * {@link ConversionRateLookup#DAY_PREDICATE} and {@link ConversionRateLookup#SYSTEM_LAST},
+   * repeated as this class's own literals so the queries below are constants Sonar can see as such
+   * (a reference to another class's constant reads as dynamic SQL to java:S2077).
+   * {@code CurrencyOptionsHandlerTest} asserts the queries still contain the shared fragments.
+   */
+  private static final String DAY_PREDICATE_SQL = " AND cr.validfrom < ?"
+      + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= ?";
+  private static final String SYSTEM_LAST_SQL = "CASE WHEN cr.ad_client_id = '0' THEN 1 ELSE 0 END";
+
+  /**
+   * The direct rates (organization currency to X) touching the reference day. ETP-6365: the day
+   * rule of {@link ConversionRateLookup} (ValidFrom before the next day, ValidTo on or after the
+   * day). Last row per currency wins: rows are read System first, then the client's, each by
+   * ascending start — the client's own over the system's, then the latest range touching the day,
+   * the precedence {@code NeoExchangeRateService#queryRate} applies (ETP-5840: the list and the
+   * saved rate must agree). A compile-time constant: every value is a bound parameter.
+   */
+  static final String DIRECT_RATES_SQL =
+      "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
+          + " FROM c_conversion_rate cr"
+          + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
+          + " WHERE cr.c_currency_id = ?"
+          + " AND cr.ad_client_id IN ('0', ?)"
+          + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+          + " AND cr.isactive = 'Y'"
+          + " AND c.isactive = 'Y'"
+          + DAY_PREDICATE_SQL
+          + " ORDER BY c.iso_code, " + SYSTEM_LAST_SQL + " DESC, cr.validfrom ASC";
+
+  /** The reverse rates (X to the organization currency), same rule and order as the direct ones. */
+  static final String INVERSE_RATES_SQL =
+      "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
+          + " FROM c_conversion_rate cr"
+          + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
+          + " WHERE cr.c_currency_id_to = ?"
+          + " AND cr.ad_client_id IN ('0', ?)"
+          + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+          + " AND cr.isactive = 'Y'"
+          + " AND c.isactive = 'Y'"
+          + DAY_PREDICATE_SQL
+          + " ORDER BY c.iso_code, " + SYSTEM_LAST_SQL + " DESC, cr.validfrom ASC";
 
   /**
    * The contract a document header that routes {@code currencyOptions} here publishes for agents
@@ -224,7 +270,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * Total: without a session, or without a readable list, it never throws and never honours the
    * parameter.
    */
-  private static String readableOrganization(String requested, OBContext obCtx) {
+  static String readableOrganization(String requested, OBContext obCtx) {
     if (obCtx == null) {
       return null; // no session: no organization to fall back to, and none to trust
     }
@@ -248,6 +294,62 @@ public class CurrencyOptionsHandler implements NeoHandler {
     return StringUtils.trimToNull(value);
   }
 
+  /**
+   * Whether the {@code currency} of a document header is one {@code currencyOptions} offers for
+   * the record being written (ETP-6365): the organization currency, or an active currency with a
+   * conversion range against it on any date, scoped like the action (the record's client or
+   * System, the record's organization or '0'). Empty for any other property, so the generic
+   * selector keeps deciding it.
+   *
+   * <p>The header customizations that route {@code currencyOptions} here answer
+   * {@link NeoHandler#offersReference} through this method, so the write validation of the header
+   * currency accepts exactly what the app's currency picker lists, on every channel, while the
+   * generic {@code Currency} selector keeps its EUR/USD/GBP allowlist for every other picker.
+   *
+   * <p>Scope: {@code organization} / {@code client} of the record (stored or sent), else the
+   * session's — the same fallback the action uses for a new record. Empty when the organization or
+   * its currency cannot be resolved (the generic selector then decides, as before). A database
+   * failure propagates, and the write is refused as not verifiable.
+   *
+   * @param propertyName the DAL property validated
+   * @param candidateId  the currency id the write sets
+   * @param mergedRecord the merged record, keyed by DAL property name and by column name
+   * @return {@code true}/{@code false} for the header currency, empty for any other property
+   */
+  static Optional<Boolean> offersHeaderCurrency(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    if (!FIELD_CURRENCY.equals(propertyName) || StringUtils.isBlank(candidateId)) {
+      return Optional.empty();
+    }
+    OBContext obCtx = OBContext.getOBContext();
+    String orgId = scopeOf(mergedRecord, PARAM_ORGANIZATION,
+        obCtx != null && obCtx.getCurrentOrganization() != null
+            ? obCtx.getCurrentOrganization().getId() : null);
+    String clientId = scopeOf(mergedRecord, "client",
+        obCtx != null && obCtx.getCurrentClient() != null ? obCtx.getCurrentClient().getId() : null);
+    String orgCurrencyId = orgId == null ? null : OBCurrencyUtils.getOrgCurrency(orgId);
+    if (orgCurrencyId == null) {
+      return Optional.empty();
+    }
+    if (orgCurrencyId.equals(candidateId)) {
+      return Optional.of(Boolean.TRUE);
+    }
+    try {
+      return Optional.of(selectableCurrencies(OBDal.getInstance().getConnection(), orgCurrencyId,
+          clientId, orgId).containsKey(candidateId));
+    } catch (java.sql.SQLException e) {
+      throw new IllegalStateException("Could not list the selectable currencies", e);
+    }
+  }
+
+  /** The record's value for {@code property}, else {@code fallback}. */
+  private static String scopeOf(Map<String, String> mergedRecord, String property,
+      String fallback) {
+    String value = mergedRecord == null ? null
+        : StringUtils.trimToNull(mergedRecord.get(property));
+    return value != null ? value : fallback;
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     return null;
@@ -265,10 +367,9 @@ public class CurrencyOptionsHandler implements NeoHandler {
       String orgCurrencyId, String orgId, String clientId, LocalDate orderDate) throws Exception {
 
     Connection conn = OBDal.getInstance().getConnection();
-    java.sql.Date sqlDate = java.sql.Date.valueOf(orderDate);
 
-    Map<String, double[]> rateMap = queryDirectRates(conn, orgCurrencyId, clientId, orgId, sqlDate);
-    mergeInverseRates(conn, orgCurrencyId, rateMap, clientId, orgId, sqlDate);
+    Map<String, double[]> rateMap = queryDirectRates(conn, orgCurrencyId, clientId, orgId, orderDate);
+    mergeInverseRates(conn, orgCurrencyId, rateMap, clientId, orgId, orderDate);
 
     JSONArray arr = new JSONArray();
     String orgIsoCode = resolveIsoCode(conn, orgCurrencyId);
@@ -304,7 +405,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * currency with no range at all is not offered; one whose ranges do not cover the reference date
    * is, with {@code rate: null} (ETP-5840 plan de pruebas, casos 8 / N2).
    */
-  private Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
+  static Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
       String clientId, String orgId) throws java.sql.SQLException {
     Map<String, String> currencies = new LinkedHashMap<>();
     try (PreparedStatement ps = conn.prepareStatement(
@@ -332,32 +433,18 @@ public class CurrencyOptionsHandler implements NeoHandler {
   }
 
   private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
-      String clientId, String orgId, java.sql.Date sqlDate) throws java.sql.SQLException {
+      String clientId, String orgId, LocalDate day) throws java.sql.SQLException {
     Map<String, double[]> rateMap = new LinkedHashMap<>();
     // Include the client's own rates and the shared system ('0') rates. Rows are collected into a
     // map keyed by currency (last write wins), so ad_client_id ASC writes the '0' row first and the
     // client-specific row last, letting a tenant rate override the system rate for the same currency.
-    String sql =
-        "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
-      + " WHERE cr.c_currency_id = ?"
-      + " AND cr.ad_client_id IN ('0', ?)"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      // Last row per currency wins: the client's own over the system's, then the latest validfrom —
-      // the precedence NeoExchangeRateService#queryRate applies (ETP-5840: the list and the saved
-      // rate must agree).
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    // ETP-6365: the day rule of ConversionRateLookup, read System first then the client's (see
+    // DIRECT_RATES_SQL).
+    try (PreparedStatement ps = conn.prepareStatement(DIRECT_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
+      ConversionRateLookup.bindDay(ps, 4, day);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           rateMap.put(rs.getString("cid"), new double[]{ rs.getDouble("multiplyrate") });
@@ -369,28 +456,15 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private void mergeInverseRates(Connection conn, String orgCurrencyId,
       Map<String, double[]> rateMap, String clientId, String orgId,
-      java.sql.Date sqlDate) throws java.sql.SQLException {
+      LocalDate day) throws java.sql.SQLException {
     Map<String, double[]> inverseMap = new LinkedHashMap<>();
     // Include the client's own rates and the shared system ('0') rates; ad_client_id ASC lets a
     // tenant rate override the system rate for the same currency (map keyed by currency, last wins).
-    String sql =
-        "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
-      + " WHERE cr.c_currency_id_to = ?"
-      + " AND cr.ad_client_id IN ('0', ?)"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(INVERSE_RATES_SQL)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
       ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
+      ConversionRateLookup.bindDay(ps, 4, day);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           String cid = rs.getString("cid");

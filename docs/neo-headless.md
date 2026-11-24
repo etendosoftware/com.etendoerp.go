@@ -1414,6 +1414,54 @@ values, the not-active-tracked exemption, no-session fail-open), the wiring case
 `NeoWritePreflightTest` (422 on an inactive reference, not re-checked once ownership already
 refused).
 
+#### A write never SETS a reference the app would not offer (ETP-6176) — fields with their own picker (ETP-6365)
+
+After ownership and activeness, `NeoReferenceSelectorValidation.findRefusedReference` (REST single
+and batch through `NeoWritePreflight`, MCP through `McpNotOfferedReference`) accepts a reference the
+write sets only when the app would offer it for the merged record; otherwise `422
+REFERENCE_NOT_ALLOWED` with `field`/`value`. By default "would offer" is the field's generic
+selector (`NeoSelectorService.offersValue`: validation rule, selector policies, organization scope).
+
+Some fields are not picked through their generic selector. A document header's `currency` (sales
+quotation, sales order, purchase order, sales and purchase invoice) is chosen from the header's own
+`currencyOptions` action — the organization currency plus every active currency with a conversion
+range against it on any date — while the generic `Currency` selector keeps the
+`CurrencyIsoAllowlistSelectorPolicy` EUR/USD/GBP allowlist for every other picker (the financial
+account form, for one). Judged by the generic selector, a CHF the header itself listed was refused
+on save. The entity's customization now answers for such a field through
+`NeoHandler#offersReference(propertyName, candidateId, record)` (default `Optional.empty()` = ask
+the generic selector; `true`/`false` replaces its answer), resolved with
+`NeoHandlerLookup.forEntityQuietly` — no entity is named in the validator. The order-family headers
+(`AbstractOrderHeaderHandler`) and both invoice headers answer it through
+`CurrencyOptionsHandler.offersHeaderCurrency`, the same `selectableCurrencies` query the action
+lists from, scoped by the record's (else the session's) client and organization. Consequence on
+every channel alike: a header currency with no range against the organization currency is refused,
+even EUR/USD/GBP — the app never offers it either. A failure while answering refuses the write as
+not verifiable (fail closed).
+
+**The header currency's selector is that same list (ETP-6365, MCP parity).** The five header
+customizations serve the SELECTOR of `currency` / `C_Currency_ID` themselves
+(`HeaderCurrencySelector.handleIfCurrencySelector`, right after the payment-method selector in
+their `handle`): `{items:[{id, label, isoCode, name}], columns, totalCount, hasMore}`, the
+organization currency first and then by ISO code exactly as `currencyOptions` lists them (`label` is
+the ISO code, `C_Currency`'s identifier; `name` in the request language), searched by `q` on ISO code
+or name, paged by `limit`/`offset`. The list depends on no date, so a selector call needs none;
+organization = the request's `organization` when the role can read it, else the session's. So REST
+`…/selectors/currency`, MCP `etendo_selectors` and the write check read one list. **Names on MCP
+writes:** `McpFkResolver` now carries the SF entity (`McpFkResolver.Target`) and, when the generic
+selector finds nothing, looks the value up in the list the entity's own SELECTOR customization
+serves (`NeoCustomizedSelectorCheck.query`, public for this, the same
+hook chain and synthetic request as the write check): `currency: "CHF"` or `"Franco Suizo"` resolves
+to the id. Structural: it applies to every field an entity serves itself, only for values the
+generic selector did not find, so nothing that resolved before resolves differently. Other Currency
+pickers (financial accounts, G/L journals…) keep the allowlist. UI: the five header forms already
+pick the currency from `currencyOptions` (`CurrencyRatePicker`, matched by the SPA's
+`isCurrencyRateSelectorField` for these specs on entity `header`/`quotation`), never through this
+selector, so the change is MCP-only and no screen changes.
+
+Tests: `NeoReferenceSelectorValidationTest` (customization answer replaces / defers to the
+selector), `CurrencyOptionsHandlerTest` (`offersHeaderCurrency`).
+
 #### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
 
 `POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the
@@ -7229,7 +7277,7 @@ the reverse rate), rounded HALF_UP to 12 decimals.
 | **Save refused** (422, nothing saved) when the currency is not the organization's and the resulting rate is empty. Two texts: `exchange_rate_missing` ("no exchange rate … for that date") only when no conversion rate range exists for the reference date; `exchange_rate_empty` ("the Exchange rate … cannot be left empty") when the range exists but the write cleared the rate (`null`/`0`) or left a stored empty rate untouched — a write that changes neither the currency nor the date never looks the rate up, so it must not claim the range is missing (QA CP-12a) | `beforeWrite`; a create whose currency or reference date only the create cascade derives is checked by `afterWrite` | all (see the §4.12.9 row for REST single creates) |
 | **Invoice date → accounting and operation dates on an update** — a CRUD `PUT`/`PATCH` whose `invoiceDate` differs from the stored one copies it into `accountingDate` and, when the `Invoice` entity declares it (`com.etendoerp.sif.general`), `etsgDateOperation`, each only when the body does not send its own non-blank value. It replays what the UI gets from the classic callout on `C_Invoice.DateInvoiced` (`SifInvoiceOperationDateCallout` → `SE_Invoice_AccountingDate`), which an API update never runs; it runs before the rate pre-hook, so the rate is recalculated on the new accounting date (QA CP-12b). An update that does not change the invoice date mirrors nothing (ETP-5273). Creates keep `NeoHandlerUtils.mirrorAccountingDateOnCreate` | `AbstractInvoiceHeaderHandler.mirrorInvoiceDateOnUpdate`, called by both invoice headers' `handle()` | REST single/batch and MCP writes |
 | **Completion refused** (422) when the stored rate is empty | orders/quotations: `DocumentRateGuards.guardOrderHeader` (`documentAction` = `CO` by CRUD or action, the `DocAction` button running `CO`, quotation `Convertquotation`); invoices: the header pre-hook (`documentAction` = `CO`) and the invoice generation flows (`CreateDraftInvoiceHandler` order and quotation routes, `CreatePurchaseInvoiceHandler` order route). **Classic completion is unchanged by ETP-5840:** `InvoiceCompletionRateHook` → `InvoiceExchangeRateValidator`, run by `ProcessInvoiceUtil` (classic backoffice and, after the GO pre-hooks, the GO completions too), still accepts a document rate or a general `C_Conversion_Rate` on the INVOICE date and answers `SMFCR_NoRateOnComplete`; only the GO channels require the document's own rate | all |
-| **Generated documents recompute** — quotation → order (`SalesQuotationHeaderHandler.recomputeConvertedOrderRate`, after the reactivation to Draft: the order is dated today) and order → invoice (`InvoiceFromOrderSupport.propagateOrderRateToInvoice`, on the invoice's accounting date). Never copied. No range: the converted **order** stays Draft with `null` and its next save is refused; an **invoice** generated from a sales order, a quotation (`createDraftInvoice`) or a purchase order (`createPurchaseInvoice`) is created AND completed in one step, so it is refused before completing (`DocumentCurrencyRate.requireRateForCompletion` → 422 `exchange_rate_missing_on_complete`, with `messageKeys`/`messageParams`) and the whole generation is rolled back — no invoice, no lines, the order untouched. The refusal and its rollback live in those two handlers (`CreateDraftInvoiceHandler` for the order and quotation routes, `CreatePurchaseInvoiceHandler` for the order route); the check runs BEFORE completing because a `ProcessInvoiceHook.preProcess` refusal returns from `ProcessInvoiceUtil` without rolling back. Receipt, shipment and return generation are unchanged | `DocumentCurrencyRate.recompute`, `requireRateForCompletion` | the actions on every channel |
+| **Generated documents recompute** — quotation → order (`SalesQuotationHeaderHandler.recomputeConvertedOrderRate`, after the reactivation to Draft: the order is dated today) and order → invoice (`InvoiceFromOrderSupport.propagateOrderRateToInvoice`, on the invoice's accounting date). Never copied. No range: the converted **order** stays Draft with `null` and its next save is refused; an **invoice** generated from a sales order, a quotation or goods shipments (`createDraftInvoice`) or from a purchase order or goods receipts (`createPurchaseInvoice`; shipments and receipts since ETP-6365) is created AND completed in one step, so it is refused before completing (`DocumentCurrencyRate.requireRateForCompletion` → 422 `exchange_rate_missing_on_complete`, with `messageKeys`/`messageParams`) and the whole generation is rolled back — no invoice, no lines, the order untouched. The refusal and its rollback live in those two handlers (`CreateDraftInvoiceHandler` for the order, quotation and shipment routes, `CreatePurchaseInvoiceHandler` for the order and receipt routes); the check runs BEFORE completing because a `ProcessInvoiceHook.preProcess` refusal returns from `ProcessInvoiceUtil` without rolling back. Receipt, shipment and return documents themselves are unchanged | `DocumentCurrencyRate.recompute`, `requireRateForCompletion` | the actions on every channel |
 | **Exchange-rates tab mirrors the header** — `autoCreateOrUpdateConversionRateDocument` deletes the `C_Conversion_Rate_Document` rows when the header rate is `null` AND the current header write left it so (body carries `eTGOCurrencyRate` without a positive value — sent by the caller or written by the recalculation) or the generation flow just recomputed it to `null`. A line save (`InvoiceLineHandler`) or a write that does not touch the rate never deletes; posted invoices are still skipped | `AbstractInvoiceHeaderHandler` | all |
 | **Rate locked on a processed document** (ETP-6177) — a write that changes the rate of a processed document (any value other than the stored one, `null` included) is refused `422` (`error.code` `document_processed`, `messageKeys: ["20501"]`, core's "Document posted/processed", the key the core restriction triggers answer for the other columns), whatever the document's currency, the organization's own included. The window locks its rate picker on `@Processed@='Y'`, and core's `C_Order` restriction trigger does not cover `EM_ETGO_Currency_Rate`, so before this a completed order's rate could be changed through REST, MCP or the public API. A write that does not send the rate, or sends the stored value (an empty one as `null` or `""`), is unchanged. Invoices are refused earlier, by `CompletedInvoiceWriteFence` (the rate is not in their completed allowlist) | `DocumentCurrencyRate.beforeWrite` → `refuseRateChangeOnProcessed` | all |
 | Org-currency documents are never recalculated nor refused; processed documents are never recalculated (their rate is only locked, row above) | — | — |
@@ -7281,6 +7329,11 @@ client or system by ISO code, `rate: null` when none is configured for the date,
 (`DocumentCurrencyRate.ATTR_RATE_TYPE`) — the handler no longer guesses the document from the spec
 name. The ACTION sub-endpoint now passes the query string to the hooks
 (`NeoSubEndpointDispatcher`, as the defaults sub-endpoint already did, ETP-5680).
+ETP-6365: the write validation of the header `currency` accepts exactly what this action lists
+(`CurrencyOptionsHandler.offersHeaderCurrency`, answered through `NeoHandler#offersReference`;
+see §4.3.7 *A write never SETS a reference the app would not offer*). The header's `currency` selector serves the
+same list (`HeaderCurrencySelector`), so `etendo_selectors` and a currency named on an MCP write
+(`"CHF"`) agree with it.
 
 **Refusal body** (`DocumentRateMessages`):
 `{"error":{"status":422,"code":"exchange_rate_missing"|"exchange_rate_empty"|"exchange_rate_missing_on_complete","message":<translated text>,"messageKeys":[…],"messageParams":{…}}}`.
@@ -10058,6 +10111,173 @@ and the contact-type rules.
 `backend_goods_shipment_completed` when a sales shipment is completed through `documentAction`, only
 after commit; see `docs/backend-observability.md` § Goods Shipment Completion KPI.
 
+#### 5.3.7 Currency conversion — manual ranges (`ConversionRateHandler`, ETP-6365)
+
+`handlers/ConversionRateHandler`, bound with
+`@NeoExtension(spec = "conversion-rates", entity = "conversionRate")` (no `Java_Qualifier`).
+The window (AD window 116, `C_Conversion_Rate`) was read-only; it is now "Conversión de divisas" /
+"Currency Conversion" and lets a user keep **manual** rates for the currencies the downloader of
+`com.smf.currency.conversionrate` does not fetch (a currency is *automatic* when an active
+`SMFCR_RULE` of the client, or of System, has the organization currency at either end). The
+entity keeps `ISGET`/`ISGETBYID`/`ISDELETE` = `Y` and has `ISPOST`/`ISPUT`/`ISPATCH` = `N`: rates are
+created and changed only through the actions below (one implementation for the window's popups and
+the MCP, story F.22-25); a generic create or update is refused by `NeoMethodPolicy` (405), and,
+should a configuration push open the flags again, by the customization itself (405,
+`ETGO_ConvRateUseActions`, pointing to the actions). `etendo_delete` / `DELETE` stays. `ValidFrom`/`ValidTo` became DateTime (reference 16) through
+`com.etendoerp.go.template`'s `configScript.xml`; NEO serialises them as server-local wall clock
+`yyyy-MM-dd'T'HH:mm:ss` (ETP-5100).
+
+**Every write is served by the customization itself** — the three write actions and the delete,
+on REST and MCP alike — no channel divergence.
+It validates everything first, then writes on the request's session and only flushes: the channel
+commits, and on any failure the session is rolled back (`NeoErrorResponses.rollbackUnlessBatchOwned`),
+so a rate is never left without its inverse.
+
+**A range never starts in the future**: create refuses a `validFromDate` later than the
+server's current minute (`HH:mm:59` of the current minute is still accepted;
+`ETGO_ConvRateFutureStart`). The `serverClock` action gives the SPA that minute as its default.
+
+**Every manual range is editable and deletable, postings or not** — changing a rate only affects
+documents that look a rate up afterwards; a posted invoice keeps the rate it was posted with
+(`C_Conversion_Rate_Document` / the header rate). Only a downloaded row stays locked. Core's
+`C_CONVERSION_RATE_TRG` refuses (`@20506@`) to update or delete a range whose dates contain postings
+of the pair, so the customization's writes (create including the closing of the previous range,
+rate update, delete) run with the database triggers disabled, through
+core's `TriggerHandler` (`ConversionRateTriggerBypass`):
+
+- **Scope.** On PostgreSQL `TriggerHandler.disable()` runs
+  `set_config('my.triggers_disabled','Y', true)`: local to the current transaction of the current DAL
+  connection, undone by its commit or rollback, invisible to any other connection. Every Etendo
+  trigger reads it through `AD_isTriggerEnabled()`. The handler also keeps a thread-local flag.
+- **Discipline.** The writes are flushed before `enable()` (Hibernate defers the SQL); `enable()`
+  always runs in `finally`, and when it fails (aborted transaction) the thread-local is cleared with
+  `clear()` and the caller's rollback discards the setting. When the triggers are already disabled by
+  an outer owner the switch is left alone.
+- **Batch.** In `/sws/neo/batch` the transaction is the batch's; the triggers are enabled again before
+  the operation returns, so later operations run with them; a failure rolls the whole batch back.
+- **What is re-checked in Java** (`ConversionRateWrites.checkRow`, on every row written): an end is
+  always set (`C_CONVERSION_RATE_TRG` would turn an empty end into 9999-12-31; an open range is
+  written as 2999-12-31, the downloader's value, so every open end is stored alike); the end is not before the start (the trigger's `@20505@`); the two currencies differ
+  (`C_CONVERSION_RATE_TRG3`'s `@SameCurrency@`). A violation is a planning bug (user input is refused
+  before writing) and fails the write, rolled back. **Skipped on purpose:** the `@20506@` "rate used in
+  accounting" check. Those are the only rules of the two triggers. Core's Java
+  `ConversionRateEventHandler` (overlap, 20504) is not a trigger and still runs at flush, which is why
+  a create closes the open range and flushes before it inserts the new one.
+
+| Operation | Input | What the server does |
+|---|---|---|
+| `createManualCurrency` ("Nueva divisa") / `createManualRate` ("Nueva tasa") — action, `id` not used (`_` / `new`) | `{toCurrency, multipleRateBy, validFromDate?}` — `toCurrency` an id or an ISO code; `validFromDate` `yyyy-MM-dd'T'HH:mm[:ss]` (seconds dropped; a bare date is 00:00; **absent: the server's current minute**) | `createManualCurrency` only for a currency with NO rate yet (else 409 `ETGO_ConvRateCurrencyHasRates`); `createManualRate` only for one that already has rates (else 409 `ETGO_ConvRateCurrencyNoRates`). Then the same create: origin = organization currency of the request (`OBCurrencyUtils.getOrgCurrency`, else the client's), organization `*` of the tenant, `conversionRateType` `S`, not synced, open end **written as 2999-12-31, the value the downloader writes** (reads treat any end in 2999+ as open). Closes every open range of the pair that started earlier at `validFromDate − 1 minute` (both directions), then inserts the rate (org → X, multiply X, divide 1/X) **and** its inverse (X → org, multiply 1/X, divide X). Answers the forward row (`response.data`) |
+| `updateManualRate` ("Modificar la tasa") — action on the rate's id (either direction) | `{multipleRateBy, confirm?}` — always the forward rate (units of the other currency per 1 organization currency) | only the rate changes, on both rows (the inverse gets 1/X; a legacy range without its inverse gets one); the period never changes (delete and create again). **Without `confirm: true` nothing is saved** and the answer is `{saved:false, proposal:{forward:{fromIso, toIso, old, new}, inverse:{fromIso, toIso, old, new}, validFrom, validTo}, warning}` (`validTo` `null` when open; `warning` = `ETGO_ConvRateUpdateWarning`: "El cambio solo se aplica a los documentos en los que se seleccione la divisa a partir de ahora. Los documentos ya creados conservan el tipo de cambio que copiaron al seleccionar la divisa, y su contabilidad sigue usando ese tipo de cambio."). With `confirm: true` it saves and answers the forward row |
+| delete | — | deletes both rows; the range it had closed is **not** reopened |
+
+**System rows are read, never written.** `updateManualRate` and delete resolve the id among the
+client's rows **and** the System (`0`) ones (`ConversionRateWrites.writableRate`): a downloaded row
+of either answers 409 `ETGO_ConvRateSyncedLocked`; any other System row answers 404 like an unknown
+id or another tenant's row. Only the tenant's own non-downloaded rows are ever written.
+A delete of a System row never reaches the customization's `handle`: the shared CRUD target guard
+(`NeoActionRecordGuard.deleteRefusalFor`, used by `NeoWritePreflight` for REST single and batch and
+by MCP `etendo_delete`) refuses it first, because the tenant cannot write it. The guard then asks
+the customization to word that refusal (`NeoHandler.refusalForReadOnlyTarget`, structural: asked
+only for a row the tenant can read, and only an error answer replaces the 404), and
+`ConversionRateHandler` answers the synced-lock 409 for a downloaded row. Same answer on every
+channel.
+
+A range is the pair of rows with the same `ValidFrom`/`ValidTo`; `ValidTo` empty or in year 2999+
+means open. Refusals, all before anything is written (Spanish/English text in
+`messages/neo_hints_*.properties`, key in `error.messageKeys`, and `error.field` — the request
+field at fault — on the field-bound ones: `toCurrency` for the currency refusals (including `CurrencyHasRates`/`CurrencyNoRates`), `multipleRateBy`
+for `InvalidRate`, `validFromDate` for `InvalidValidFrom`/`FutureStart`/`Overlap`):
+
+| Key | Status | When |
+|---|---|---|
+| `ETGO_ConvRateCurrencyRequired` | 400 | no `toCurrency` |
+| `ETGO_ConvRateCurrencyInvalid` | 400 | unknown, inactive, or another tenant's currency |
+| `ETGO_ConvRateOrgCurrency` | 400 | `toCurrency` is the organization currency |
+| `ETGO_ConvRateAutoCurrency` | 400 | the currency is downloaded automatically |
+| `ETGO_ConvRateInvalidRate` | 400 | rate missing, not a number, or ≤ 0 |
+| `ETGO_ConvRateInvalidValidFrom` | 400 | start missing or not a date |
+| `ETGO_ConvRateCurrencyHasRates` | 409 | `createManualCurrency` (or preview `mode: newCurrency`) for a currency that already has rates — "CHF ya tiene tasas. Use Nueva tasa para cargar una tasa nueva." |
+| `ETGO_ConvRateCurrencyNoRates` | 409 | `createManualRate` (or preview `mode: newRate`) for a currency without rates — "CHF todavía no tiene tasas. Use Nueva divisa para darla de alta con su primera tasa." |
+| `ETGO_ConvRateUseActions` | 405 | a generic create or update reached the customization (only if the flags were opened again) |
+| `ETGO_ConvRateFutureStart` | 400 | start later than the server's current minute — "La fecha y hora de inicio no puede ser posterior al momento actual." |
+| `ETGO_ConvRateOverlap` | 409 | the new range falls inside a closed range, or does not start after the start of the range in force — "Ya existe una tasa de conversión para EUR → CHF en las fechas indicadas (01/11/2026 09:00 – 18/11/2026 14:29). Elija una fecha de inicio posterior al 18/11/2026 14:30." `{2}`–`{3}` is the colliding range (`dd/MM/yyyy HH:mm` in every language; an open end reads "sin fecha de fin" / "no end date", key `ETGO_ConvRateNoEndDate`); `{4}` is the start of the pair's open range, or, with none, the latest end of the colliding ranges. Also the translation of core's 20504 (the ranges are read again after the rollback to fill the dates) |
+| `ETGO_ConvRateSyncedLocked` | 409 | update/delete of a downloaded row — the tenant's own or a System (`0`) one, where the downloader writes (also the translation of `SMFCR_CannotDeleteSyncedRate`) |
+| `ETGO_ConvRateNoOrgCurrency` | 422 | the organization has no currency |
+
+**State — one virtual column** on `C_Conversion_Rate`, listed, filtered and sorted like any other
+column (REST through core's `AdvancedQueryBuilder`, MCP through `_computedColumns`):
+`etgoRateStatus` (`EM_Etgo_Rate_Status`, function `ETGO_CONVRATE_STATUS`) — `CURRENT` when
+`ValidFrom ≤ now() ≤ ValidTo` (an empty end, or one in year 2999+, is open), otherwise `HISTORIC`.
+It is a **list** column (reference `ETGO_ConvRate_Status`: `CURRENT` = "Current", `HISTORIC` =
+"Historic"), so `etendo_schema` publishes `options:[{value, label}]`, and it has a read-only field
+on tab 198 ("Status") so the MCP label catalog applies: `mcp_field_labels_es.properties` words it
+"Estado" with the description "CURRENT = Vigente …, HISTORIC = Histórico …". The origin of a rate
+is `sMFCRSynced` (`EM_SMFCR_Is_Synced`, com.smf.currency.conversionrate): the same catalog words it
+"Automática" — `true` = Automática (downloaded daily, locked), `false` = Manual (story F.26). The
+English list labels and field description come from AD; the module exports no `*_TRL`, which is why
+the Spanish meaning travels in the catalog.
+**Why virtual (`Computation_Mode = 'V'`):** it depends on `now()`, the case a stored column cannot
+follow. The function is total (every edge case answers `HISTORIC`).
+
+**Actions** (`actionContracts`, read-only, not tied to a record — REST
+`POST /sws/neo/conversion-rates/conversionRate/new/action/<name>`, MCP `etendo_action` with
+`id: "_"`):
+
+| Action | Parameters | Answer (`response.data`) |
+|---|---|---|
+| `manualCurrencyOptions` | optional `withoutRates` (boolean, default `false`; `"true"`/`"false"` accepted on the query string) | `[{id, isoCode, name, symbol}]`: active currencies minus the organization currency and the automatic ones; with `withoutRates: true` also minus every currency that already has an active `C_Conversion_Rate` row of the client (or of System) with the organization currency, in either direction and on any date — the list of the "Nueva divisa" popup (a currency that already has rates gets a new range from its own "Nueva tasa · ISO" entry). `name`/`symbol` in the request language |
+| `previewManualRate` | `toCurrency`, `multipleRateBy`, optional `validFromDate` (default now), optional `mode` (`newCurrency` = the checks of `createManualCurrency`, `newRate` = those of `createManualRate`; absent = no check on existing rates) | `{creates:[{fromIso, toIso, rate, validFrom}], closes:[{id, fromIso, toIso, validFrom, newValidTo}]}` — or `{creates:[], closes:[], error, errorKey, errorField}` with the refusal a create would get (same text as the create; `errorField` as `error.field` above, absent for refusals bound to no field). Writes nothing |
+| `serverClock` | — | `{now: "yyyy-MM-dd'T'HH:mm:00"}` — the server's current minute, server-local wall clock (the zone `validFromDate` is read in); the default start of a new rate |
+| `currentRates` | — | `[{currencyId, isoCode, name, symbol, origin: AUTO\|MANUAL, rate, validFrom, lastDownloadAt}]` — one per currency with a range in force now, of the client or of System (the downloader's rows): the client's row wins over the System one, as in `ConversionRateLookup`, then the latest start; `rate` is always "1 organization currency = rate"; `lastDownloadAt` (AUTO only) is the latest `SUCCESS` run in `SMFCR_SYNC_LOG` of the client or of System, or the row's `updated` when that is newer or there is no run (the log is per run, not per pair) |
+
+A generic create or update on `conversion-rates` (REST `POST`/`PUT`/`PATCH`, MCP `etendo_create` /
+`etendo_update`) is refused with 405 `ETGO_ConvRateUseActions`: rates are written only through the
+actions `createManualCurrency`, `createManualRate` and `updateManualRate` (above).
+
+**The rate a document picks — `ConversionRateLookup` (shared, names no window).** For a document
+of day `D`, among the active rows of the pair with `ValidFrom < D+1 00:00` and `ValidTo ≥ D 00:00`
+(an empty end is open): the client's row before the System (`0`) one, then the greatest `ValidFrom`
+— "the last range of the day". Every GO lookup goes through it:
+
+| Caller | Organization scope (unchanged) |
+|---|---|
+| `NeoExchangeRateService.queryRate` (document recalculation, `hasRate`, direct then inverse) | organization `0` or the document's, at once |
+| `CurrencyOptionsHandler` `queryDirectRates` / `mergeInverseRates` | organization `0` or the document's, at once |
+| `NeoCurrencyTotals.todayMultiplyRate` (and `FinancialAccountsPageHandler.lookupRate` through it) | the org tree walked up to `0`, first level with a row wins (`orgTreeMultiplyRate`, as core's `FinancialUtils.getConversionRate`) |
+| `PaymentCurrencyConverter.generalRate` | same walk, from the invoice organization |
+| `InvoiceExchangeRateValidator.hasGeneralRate` | same walk, from the invoice organization |
+
+**On existing data it answers what the old lookups did:** every row written before ETP-6365 is at
+00:00; for those `ValidFrom < D+1 00:00` is exactly the former `ValidFrom ≤ D`, `ValidTo ≥ D` is
+unchanged, and core's overlap check (20504) leaves at most one row per client, pair and day, so the
+ordering picks the client row before the System one as before. Only a range with a time of day
+changes the answer — which is the point. `NeoConversionHelper` (no caller) was left as it was.
+
+**Invoices generated from shipments and receipts store their rate too.** `createDraftInvoice`
+from goods shipments and `createPurchaseInvoice` from goods receipts — one document or several,
+with or without an order — give the invoice its own rate for its accounting date
+(`InvoiceFromOrderSupport.propagateOrderRateToInvoice(null, invoice)`, the last range of the day,
+mirrored into `C_Conversion_Rate_Document`), and refuse a foreign-currency invoice without one
+before completing (422 `exchange_rate_missing_on_complete`, whole generation rolled back), exactly
+as the order routes. Before, the several-documents and no-order routes stored nothing and core
+posted with its 00:00 rule (or failed with its technical `NoConversionRate` when no range was open
+at 00:00).
+
+**Residual.** Documents that store no rate of their own — standalone payments, financial-account
+movements, manual G/L journals, invoices generated from returns, costing — are converted by core at
+posting time with its own midnight rule (`ValidFrom ≤ D 00:00`): on the day a timed range is created
+they still use the range that was in force at 00:00; from the next day on they pick the new one.
+In practice this is unreachable for manual currencies today: they can only be chosen in documents
+that store their rate, because the `Currency` selectors elsewhere (financial accounts, G/L journals)
+are limited to EUR/USD/GBP by `CurrencyIsoAllowlistSelectorPolicy`, and the downloaded
+USD/GBP ranges start at 00:00. To revisit if manual currencies are ever enabled there. Invoices
+freeze their rate on the header / `C_Conversion_Rate_Document` when the date or currency changes, so
+changing a range never changes an existing invoice.
+
+The reads of `SMFCR_RULE` / `SMFCR_SYNC_LOG` are guarded by the runtime model, but
+`com.etendoerp.go` declares no dependency on `com.smf.currency.conversionrate` (the spec's
+`EM_SMFCR_Is_Synced` field already requires it).
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:
@@ -10727,8 +10947,8 @@ fields, sibling to `windows`/`windowCount`/`matrix` and never merged into them, 
 9 reports the real `report-viewer` gallery shows (confirmed live against a running environment,
 2026-09-21; `ReportViewerPage.jsx`'s own `REPORT_PREVIEW_IMAGES` keys in `etendo_schema_forge` are
 the authoritative list). Each row carries a hardcoded category (`ReportAccessCatalog.Row#category`)
-that `reportsMatrix` groups by: 6 under `Finance`, 2 under `Treasury` (`aging-receivable`,
-`aging-payable`) and 1 under `Inventory`. The category string is the SPA's `menu.json` group name
+that `reportsMatrix` groups by: 5 under `Finance`, 2 under `Treasury` (`aging-receivable`,
+`aging-payable`), 1 under `Taxes` (`tax-report`, ETP-6380) and 1 under `Inventory`. The category string is the SPA's `menu.json` group name
 and the i18n key the frontend translates the heading with, so it must match it verbatim. **This corrects an earlier revision of
 this section**, which wrongly included 6 rows tied to `ETGO_SF_ENTITY.ad_tab_id` pointing at the
 "Financial Account" window (`bank-statements`, `bank-reconciliation`, `cash-close`, `financial-
@@ -12669,8 +12889,8 @@ The module includes unit tests that run without a backend:
 | `NeoAccountingAccessPolicyTest` | -- | Accounting-entity criterion (child tab + `C_AcctSchema_ID`; header and column-less tabs excluded), `canSeeAccounting` (null role, admin/client-admin bypass, flag Y/N/missing), the role flag read only for accounting entities, fail-closed case-insensitive name lookup (ETP-5648). Posting actions (ETP-5684): post/unpost, a button is posting by its process (explicit or `Posted` fallback), the 403 body, the flag read only for a posting action. Accounting field names in filters and sorts (ETP-6087): property and column names in any case, `$_identifier`, reference paths; look-alikes such as `postedBy` are not accounting. |
 | `McpQuerySupportAccountingTest` | -- | ETP-6087: for a role without `showAccountingFields`, an `etendo_list` filter on an accounting field gets the excluded-field refusal and a sort on one the `orderBy` refusal; a role with the capability filters and sorts by `posted`; other fields never read the role flag. |
 | `WidgetAccessPolicyTest` | -- | ETP-5088 dashboard widget gate: financial-account reachable by Finance only (and not by Sales/Purchasing), product reachable by every template role, null role denied without consulting the access helper, the helper always asked with `GET`, per-slug sales/purchase split, unknown/blank/null slug denied (fail closed). |
-| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. **ETP-5402 additions (7 cases, 43 tests total):** the Informes `reports`/`reportCount`/`reportsMatrix` contract — a role with no grants at all gets an empty `reports` array; an OBUIAPP grant on the Receivables Aging process surfaces `aging-receivable` with the correct tier; a classic `AD_Process_Access` grant on `tax-report` always resolves `"full"`, never `"read-only"`, even when the grant row itself has `IsEditableField = false` (binary semantics); a `FULL` grant on the "Informes financieros" pseudo-window surfaces all 5 financial-family rows without any separate per-row grant; `inventory-stock-report` resolves via its own pseudo-window grant independent of `goWindows` membership, and never leaks into the real `windows`/`windowCount`; `reportsMatrix` groups rows by their hardcoded category (`Finance`/`Inventory`/`Treasury`) and marks every ungranted row `"none"`. |
-| `RoleAccessMatrixTest` | -- | Unit test (9 tests, `MockedStatic<OBDal>` + a mocked category `NativeQuery`) of `RoleAccessMatrix`'s pure row-building edge cases; end-to-end tier resolution stays in `SFRolesOverviewTest`/`SFSystemRoleTemplatesTest`. Window `matrix`: every row exists with no roles (empty `access`), a proxy id that is also a real GO window yields one row, a window with no menu category falls back to `Other`, a missing tier resolves to `none`, `withoutUiExcluded` drops UI-hidden windows keeping order, `windowsJson` never emits a proxy id, an empty category lookup short-circuits without touching the session. `reportsMatrix`: every `ReportAccessCatalog` row appears once with `access` keyed by role; `testReportsMatrixGroupsAgingSchedulesUnderTreasury` pins `TREASURY_CATEGORY` to the literal `"Treasury"` (the SPA's `menu.json` group name and i18n key) and asserts three categories sorted `Finance` (6 rows) / `Inventory` (1) / `Treasury` (2: `aging-payable`, `aging-receivable`, sorted by name, `none` for an ungranted role). |
+| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. **ETP-5402 additions (7 cases, 43 tests total):** the Informes `reports`/`reportCount`/`reportsMatrix` contract — a role with no grants at all gets an empty `reports` array; an OBUIAPP grant on the Receivables Aging process surfaces `aging-receivable` with the correct tier; a classic `AD_Process_Access` grant on `tax-report` always resolves `"full"`, never `"read-only"`, even when the grant row itself has `IsEditableField = false` (binary semantics); a `FULL` grant on the "Informes financieros" pseudo-window surfaces all 5 financial-family rows without any separate per-row grant; `inventory-stock-report` resolves via its own pseudo-window grant independent of `goWindows` membership, and never leaks into the real `windows`/`windowCount`; `reportsMatrix` groups rows by their hardcoded category (`Finance`/`Inventory`/`Taxes`/`Treasury`) and marks every ungranted row `"none"`. |
+| `RoleAccessMatrixTest` | -- | Unit test (10 tests, `MockedStatic<OBDal>` + a mocked category `NativeQuery`) of `RoleAccessMatrix`'s pure row-building edge cases; end-to-end tier resolution stays in `SFRolesOverviewTest`/`SFSystemRoleTemplatesTest`. Window `matrix`: every row exists with no roles (empty `access`), a proxy id that is also a real GO window yields one row, a window with no menu category falls back to `Other`, a missing tier resolves to `none`, `withoutUiExcluded` drops UI-hidden windows keeping order, `windowsJson` never emits a proxy id, an empty category lookup short-circuits without touching the session. `reportsMatrix`: every `ReportAccessCatalog` row appears once with `access` keyed by role; `testReportsMatrixGroupsAgingSchedulesUnderTreasury` pins `TREASURY_CATEGORY` to the literal `"Treasury"` (the SPA's `menu.json` group name and i18n key) and asserts four categories sorted `Finance` (5 rows) / `Inventory` (1) / `Taxes` (1) / `Treasury` (2: `aging-payable`, `aging-receivable`, sorted by name, `none` for an ungranted role); `testReportsMatrixGroupsTaxReportUnderTaxes` (ETP-6380) pins `TAXES_CATEGORY` to `"Taxes"` and asserts `tax-report` sits alone under it keeping the role's tier. |
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). **ETP-5402 additions (4 cases, 28 tests total):** the new `standaloneClassicProcessGrantsByRoleId()` mechanism (the Tax Report grant, §8c) — exposes exactly the 4 non-Admin template roles as keys; Finance holds exactly the one classic-process grant (`tax-report`), nothing else; Sales/Purchasing/Inventory hold zero standalone classic-process grants; the map is a fresh mutable copy per call, same "no shared mutable state between callers" contract as `standaloneProcessGrantsByRoleId()`/`byRoleId()`. |
 | `UserRoleCompositionServiceTest` | -- | **ETP-4830 items #6.1/#6.2 additions:** `createFreshPersonalRole` grants `AD_Role_OrgAccess` to both the user's real organization and the wildcard `'*'` (two distinct `RoleOrganization` saves, both scoped to the role's own client); skips the duplicate org-access row when the user's own organization already IS the wildcard; sets `Default_Ad_Client_ID`/`Default_Ad_Org_ID`/`Default_M_Warehouse_ID`/`EM_SMFSWS_Default_WS_Role_ID` on the user (warehouse resolved via a `Warehouse` criteria scoped to the user's org); and skips the org/warehouse defaults entirely (no crash) when the user has no organization at all. Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. **ETP-4830 owner-protection additions:** the 4-arg `assignTemplateRoles(String, List, Role, String)` overload rejects a non-owner `callerUserId` reassigning a `EM_ETGO_Is_Owner`-flagged user's roles (`OwnerSupport.isOwner` mocked statically); the owner reassigning their OWN roles reaches the (unrelated) template-validation error instead, proving `enforceOwnerProtection` did not block it; a target NOT flagged as owner is unaffected regardless of caller mismatch (baseline); and a `null` `callerUserId` (the 2-/3-arg overloads) skips the check entirely without ever calling `OwnerSupport` — deliberately left unmocked in that one test so a regression would surface as a loud NPE, not a silent behavior change. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |

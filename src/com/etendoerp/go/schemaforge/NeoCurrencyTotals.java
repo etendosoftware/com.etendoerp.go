@@ -29,8 +29,6 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.currency.Currency;
 
 /**
@@ -236,8 +234,9 @@ public final class NeoCurrencyTotals {
   }
 
   /**
-   * Today's general {@code C_Conversion_Rate} multiply rate, looked up through core
-   * {@link FinancialUtils#getConversionRate} so the organization tree is walked up to {@code 0}.
+   * Today's general {@code C_Conversion_Rate} multiply rate, looked up through
+   * {@link ConversionRateLookup#orgTreeMultiplyRateOrNull} (ETP-6365: the last range of the day;
+   * the organization tree is walked up to {@code 0}, as core's {@code FinancialUtils} did).
    * Never throws for a missing rate: a zero rate is reported as {@code null} too.
    *
    * @param fromCurrencyId the source {@code C_Currency_ID}
@@ -245,15 +244,10 @@ public final class NeoCurrencyTotals {
    * @return the multiply rate, or {@code null} when no usable rate is configured
    */
   public static BigDecimal todayMultiplyRate(String fromCurrencyId, String toCurrencyId) {
-    OBDal dal = OBDal.getInstance();
     OBContext context = OBContext.getOBContext();
-    ConversionRate rate = FinancialUtils.getConversionRate(new Date(),
-        dal.getProxy(Currency.class, fromCurrencyId), dal.getProxy(Currency.class, toCurrencyId),
-        context.getCurrentOrganization(), context.getCurrentClient());
-    if (rate == null) {
-      return null;
-    }
-    BigDecimal multiplyRate = rate.getMultipleRateBy();
+    BigDecimal multiplyRate = ConversionRateLookup.orgTreeMultiplyRateOrNull(new Date(),
+        fromCurrencyId, toCurrencyId, context.getCurrentOrganization().getId(),
+        context.getCurrentClient().getId());
     return multiplyRate != null && multiplyRate.signum() != 0 ? multiplyRate : null;
   }
 }

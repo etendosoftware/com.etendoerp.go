@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -105,6 +106,19 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * deferral from {@code handle()} to {@code afterHandle()} of the same request.
    */
   protected abstract DocumentCurrencyRate currencyRate();
+
+  /**
+   * {@inheritDoc} ETP-6365: the header currency is picked from {@code currencyOptions} (every order-family header that
+   * extends this class routes it),
+   * so it is accepted when that action would list it ({@link
+   * CurrencyOptionsHandler#offersHeaderCurrency}) rather than through the generic
+   * {@code Currency} selector and its EUR/USD/GBP allowlist.
+   */
+  @Override
+  public Optional<Boolean> offersReference(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    return CurrencyOptionsHandler.offersHeaderCurrency(propertyName, candidateId, mergedRecord);
+  }
 
   /**
    * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}

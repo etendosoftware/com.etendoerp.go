@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -51,10 +52,10 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.common.currency.ConversionRate;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
@@ -64,19 +65,19 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * (now removed) {@code derivedRate} arithmetic: the conversion rate is no longer derived from the
  * two settlement amounts, it comes from the invoice's own exchange rate — its document-level
  * {@link ConversionRateDoc} first, then the general {@code C_Conversion_Rate} spot rate via
- * {@link FinancialUtils} — with same-currency short-circuiting to {@link BigDecimal#ONE}.
+ * {@link ConversionRateLookup} (ETP-6365: the last range of the invoice day) — with same-currency short-circuiting to {@link BigDecimal#ONE}.
  *
  * <p>{@code documentRate}/{@code generalRate} are private and touch {@link OBDal}/
- * {@link FinancialUtils} via static calls, so both are mocked with Mockito's inline
+ * {@link ConversionRateLookup} via static calls, so both are mocked with Mockito's inline
  * {@code mockStatic}, mirroring the house style already used in
  * {@code ReconciliationFlowSupportForeignInvoiceTest} (a {@link MockedStatic} opened in
  * {@code @BeforeEach} and closed in {@code @AfterEach}).
  *
  * <p>Edge cases covered ({@code >= 3} required):
  * <ul>
- *   <li>same currency (invoice == account) → {@link BigDecimal#ONE}, no DB/FinancialUtils call</li>
- *   <li>different currencies, a document rate exists (non-zero) → that rate wins, FinancialUtils
- *       never consulted</li>
+ *   <li>same currency (invoice == account) → {@link BigDecimal#ONE}, no DB/rate lookup call</li>
+ *   <li>different currencies, a document rate exists (non-zero) → that rate wins, the general
+ *       rate never consulted</li>
  *   <li>different currencies, no document rate (empty criteria result) → falls back to the general
  *       rate</li>
  *   <li>a document rate row of exactly zero is treated as absent → falls through to the general
@@ -103,23 +104,25 @@ class PaymentCurrencyConverterTest {
 
   private static final String ACCOUNT_CURRENCY_ID = "eur-id";
   private static final String INVOICE_CURRENCY_ID = "usd-id";
+  private static final String INVOICE_ORG_ID = "org-id";
+  private static final String INVOICE_CLIENT_ID = "client-id";
 
   private OBDal obDal;
   private MockedStatic<OBDal> obDalMock;
-  private MockedStatic<FinancialUtils> financialUtilsMock;
+  private MockedStatic<ConversionRateLookup> rateLookupMock;
 
   @BeforeEach
   void setUp() {
     obDal = mock(OBDal.class);
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-    financialUtilsMock = mockStatic(FinancialUtils.class);
+    rateLookupMock = mockStatic(ConversionRateLookup.class);
   }
 
   @AfterEach
   void tearDown() {
     obDalMock.close();
-    financialUtilsMock.close();
+    rateLookupMock.close();
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -148,6 +151,12 @@ class PaymentCurrencyConverterTest {
     when(inv.getCurrency()).thenReturn(currency);
     when(inv.getInvoiceDate()).thenReturn(new Date());
     when(inv.getDocumentNo()).thenReturn("INV-1");
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(INVOICE_ORG_ID);
+    when(inv.getOrganization()).thenReturn(org);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(INVOICE_CLIENT_ID);
+    when(inv.getClient()).thenReturn(client);
     return inv;
   }
 
@@ -165,19 +174,28 @@ class PaymentCurrencyConverterTest {
     return doc;
   }
 
-  /** Stubs {@code FinancialUtils.getConversionRate(...)} to return a rate with the given multiplier. */
+  /**
+   * Stubs the day-rule lookup ({@link ConversionRateLookup#orgTreeMultiplyRateOrNull}) for exactly
+   * the invoice's pair, organization and client, so a call with any other arguments answers
+   * {@code null} and the test fails on the missing rate.
+   */
   private void stubGeneralRate(String multiplyRate) {
-    ConversionRate cr = mock(ConversionRate.class);
-    when(cr.getMultipleRateBy()).thenReturn(multiplyRate == null ? null : new BigDecimal(multiplyRate));
-    financialUtilsMock
-        .when(() -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()))
-        .thenReturn(cr);
+    BigDecimal rate = multiplyRate == null ? null : new BigDecimal(multiplyRate);
+    rateLookupMock
+        .when(() -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(Date.class),
+            eq(INVOICE_CURRENCY_ID), eq(ACCOUNT_CURRENCY_ID), eq(INVOICE_ORG_ID),
+            eq(INVOICE_CLIENT_ID)))
+        .thenReturn(rate);
   }
 
   private void stubGeneralRateReturnsNull() {
-    financialUtilsMock
-        .when(() -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()))
-        .thenReturn(null);
+    stubGeneralRate(null);
+  }
+
+  private void verifyGeneralRateNeverConsulted() {
+    rateLookupMock.verify(
+        () -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(), any(), any(), any(), any()),
+        never());
   }
 
   // ── resolveInvoiceRate ───────────────────────────────────────────────────
@@ -191,8 +209,7 @@ class PaymentCurrencyConverterTest {
     BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(inv, acc);
 
     assertEquals(0, BigDecimal.ONE.compareTo(rate));
-    financialUtilsMock.verify(
-        () -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()), never());
+    verifyGeneralRateNeverConsulted();
   }
 
   @Test
@@ -206,8 +223,7 @@ class PaymentCurrencyConverterTest {
     BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(inv, acc);
 
     assertEquals(0, new BigDecimal("0.92").compareTo(rate));
-    financialUtilsMock.verify(
-        () -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()), never());
+    verifyGeneralRateNeverConsulted();
   }
 
   @Test
@@ -277,9 +293,8 @@ class PaymentCurrencyConverterTest {
 
     assertThrows(OBException.class,
         () -> PaymentCurrencyConverter.resolveInvoiceRate(inv, acc));
-    // getConversionRate must never be called when the invoice date is null.
-    financialUtilsMock.verify(
-        () -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()), never());
+    // The general-rate lookup must never be called when the invoice date is null.
+    verifyGeneralRateNeverConsulted();
   }
 
   // ── invoiceAmountFor ─────────────────────────────────────────────────────
@@ -388,8 +403,7 @@ class PaymentCurrencyConverterTest {
 
     assertEquals("0.87", body.getString("conversionRate"));
     // No rate source was consulted at all.
-    financialUtilsMock.verify(
-        () -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()), never());
+    verifyGeneralRateNeverConsulted();
   }
 
   @Test
