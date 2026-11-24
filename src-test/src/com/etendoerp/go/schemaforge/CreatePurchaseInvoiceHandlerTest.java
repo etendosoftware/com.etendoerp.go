@@ -2111,18 +2111,24 @@ public class CreatePurchaseInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5840, table-driven: an invoice generated from a purchase order in a foreign currency
-   * WITHOUT a rate is refused before completing — 422 {@code exchange_rate_missing_on_complete} with
-   * its identity, the generation rolled back, the completion never run. With a rate it completes as
-   * before; the goods-receipt route is not checked. The organization currency is {@code eur}.
+   * ETP-5840, table-driven: an invoice generated from a purchase order or (ETP-6365) goods
+   * receipts — one or several — in a foreign currency WITHOUT a rate is refused before completing —
+   * 422 {@code exchange_rate_missing_on_complete} with its identity, the generation rolled back, the
+   * completion never run. With a rate it completes as before. Every receipt route first stores the
+   * invoice's own rate ({@code propagateOrderRateToInvoice}). The organization currency is
+   * {@code eur}.
    */
   @Test
   public void handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack() throws Exception {
     Object[][] cases = {
-        // name, spec, rate, expected status
-        { "purchase order, no rate", "purchase-order", null, 422 },
-        { "purchase order, with rate", "purchase-order", new BigDecimal("1.1"), 201 },
-        { "goods receipt is not checked", "goods-receipt", null, 201 },
+        // name, spec, rate, expected status, receiptIds (receipt routes only)
+        { "purchase order, no rate", "purchase-order", null, 422, null },
+        { "purchase order, with rate", "purchase-order", new BigDecimal("1.1"), 201, null },
+        { "one receipt, no rate", "goods-receipt", null, 422, null },
+        { "one receipt, with rate", "goods-receipt", new BigDecimal("1.1"), 201, null },
+        { "several receipts, no rate", "goods-receipt", null, 422, List.of("src-1", "src-2") },
+        { "several receipts, with rate", "goods-receipt", new BigDecimal("1.1"), 201,
+            List.of("src-1", "src-2") },
     };
     for (Object[] c : cases) {
       String name = (String) c[0];
@@ -2153,10 +2159,15 @@ public class CreatePurchaseInvoiceHandlerTest {
         when(dal.get(eq(Invoice.class), eq("ap-inv-fx"))).thenReturn(completed);
 
         CreatePurchaseInvoiceHandler handler;
+        RoutingHandler routing = null;
+        JSONObject body = null;
         if ("goods-receipt".equals(c[1])) {
-          RoutingHandler routing = new RoutingHandler();
+          routing = new RoutingHandler();
           routing.invoiceToReturn = created;
           handler = routing;
+          if (c[4] != null) {
+            body = new JSONObject().put("receiptIds", new JSONArray((List<?>) c[4]));
+          }
         } else {
           CompletingHandler completing = new CompletingHandler();
           completing.createdInvoice = created;
@@ -2167,9 +2178,14 @@ public class CreatePurchaseInvoiceHandlerTest {
           NeoResponse response = handler.handle(NeoContext.builder()
               .endpointType(NeoEndpointType.ACTION).httpMethod("POST")
               .fieldName("createPurchaseInvoice").specName((String) c[1]).recordId("src-1")
-              .build());
+              .requestBody(body).build());
 
           assertEquals(name, c[3], response.getHttpStatus());
+          if (routing != null) {
+            assertSame(name + ": the receipt route must store the invoice's own rate", created,
+                routing.rateOf);
+            assertEquals(name, c[4] == null, routing.receivedMultiReceiptIds.isEmpty());
+          }
           if ((Integer) c[3] == 422) {
             JSONObject error = response.getBody().getJSONObject("error");
             assertEquals(name, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
@@ -2765,6 +2781,19 @@ public class CreatePurchaseInvoiceHandlerTest {
     @Override
     protected void ensureDocumentNo(Invoice invoice) {
       // no-op: the real implementation resolves an AD sequence
+    }
+
+    /** The invoice whose own rate was stored (ETP-6365), or {@code null}. */
+    Invoice rateOf;
+
+    @Override
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void propagateOrderRateToInvoice(Order order, Invoice invoice) {
+          rateOf = invoice;
+        }
+      };
     }
   }
 

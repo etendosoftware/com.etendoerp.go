@@ -229,38 +229,20 @@ class NeoExchangeRateService {
   /**
    * Returns the {@code multiplyrate} for the given currency pair on {@code date},
    * or {@code null} when no active rate row is found.
+   *
+   * <p>ETP-6365: the day rule of {@link ConversionRateLookup} — the client's and the System ('0')
+   * rates of organization {@code 0} or {@code orgId}, the client row first, then the latest range
+   * that touches the day. On rows at 00:00 (all data before ETP-6365) it answers what the former
+   * {@code validfrom <= date AND validto >= date} query answered.</p>
    */
   private static Double queryRate(
       Connection conn,
       String fromId, String toId,
       String clientId, String orgId,
       java.time.LocalDate date) throws java.sql.SQLException {
-
-    // Include the client's own rates and the shared system ('0') rates. A client-specific rate
-    // wins over the system rate (ad_client_id DESC picks the tenant row before '0' under LIMIT 1).
-    String sql =
-        "SELECT multiplyrate FROM c_conversion_rate"
-      + " WHERE c_currency_id = ?"
-      + " AND c_currency_id_to = ?"
-      + " AND isactive = 'Y'"
-      + " AND ad_client_id IN ('0', ?)"
-      + " AND (ad_org_id = '0' OR ad_org_id = ?)"
-      + " AND validfrom <= ?"
-      + " AND (validto IS NULL OR validto >= ?)"
-      + " ORDER BY ad_client_id DESC, validfrom DESC"
-      + " LIMIT 1";
-
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, fromId);
-      ps.setString(2, toId);
-      ps.setString(3, clientId);
-      ps.setString(4, orgId);
-      ps.setDate(5, java.sql.Date.valueOf(date));
-      ps.setDate(6, java.sql.Date.valueOf(date));
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getDouble("multiplyrate") : null;
-      }
-    }
+    BigDecimal rate = ConversionRateLookup.multiplyRate(conn, fromId, toId, clientId,
+        orgId != null ? java.util.List.of("0", orgId) : java.util.List.of("0"), date);
+    return rate != null ? rate.doubleValue() : null;
   }
 
   /**

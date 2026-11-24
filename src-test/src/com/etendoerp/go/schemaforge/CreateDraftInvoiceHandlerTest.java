@@ -2262,12 +2262,12 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5840, table-driven: an invoice generated from a sales order or quotation in a foreign
-   * currency WITHOUT a rate (none configured for its accounting date) is refused BEFORE completing —
-   * 422 {@code exchange_rate_missing_on_complete} with its message keys and params, the generation
-   * rolled back ({@code rollbackAndClose}), the completion never run and the quotation not marked
-   * invoiced. With a rate, or in the organization currency, it completes as before; the shipment
-   * route is not checked.
+   * ETP-5840, table-driven: an invoice generated from a sales order, a quotation or (ETP-6365)
+   * goods shipments in a foreign currency WITHOUT a rate (none configured for its accounting date)
+   * is refused BEFORE completing — 422 {@code exchange_rate_missing_on_complete} with its message
+   * keys and params, the generation rolled back ({@code rollbackAndClose}), the completion never
+   * run and the quotation not marked invoiced. With a rate, or in the organization currency, it
+   * completes as before.
    */
   @Test
   public void handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack() throws Exception {
@@ -2277,7 +2277,8 @@ public class CreateDraftInvoiceHandlerTest {
         { "quotation, foreign, no rate", SPEC_SALES_QUOTATION, "usd", null, 422 },
         { "order, foreign, with rate", SPEC_SALES_ORDER, "usd", new BigDecimal("1.1"), 201 },
         { "order, org currency", SPEC_SALES_ORDER, "eur", null, 201 },
-        { "shipment route is not checked", SPEC_GOODS_SHIPMENT, "usd", null, 201 },
+        { "shipment, foreign, no rate", SPEC_GOODS_SHIPMENT, "usd", null, 422 },
+        { "shipment, org currency", SPEC_GOODS_SHIPMENT, "eur", null, 201 },
     };
     for (Object[] c : cases) {
       String name = (String) c[0];
@@ -5909,6 +5910,19 @@ public class CreateDraftInvoiceHandlerTest {
     protected void createInvoiceLinesFromShipmentLines(JSONArray selectedLines, Invoice invoice) {
       capturedLines = selectedLines;
     }
+
+    /** The invoice whose own rate was stored (ETP-6365), or {@code null}. */
+    Invoice rateOf;
+
+    @Override
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void propagateOrderRateToInvoice(Order order, Invoice invoice) {
+          rateOf = invoice;
+        }
+      };
+    }
   }
 
   /** Two shipments (no linked order): SH-ship-1 has sl-1 (10 units), SH-ship-2 has sl-2 (3 units). */
@@ -5947,6 +5961,29 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals("the already-invoiced sl-1 must not come back", 1, handler.capturedLines.length());
       assertEquals("sl-2", handler.capturedLines.getJSONObject(0).getString("id"));
       assertEquals("2", handler.capturedLines.getJSONObject(0).getString("orderedQuantity"));
+    }
+  }
+
+  /**
+   * ETP-6365: an invoice from several shipments (no single order to take the rate from) stores its
+   * own rate for its accounting date, as the order route does — so a foreign-currency one has a
+   * rate to complete with, and the completion check (see
+   * {@code handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack}) refuses it otherwise.
+   */
+  @Test
+  public void testMultiShipmentStoresTheInvoicesOwnRate() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      pendingFor(supportMock, "ship-1", Collections.singletonMap("sl-1", new BigDecimal("10")));
+      pendingFor(supportMock, "ship-2", Collections.singletonMap("sl-2", new BigDecimal("3")));
+      MultiShipmentHandler handler = multiShipmentHandler();
+
+      Invoice result = handler.createFromShipments(twoShipmentIds(), Collections.emptyMap(), null);
+
+      assertSame(handler.header, result);
+      assertSame("the generated invoice must get its own rate", handler.header, handler.rateOf);
     }
   }
 

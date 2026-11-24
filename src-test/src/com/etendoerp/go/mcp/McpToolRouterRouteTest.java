@@ -30,6 +30,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1573,18 +1574,29 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("etendo_delete of another tenant's id answers 404 before the hook or the delete (ETP-5880)")
+    @DisplayName("etendo_delete answers the delete guard's refusal (404, or the 409 a customization"
+        + " words) before the hook or the delete (ETP-5880, ETP-6365)")
     void deleteOfForeignRecordIsRefusedBeforeAnyWork() throws Exception {
-      guardMock.when(() -> NeoActionRecordGuard.writeRefusalFor(any(SFEntity.class), anyString()))
-          .thenReturn(NeoResponse.error(404, "Record not found"));
-      JSONObject args = buildCrudArgs();
-      args.put("id", RECORD_ID);
+      for (int status : new int[] { 404, 409 }) {
+        guardMock.when(() -> NeoActionRecordGuard.deleteRefusalFor(any(SFEntity.class),
+            any(NeoContext.class))).thenReturn(NeoResponse.error(status, "refused"));
+        JSONObject args = buildCrudArgs();
+        args.put("id", RECORD_ID);
 
-      JSONObject result = router.route("etendo_delete", args, WRITE_SCOPES);
+        JSONObject result = router.route("etendo_delete", args, WRITE_SCOPES);
 
-      assertTrue(result.getBoolean("isError"), result.toString());
-      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
-      guardMock.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, RECORD_ID));
+        assertTrue(result.getBoolean("isError"), result.toString());
+        assertEquals(status,
+            new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      }
+      // Same guard as REST (NeoWritePreflight): asked with the DELETE context of the record.
+      ArgumentCaptor<NeoContext> asked = ArgumentCaptor.forClass(NeoContext.class);
+      guardMock.verify(() -> NeoActionRecordGuard.deleteRefusalFor(eq(entity), asked.capture()),
+          times(2));
+      for (NeoContext ctx : asked.getAllValues()) {
+        assertEquals("DELETE", ctx.getHttpMethod());
+        assertEquals(RECORD_ID, ctx.getRecordId());
+      }
       dispatcherMock.verifyNoInteractions();
       batchMock.verify(com.etendoerp.go.schemaforge.BatchService::currentJsonService, never());
     }
@@ -1812,6 +1824,94 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("column"));
+    }
+
+    /**
+     * ETP-6365: runs etendo_selectors on {@code currency} with {@code query}; the entity's
+     * customization serves the field when {@code customized}, else the generic selector answers.
+     * Returns the selector requests dispatched to the customization chain.
+     */
+    private List<com.etendoerp.go.schemaforge.NeoExtensionRequest> runSelectors(String query,
+        boolean customized, java.util.Map<String, String> contextParams,
+        org.openbravo.model.ad.datamodel.Column column, SFEntity entity) throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, mockTab());
+      NeoHandler customization = mock(NeoHandler.class);
+      NeoResponse served = NeoResponse.ok(new JSONObject().put("items",
+          new JSONArray().put(new JSONObject().put("id", "chf").put("label", "CHF"))));
+      List<com.etendoerp.go.schemaforge.NeoExtensionRequest> dispatched = new ArrayList<>();
+      JSONObject args = buildCrudArgs().put("column", "currency");
+      if (query != null) {
+        args.put("query", query);
+      }
+      try (MockedStatic<org.openbravo.base.model.ModelProvider> model =
+              mockStatic(org.openbravo.base.model.ModelProvider.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class);
+          MockedStatic<McpSelectorContextHelper> contextHelper = mockStatic(
+              McpSelectorContextHelper.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+          MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+              mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class)) {
+        model.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(mock(org.openbravo.base.model.ModelProvider.class));
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(any(), eq("currency"), any()))
+            .thenReturn(column);
+        contextHelper.when(() -> McpSelectorContextHelper.buildSelectorContextParams(any(), any()))
+            .thenReturn(contextParams);
+        dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+            .thenAnswer(inv -> {
+              com.etendoerp.go.schemaforge.NeoExtensionRequest request = inv.getArgument(0);
+              dispatched.add(request);
+              boolean pre = request.phase()
+                  != com.etendoerp.go.schemaforge.NeoExtensionRequest.Phase.POST;
+              return new com.etendoerp.go.schemaforge.NeoExtensionResult(
+                  customized ? customization : null, customized && pre ? served : null, null);
+            });
+        selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(any(SFEntity.class),
+            any(), anyString(), any(), anyInt(), anyInt(), any())).thenReturn(served);
+
+        JSONObject result = router.route("etendo_selectors", args, READ_SCOPES);
+
+        assertFalse(result.has("isError") && result.getBoolean("isError"), result.toString());
+      }
+      return dispatched;
+    }
+
+    @Test
+    @DisplayName("etendo_selectors hands the query to the entity's own selector as q (ETP-6365)")
+    void selectorsPassTheQueryToTheCustomizationAsQ() throws Exception {
+      // query, expected q in the customization's context (null = absent)
+      String[][] cases = { { "chf", "chf" }, { null, null }, { "  ", null } };
+      for (String[] c : cases) {
+        java.util.Map<String, String> contextParams = new java.util.HashMap<>();
+        contextParams.put("IsSOTrx", "Y");
+        List<com.etendoerp.go.schemaforge.NeoExtensionRequest> dispatched = runSelectors(c[0],
+            true, contextParams, mock(org.openbravo.model.ad.datamodel.Column.class),
+            mockEntity());
+
+        java.util.Map<String, String> sent = dispatched.get(0).context().getQueryParams();
+        assertEquals(c[1], sent.get("q"), "query=" + c[0]);
+        assertEquals("Y", sent.get("IsSOTrx"), "the selector context travels with it");
+        assertFalse(contextParams.containsKey("q"), "the caller's context is not modified");
+        selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(any(SFEntity.class),
+            any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_selectors keeps the generic selector call unchanged: query as search, no q")
+    void selectorsKeepTheGenericCallUnchanged() throws Exception {
+      java.util.Map<String, String> contextParams = new java.util.HashMap<>();
+      contextParams.put("IsSOTrx", "Y");
+      org.openbravo.model.ad.datamodel.Column column =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      SFEntity entity = mockEntity();
+
+      runSelectors("chf", false, contextParams, column, entity);
+
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(entity, column,
+          "currency", "chf", 50, 0, contextParams));
+      assertFalse(contextParams.containsKey("q"));
     }
   }
 

@@ -270,10 +270,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
-        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
-    if (paymentMethodSelector != null) {
-      return paymentMethodSelector;
+    // ETP-6365: the header's own selectors — payment method, and the currency currencyOptions lists
+    NeoResponse ownSelector = HeaderCurrencySelector.handleIfHeaderSelector(context);
+    if (ownSelector != null) {
+      return ownSelector;
     }
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
     PartnerLocationDefaults.fillOrderLocations(context);

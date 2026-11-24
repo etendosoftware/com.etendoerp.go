@@ -408,7 +408,11 @@ class McpParentSelectorContextTest {
     List<String> resolve = McpSourceScanner.callArguments(body, "McpFkResolver.resolveFkNames",
         0);
     assertTrue(resolve.size() >= 4, method + " must still run the FK-by-name pre-pass");
-    List<String> selector = McpSourceScanner.callArguments(resolve.get(3),
+    // ETP-6365: the written entity travels as a McpFkResolver.Target carrying the SF entity, so a
+    // name only the field's own picker lists resolves too; the selector context comes next.
+    assertTrue(resolve.get(1).contains("Target(") && resolve.get(1).contains("sfEntity"),
+        method + " must pass the SF entity to the resolver: " + resolve.get(1));
+    List<String> selector = McpSourceScanner.callArguments(resolve.get(2),
         "McpParentSelectorContext.selectorArgs", 0);
     assertEquals(5, selector.size(),
         method + " must build the resolver's selector context from McpParentSelectorContext");

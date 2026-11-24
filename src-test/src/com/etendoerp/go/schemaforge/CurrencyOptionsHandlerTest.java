@@ -86,21 +86,21 @@ public class CurrencyOptionsHandlerTest {
 
   @SuppressWarnings("unchecked")
   private static Map<String, double[]> invokeQueryDirectRates(CurrencyOptionsHandler handler,
-      Connection conn, String orgCurrencyId, String clientId, String orgId, java.sql.Date sqlDate)
-      throws Exception {
+      Connection conn, String orgCurrencyId, String clientId, String orgId,
+      java.time.LocalDate day) throws Exception {
     Method m = CurrencyOptionsHandler.class.getDeclaredMethod("queryDirectRates", Connection.class,
-        String.class, String.class, String.class, java.sql.Date.class);
+        String.class, String.class, String.class, java.time.LocalDate.class);
     m.setAccessible(true);
-    return (Map<String, double[]>) m.invoke(handler, conn, orgCurrencyId, clientId, orgId, sqlDate);
+    return (Map<String, double[]>) m.invoke(handler, conn, orgCurrencyId, clientId, orgId, day);
   }
 
   private static void invokeMergeInverseRates(CurrencyOptionsHandler handler, Connection conn,
       String orgCurrencyId, Map<String, double[]> rateMap, String clientId, String orgId,
-      java.sql.Date sqlDate) throws Exception {
+      java.time.LocalDate day) throws Exception {
     Method m = CurrencyOptionsHandler.class.getDeclaredMethod("mergeInverseRates", Connection.class,
-        String.class, Map.class, String.class, String.class, java.sql.Date.class);
+        String.class, Map.class, String.class, String.class, java.time.LocalDate.class);
     m.setAccessible(true);
-    m.invoke(handler, conn, orgCurrencyId, rateMap, clientId, orgId, sqlDate);
+    m.invoke(handler, conn, orgCurrencyId, rateMap, clientId, orgId, day);
   }
 
   private static String invokeResolveIsoCode(CurrencyOptionsHandler handler, Connection conn,
@@ -128,7 +128,21 @@ public class CurrencyOptionsHandlerTest {
     return ps;
   }
 
-  private static final java.sql.Date DATE = java.sql.Date.valueOf("2026-01-15");
+  private static final java.time.LocalDate DATE = java.time.LocalDate.of(2026, 1, 15);
+
+  /**
+   * ETP-6365: the rate query applies {@link ConversionRateLookup}'s day rule — ranges that start
+   * before the next day and end on or after the day, bound as {@code DATE+1 00:00} then
+   * {@code DATE 00:00} — and reads System rows first, then each client's by ascending start, so the
+   * last row per currency (the map keeps it) is the client's last range of the day.
+   */
+  private static void assertDayRuleQuery(String sql, PreparedStatement ps) throws SQLException {
+    assertTrue(sql, sql.contains(ConversionRateLookup.DAY_PREDICATE));
+    assertTrue(sql, sql.contains("ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST
+        + " DESC, cr.validfrom ASC"));
+    verify(ps).setTimestamp(4, java.sql.Timestamp.valueOf("2026-01-16 00:00:00"));
+    verify(ps).setTimestamp(5, java.sql.Timestamp.valueOf("2026-01-15 00:00:00"));
+  }
 
   // ---------------------------------------------------------------
   // queryDirectRates
@@ -155,12 +169,13 @@ public class CurrencyOptionsHandlerTest {
   @Test
   public void testQueryDirectRatesSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
     // ETP-4474 regression: queryDirectRates must include both the tenant's rates and the shared
-    // system ('0') rates, ordered ad_client_id ASC so the '0' row is written first and the tenant
-    // row overwrites it in the map (last-write-wins → tenant wins).
+    // system ('0') rates, System rows read first so the tenant row overwrites it in the map
+    // (last-write-wins → tenant wins). ETP-6365: ranges touching the day (ConversionRateLookup's
+    // day rule), each client's by ascending start so the last range of the day wins.
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     Connection conn = mock(Connection.class);
     ResultSet rs = mock(ResultSet.class);
-    wirePreparedStatement(conn, rs);
+    PreparedStatement ps = wirePreparedStatement(conn, rs);
     when(rs.next()).thenReturn(false);
 
     invokeQueryDirectRates(handler, conn, "USD-ID", "client-1", "org-1", DATE);
@@ -169,17 +184,17 @@ public class CurrencyOptionsHandlerTest {
     verify(conn).prepareStatement(sqlCaptor.capture());
     String sql = sqlCaptor.getValue();
     assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
-    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC"));
+    assertDayRuleQuery(sql, ps);
   }
 
   @Test
   public void testMergeInverseRatesSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
-    // ETP-4474 regression: the inverse-rate query mirrors the same system+tenant scoping and ASC
-    // ordering as the direct query.
+    // ETP-4474 regression: the inverse-rate query mirrors the same system+tenant scoping, day rule
+    // and ordering as the direct query.
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     Connection conn = mock(Connection.class);
     ResultSet rs = mock(ResultSet.class);
-    wirePreparedStatement(conn, rs);
+    PreparedStatement ps = wirePreparedStatement(conn, rs);
     when(rs.next()).thenReturn(false); // no inverse rows → no ISO resolution query issued
 
     invokeMergeInverseRates(handler, conn, "USD-ID", new LinkedHashMap<>(), "client-1", "org-1", DATE);
@@ -188,19 +203,20 @@ public class CurrencyOptionsHandlerTest {
     verify(conn).prepareStatement(sqlCaptor.capture());
     String sql = sqlCaptor.getValue();
     assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
-    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC"));
+    assertDayRuleQuery(sql, ps);
   }
 
   @Test
   public void testQueryDirectRatesTenantRowOverridesSystemRowForSameCurrency() throws Exception {
-    // ETP-4474 regression: with ad_client_id ASC the '0' (system) row for a currency is written
-    // first and the tenant row for the SAME currency overwrites it — the map keeps the tenant value.
+    // ETP-4474 regression: the '0' (system) row for a currency is read first and the tenant row for
+    // the SAME currency overwrites it — the map keeps the tenant value.
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     Connection conn = mock(Connection.class);
     ResultSet rs = mock(ResultSet.class);
     wirePreparedStatement(conn, rs);
 
-    // Two rows, same currency id: system rate 1.10 first, tenant rate 1.16 second (ASC ordering)
+    // Two rows, same currency id: system rate 1.10 first, tenant rate 1.16 second (System last-sorted
+    // DESC, i.e. read first)
     when(rs.next()).thenReturn(true, true, false);
     when(rs.getString("cid")).thenReturn("EUR-ID", "EUR-ID");
     when(rs.getDouble("multiplyrate")).thenReturn(1.10, 1.16);
@@ -474,6 +490,23 @@ public class CurrencyOptionsHandlerTest {
       }
     }
 
+    java.util.Optional<Boolean> offersHeaderCurrency(String property, String candidate,
+        Map<String, String> mergedRecord) {
+      try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+           MockedStatic<OBCurrencyUtils> currencies = Mockito.mockStatic(OBCurrencyUtils.class)) {
+        obCtx.when(OBContext::getOBContext).thenReturn(obContext);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        currencies.when(() -> OBCurrencyUtils.getOrgCurrency(anyString())).thenReturn("EUR-ID");
+        java.util.Optional<Boolean> answer =
+            CurrencyOptionsHandler.offersHeaderCurrency(property, candidate, mergedRecord);
+        ArgumentCaptor<String> org = ArgumentCaptor.forClass(String.class);
+        currencies.verify(() -> OBCurrencyUtils.getOrgCurrency(org.capture()), atMostOnce());
+        resolvedOrg = org.getAllValues().isEmpty() ? null : org.getValue();
+        return answer;
+      }
+    }
+
     /** The organization whose currency handle() asked for, or {@code null} when it did not. */
     String resolvedOrg;
   }
@@ -541,7 +574,12 @@ public class CurrencyOptionsHandlerTest {
       assertTrue(name, data.getJSONObject(0).getBoolean("isOrgCurrency"));
       assertEquals(name, c[5], run.resolvedOrg);
       verify(run.ps, atLeastOnce()).setString(anyInt(), eq((String) c[6]));
-      verify(run.ps, atLeastOnce()).setDate(anyInt(), eq(java.sql.Date.valueOf((String) c[7])));
+      // ETP-6365: the day is bound as the day rule's two bounds (next day, then the day itself).
+      java.time.LocalDate day = java.time.LocalDate.parse((String) c[7]);
+      verify(run.ps, atLeastOnce()).setTimestamp(anyInt(),
+          eq(java.sql.Timestamp.valueOf(day.plusDays(1).atStartOfDay())));
+      verify(run.ps, atLeastOnce()).setTimestamp(anyInt(),
+          eq(java.sql.Timestamp.valueOf(day.atStartOfDay())));
     }
   }
 
@@ -560,6 +598,51 @@ public class CurrencyOptionsHandlerTest {
     // new record (the record is looked up before any organization is considered).
     HandleRun untyped = new HandleRun();
     assertEquals(404, untyped.handle(currencyOptions("inv-1", null, null, null)).getHttpStatus());
+  }
+
+  // ---------------------------------------------------------------
+  // offersHeaderCurrency (ETP-6365)
+  // ---------------------------------------------------------------
+
+  /**
+   * ETP-6365: the write validation of a header {@code currency} accepts exactly what
+   * {@code currencyOptions} lists — the organization currency and every currency with a range
+   * against it, whatever its ISO code (a CHF range inserted in Classic) — and refuses a currency
+   * with no range at all, even an allowlisted one. Any other property defers to the generic
+   * selector. Scoped by the record's client and organization.
+   */
+  @Test
+  public void testOffersHeaderCurrencyMatchesTheListedCurrencies() throws Exception {
+    Map<String, String> mergedRecord = Map.of("organization", "doc-org", "client", "doc-client");
+    Object[][] cases = {
+        // name, property, candidate, ranged currency the query lists (or null), expected
+        { "ranged non-allowlisted currency is offered", "currency", "CHF-ID", "CHF-ID",
+            java.util.Optional.of(Boolean.TRUE) },
+        { "currency with no range is refused", "currency", "GBP-ID", null,
+            java.util.Optional.of(Boolean.FALSE) },
+        { "organization currency is offered", "currency", "EUR-ID", null,
+            java.util.Optional.of(Boolean.TRUE) },
+        { "other property defers to the generic selector", "priceList", "PL-1", null,
+            java.util.Optional.empty() },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      HandleRun run = new HandleRun();
+      ResultSet listed = mock(ResultSet.class);
+      when(listed.next()).thenReturn(c[3] != null, false);
+      when(listed.getString(1)).thenReturn((String) c[3]);
+      when(listed.getString(2)).thenReturn("ISO");
+      when(run.ps.executeQuery()).thenReturn(listed);
+
+      assertEquals(name, c[4],
+          run.offersHeaderCurrency((String) c[1], (String) c[2], mergedRecord));
+    }
+
+    HandleRun scoped = new HandleRun();
+    scoped.offersHeaderCurrency("currency", "CHF-ID", mergedRecord);
+    assertEquals("doc-org", scoped.resolvedOrg);
+    verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-client"));
+    verify(scoped.ps, atLeastOnce()).setString(anyInt(), eq("doc-org"));
   }
 
   // ---------------------------------------------------------------

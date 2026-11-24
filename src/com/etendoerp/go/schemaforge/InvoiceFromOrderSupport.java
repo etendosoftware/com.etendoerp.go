@@ -319,9 +319,11 @@ public class InvoiceFromOrderSupport {
    * <p>No rate configured for that date → the rate stays {@code null} and the tab empty; the invoice
    * is created anyway and its next save is refused until a rate is entered. Org-currency invoices
    * are left alone. The name is kept for its callers ({@link CreateDraftInvoiceHandler},
-   * {@link CreatePurchaseInvoiceHandler}); {@code order} is only used for logging now.
+   * {@link CreatePurchaseInvoiceHandler}); {@code order} is only used for logging now, so the
+   * shipment and receipt routes, which may have several orders or none, pass {@code null}
+   * (ETP-6365).
    *
-   * @param order   the source order (logging only)
+   * @param order   the source order (logging only); may be {@code null}
    * @param invoice the newly created draft invoice, managed by the current session
    */
   public void propagateOrderRateToInvoice(Order order, Invoice invoice) {

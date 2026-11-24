@@ -245,6 +245,66 @@ public interface NeoHandler {
   }
 
   /**
+   * A more precise refusal for a {@code DELETE} the CRUD target guard has already refused because
+   * the current tenant can READ the row but not write it — typically a System ({@code 0}) row
+   * shared by every client (ETP-6365).
+   *
+   * <p><b>Why.</b> The guard ({@code NeoActionRecordGuard.deleteRefusalFor}) answers such a row
+   * the same 404 an unknown id gets, before any customization runs. For a row the tenant can see
+   * in the app that answer is wrong, and only the customization knows the real reason (a
+   * downloaded conversion rate is locked, for one). Shared code never names the entity.</p>
+   *
+   * <p><b>Contract.</b> Asked only for a {@code DELETE} on a row that exists, that the tenant can
+   * read and that the guard refused; never for another tenant's row or an unknown id. It can only
+   * replace one refusal with another: the engine uses the answer when it is an error (status
+   * {@code >= 400}) and keeps the 404 otherwise — a {@code null} or a success answer can never
+   * make the row deletable. Pure: no write.</p>
+   *
+   * <p>Readers: {@code NeoWritePreflight} (REST single and batch), MCP {@code etendo_delete}.</p>
+   *
+   * @param context the delete request context; its record id names the row
+   * @return the refusal to answer instead of the 404, or {@code null} (the default) to keep it
+   */
+  default NeoResponse refusalForReadOnlyTarget(NeoContext context) {
+    return null;
+  }
+
+  /**
+   * Answers whether the app offers {@code candidateId} for the reference {@code propertyName} of
+   * the record being written, when the picker the app shows for that field is this
+   * customization's own and not the field's generic selector (ETP-6365).
+   *
+   * <p><b>Why the customization answers.</b> The write validation of references (ETP-6176,
+   * {@code NeoReferenceSelectorValidation}) accepts a value only when the app would offer it, and
+   * by default asks the field's generic selector. Some fields are not picked through that
+   * selector: a document header's currency is chosen from the header's own
+   * {@code currencyOptions} action, which lists the currencies with a conversion range against the
+   * organization currency, while the generic {@code Currency} selector keeps the EUR/USD/GBP
+   * allowlist other pickers need. Only the customization knows its field has its own picker, so it
+   * is the one that says what that picker offers; shared code never names the entity or the
+   * field.</p>
+   *
+   * <p><b>Contract.</b> {@code Optional.empty()} — the default — leaves the decision to the
+   * generic selector. {@code Optional.of(true)} accepts the value, {@code Optional.of(false)}
+   * refuses it as not offered; either replaces the generic selector's answer for this field. Pure
+   * (no side effect); a {@link RuntimeException} refuses the write as not verifiable (fail
+   * closed). Ownership and activeness are checked before and are not affected.</p>
+   *
+   * <p>Readers: {@code NeoReferenceSelectorValidation}, shared by REST single
+   * ({@code NeoWritePreflight}), batch ({@code BatchService}) and MCP writes.</p>
+   *
+   * @param propertyName the DAL property name of the reference being validated
+   * @param candidateId  the id the write sets
+   * @param mergedRecord the merged record (parent, stored and incoming values), keyed by DAL
+   *                     property name and by column name
+   * @return the customization's answer, or empty to defer to the generic selector
+   */
+  default Optional<Boolean> offersReference(String propertyName, String candidateId,
+      Map<String, String> mergedRecord) {
+    return Optional.empty();
+  }
+
+  /**
    * Declares DAL property names that the create-time callout cascade must not populate or
    * overwrite for this entity. The default is empty so handlers opt in only when a legacy
    * callout differs from the entity's NEO contract.

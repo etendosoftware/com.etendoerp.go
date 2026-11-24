@@ -37,7 +37,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
@@ -95,7 +94,7 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  * converted once with today's general {@code C_Conversion_Rate} ({@link #lookupRate}); the
  * converted total is rounded to the org currency's standard precision. Both the target currency
  * and the rate lookup are anchored on the login organization, while the accounts span its whole
- * accessible tree: core {@code FinancialUtils.getConversionRate} walks from the login org UP to
+ * accessible tree: the lookup ({@link ConversionRateLookup}) walks from the login org UP to
  * {@code 0}, so a rate defined only on a sibling or child organization is not found and that
  * currency is reported as missing (fail-safe — it is excluded, never summed unconverted). Only
  * the DIRECT direction (account currency to org currency) is looked up, consistent with core: if
@@ -625,12 +624,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   /**
    * Today's general {@code C_Conversion_Rate} multiply rate from {@code fromCurrencyId} to
-   * {@code toCurrencyId}, looked up through core {@link FinancialUtils#getConversionRate} so the
-   * organization tree is walked up to {@code 0} (ETP-5580). Package-private seam so tests can
+   * {@code toCurrencyId}, looked up through {@link NeoCurrencyTotals#todayMultiplyRate} — the last
+   * range of the day (ETP-6365), the organization tree walked up to {@code 0} as core's
+   * {@code FinancialUtils.getConversionRate} does (ETP-5580). Package-private seam so tests can
    * stub the rate without the DAL.
    *
-   * <p>Never throws for a missing rate: {@code FinancialUtils} already swallows lookup errors and
-   * returns {@code null}, and a zero rate is reported as {@code null} too.
+   * <p>Never throws for a missing rate: lookup errors are logged and answered {@code null}, and a
+   * zero rate is reported as {@code null} too.
    *
    * @param fromCurrencyId the source {@code C_Currency_ID}
    * @param toCurrencyId the target {@code C_Currency_ID}

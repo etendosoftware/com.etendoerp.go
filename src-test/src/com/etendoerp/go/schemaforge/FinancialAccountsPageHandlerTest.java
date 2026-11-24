@@ -66,10 +66,8 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
-import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 
@@ -658,45 +656,33 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
-   * Verifies that {@code lookupRate()} delegates to core
-   * {@code FinancialUtils.getConversionRate} with the current org/client and
-   * returns the multiply rate, or {@code null} for a missing or zero rate.
+   * Verifies that {@code lookupRate()} asks {@link ConversionRateLookup} (ETP-6365: the last range
+   * of today, organization tree walked as core did) for today's rate with the current org/client
+   * ids, and returns the multiply rate, or {@code null} for a missing or zero rate.
    */
   @Test
-  public void testLookupRateDelegatesToFinancialUtils() {
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-        MockedStatic<FinancialUtils> finUtils = mockStatic(FinancialUtils.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      org.openbravo.model.common.currency.Currency usd =
-          mock(org.openbravo.model.common.currency.Currency.class);
-      org.openbravo.model.common.currency.Currency eur =
-          mock(org.openbravo.model.common.currency.Currency.class);
-      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, USD_ID)).thenReturn(usd);
-      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(eur);
+  public void testLookupRateDelegatesToTheDayRuleLookup() {
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<ConversionRateLookup> lookup = mockStatic(ConversionRateLookup.class)) {
       OBContext ctx = mock(OBContext.class);
       Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("ORG-1");
       Client client = mock(Client.class);
+      when(client.getId()).thenReturn("CLIENT-1");
       when(ctx.getCurrentOrganization()).thenReturn(org);
       when(ctx.getCurrentClient()).thenReturn(client);
       obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
 
-      ConversionRate rate = mock(ConversionRate.class);
-      when(rate.getMultipleRateBy()).thenReturn(new BigDecimal("0.92"));
-      finUtils.when(() -> FinancialUtils.getConversionRate(any(), eq(usd), eq(eur), eq(org),
-          eq(client))).thenReturn(rate);
-      assertEquals(new BigDecimal("0.92"), handler.lookupRate(USD_ID, EUR_ID));
-
-      when(rate.getMultipleRateBy()).thenReturn(BigDecimal.ZERO);
-      assertNull("a zero rate is unusable", handler.lookupRate(USD_ID, EUR_ID));
-
-      when(rate.getMultipleRateBy()).thenReturn(null);
-      assertNull("a rate with no multiply value is unusable", handler.lookupRate(USD_ID, EUR_ID));
-
-      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()))
-          .thenReturn(null);
-      assertNull("no rate configured", handler.lookupRate(USD_ID, EUR_ID));
+      Object[][] cases = {
+          { new BigDecimal("0.92"), new BigDecimal("0.92"), "a configured rate is returned" },
+          { BigDecimal.ZERO, null, "a zero rate is unusable" },
+          { null, null, "no rate configured" },
+      };
+      for (Object[] c : cases) {
+        lookup.when(() -> ConversionRateLookup.orgTreeMultiplyRateOrNull(any(java.util.Date.class),
+            eq(USD_ID), eq(EUR_ID), eq("ORG-1"), eq("CLIENT-1"))).thenReturn((BigDecimal) c[0]);
+        assertEquals((String) c[2], c[1], handler.lookupRate(USD_ID, EUR_ID));
+      }
     }
   }
 
