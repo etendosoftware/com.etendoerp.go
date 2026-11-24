@@ -126,9 +126,13 @@ public class NeoAccessStartup extends SessionAwareStartup {
         if (role.getClient() == null || SYSTEM_CLIENT.equals(role.getClient().getId())) {
           continue;
         }
-        int windowGranted = grantWindowAccess(role, orgZero, windowSpecs);
-        int processGranted = grantProcessAccess(role, orgZero, processSpecs);
-        int reportGranted = grantReportAccess(role, orgZero);
+        // One shared set per access type: the DAL session flushes on COMMIT only, so a later
+        // query would not see the rows saved earlier in this same pass.
+        Set<String> existingWindows = existingWindowIds(role);
+        Set<String> existingProcesses = existingProcessIds(role);
+        int windowGranted = grantWindowAccess(role, orgZero, windowSpecs, existingWindows);
+        int processGranted = grantProcessAccess(role, orgZero, processSpecs, existingProcesses);
+        int reportGranted = grantReportAccess(role, orgZero, existingWindows, existingProcesses);
         if (windowGranted + processGranted + reportGranted > 0) {
           log.info("NeoAccessStartup: granted {} window + {} process + {} Informes-report access"
               + " row(s) to role \"{}\" (client {}).", windowGranted, processGranted,
@@ -169,8 +173,8 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return specs.list();
   }
 
-  private int grantWindowAccess(Role role, Organization orgZero, List<SFSpec> windowSpecs) {
-    Set<String> existing = existingWindowIds(role);
+  private int grantWindowAccess(Role role, Organization orgZero, List<SFSpec> windowSpecs,
+      Set<String> existing) {
     int granted = 0;
     for (SFSpec spec : windowSpecs) {
       if (spec.getADWindow() != null && !existing.contains(spec.getADWindow().getId())) {
@@ -189,8 +193,8 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return granted;
   }
 
-  private int grantProcessAccess(Role role, Organization orgZero, List<SFSpec> processSpecs) {
-    Set<String> existing = existingProcessIds(role);
+  private int grantProcessAccess(Role role, Organization orgZero, List<SFSpec> processSpecs,
+      Set<String> existing) {
     int granted = 0;
     for (SFSpec spec : processSpecs) {
       if (spec.getProcess() != null && !existing.contains(spec.getProcess().getId())) {
@@ -222,9 +226,8 @@ public class NeoAccessStartup extends SessionAwareStartup {
    * that one row, same permissive-skip convention {@link #grantWindowAccess}/{@link
    * #grantProcessAccess} already use for a spec with no linked window/process.
    */
-  private int grantReportAccess(Role role, Organization orgZero) {
-    Set<String> existingWindowIds = existingWindowIds(role);
-    Set<String> existingProcessIds = existingProcessIds(role);
+  private int grantReportAccess(Role role, Organization orgZero, Set<String> existingWindowIds,
+      Set<String> existingProcessIds) {
     Set<String> existingObuiappProcessIds = existingObuiappProcessIds(role);
     int granted = 0;
     for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
@@ -330,13 +333,17 @@ public class NeoAccessStartup extends SessionAwareStartup {
     return 1;
   }
 
-  /** Every {@code obuiapp_process_id} {@code role} already has active access to. */
+  /**
+   * Every {@code obuiapp_process_id} {@code role} already has an access row for, active or not:
+   * the unique index ignores {@code isactive}, so an inactive row still blocks an insert.
+   */
   private Set<String> existingObuiappProcessIds(Role role) {
     OBCriteria<org.openbravo.client.application.ProcessAccess> existing = OBDal.getInstance()
         .createCriteria(org.openbravo.client.application.ProcessAccess.class);
     existing.add(Restrictions.eq(
         org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (org.openbravo.client.application.ProcessAccess opa : existing.list()) {
       if (opa.getObuiappProcess() != null) {
@@ -350,6 +357,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     OBCriteria<WindowAccess> existing = OBDal.getInstance().createCriteria(WindowAccess.class);
     existing.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (WindowAccess wa : existing.list()) {
       if (wa.getWindow() != null) {
@@ -363,6 +371,7 @@ public class NeoAccessStartup extends SessionAwareStartup {
     OBCriteria<ProcessAccess> existing = OBDal.getInstance().createCriteria(ProcessAccess.class);
     existing.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE, role));
     existing.setFilterOnReadableClients(false);
+    existing.setFilterOnActive(false);
     Set<String> ids = new HashSet<>();
     for (ProcessAccess pa : existing.list()) {
       if (pa.getProcess() != null) {
