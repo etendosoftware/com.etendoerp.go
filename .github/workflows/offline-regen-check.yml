@@ -1,4 +1,4 @@
-# AUTO-GENERATED from etendosoftware/etendo_schema_forge
+# AUTO-GENERATED from etendo-ai/etendo_schema_forge
 #   .github/workflows/offline-regen-check.yml
 # Do not edit by hand — re-run `make sync-regen-check-workflow` in schema_forge
 # and commit the result. Manual edits here will be overwritten on next sync.
@@ -73,7 +73,7 @@ jobs:
       - name: Checkout schema_forge (matching branch or fallback)
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_schema_forge
+          repository: etendo-ai/etendo_schema_forge
           path: etendo_core/etendo_schema_forge
           fetch-depth: 0
 

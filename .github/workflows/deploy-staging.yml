@@ -27,7 +27,7 @@ jobs:
       - name: Checkout etendo_core
         uses: actions/checkout@v4
         with:
-          repository: etendosoftware/etendo_core
+          repository: etendo-ai/etendo_core
           token: ${{ secrets.ETENDOBOT_TOKEN }}
           ref: develop
           path: etendo_core
