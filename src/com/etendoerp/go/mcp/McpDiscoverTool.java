@@ -91,8 +91,20 @@ final class McpDiscoverTool {
       String primaryEntity = "W".equals(specType)
           ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
           : null;
-      specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
-          spec, specType, entities, primaryEntity, includedEntities));
+      JSONObject specJson = McpToolRouterSupport.buildDiscoverSpec(
+          spec, specType, entities, primaryEntity, includedEntities);
+      if ("W".equals(specType)) {
+        // ETP-6421: where the user finds this window, so the agent does not guess a menu path.
+        String windowName = McpToolTitles.windowNameForSpec(spec);
+        if (windowName != null) {
+          specJson.put("windowName", windowName);
+        }
+        String windowUrl = McpRecordUrls.buildWindowUrl(spec.getName());
+        if (windowUrl != null) {
+          specJson.put(McpRecordUrls.KEY_WINDOW_URL, windowUrl);
+        }
+      }
+      specsArray.put(specJson);
     }
 
     JSONObject result = new JSONObject();

@@ -115,6 +115,25 @@ class McpRecordUrlsTest {
   }
 
   @Nested
+  @DisplayName("buildWindowUrl")
+  class BuildWindowUrl {
+
+    @Test
+    @DisplayName("joins the configured app base and the spec name")
+    void buildsTheWindowUrl() throws Exception {
+      assertEquals(APP_BASE + "/" + SPEC,
+          withProperties(configured(), () -> McpRecordUrls.buildWindowUrl(SPEC)));
+    }
+
+    @Test
+    @DisplayName("returns null without an app base or with a blank spec")
+    void noBaseOrBlankMeansNoUrl() throws Exception {
+      assertNull(withProperties(unconfigured(), () -> McpRecordUrls.buildWindowUrl(SPEC)));
+      assertNull(withProperties(configured(), () -> McpRecordUrls.buildWindowUrl(" ")));
+    }
+  }
+
+  @Nested
   @DisplayName("buildRecordUrl")
   class BuildRecordUrl {
 

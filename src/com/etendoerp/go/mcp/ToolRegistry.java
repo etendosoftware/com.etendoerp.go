@@ -440,6 +440,10 @@ public class ToolRegistry {
             + "Call it when you do not know which spec holds what the task needs, or which "
             + "entities a spec has; when you already know the spec, go straight to it. "
             + "Pass spec to get only that spec's entities, parent links and actions. "
+            + "Each window spec carries windowName, the window's name in the user's language, "
+            + "and windowUrl when the app has a public URL. To tell the user where something is "
+            + "managed, use them; do not infer window names or menu paths from Openbravo/Etendo "
+            + "Classic, because the Etendo Go menu is different. "
             + "The answer is always complete, never paged: count is the number of specs returned. "
             + "If your client shows it cut, call it again with spec for the one you need.",
         schema);

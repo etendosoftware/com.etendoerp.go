@@ -71,6 +71,9 @@ public final class McpRecordUrls {
   /** Key holding what a record link is for, next to {@link #KEY_URL} (ETP-5850). */
   static final String KEY_URL_NOTE = "urlNote";
 
+  /** Key holding a window spec's link in the {@code etendo_discover} result. */
+  static final String KEY_WINDOW_URL = "windowUrl";
+
   private static final String KEY_DATA = "data";
   private static final String KEY_ID = "id";
 
@@ -132,6 +135,24 @@ public final class McpRecordUrls {
       return null;
     }
     return PublicUrlResolver.appendPath(baseUrl, specName + "/" + recordId);
+  }
+
+  /**
+   * Builds the Etendo Go link to a spec's window.
+   *
+   * @param specName the spec name, which doubles as the app's window segment
+   * @return the absolute window URL, or {@code null} when the app base URL is not configured or
+   *     the name is blank
+   */
+  static String buildWindowUrl(String specName) {
+    if (StringUtils.isBlank(specName)) {
+      return null;
+    }
+    String baseUrl = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+    if (StringUtils.isBlank(baseUrl)) {
+      return null;
+    }
+    return PublicUrlResolver.appendPath(baseUrl, specName);
   }
 
   /**
