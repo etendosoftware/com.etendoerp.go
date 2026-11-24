@@ -76,6 +76,16 @@ public class ToolRegistryTest {
     assertEquals(java.util.Set.of("spec"), declared.get());
   }
 
+  /** ETP-6421: the etendo_discover description tells the agent where the window data is. */
+  @Test
+  public void testDiscoverDescriptionMentionsWindowNameAndUrl() {
+    String description = new ToolRegistry().buildDiscoverTool().getDescription();
+
+    assertTrue(description.contains("windowName"));
+    assertTrue(description.contains("windowUrl"));
+    assertTrue(description.contains("do not infer window names or menu paths"));
+  }
+
   /**
    * ETP-5714: {@code etendo_schema} declares an optional {@code id} (the record whose actions are
    * judged), next to its other arguments, so the unknown-argument guard accepts it.

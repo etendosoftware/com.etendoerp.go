@@ -136,6 +136,9 @@ final class McpToolTitles {
     return window != null ? translatedName(window, Window.PROPERTY_NAME, language) : null;
   }
 
+  /** Key holding a window spec's translated window name in the {@code etendo_discover} result. */
+  static final String KEY_WINDOW_NAME = "windowName";
+
   /**
    * Name of the spec's AD_Window in the current user's language, as the user sees it in the app.
    * Unlike {@link #forSpec} it never prefers the process. Total by design: a lookup failure or a

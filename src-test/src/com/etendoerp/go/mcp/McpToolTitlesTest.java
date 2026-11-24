@@ -148,6 +148,8 @@ class McpToolTitlesTest {
     when(window.getId()).thenReturn("W1");
     when(window.get(Window.PROPERTY_NAME, null, "W1")).thenReturn(" Price List ");
     Process process = mock(Process.class);
+    when(process.getId()).thenReturn("P1");
+    when(process.get(Process.PROPERTY_NAME, null, "P1")).thenReturn("Process name");
     SFSpec spec = mock(SFSpec.class);
     when(spec.getADWindow()).thenReturn(window);
     when(spec.getProcess()).thenReturn(process);

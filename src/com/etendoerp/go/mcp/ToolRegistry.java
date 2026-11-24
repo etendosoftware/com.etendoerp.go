@@ -421,7 +421,7 @@ public class ToolRegistry {
 
   // ── Discovery tool ─────────────────────────────────────────────────────
 
-  private McpToolDefinition buildDiscoverTool() {
+  McpToolDefinition buildDiscoverTool() {
     Map<String, Object> props = new LinkedHashMap<>();
     // IMP-53: optional. The full catalog runs to tens of KB; an agent that already knows the spec
     // it needs pays only for that one.
@@ -439,13 +439,16 @@ public class ToolRegistry {
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Call it when you do not know which spec holds what the task needs, or which "
             + "entities a spec has; when you already know the spec, go straight to it. "
-            + "Pass spec to get only that spec's entities, parent links and actions. "
+            + "Pass spec to get only that spec's entities, parent links and actions; the full "
+            + "catalog is large, and if your client shows it cut, call it again with spec for the "
+            + "one you need. "
             + "Each window spec carries windowName, the window's name in the user's language, "
-            + "and windowUrl when the app has a public URL. To tell the user where something is "
-            + "managed, use them; do not infer window names or menu paths from Openbravo/Etendo "
-            + "Classic, because the Etendo Go menu is different. "
-            + "The answer is always complete, never paged: count is the number of specs returned. "
-            + "If your client shows it cut, call it again with spec for the one you need.",
+            + "and windowUrl, its link in the app when the app has a public URL (it may not "
+            + "match a menu entry). The menu path is not provided: to tell the user where "
+            + "something is managed, use windowName and windowUrl, and do not infer window names "
+            + "or menu paths from Openbravo/Etendo Classic, because the Etendo Go menu is "
+            + "different. "
+            + "The answer is always complete, never paged: count is the number of specs returned.",
         schema);
   }
 

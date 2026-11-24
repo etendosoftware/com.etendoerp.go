@@ -1007,6 +1007,68 @@ class McpToolRouterRouteTest {
       return new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
     }
 
+    private JSONObject discoverRow(SFSpec spec, String type, String windowName, String windowUrl)
+        throws Exception {
+      stubCatalog(spec);
+      JSONObject args = new JSONObject();
+      args.put("spec", spec.getName());
+      try (MockedStatic<McpToolTitles> titles = mockStatic(McpToolTitles.class);
+          MockedStatic<McpRecordUrls> urls = mockStatic(McpRecordUrls.class)) {
+        titles.when(() -> McpToolTitles.windowNameForSpec(spec)).thenReturn(windowName);
+        urls.when(() -> McpRecordUrls.buildWindowUrl(spec.getName())).thenReturn(windowUrl);
+        JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+        assertFalse(result.has("isError"), result.toString());
+        return bodyOf(result).getJSONArray("specs").getJSONObject(0);
+      }
+    }
+
+    private SFSpec stubTypedSpec(String type) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("typed-id");
+      when(spec.getName()).thenReturn("price-list");
+      when(spec.getSpecType()).thenReturn(type);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq(type)))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities("typed-id"))
+          .thenReturn(Collections.emptyList());
+      JSONObject row = new JSONObject();
+      row.put("name", "price-list");
+      supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(
+          eq(spec), eq(type), any(), any(), any())).thenReturn(row);
+      return spec;
+    }
+
+    @Test
+    @DisplayName("etendo_discover adds windowName and windowUrl to a W spec (ETP-6421)")
+    void discoverAddsWindowNameAndUrlToWindowSpec() throws Exception {
+      JSONObject row = discoverRow(stubTypedSpec("W"), "W", "Tarifa", "http://app/price-list");
+
+      assertEquals("Tarifa", row.getString("windowName"));
+      assertEquals("http://app/price-list", row.getString("windowUrl"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover leaves P and R specs without window keys (ETP-6421)")
+    void discoverLeavesProcessAndReportSpecsUntouched() throws Exception {
+      for (String type : new String[] {"P", "R"}) {
+        JSONObject row = discoverRow(stubTypedSpec(type), type, "Tarifa", "http://app/price-list");
+
+        assertFalse(row.has("windowName"), type);
+        assertFalse(row.has("windowUrl"), type);
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_discover omits windowUrl without app base URL and windowName without "
+        + "window, keeping the spec listed (ETP-6421)")
+    void discoverOmitsUnresolvedWindowKeys() throws Exception {
+      JSONObject row = discoverRow(stubTypedSpec("W"), "W", null, null);
+
+      assertEquals("price-list", row.getString("name"));
+      assertFalse(row.has("windowName"));
+      assertFalse(row.has("windowUrl"));
+    }
+
     @Test
     @DisplayName("etendo_discover(spec) returns only the requested spec, same envelope")
     void discoverWithSpecReturnsOnlyThatSpec() throws Exception {
