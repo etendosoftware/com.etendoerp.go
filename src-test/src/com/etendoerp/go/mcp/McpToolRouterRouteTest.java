@@ -1007,7 +1007,7 @@ class McpToolRouterRouteTest {
       return new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
     }
 
-    private JSONObject discoverRow(SFSpec spec, String type, String windowName, String windowUrl)
+    private JSONObject discoverRow(SFSpec spec, String windowName, String windowUrl)
         throws Exception {
       stubCatalog(spec);
       JSONObject args = new JSONObject();
@@ -1041,7 +1041,7 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("etendo_discover adds windowName and windowUrl to a W spec (ETP-6421)")
     void discoverAddsWindowNameAndUrlToWindowSpec() throws Exception {
-      JSONObject row = discoverRow(stubTypedSpec("W"), "W", "Tarifa", "http://app/price-list");
+      JSONObject row = discoverRow(stubTypedSpec("W"), "Tarifa", "http://app/price-list");
 
       assertEquals("Tarifa", row.getString("windowName"));
       assertEquals("http://app/price-list", row.getString("windowUrl"));
@@ -1051,7 +1051,7 @@ class McpToolRouterRouteTest {
     @DisplayName("etendo_discover leaves P and R specs without window keys (ETP-6421)")
     void discoverLeavesProcessAndReportSpecsUntouched() throws Exception {
       for (String type : new String[] {"P", "R"}) {
-        JSONObject row = discoverRow(stubTypedSpec(type), type, "Tarifa", "http://app/price-list");
+        JSONObject row = discoverRow(stubTypedSpec(type), "Tarifa", "http://app/price-list");
 
         assertFalse(row.has("windowName"), type);
         assertFalse(row.has("windowUrl"), type);
@@ -1062,7 +1062,7 @@ class McpToolRouterRouteTest {
     @DisplayName("etendo_discover omits windowUrl without app base URL and windowName without "
         + "window, keeping the spec listed (ETP-6421)")
     void discoverOmitsUnresolvedWindowKeys() throws Exception {
-      JSONObject row = discoverRow(stubTypedSpec("W"), "W", null, null);
+      JSONObject row = discoverRow(stubTypedSpec("W"), null, null);
 
       assertEquals("price-list", row.getString("name"));
       assertFalse(row.has("windowName"));

@@ -55,6 +55,8 @@ final class McpToolTitles {
   private static final Logger log = LogManager.getLogger(McpToolTitles.class);
   private static final String BUNDLE = "com.etendoerp.go.mcp.messages.mcp_titles";
   private static final String KEY_PREFIX = "title.";
+  /** Key holding a window spec's translated window name in the {@code etendo_discover} result. */
+  static final String KEY_WINDOW_NAME = "windowName";
   /** The MCP surface is English (descriptions, errors), so an unknown language falls back to it. */
   private static final Locale FALLBACK_LOCALE = Locale.ENGLISH;
   /**
@@ -135,9 +137,6 @@ final class McpToolTitles {
     Window window = spec.getADWindow();
     return window != null ? translatedName(window, Window.PROPERTY_NAME, language) : null;
   }
-
-  /** Key holding a window spec's translated window name in the {@code etendo_discover} result. */
-  static final String KEY_WINDOW_NAME = "windowName";
 
   /**
    * Name of the spec's AD_Window in the current user's language, as the user sees it in the app.
