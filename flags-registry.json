@@ -1,0 +1,778 @@
+{
+  "version": 3,
+  "$comment": "com.etendoerp.go's slice of the flag registry (format v3, ETP-4697). Only CONTRIBUTIONS live here: id + flagKey (or `contribution: true` once the flag is retired) plus this repo's own paths and testSpecs. The header — description, owner, flag object with ttl/defaultValue, bundled deferredItems — stays in etendo_schema_forge's flags-registry.json; ttl/ttlNote/defaultValue are forbidden here. flagKey is present exactly when GoFeatureFlags declares a FLAG_* constant for the key (GoFeatureFlagsRegistrySyncTest enforces it). Score the whole thing with `make flag-debt-rollup` in etendo_schema_forge.",
+  "sonarProject": "etendo-go",
+  "conventions": {
+    "frameworkPaths": [
+      "com/etendoerp/go/featureflags/"
+    ]
+  },
+  "features": [
+    {
+      "id": "paid-second-tenant",
+      "contribution": true,
+      "paths": [
+        "src/com/etendoerp/go/payment/"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/TenantPaywallServiceTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/TenantPlanServiceTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/HostedCheckoutServiceTest.java"
+          }
+        ],
+        "e2e": []
+      },
+      "$knownGapComment": "CLOSED in ETP-4966 — TenantPlanServiceTest now covers markProductive (write, blank tenant, missing tenant, failed write) and resolvePlan (marker present, other value, absent, blank id, lookup failure), plus the write/read agreement on AD_Preference.Attribute. It was accepted debt before: 'markProductive: zero coverage… the only covered branch is the one that hides failures', which is verbatim the defect later reported from production. Asserting the AD_Preference persistence against a real database remains integration scope and is still not covered here."
+    },
+    {
+      "id": "acct-process-monitor",
+      "contribution": true,
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/webhooks/SFAcctProcessMonitor.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/webhooks/SFAcctProcessMonitorTest.java",
+            "note": "EXISTS on feature/ETP-5269 in the com.etendoerp.go worktree. The scorer resolves roots.backend to etendo_core/modules/com.etendoerp.go, which is the MAIN checkout and currently sits on a different branch, so it reports this file missing. Left scoring as-is on purpose: marking it expected:true would suppress a real 5 pts on every future run to paper over a local path artifact that disappears once the branches are co-located."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoPseudoSpecDispatcherTest.java",
+            "note": "Shared dispatcher spec; carries the acctprocessmonitor routing case."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "bp-self-service-portal",
+      "flagKey": "bp-portal-link",
+      "paths": [
+        "src/com/etendoerp/go/portal/"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalLinkServiceTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalServletTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalLinkDalTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalDocumentQueryTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalDocumentsEndpointTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalDocumentLinksTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalRateLimiterTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/email/contracts/PortalLinkRenewalEmailContractTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/portal/PortalUsageEventsTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/AnonymousAttachmentStreamerTest.java"
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "demo-data-transfer",
+      "contribution": true,
+      "paths": [
+        "src/com/etendoerp/go/payment/DemoDataTransferFlag.java",
+        "src/com/etendoerp/go/payment/DemoDataTransferService.java",
+        "src/com/etendoerp/go/payment/DemoDataTransferReflection.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/DemoDataTransferServiceTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/DemoDataTransferFlagTest.java",
+            "note": "Present in Go; covers default-off and configured-on flag evaluation."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/rest/EtendoGoJwtServletDemoDataTransferFlagTest.java",
+            "note": "Present in Go; 12 passing tests cover route gating, selection recording and projection, and flag-dependent onboarding paths."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "environment-access-enforcement-kill-switch",
+      "flagKey": "environment-access-enforcement-off",
+      "paths": [
+        "src/com/etendoerp/go/payment/EnvironmentAccessEnforcementFlag.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/EnvironmentAccessEnforcementFlagTest.java",
+            "note": "Unset flag, a non-boolean value and a provider failure all read as NOT switched off; only a value resolving to true (locally true, Y, yes or 1, case-insensitive) switches off; the clientId attribute reaches the evaluation context (asserted on the FeatureFlagContext and end to end through a per-tenant stub provider)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/EnvironmentAccessGuardTest.java",
+            "note": "Decision x switch matrix: ALLOWED and null never consult the switch; a denial with the switch off is refused, with it on is allowed and logged at INFO; error body shape; checkAsSystem hands the caller its context back."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "mcp-dual-era",
+      "flagKey": "mcp-modern-era-disabled",
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/mcp/McpServletTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/mcp/McpRequestEraTest.java"
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "batch-redundant-callout-skip",
+      "flagKey": "batch-callout-skip-disabled",
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoBatchScopeTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BatchServiceTest.java"
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "my-companies",
+      "contribution": true,
+      "paths": [
+        "src/com/etendoerp/go/rest/EnvironmentDetails.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/rest/EnvironmentDetailsTest.java",
+            "expected": true
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/rest/EtendoGoJwtServletTest.java",
+            "expected": true,
+            "note": "Shared spec; covers the ?details=true branch of GET /environments."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/rest/CompanyInvitationServiceTest.java",
+            "expected": true,
+            "note": "Shared spec; covers the invitation-origin fields."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "billing-reconciliation-schedule",
+      "flagKey": "billing-reconciliation-schedule",
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/startup/BillingReconciliationScheduleStartupTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/payment/reconcile/BillingReconciliationProcessTest.java",
+            "note": "The scheduled-run gate: a scheduled run with the flag off does nothing and reports 'billing-reconciliation-schedule flag is off'."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "usage-aggregation-schedule",
+      "flagKey": "usage-aggregation-schedule",
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/usage/UsageAggregationProcessTest.java",
+            "note": "The scheduled-run gate: a scheduled run with the flag off does no work and fails with 'usage-aggregation-schedule flag is off'; the flag is evaluated with the key the process declares."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/startup/UsageAggregationScheduleStartupTest.java",
+            "note": "The startup hook, with the flag stubbed: flag off plants nothing; flag on plants the fixed System request at the configured cadence (two hours by default, floored); an active scheduled request is not planted twice and an unscheduled one is never reinserted; a missing process definition is skipped; scheduleEnabled() follows usage-aggregation-schedule; a scheduler failure while registering does not break the startup."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "contact-category-type",
+      "flagKey": "contact-category-type",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/handlers/ContactTypeRules.java",
+        "src/com/etendoerp/go/schemaforge/handlers/BusinessPartnerCategoryHandler.java",
+        "src/com/etendoerp/go/schemaforge/handlers/ContactTypeFlagGuardHandler.java",
+        "src/com/etendoerp/go/schemaforge/handlers/ContactCustomerTabHandler.java",
+        "src/com/etendoerp/go/schemaforge/handlers/ContactVendorTabHandler.java",
+        "src/com/etendoerp/go/schemaforge/handlers/ContactTypeTelemetry.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/handlers/ContactTypeRulesTest.java"
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "structured-address-for-sepa",
+      "flagKey": "structured-address-for-sepa",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/ContactsLocationAddressHandler.java",
+        "src/com/etendoerp/go/schemaforge/WarehouseLocationHandler.java",
+        "src/com/etendoerp/go/schemaforge/BpLocationHandler.java",
+        "src/com/etendoerp/go/schemaforge/util/StructuredAddressComposer.java",
+        "src/com/etendoerp/go/schemaforge/selector/policy/AddressVirtualSelectorPolicy.java",
+        "src/com/etendoerp/go/mcp/McpSchemaFieldBuilder.java",
+        "src/com/etendoerp/go/schemaforge/webhooks/SFWindowAccessMap.java",
+        "src/com/etendoerp/go/rest/EtendoGoJwtServlet.java",
+        "src/com/etendoerp/go/onboarding/OnboardingOrgInfoService.java",
+        "src/com/etendoerp/go/onboarding/OnboardingWarehouseAddressService.java",
+        "src/com/etendoerp/go/rest/OnboardingProvisioningChain.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ContactsLocationAddressHandlerTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/WarehouseLocationHandlerTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BpLocationHandlerTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/util/StructuredAddressComposerTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/webhooks/SFWindowAccessMapTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/rest/EtendoGoJwtServletCoverageTest.java",
+            "note": "Shared spec; covers validateStructuredAddressBlock/Length gating. Not EtendoGoJwtServletTest.java -- that file is unrelated to this flag."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/mcp/McpSchemaFieldBuilderTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/selector/policy/AddressVirtualSelectorPolicyTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/onboarding/OnboardingOrgInfoServiceTest.java",
+            "note": "Covers the structured-address branch of ensureOrgInfoLocation/createLocation added for this flag (flag on/off, legacy-address fallback)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/common/GoAccountResolverTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/mcp/McpHookExecutorTest.java",
+            "note": "testRunReadHookInvokesAfterHandleOnAnAnnotationOnlyHandler/testRunReadHookWithNoResolvedHandlerKeepsTheOriginalBody cover the runReadHook dispatch-resolution regression fix."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "fiscal-model-390",
+      "flagKey": "fiscal-model-390",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/FiscalModel390Flag.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FiscalModel390FlagTest.java",
+            "note": "Covers: applyToRead on/off (390 dropped + _unavailable added; on = stored as is; a stored _unavailable never echoed), applyToWrite on/off (incoming 390 ignored and stored 390 kept when off, absent when nothing stored; _unavailable stripped on both), arguments never mutated. Email reaches the provider context: contextFor(email, clientId) publishes the targeting key, `Email` and lowercase `email` plus clientId; contextFor(null, clientId) carries clientId only and no targeting key; isEnabled passes GoAccountResolver.currentAccountEmail() through, end to end through GoFeatureFlags into a capturing provider; unset, non-boolean and failing-provider all read as hidden."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/common/GoAccountResolverTest.java",
+            "note": "Shared spec, owned by ETP-5791 (develop): currentAccountEmail -- the resolver ETP-5791 extracted from PortalLinkPolicy and fiscal-model-390 now reuses (ETP-5716 had extracted the same method as findCurrentAccountEmail; dropped in the develop merge). Covers no OBContext (admin mode never entered), account found by a +suffix username, no user, no account and a failure reading the user -> null, admin mode always restored; a DAL failure is covered on findAccountByUsername."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoFiscalModelsCatalogServiceTest.java",
+            "note": "Shared spec. Every case pins the flag (flag(...) helper), so none depends on local Openbravo.properties/env. Extended for ETP-5716: GET with the flag on returns the stored catalog unchanged, GET off with a stored 390:true hides it and adds the marker, GET off with an unreadable store (PropertyException or RuntimeException) answers exactly {_unavailable:[390]}, a failure building the answer fails hidden; PUT off keeps the stored 390, PUT on keeps it when the body omits it, PUT never stores _unavailable, an unreadable store (PropertyException or RuntimeException) refuses the save with IllegalStateException in both flag states and writes nothing, PUT off over a corrupt or blank store saves without 390 or marker; the tenant id reaches the gate. The refusal's HTTP mapping (500, not 400) is pinned in NeoBuiltInEndpointHandlerTest (propagates, no 400) and NeoServletProcessRequestTest (500)."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "grid-column-views",
+      "contribution": true,
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/NeoGridViewsService.java"
+      ]
+    },
+    {
+      "id": "invoice-inbox",
+      "flagKey": "invoice-inbox",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxFlag.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxUploadEndpoint.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxHeaderHandler.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxDiscard.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxIntake.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxMessages.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxProcessor.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxWorkStore.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxValidator.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxStatusPolicy.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxSummary.java",
+        "src/com/etendoerp/go/schemaforge/InvoiceInboxReview.java",
+        "src/com/etendoerp/go/schemaforge/ocr/InboxDocument.java",
+        "src/com/etendoerp/go/schemaforge/ocr/InboxMatcher.java",
+        "src/com/etendoerp/go/schemaforge/ocr/InboxVendorMatcher.java",
+        "src/com/etendoerp/go/schemaforge/ocr/InboxLineMatcher.java",
+        "src/com/etendoerp/go/schemaforge/ocr/TaxIdNormalizer.java",
+        "src/com/etendoerp/go/startup/InvoiceInboxSweeperStartup.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxFlagTest.java",
+            "note": "Covers: isEnabled(email, clientId) publishes the targeting key, Email and lowercase email plus clientId to the provider, end to end through GoFeatureFlags into a capturing provider; a targeted account reads true and a non-targeted one false; blank or null email -> clientId only, no targeting key, default false; isEnabled() passes GoAccountResolver.currentAccountEmail() and the OBContext tenant through; no OBContext or no client -> null client id, no throw; unset, non-boolean and failing provider all read false; local property arm (etendo.go.flags.invoice-inbox / ETGO_FLAG_INVOICE_INBOX) true/false."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxUploadEndpointTest.java",
+            "note": "Covers: flag off -> 403 feature_disabled before getParts() is called and before any window/org check; no window write access -> 403 access_denied; not multipart -> 400 not_multipart; star org and org outside getWritableOrganizations -> 403 org_not_allowed; getParts() throwing IllegalStateException -> 413 request_too_large (message carries 10 and 210 MB); getParts() IOException/ServletException -> 400 not_multipart; only parts named `files` with a submitted file name count; 0 files -> 400 no_files; 21 files -> 400 too_many_files with max 20 and count and NOTHING created; exactly 20 accepted; mixed batch answers 200 with accepted/rejected counts and ordered results; ids (client/org/user) captured once; parts' temp files deleted in every path. Extended (ETP-6048): only the accepted rows are submitted to the worker, once; nothing is submitted when every file is rejected or the request is refused; a worker that fails to queue does not change the answer of a committed upload."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxIntakeTest.java",
+            "note": "Covers: extension not in {pdf,jpg,jpeg,png} (webp, exe, none, ..) -> unsupported_type without touching the DAL; size 0 -> empty_file; path-traversal names sanitized; happy path creates the IncomingDocument (source UPLOAD, targetType PURCHASE_INVOICE, status PROCESSING, adjusted/reviewed false, client/org re-read by id), calls NeoAttachmentStore.store with markAsMain true and the table name, then commitAndClose and returns the row id; store 400/422 -> rollbackAndClose + invalid_content passing the store message; store 404/500 or no message -> store_failed; any exception -> rollbackAndClose + store_failed, never thrown; temp file and its directory removed in every path; one file failing does not affect the next. Extended (ETP-6048): a new row starts with processingAttempts 0."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxMessagesTest.java",
+            "note": "Covers: the AD text is used when present, the English fallback when the row is missing or messageBD returns the key or throws; @name@ placeholders replaced; every key has a default."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoBuiltInEndpointHandlerTest.java",
+            "note": "Shared spec (find with make find-tests): the invoice-inbox/upload POST branch delegates and writes the response; invoice-inbox with another entity or verb does not take the branch."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/roles/TemplateRoleWindowAccessTest.java",
+            "note": "Shared spec, updated: Purchasing 14, Finance 34, total 74, distinct windows 42; Invoice Inbox 81AC659E93504927B459E0CAE80CE923 is FULL for Compras and Financiero and absent for Ventas/Almacén. Parity guardrail: EnsureSystemRoleTemplatesScript's inlined matrix (compiled in memory, read by reflection) equals TemplateRoleWindowAccess for every role, Invoice Inbox included."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoAttachmentPolicyTest.java",
+            "note": "Shared spec: the per-file limit and the 210 MB multipart request limit derive from MAX_SIZE_MB (20 files x 10 MB + 10 MB margin)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxIntakeIntegrationTest.java",
+            "note": "DB-backed (WeldBaseTest, F&B sample data): each accepted file commits a PROCESSING row plus its main C_File attachment; a content mismatch leaves no row and no attachment; a refused file between two good ones does not affect them; nothing is created in C_Invoice. Extended (ETP-6048): the committed PROCESSING row starts with no passes counted."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxProcessorTest.java",
+            "note": "Covers: a readable invoice ends PENDING_REVIEW (extraction stored first, lease released) and the worker never writes ADJUSTED or REVIEWED; runs as the row's user/client/org with admin mode balanced and the context cleared, also when matching throws; a stored extraction skips the attachment; nothing readable or a blank document or no main attachment -> ERROR / UNREADABLE; 5xx retried 3 times (0, 15, 45 s), a 400 not retried; a row discarded, confirmed or claimed by another node is left alone; foreign receiver -> ERROR / FOREIGN_RECEIVER, missing data -> MISSING_FIELDS; unexpected exceptions leave the row PROCESSING for the sweeper; every pass counts against the cap of three; the sweep ends exhausted rows, and a failing store rolls back; same vendor and number already in the inbox is a warning."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxValidatorTest.java",
+            "note": "Covers: a complete document is valid; missing vendor (ambiguous, unmatched, none; a new vendor needs name and tax id), date, amount, lines, line tax (D2 pending address with a printed rate) and product (D8 new product needs description, quantity above zero, price of zero or more); every missing item reported at once in document order; reference of 20 characters fits and 21 is REFERENCE_TOO_LONG; FOREIGN_RECEIVER wins over everything; null document or header-less is MISSING_FIELDS."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxStatusPolicyTest.java",
+            "note": "Covers: how a validation verdict moves a row: valid keeps PENDING_REVIEW, missing data -> ERROR / MISSING_FIELDS, long number -> REFERENCE_TOO_LONG, an edit that completes the data brings the row back to review, one validation error can change into the other; PROCESSING, READY, CONFIRMED, DISCARDED and ERRORs decided elsewhere (UNREADABLE, SERVICE_FAILURE, CONFIRM_FAILED) are never touched; adjusted and reviewed flags are never written."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxSummaryTest.java",
+            "note": "Covers: copies the header into the list columns (name, tax id, vendor, number, date, total), truncating to the column sizes (30 and 255), leaving them empty for blank, ambiguous or new vendor, a number over 20 characters, a malformed date or no total; the duplicate column holds the first duplicate; a header-less document leaves the row as it was; never writes status, error code, adjusted or reviewed."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxWorkStoreIntegrationTest.java",
+            "note": "DB-backed (WeldBaseTest): a claim counts the pass, sets the lease and returns what the worker needs; a live lease keeps others out, an expired one can be retaken; two nodes claiming at once produce exactly one winner; the cap of passes stops claims; the extraction is stored once and only while PROCESSING; failOrRelease releases the lease or ends the row as SERVICE_FAILURE on the last pass and never touches a row no longer PROCESSING; stalled ids are old PROCESSING rows with no live lease and passes left, oldest first and capped; exhausted rows end as SERVICE_FAILURE; the user's role is one of its own active roles in the client (default wins)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/InvoiceInboxProcessorInboxDuplicatesIntegrationTest.java",
+            "note": "DB-backed: an unlinked row with the same tax id in any spelling and the same number finds the first duplicate; a different number or tax id is not a duplicate; discarded rows, other clients and the row itself are ignored; a blank or short tax id or a bad number asks nothing; a linked vendor still matches by vendor id."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/PurchaseInvoiceOcrLookupsVendorTaxIdIntegrationTest.java",
+            "note": "DB-backed: vendorsByTaxId finds a vendor stored with or without a country prefix or with separators, returns both vendors sharing a tax id, honors the limit, skips inactive vendors and non-vendors, and never returns another client's vendor; vendorTaxId reads only my client's vendor; searchVendorsByName and vendorAddress work in admin mode and never leak another client's vendor."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/InboxVendorMatcherTest.java",
+            "note": "Covers: one vendor with the tax id is linked by tax id; the id is searched cleaned; two vendors sharing it are ambiguous (max ten candidates); a tax id under five characters is not searched; falls back to the exact name (linked only when the stored tax id is absent or equal; different tax ids are another company; a contains-only hit is never linked); unknown named vendor is new, nothing read is none."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/InboxLineMatcherTest.java",
+            "note": "Covers: lines keep what was read; products looked up once in line order; link by similarity above 90 % (single top; ties only suggested; ETP-5654 code-only lookalike not linked), exact name links, two exact are ambiguous, no candidates is a new product; without a vendor address every line is pending_vendor; the tax is resolved once per rate with candidates, no_tax_at_rate when none, unknown when the lookup fails."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/InboxMatcherTest.java",
+            "note": "Covers: a readable invoice becomes version 1 of the document (vendor, header, lines, notices); a foreign receiver is not matched; receiver or organization without tax id is a notice; a linked vendor without address is a notice; duplicate invoice found or unknown with a notice; the printed total is used when above zero, otherwise computed from the lines with tax rounded half up; dates read as ISO, d/M/yyyy and d-M-yy, impossible dates are null."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/TaxIdNormalizerTest.java",
+            "note": "Covers: clean (upper case A-Z and digits, placeholders become empty); stripVatPrefix for known country prefixes (GR alias of EL; NIE and CIF letters are never stripped); idsMatch ignores formatting and prefix on either side and never matches a blank; variants lists the id, the bare form and each prefix form, empty for a blank id."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/startup/InvoiceInboxSweeperStartupTest.java",
+            "note": "Covers: the first pass sweeps once and starts the periodic scheduler, a second pass creates no second one; the scheduler starts even when the first sweep fails and the failure still reaches the base class; shutdown stops scheduler and worker and can be called twice; qualifier and 2-minute period are the registered ones."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/PurchaseInvoiceOcrLookupsTest.java",
+            "note": "Shared spec, extended (ETP-6048): vendorsByTaxId (query shape, shared tax id returns both, foreign partners dropped, blank or failing is empty), vendorTaxId (tenant guard, trimmed, missing or failing is none), organizationTaxId read through the worker's own DAL, and selector failures log WARN naming the spec, status or exception class only."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoAttachmentsHelperTest.java",
+            "note": "Shared spec, extended (ETP-6048): copyMainAttachmentToTemp copies the bytes into an owner-only directory, removes the handler's own temporary copy, and is null without a main attachment, for a nameless one, or when the bytes are gone."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/CopilotOcrServiceClientTest.java",
+            "note": "Shared spec, extended (ETP-6048): 5xx, 408, 429, timeouts and connection failures are retryable (upload step classified the same way), other 4xx are not, an unparseable 200 stays retryable, and the two-argument OcrUnavailableException constructor stays retryable."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/OcrConfigTest.java",
+            "note": "Shared spec, extended (ETP-6048): total_amount is a nullable number, a property and required, but not a data key (a total alone is not a reading); the question asks for the total with taxes."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ocr/OcrSanitizerTest.java",
+            "note": "Shared spec, extended (ETP-6048): the packaged schema keeps a printed total (number or numeric string), reads a missing total as null, and a hostile total becomes null."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "product-movements-tab",
+      "flagKey": "product-movements-tab",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/ProductMovementsPolicy.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ProductMovementsPolicyTest.java"
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ProductTransactionsHandlerTest.java",
+            "note": "Shared spec: flag-off and Warehouse-never-consults-flag cases."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/SFWindowAccessMapTest.java",
+            "note": "Shared spec: productMovements capability cases."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "bank-bounce-suggestions",
+      "flagKey": "bank-bounce-suggestions",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/BankBounceSuggestionsFlag.java",
+        "src/com/etendoerp/go/schemaforge/BankBounceDetector.java",
+        "src/com/etendoerp/go/schemaforge/BankBounceLineText.java",
+        "src/com/etendoerp/go/schemaforge/BankBouncePaymentGuard.java",
+        "src/com/etendoerp/go/schemaforge/BankBounceSuggestions.java",
+        "src/com/etendoerp/go/schemaforge/BankBouncePairService.java",
+        "src/com/etendoerp/go/schemaforge/BankBounceErrors.java",
+        "src/com/etendoerp/go/schemaforge/StatementLineFilter.java",
+        "src/com/etendoerp/go/schemaforge/BankBounceKpiTelemetry.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankBounceSuggestionsFlagTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1): the ETGO_ACCOUNT email reaches the provider context through the real GoFeatureFlags into a capturing provider, as targeting key and as Email/email attributes, with the account resolved for real by GoAccountResolver over mocked OBContext/OBDal; a targeted account reads true and a non-targeted one false; no OBContext, no user, no account, a null email, a failed account query or a failure reading the user read false and hand the provider no identity; unset, non-boolean and failing provider read false; the key is bank-bounce-suggestions."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankBounceDetectorTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1): each signal (pis_link on the outflow's last description token, return_text on the bounce line only, counterparty after normalization, blank names never equal) and their priority; the confidence rules (high: same-day wording, PIS link within tolerance, PIS link plus wording; review: later-day wording, PIS link alone weeks later, counterparty alone); the window (0 and 60 days in, 61 out, a bounce before its original out); only opposite sign and the exact amount pair, same sign, different or zero amount never pair, no signal never pairs; each line in at most one pair; same-day roles (wording wins whatever the sign, else the PIS-linked outflow is the original, else the outflow); an ambiguous group is one review pair with no original and its candidates closest first; an original without an ERP payment is preferred and a pair whose only original has one is not proposed; only PSD2 lines outside a match group are candidates (toStatementLine), load reads PSD2 payments, open movements and schedule counts and runs no query without candidates, detectQuietly answers empty on a failed read. Excluding pending/discarded lines is the caller's (loadPendingLines), covered in ReconciliationHandlerTest."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ReconciliationHandlerBounceSuggestionsTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1): the bounce plan (only high pairs reserve lines, a review pair only when none of its lines or candidates is taken, high first, flag off is Plan.NONE with no detection); autoMatch with the flag on (high-pair lines never suggested to a transaction, kind:transaction on existing groups, the bouncePair group shape, ambiguous pairs with candidates, groupsFound and telemetry count transaction groups only, kpis.bouncePairs) and off (no detection, no kind, kpis exactly as before, output equal to flag-on-without-pairs minus kind/bouncePairs); panel/modal agreement (same bounce lines and groupKeys, counts, reserved rows unclassified) and the bouncePair annotation for the original, bounce and candidate roles; applySuggestions (bounce groups first in a mixed batch, a line in two groups 409, unknown kind 400, flag off 403 BOUNCE_SUGGESTIONS_OFF per bounce group with nothing written, telemetry without the bounce groups). Discarded lines, excluded with the flag on and plain pending lines with it off: see ReconciliationHandlerTest."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankBouncePairServiceTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1): discardPair sets EM_PSD2_IS_DISCARDED=Y and the PSD2 button in sync on BOTH lines, links each to the other and stores one discard time, signal and confidence on both (pis_link/high whichever line is named first; no signal -> review; 60 days accepted); every coded refusal in the code's order (LINE_DISCARDED incl. a hook-excluded line, DISCARD_NOT_ALLOWED for reconciled / not PSD2 / PSD2 columns missing, LINE_NOT_PENDING, SIGN_MISMATCH, AMOUNT_MISMATCH, DISCARD_NOT_ALLOWED outside the 60-day window, HAS_PAYMENT) and the request errors, each writing nothing; flag off -> 403 BOUNCE_SUGGESTIONS_OFF reading and writing nothing; a discarded line that is reconciled counts as reconciled (DISCARD_NOT_ALLOWED, not LINE_DISCARDED). restorePair, gated by the flag since option 2 (flag off -> 403 BOUNCE_SUGGESTIONS_OFF, nothing read or restored): restores both lines and clears the four link columns, a lone discarded line restores alone, a plain line is a 200 no-op, a counterpart in another account is left alone, refusals write nothing. Renamed from BankBouncePairDiscardTest (it covers the whole BankBouncePairService). Alex review round: both lines locked FOR UPDATE in id order (Session.refresh with PESSIMISTIC_WRITE) after the ownership check and before validation, on discardPair and restorePair; restorePair restores a line alone when its counterpart does not point back; applyPairs loads and detects once for all pairs of a call; discardPair and restorePair read the flag once; stored confidence is high only for the exact pair detection proposed as high (an ambiguous pair resolved in the panel and a pair detection did not propose are stored review, with the detection's signal). Extended (ETP-5581 part 3, repro/contract tests of the developer): nested KpiEvents -- discardPair of a proposed high pair emits discarded/preselected/surface panel with no record data; a chosen candidate of an ambiguous pair is chosen_among_alternatives/review; a 409 on a proposed pair emits failed and a 400 nothing; dismissPair writes nothing, emits unchecked from the bounce alone or a chosen candidate, nothing for an unpaired line, 400 without statementLineId, 403 with the flag off; restorePair of a linked pair emits restored with the stored signal/confidence and days_since_decided, a lone line nothing; the modal (applyPairs + ModalDecisions) emits one decision per applied pair and per bounceDecisions entry (unknown key, unknown decision, repeat and applied key ignored) plus the summary, preselection_changed on an unchecked high pair, a repeated pair as failed; flag off sends nothing; an MCP call is channel mcp."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankBounceLineTextTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1), port of the parked ReturnLineTextTest without its learnedForm cases: normalize (accents, umlauts, blank); the bounce vocabulary (every word, the Santander accent, inflected long words, short words only as whole tokens, no match inside another token, an ordinary transfer is not a bounce); lastToken (end-to-end id, trailing punctuation, blank); sameCounterparty (normalized names, empty names never match)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankBouncePaymentGuardTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581 part 1): attribution (a payment found through the PIS link even with another amount; a single fitting movement within tolerance; outside tolerance or opposite sign gives none; a payment claimed by another line's PIS link excluded; a contested movement or two fitting movements give CANNOT_ATTRIBUTE); ambiguousPayment (3 attempts / 1 payment / 2 pairs is safe, 2 outflows / 2 payments / 1 bounce is ambiguous and gives HAS_PAYMENT); containedInLargerPayment (a larger multi-invoice movement of the same counterparty, or any when the line names none; not a single-invoice, smaller, opposite-sign, out-of-tolerance, other-counterparty or PIS-claimed one; never a line with its own payment); blocker (null without payments, HAS_PAYMENT on either side, a PIS-linked original blocks)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/StatementLineFilterTest.java",
+            "expected": true,
+            "note": "Covered (ETP-5581; the class became owned with option 2): with no hook nothing is excluded and nothing is queried; with a hook its condition, parameters, account and usage reach the queries, excludedLineIds answers the account's unmatched lines the hook rejects, an excluded line answers the coded 409 LINE_DISCARDED, markDiscarded marks every listed row once per account and never fails the listing, and the Discards view splits, answers status=discarded and puts counts.discarded; with bank-bounce-suggestions off nothing is honoured, hook or not: hql is empty and asks no hook, isExcluded/discardedLineError answer false/null with no query, markDiscarded puts no marker and reads nothing, and Discards keeps every row, ignores status=discarded and adds no count; the pure row helpers (splitRows, markRows, discardedLinesData)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ReconciliationHandlerTest.java",
+            "expected": true,
+            "note": "Folded into the existing ReconciliationHandlerTest (reuse-first; replaces the provisional AutoMatchSupportDiscardedLinesTest.java, never created). Gated by the flag since option 2, covered (ETP-5581): with the flag on, pendingLines leaves hook-excluded (discarded) lines out of lines, total and the state counts and reports counts.discarded, and status=discarded lists only them, state discarded, with bounceLink (counterpart, signal, confidence, discardedAt) or null for a line discarded alone; with the flag off they are plain pending lines in lines, total and the counts, there is no counts.discarded and status=discarded is ignored; flag off adds no counts.bounce, bouncePair or kind and runs no detection; loadPendingLines appends (flag on) the hooks' AUTO_MATCH_CANDIDATES HQL condition and parameters to an OBQuery that keeps the client/org/active filter, and adds none without a hook or an owned account (the two earlier loadPendingLines tests rewritten from OBCriteria to OBQuery). The 409 LINE_DISCARDED before any write is in ReconciliationRefusedWriteTest (reconcileGroup, prepareGroup), ReconciliationDifferenceSupportTest (reconcileDifference) and ReconciliationLineTargetSupportTest (the heal in resolveForMatch)."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "psd2-statement-import-settings",
+      "flagKey": "psd2-statement-import-settings",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/Psd2ImportSettingsFlag.java",
+        "src/com/etendoerp/go/schemaforge/BankImportSettingsRules.java",
+        "src/com/etendoerp/go/schemaforge/BankStatementDeletion.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/Psd2ImportSettingsFlagTest.java",
+            "expected": true,
+            "note": "Covered (New, copied from the bank-bounce-suggestions gate test): the ETGO_ACCOUNT email reaches the provider context as targeting key and Email/email attributes; a targeted account reads on, another reads off; no OBContext, no user, no account, a null email or a failed lookup read off and hand the provider no identity; unset, non-boolean and failing provider read off."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountBankConnectionHandlerLinkTest.java",
+            "expected": true,
+            "note": "Covered (Extended): flag ON for the import-settings validation of link, createAndLink and import-settings; flag OFF: link and createAndLink ignore the import keys and write none, import-settings requires nothing and accepts a grouping outside the codes, a malformed date keeps the old 500; the flag is evaluated once per link request."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountBankConnectionHandlerQueryTest.java",
+            "expected": true,
+            "note": "Covered (Extended): accounts answers maxFetchInterval with the flag on; flag OFF: no maxFetchInterval and the logo through the one plain providers/{code} call."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountHandlerTest.java",
+            "expected": true,
+            "note": "Covered (Extended): PUT/PATCH import-key validation with the flag on; flag OFF: nothing validated or trimmed, clearing the keys of a connected account is allowed and no stored account is loaded."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankStatementsHandlerTest.java",
+            "expected": true,
+            "note": "Covered (Extended): delete of bank-connected statements with the flag on; flag OFF: a draft of a connected account answers the 409, a processed one the not-draft 400 and is never reactivated, and a draft of an unconnected account is still deleted."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/BankStatementAgentActionsContractTest.java",
+            "expected": true,
+            "note": "Covered (Extended): the static deleteStatement description states both the flag-off and the flag-on rule."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "sepa-remittances",
+      "flagKey": "sepa-remittances",
+      "paths": [
+        "src/com/etendoerp/go/schemaforge/SepaRemittancesFlag.java",
+        "src/com/etendoerp/go/schemaforge/SepaCreditorId.java",
+        "src/com/etendoerp/go/schemaforge/FinancialAccountRemittanceSupport.java",
+        "src/com/etendoerp/go/schemaforge/RemittanceSepaProvisioning.java",
+        "src/com/etendoerp/go/schemaforge/RemittanceHeaderHandler.java",
+        "src/com/etendoerp/go/schemaforge/RemittanceLinesHandler.java",
+        "src/com/etendoerp/go/schemaforge/handlers/ContactSepaMandateDefaults.java",
+        "src/com/etendoerp/go/schemaforge/BusinessPartnerHandler.java",
+        "src/com/etendoerp/go/schemaforge/FinancialAccountHandler.java",
+        "src/com/etendoerp/go/schemaforge/FinancialAccountBankConnectionHandler.java",
+        "src/com/etendoerp/go/onboarding/OnboardingRemittanceSetupService.java",
+        "src/com/etendoerp/go/rest/EtendoGoJwtServlet.java"
+      ],
+      "testSpecs": {
+        "unit": [
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/SepaRemittancesFlagTest.java",
+            "note": "Copy InvoiceInboxFlagTest: isEnabled(email, clientId) publishes the targeting key, Email and lowercase email plus clientId through GoFeatureFlags into a capturing provider; targeted account true, other false; blank or null email -> clientId only, default false; isEnabled() passes GoAccountResolver.currentAccountEmail() and the OBContext tenant; no OBContext -> null client id, no throw; unset, non-boolean and failing provider read false; local property arm true/false."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/SepaCreditorIdTest.java",
+            "note": "Parity with SEPAUtil.getAT02Identification on the developer-2 vectors (ES97000B12345678, DE98ZZZ09999999999, ...), blank vs format vs check digits, the 99/02 congruence rejected, build() null cases."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountHandlerTest.java",
+            "note": "The FinancialAccountRemittanceSupport rules live here (the class @covers both). There is no per-account switch: a Bank account created with the flag on gets the two SEPA remittance methods; Cash and Card never do; existing accounts are never revisited. Through the handler hooks (flag and DAL seams stubbed): a valid Bank create with the flag on runs ensureClient in the pre-hook (same transaction as the insert) and links nothing yet; flag off or a Cash create provisions nothing; a unique violation while provisioning (SQLState 23505 in the cause or next-exception chain) rolls back and answers 409 ETGO_RemittanceProvisioningConflict, any other failure is rethrown without rollback; the post-hook of a Bank create runs provisionNewAccount then ensureAccountLinks, skips Cash accounts and the flag off, and swallows a link failure; an update never provisions nor links; moving a Bank account to another type with open remittances -> 422 ETGO_RemittanceAccountTypeChangeBlocked with the count, flag off included, while 0 open, staying Bank or an update without type pass with a single count at most; with 0 open the change deactivates the account's remittance links (deactivateAccountLinks) in the same pre-hook. Called directly: appliesTo is true only for type B with the flag on (C, CA, null, flag off -> false); provisionNewAccount returns null without provisioning for Card, Cash, no account or the flag off, provisions a Bank account once, answers 409 + rollback on a unique violation and rethrows anything else; linkNewAccount(null) reads no flag; checkTypeChange counts only when the type really leaves Bank (unknown account, non-Bank and B->B never query)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceSepaProvisioningTest.java",
+            "note": "Mockito over OBDal (recording OBQuery whose uniqueResult is resolved from entity + HQL + named parameters) and OBProvider (a mock per created entity): a fresh client gets the In Remittance exec process (+2 params), the REM_REM doc type + sequence, two methods with the OBSEPA template flags and two types each with the ETGO_SEPA_SCHEME marker, Creditor_Business_Code=000 on CORE only; a provisioned client gets nothing new; every lookup binds the marker, the Java class or the category, never a display name; names follow the client language; no GL category -> no doc type; createRemittanceLink sets exactly what REMRemittanceProcess.checkPMSetup reads (direction only, A, process, deferred, no multicurrency, not default); ensureAccountLinks creates a missing link per provisioned method or reactivates an inactive one with the setup re-applied, never deactivates nor deletes, and on an unprovisioned client links nothing and logs one WARN per missing scheme (CORE, then SCT) naming the account; provisionAccount runs ensureClient(account's client) before ensureAccountLinks(account); hasRemittanceMethodLink counts active links to marked methods (false for none, a null count, an unsaved or null account); countOpenRemittances binds PE/PR/CP/PP and the null+unprocessed case. ETP-6247: the file setup per scheme (literal parameter values incl. ETAR_SETTLE_ON_DUEDATE=Y, equal to RemittanceProcessHookImpl.PARAM_SETTLE_ON_DUEDATE; generator class names), a blank class filled and an existing one kept, only absent parameters written, nothing written when fully set up, unknown or null scheme untouched, schemeOf. ETP-6247 return method: ensureReturnPaymentMethod creates the client's own method (organization 0, EM_Etar_IsReturn, manual execution both ways, upon deposit DEP / withdrawal WIT, no automatic flags, pay-in and pay-out allowed, Spanish or English name by the client language) and saves it; an existing one is returned without creating or saving; findReturnPaymentMethod binds the flag, active, the client and organization 0, never a name; ensureClient also provisions it (the third method, the only one flagged)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/onboarding/OnboardingRemittanceSetupServiceTest.java",
+            "note": "OnboardingRemittanceSetupService, the onboarding step for the sample data's «Cuenta de Banco»: flag off -> false with no query, no provisioning and no admin mode; no Bank account -> false; every Bank account of the tenant (client + type B, readable-client and readable-org filters off) is provisioned through RemittanceSepaProvisioning.provisionAccount and the step answers true; a provisioning failure propagates and restores the admin mode; the flag is read for the receiving account (targeting key = email) and the new tenant (clientId attribute), not the System user; a null tenant reads no flag. The servlet side lives in EtendoGoJwtServletSampleDataTest (true -> its own commit 'remittance setup', false -> no transaction call, a failure or a failing commit -> rollback, never escapes) and EtendoGoJwtServletTenantPoolTest (order: initial period state -> sample data import -> remittance setup -> costing schedule)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountRemittanceProvisioningIntegrationTest.java",
+            "note": "WeldBaseTest on the F&B sample client through the real NEO REST dispatch of financial-account/account (the @NeoExtension FinancialAccountHandler, via the shared NeoRestTestClient), caller-owned transaction so nothing commits, rolled back; the flag is the only stub (SepaRemittancesFlag.isEnabled() static mock). Green on 2026-11-12: a Bank account created with the flag on is linked to the CORE and SCT methods and each link passes Classic's checkPMSetup rule for its direction (allowed, deferred, executed A through a process); a Cash account created the same way gets none. A Bank account holding a real REM remittance in PE refuses PATCH {type:C} with 422 ETGO_RemittanceAccountTypeChangeBlocked and stays B; once the remittance is AN the same PATCH (with the updated value read through NEO) changes it to C, deactivates only the remittance links (kept, inactive; a link to another payment method stays active) and PATCH back to B does not reactivate them. The deactivation now runs in the post-hook, once the update succeeded: a type change through MCP etendo_update deactivates the remittance links too (another payment method stays active), and aRefusedTypeChangeLeavesTheRemittanceLinksActive — a single-request PATCH {type:C} refused by the generic write (no updated -> 400, stale -> 409) — leaves the account Bank with its links active (green 2026-11-12, 4/4). The /sws/neo/batch variant cannot be built: batch operations are create-only."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/ContactSepaMandateIntegrationTest.java",
+            "note": "WeldBaseTest (developer-go-3's, extended), real NEO REST dispatch of contacts/businessPartner, caller-owned transaction, rolled back; flag static mock; green 2026-11-12 (13/13). Flag on: a new customer stores its CIF and today; a sent mandate wins; a customer's first CIF on update becomes the ID and a later CIF change does not move it; a vendor's saves (a new CIF included) never fill, becoming a customer does (stored CIF, creation date); an unrelated save fills an empty mandate; an explicit clear holds for that save only. Flag off: no save fills, not even one giving the first CIF. Channels and shapes: an MCP etendo_update fills an empty mandate; a /sws/neo/batch create stores it (batch is create-only, so the create path; a probe operation reads the row and fails the batch, which rolls back); a create in a data envelope stores it (searchKey sent: the handler's placeholder only goes to the top level); a type inherited from the contact category (contact-category-type rules on) decides it — customer category yes, vendor-only no; GET defaults carries today's signature date only with the flag on."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceSepaProvisioningIdempotencyIntegrationTest.java",
+            "note": "OBBaseTest on the F&B sample client, rolled back (setDoRollback): the rows ensureClient writes satisfy the real constraints and triggers and its HQL resolves against the real mapping; ensureClient twice -> exactly one exec process, one REM_REM doc type, two new methods, one ETGO_SEPA_SCHEME marker per scheme, Creditor_Business_Code=000 on CORE only; ensureAccountLinks links both methods with the checkPMSetup setup (hasRemittanceMethodLink true), and after both links are set inactive (hasRemittanceMethodLink false) a second call reactivates the same rows; countOpenRemittances runs and is 0 for a fresh type; against the real c_doctype_name index, a «Remesa» of another category or an inactive REM_REM in org 0 makes the provisioned (active, created once) document type «Remesa (SEPA)»."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceMethodLinkObserverTest.java",
+            "note": "Active link of a remittance method to a non-Bank account (Cash C, Card CA) -> MessageKeyedException ETGO_RemittanceMethodAccountNotAllowed; a Bank account passes without asking whether the method is a remittance one; inactive link passes; non-remittance method passes; update that only changes another column passes; an update that reactivates the link is checked."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceNameSuggestionTest.java",
+            "note": "RemittanceNameSuggestion: kindOf (pay-in only -> collection, pay-out only -> payment, both/neither/no type -> generic); suggest wording Cobros/Pagos/Remesa <mes> <año> in es_ES and es_AR, Collections/Payments/Remittance <Month> <year> in en_US, blank language = English; every language x kind x month fits 60 characters and is recognised by isSuggestion; isSuggestion accepts any month/year of both languages and rejects Mi remesa, Cobros noviembre, a two-digit year, an extra word, blank and null; parseDay reads the yyyy-MM-dd prefix of a date or timestamp and answers null otherwise."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceDueItemsTest.java",
+            "note": "RemittanceDueItems (Mockito, HQL recorded): the candidate query states every rule (invoice schedules only via the inner join, a business partner, not paid / cancelled / invoice-paid, the org child tree, expectedDate < the day after the due date so the due day is included, the account currency, not in another unprocessed remittance) and the direction from the account-method link (pay-in -> sales, pay-out -> purchase, both/neither/none -> no filter); missing type, account, currency or date -> 422 ETGO_RemittanceTypeOrAccountMissing; list maps id/documentNo/businessPartner/dueDate/outstandingAmount/currency, alreadyInRemittance only for this remittance, total counts all (null -> 0), search iContains on invoice no. or partner, pageSize default 50 capped 200 and page from 1, query-string params typed; select: no ids -> 422 ETGO_RemittanceDueItemsRequired, any ineligible id -> 422 ETGO_RemittanceDueItemNotAvailable with invalidIds and no Classic call, valid ids -> _selection (paymentScheduleID, realpayment = outstandingamount, rest 0) without _allRows, inpRecordId and the header tab, created = line-count difference never negative, REM showMsgInView ERROR -> 422 ETGO_RemittanceDueItemsSelectionFailed with its text. Round 3: three contracts (syncDueItems with items/remove, isWrite for select and sync); a due already in this remittance stays a candidate past the due date (the exists clause); items carry invoiceId, salesTransaction, docTypeName, invoiceDate, businessPartnerId, grandTotalAmount, dueStatus (OVERDUE/DUE_TODAY/PENDING against today, no date PENDING) and, only when included, lineAmount = the sum of all its lines and lineIds in line order; sync: nothing -> 422 ETGO_RemittanceDueItemsRequired, a remove id not included or also in items -> 422 ETGO_RemittanceDueItemNotIncluded with invalidIds, a non-candidate item -> 422 NotAvailable, a bad amount (above the outstanding, 0, other sign, non-numeric) -> 422 ETGO_RemittanceLineAmountInvalid with invalidIds and error.max only for a single bad due, all before any write; a new due -> Classic selection with realpayment = the part and outstandingamount = the due, a changed amount -> its lines deleted then re-added (updated), the same amount -> untouched and no Classic call, a remove -> all its lines deleted without Classic; one call adds, changes and removes; a REM refusal rolls back. The rules are asserted as the query states them, not against real invoices."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceProcessActionTest.java",
+            "note": "RemittanceProcessAction (run() stubbed through a CALLS_REAL_METHODS static mock): mutating contract with an optional grouping limited to P/GGPD; already processed -> 422 ETGO_RemittanceAlreadyProcessed and no active lines (0 or null) -> 422 ETGO_RemittanceNoLines, both without running Classic; grouping defaults to P (also for a blank one), GGPD passed through; REM OBError type Error (message, or title when there is none) or no answer -> 422 ETGO_RemittanceProcessFailed with REM's text; success (Success or Warning) -> {status, message} with the status read back from the reloaded remittance (null when it cannot be reloaded); reactivate: a contract without parameters, not processed -> 422 ETGO_RemittanceNotProcessed without running Classic, REM Error -> 422 ETGO_RemittanceReactivateFailed with REM's text, success -> {status PE, message} with run called with code R. run() itself (round 3 connection fix): the bundle is init on a DalConnectionProvider(false) — its AD_Process lookup runs on that connection and bundle.getConnection() is it — with REM_Remittance_ID and the grouping set after the init, REM's OBError returned as is; a throwing run -> Error result with the exception text; no OBError result -> null."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceLineAmountTest.java",
+            "note": "RemittanceLineAmount, the one «A remesar» rule: isValid true for 0 < |amount| <= |outstanding| with the due's sign (positive and negative dues, the exact outstanding, scale-insensitive), false above it, at 0, of the other sign, for a 0 outstanding or a null side; parse reads numbers and numeric strings (trimmed), null for null/JSON null/blank/junk/decimal comma/boolean; invalid(max) -> 422 ETGO_RemittanceLineAmountInvalid with error.max and the max in the text, invalid(null) without max."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceProcessActionPartialAmountIntegrationTest.java",
+            "note": "WeldBaseTest on the F&B sample client, rolled back; ran green on 2026-11-11 (2/2, goIsolatedDalTest). Fixture: a pay-out (SCT) remittance on F&B España's EUR account with one line on purchase invoice 10001723's due (EUR 133.10); F&B has no open sales dues, hence pay-out. Pinned by the run: the line edit refuses 133.11 with error.max 133.10 against the real detail and accepts 50; «Procesar» grouping P answers 200 status PR and creates one payment of 50, the payment engine splitting the detail into 50 paid and 83.10 open; REM_SettleProtest.cancelPayment leaves the schedule at 83.10 outstanding and 50 paid and the remittance PT (paid, the pay-out counterpart of a collection's CT); availableDueItems offers the schedule again with outstandingAmount 83.10. A line above its due is refused by REM (Out of range payment amount) -> 422 ETGO_RemittanceProcessFailed. Also the repro of the run() connection fix (ProcessBundle.init on a DAL connection)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceDueItemsQueryIntegrationTest.java",
+            "note": "OBBaseTest on the F&B sample client, rolled back, no invoice fixtures: for an unsaved remittance of a provisioned type the candidate HQL (list + count) resolves and executes with no direction filter (account not linked), with each direction (pay-in / pay-out links) and with a search and paging, and the selection re-check runs and refuses an unknown schedule with invalidIds; whatever the sample data yields is in the account currency, due on or before the remittance due date and not flagged alreadyInRemittance."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceHeaderHandlerTest.java",
+            "note": "Flag off -> 403 on CRUD, selector, callout; the account must be a remittance account (accountRefusal, cheapest first: not Bank -> 422 ETGO_RemittanceAccountNotBank without any link query; a Bank account without a valid IBAN for its country — none, blank, no country, a broken checksum, another country's IBAN — -> 422 ETGO_RemittanceAccountIbanRequired; a valid Bank account without the remittance methods -> 422 ETGO_RemittanceAccountNotAllowed; the IBAN is read ignoring spaces and case), each refusal answered by a create with its own key before the type is read; DEFAULTS drops a non-remittance account (Cash, or Bank unlinked) and the type with their $_identifier, keeping the other defaults, and keeps a remittance account; type not provisioned or not linked -> 422 ETGO_RemittanceTypeNotAvailable; processed -> 422 on PUT/PATCH/DELETE; name blank / > 60 -> 400; the callout suggests the name on a dueDate/remittanceType change of a new remittance (updates.name {value, suggested:true}; empty for a typed name, an existing record, no due date, another field, an unreadable body, or an unchanged suggestion; 403 with the flag off); a REST create without a name but with a dueDate is saved with the suggestion, a sent name is kept, PUT/PATCH never change it; MCP resolveServerCreateFields fills a missing name, no-op with the flag off or without a dueDate, never throws; due date (today() pinned): a create or a changed dueDate earlier than today -> 422 ETGO_RemittanceDueDatePast (Spanish for es_ES/es_AR, English for en_US), today/later passes, no dueDate or an echo of the stored day passes (a rename of a remittance with a past date included), a timestamp is judged by its date part, an unparseable value is left to the generic write, a processed remittance answers ProcessedNotEditable first; account selector offers only Bank accounts with an IBAN and an active remittance-method link in one query, then drops an invalid IBAN in Java and pages after it (an offset past the end -> empty items, hasMore false, the real total); type selector empty without FIN_Financial_Account_ID, otherwise only linked provisioned types.; due-items actions: availableDueItems params from the query string, the request or a POST body, selectDueItems POST only (405 otherwise) with ids required by its contract, an unknown parameter 422, 404 unknown remittance, 422 processed, 403 flag off, 500 on an internal failure, another action not routed; process action: POST only (405 otherwise), an invalid grouping refused by the contract, the body passed to the process step as is, a processed remittance -> 422 ETGO_RemittanceAlreadyProcessed, 404 unknown, 403 flag off; reactivate action: POST only, no parameters (422 for any), routed with its answer as is, an unprocessed remittance -> 422 ETGO_RemittanceNotProcessed, 404, 403; syncDueItems: POST only (405 otherwise), routed with its body and its answer as is, 422 processed before the sync runs, 404 unknown, 403 flag off; an unknown action name is routed nowhere; an action context with an EMPTY query map reads the REST GET parameters from the servlet request; process/reactivate take a fieldValues body (flat still accepted): {fieldValues:{grouping:GGPD}} reaches the process step as GGPD, an unknown key inside fieldValues -> 422 unknownParameters, reactivate with {fieldValues:{}} passes validation, and only those two contracts unwrap it; sepaFileData (contract: accountId required, organizationId optional; read): for a new remittance (id new, REST or MCP origin) the account's organization, for a saved one the remittance's, an explicit organizationId as given (404 when the tenant does not own it), GET reads the query string (trimmed), flag off -> 403 without loading the account, no accountId -> 422 missingParameters, an account that is not a remittance account -> 422 with its key, a stored Creditor_Business_Code used and normalized (whitespace removed, first 3) with 000 for missing/blank and missing creditorBusinessCode for a malformed one, a tax ID over 28 characters -> creditorId null and missing orgTaxId; the account selector offers linked Bank accounts with or without a valid IBAN, each with iban/ibanValid; DEFAULTS also drop a linked account without a valid IBAN (none or a broken checksum). ETP-6247: afterHandle marks a remittance created by a successful POST as automatic (createdId from array, object or body), skips a failed POST, an already-automatic one and the flag off, and never throws."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceSepaFileDataTest.java",
+            "note": "RemittanceSepaFileData, the «Datos para el fichero SEPA» answer (pure): the action is a read with accountId required and organizationId optional; suffixOf normalizes the business code as Classic does (ABCD -> ABC, spaces removed, null/blank -> 000); everything present gives the AT-02 identifier and nothing missing; iban, orgTaxId and country are named in that order; a tax ID over 28 characters gives no identifier and missing orgTaxId; a malformed business code with good organization data gives missing creditorBusinessCode; the stored IBAN is shown trimmed and blank is null."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceHeaderHandlerAccountsIntegrationTest.java",
+            "note": "WeldBaseTest on the F&B sample client, DAL fixtures (ensureClient, Bank accounts, links), rolled back; flag static mock; green on 2026-11-12 (5/5). Selector against the real HQL: offers linked Bank accounts with and without a valid IBAN (ibanValid false / true, iban null / stored), not an unlinked Bank account, one whose links were deactivated, nor one that is no longer Bank; search by name and limit/offset page the same list (totalCount, hasMore, an offset past the end empty). sepaFileData: an organization of another client (QA Testing) or an unknown id -> 404; a new remittance uses the account's organization; a real MCP etendo_action call (McpToolRouter.handleAction) with id new reaches the action and answers the account."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/FinancialAccountIbanCountryIntegrationTest.java",
+            "note": "WeldBaseTest on the F&B sample client through the real NEO REST dispatch, caller-owned transaction, rolled back. Guard of the ETP-5473 rule after the IBAN-prefix derivation was REVERTED (user decision, 2026-11-12): on a country-less Bank account created through the DAL, a PATCH {iBAN, updated} with no country key, and one with an explicit country:null, are both refused 400 ETGO_FinAccIbanRequiresCountry and save neither the country nor the IBAN; the same IBAN sent with its country (Spain) is saved and accepted by FIN_FINANCIAL_ACCOUNT_TRG2."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/NeoExtensionMigrationTest.java",
+            "note": "Shared migration spec; carries ETP-6148 B1: FinancialAccountBankConnectionHandler is bound by @NeoExtension(financial-account-bank-connection, financial-account-bank-connection) with no @Named and no row qualifier, resolves on every channel and through the entity-level readers, and is reached with no qualifier by the REST report route and by FinancialAccountBankConnectionEndpoint (REST and MCP origin)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceLinesHandlerTest.java",
+            "note": "RemittanceLinesHandler: flag off -> 403 feature_disabled (PUT/PATCH too, without loading the line); POST on CRUD (or no endpoint type) -> 405 ETGO_RemittanceLinesReadOnly; PUT/PATCH of amount (flat or wrapped in data): a part of the due's detail amount -> null (generic write), above it / 0 / negative / non-numeric -> 422 ETGO_RemittanceLineAmountInvalid with error.max, a line without a due -> 422 ETGO_RemittanceLineAmountNotEditable, a processed remittance -> 422 ETGO_RemittanceProcessedNotEditable whatever the body, a body without amount or an unknown line -> null, the same answer for REST and MCP; DELETE of a line of an unprocessed remittance -> null (generic delete), of a processed one -> 422 ETGO_RemittanceProcessedNotEditable, an unknown line or one without remittance -> null, flag off -> 403 without loading the line; reads and sub-endpoints pass through."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileProblemsTest.java",
+            "note": "ETP-6247 (New): RemittanceFileProblems folds the readiness problems per partner + code with the line ids, never folds an amount problem or a partner-less one, carries the organization/account ids, renders the message in the request language (es_ES via NeoLanguage.requestCode) and prints '-' for a null placeholder. due(): one problem per due, named by its first line, lineIds = every line of the due, never folded with another due nor with the partner's other problems."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileLineCheckTest.java",
+            "note": "ETP-6247 (New): RemittanceFileLineCheck per line: bank account taken from invoice, then order, then RemittanceUtils.getDefaultOrLastBA; no bank account, missing IBAN, IBAN with spaces, malformed BIC; the mandate checked only on collections; no tax ID; address errors (OBSEPA_BP_NOLOCALITYCOUNTRY, OBSEPA_BP_NOSTRUCTUREDADDR, no location); amount <= 0, above the outstanding amount or null; nothing checked on a processed remittance; no partner; payment lines."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileReadinessTest.java",
+            "note": "ETP-6247 (New): RemittanceFileReadiness: organization (no address, locality/country, street/number, tax ID, CORE creditor id too long vs SCT), account (NoGenerator with the type name, invalid IBAN, malformed BIC, non-EUR), per-line flags, the summary (distinct invoices, total, currency, due date) and latestFile (only the main .xml). The sum of a due: lines of one due that each fit but together exceed its outstanding amount are reported once (ETGO_RemittanceFileLineAmountInvalid named by the first line, lineIds = every line of the due, params partner, document number, outstanding); an exact sum, a single line, a due with a line that fails alone, an unknown outstanding and a processed remittance report nothing; only the exceeded due is reported."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileActionTest.java",
+            "note": "ETP-6247 (New): RemittanceFileAction: 405 for non-POST writes, 404, 403 with the flag off, fileReadiness, invalid grouping 422; confirm refuses processed, no lines and not ready (error.problems); happy path sets ETAR automatic process, saves, flushes, ensures the file setup, runs the process with the grouping and answers {status, attachmentId, fileName, downloadUrl}; REM error or success-but-unprocessed -> ProcessFailed + rollback; a generator Refusal -> 422 key/args + rollback; unexpected -> 500 + rollbackUnlessBatchOwned; generateFile (NotProcessed, happy path); is_regeneration false/true telemetry. ETP-6247 returns: generateFile of a remittance with returns (RemittanceReturnState.hasReturns, a static seam mocked in setUp, false by default) -> 422 ETGO_RemittanceFileHasReturns before the readiness, the setup, the generator or the storage run."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileGeneratorTest.java",
+            "note": "ETP-6247 (New): RemittanceFileGenerator with mocked generators: NoGenerator for null/blank/unknown/foreign class or no type; getMyError + line detail, title fallback, null output, a RuntimeException caught; ISO-8859-1 recovery; a SEPA generator whose version has no XSD next to it nor bundled is refused with ETGO_RemittanceFileSchemaMissing [version] ('-' without a version), never stored unvalidated; a version GO bundles is validated against GO's copy (ETGO_RemittanceFileInvalid naming the version and GrpHdr); file name sanitisation and _2/_3 suffixes; store marks the new attachment main keeping the previous ones (markAsMain(.., true)); IOException when the record or its tab is not found. The validation itself moved to RemittanceSepaSchemaTest."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileTelemetryTest.java",
+            "note": "ETP-6247 (New): RemittanceFileTelemetry emits the remittance file event with direction AR/AP, invoice_count, is_regeneration and role_groups, and never throws."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/telemetry/NeoRoleGroupsTest.java",
+            "note": "ETP-6247 (New): NeoRoleGroups maps the effective role names of the request user to the role groups sent with telemetry."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceFileGeneratorIntegrationTest.java",
+            "note": "ETP-6247 (New, WeldBaseTest, rolled back; 4/4 green 2026-11-13): a minimal remittance of each scheme built and processed by REM in the test transaction (payment: F&B purchase invoice 10001723, collection: GOClient sales invoice FV1000045 with a mandate; partner IBAN bank account and organization structured address created in-transaction), then (a) the Classic CreditTransfer / CoreDirectDebit generator its provisioned type names produces a file valid against pain.001.001.09 / pain.008.001.08 (JDK validator, real XSDs), and (b) GO's RemittanceFileGenerator.generate generates and validates the same file on the class path's Xerces 2.9 (it refused every file with the JAXP 1.5 accessExternalDTD property before RemittanceSepaSchema)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceReturnStateTest.java",
+            "note": "ETP-6247 returns (New, Mockito over a session answering the four HQL queries): RemittanceReturnState.of gives PENDING / NOT_PROCESSED for an unprocessed remittance, PROCESSED / NOT_SETTLED without a settlement row, SETTLED returnable (reasonCode null) for a collection nothing blocks, RETURNED / ALREADY_RETURNED for a void (RPVOID) payment even if a row of it remains; reasons NOT_A_COLLECTION (a payment remittance), POSTED via the settlement row, via the payment and via a bank transaction, RECONCILED via a transaction (and a transaction both reconciled and posted is RECONCILED), an unposted unreconciled transaction does not block; paymentLineIds lists every line of a shared (GGPD) payment, a line without a payment lists only itself and two of them are not grouped; line order kept; settlementRows keyed by payment, first row wins, rows without payment dropped; hasReturns (count 1, 0, null); returnDate is the accounting date of the return row created nearest to the payment's last update, rows without date skipped, a void payment without update date has none; isCollection (payin allowed, not, no method, no type)."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceReturnActionTest.java",
+            "note": "ETP-6247 returns (New, Mockito: the state, the provisioning, TransactionRemovalUtil and the module's RemittanceReturnProcess are seams mocked statically or by construction): returnLines non-POST -> 405, unknown remittance -> 404, flag off -> 403 (both actions), no lineIds -> contract 422, a failure loading -> 500 + rollback; returnState body {collection, hasReturns, lines{state, returnable, reasonCode null when returnable, returnDate, paymentId, paymentLineIds}}; the date: impossible or future -> ETGO_RemittanceReturnDateInvalid before anything is touched, not yyyy-MM-dd -> contract 422, today and the past accepted, default today (handler.today() pinned); an unknown line -> ETGO_RemittanceReturnLineNotFound; every reason code (NOT_PROCESSED, NOT_SETTLED, ALREADY_RETURNED, NOT_A_COLLECTION, POSTED, RECONCILED) -> ETGO_RemittanceReturnNotAllowed with error.problems {lineId, reasonCode, documentNo}, returnable lines not listed, a line without invoice has documentNo null; a shared payment sent partially -> SHARED_PAYMENT, accepted when all its lines are sent (one settlement row for the payment); the run: ensureReturnPaymentMethod, flush, reactivateAndRemove for each bank transaction, the module given the settlement-row ids, the date and a reference payment, the answer {status, returned, returnPaymentId, returnPaymentDocumentNo} and no rollback; failures (removal throws, module throws, no settlement row, payment not void, settlement row survives, no return row written) -> ETGO_RemittanceReturnFailed with the cause + rollbackUnlessBatchOwned; RemittanceReturnProcess.getPaymentMethod returns the given method; reasonKey of every code and every refusal key exist in neo_hints en and es."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceReturnIntegrationTest.java",
+            "note": "ETP-6247 returns (New, WeldBaseTest, rolled back; runs in goIsolatedDalTest): a GOClient collection remittance (sales invoice FV1000045, plus FV1000046 for GGPD) confirmed by REM with the automated hook, then returned through RemittanceReturnAction with the real module code. A settled line is SETTLED and returnable; returnLines (explicit date) -> payment RPVOID, no Cancel row left, a Return row, a negative payment of the amount, the due pending again (outstanding 40.91, paid 0, pending details 40.91, invoice not paid: the reactivated settlement transaction does not corrupt the dues), remittance status CP, returnState RETURNED with the date, generateFile -> ETGO_RemittanceFileHasReturns, a second return -> ALREADY_RETURNED; a reconciled settlement transaction -> RECONCILED, 422 NotAllowed and nothing changed; GGPD merges two lines into one payment (paymentLineIds both), one line alone -> SHARED_PAYMENT and nothing changed, both together are returned and both dues pending. No request context is set up by the test: the bank transaction removal needs the request's VariablesSecureApp and the action pushes it itself (NeoProcessService.pushRequestContextVars), so a return without it proves that push."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/RemittanceSepaSchemaTest.java",
+            "note": "ETP-6247 (New; the validation cases moved here from RemittanceFileGeneratorTest): locate takes the XSD next to the generator class first (Classic CoreDirectDebit), else GO's bundled schemaforge/sepa copy (pain.008.001.08 and pain.001.001.09 only, also without a generator class), else null (unknown, blank or null version); failure is null for a valid document, a cvc- message for an invalid one, non-null for non-XML, and the bundled pain.008 rejects an initiation without GrpHdr. No external access on Xerces 2.9, proved with a counting local HTTP server: a DOCTYPE with an external entity (XXE) is refused ('DOCTYPE') with 0 fetches, an external DTD is refused unread, an xsi:noNamespaceSchemaLocation hint is never fetched (the given schema decides), an xs:include of a remote schema is never fetched; secureReader is namespace-aware, disallows a DOCTYPE and its entity resolver throws."
+          },
+          {
+            "path": "src-test/src/com/etendoerp/go/schemaforge/handlers/ContactBankAccountHandlerTest.java",
+            "note": "ETP-6247 (New): ContactBankAccountHandler, @NeoExtension(contacts, bankAccount) with no @Named: the IBAN at the top level, inside the data envelope or both, under any casing of the key (iBAN, Iban, IBAN, iban) kept as sent, is normalized (a key that only contains iban, e.g. ibanCountry, is not; a non-object data is not an envelope); normalize strips every whitespace (tab, newline, NBSP, em space) and upper-cases independently of the server locale (tr_TR); normalizeIban rewrites only a String iBAN (explicit null, a number, an absent key and a null body untouched, other keys untouched); POST/PUT/PATCH on CRUD or without endpoint type rewrite the request body in place and continue (null); GET/DELETE and DEFAULTS/CALLOUT/SELECTOR/ACTION leave it; a write without body continues."
+          }
+        ],
+        "e2e": []
+      }
+    },
+    {
+      "id": "mcp-routines",
+      "flagKey": "mcp-routines",
+      "paths": [
+        "src/com/etendoerp/go/mcp/McpRoutineTool.java",
+        "src/com/etendoerp/go/mcp/McpRoutineSteps.java",
+        "src/com/etendoerp/go/mcp/McpRoutineParams.java",
+        "src/com/etendoerp/go/mcp/McpRoutineHelp.java",
+        "src/com/etendoerp/go/mcp/McpRoutineStore.java",
+        "src/com/etendoerp/go/mcp/McpRoutineJdbcStore.java",
+        "src/com/etendoerp/go/mcp/McpRoutinesFlag.java",
+        "src-db/database/model/tables/ETGO_MCP_ROUTINE.xml",
+        "src-db/database/model/tables/ETGO_MCP_ROUTINE_VERSION.xml",
+        "src-db/database/model/tables/ETGO_MCP_ROUTINE_EXEC.xml"
+      ]
+    },
+    {
+      "id": "onboarding-tenant-pool",
+      "flagKey": "onboarding-tenant-pool"
+    },
+    {
+      "id": "sii-import-dua",
+      "flagKey": "sii-import-dua"
+    }
+  ]
+}
