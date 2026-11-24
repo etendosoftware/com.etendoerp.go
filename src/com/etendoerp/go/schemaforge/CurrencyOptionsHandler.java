@@ -89,6 +89,16 @@ public class CurrencyOptionsHandler implements NeoHandler {
   static final String FIELD_CURRENCY = "currency";
 
   /**
+   * {@link ConversionRateLookup#DAY_PREDICATE} and {@link ConversionRateLookup#SYSTEM_LAST},
+   * repeated as this class's own literals so the queries below are constants Sonar can see as such
+   * (a reference to another class's constant reads as dynamic SQL to java:S2077).
+   * {@code CurrencyOptionsHandlerTest} asserts the queries still contain the shared fragments.
+   */
+  private static final String DAY_PREDICATE_SQL = " AND cr.validfrom < ?"
+      + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= ?";
+  private static final String SYSTEM_LAST_SQL = "CASE WHEN cr.ad_client_id = '0' THEN 1 ELSE 0 END";
+
+  /**
    * The direct rates (organization currency to X) touching the reference day. ETP-6365: the day
    * rule of {@link ConversionRateLookup} (ValidFrom before the next day, ValidTo on or after the
    * day). Last row per currency wins: rows are read System first, then the client's, each by
@@ -105,8 +115,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
           + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
           + " AND cr.isactive = 'Y'"
           + " AND c.isactive = 'Y'"
-          + ConversionRateLookup.DAY_PREDICATE
-          + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
+          + DAY_PREDICATE_SQL
+          + " ORDER BY c.iso_code, " + SYSTEM_LAST_SQL + " DESC, cr.validfrom ASC";
 
   /** The reverse rates (X to the organization currency), same rule and order as the direct ones. */
   static final String INVERSE_RATES_SQL =
@@ -118,8 +128,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
           + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
           + " AND cr.isactive = 'Y'"
           + " AND c.isactive = 'Y'"
-          + ConversionRateLookup.DAY_PREDICATE
-          + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + " DESC, cr.validfrom ASC";
+          + DAY_PREDICATE_SQL
+          + " ORDER BY c.iso_code, " + SYSTEM_LAST_SQL + " DESC, cr.validfrom ASC";
 
   /**
    * The contract a document header that routes {@code currencyOptions} here publishes for agents

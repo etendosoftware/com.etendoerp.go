@@ -84,6 +84,11 @@ class ConversionRateStore {
       + " ON t.c_currency_id = c.c_currency_id AND t.ad_language = ?";
 
   // SQL of the reads: compile-time constants, every value a bound parameter.
+  /**
+   * {@link ConversionRateLookup#SYSTEM_LAST} (the client's row before the System one), repeated as
+   * this class's own literal so the queries are constants Sonar sees as such (java:S2077).
+   */
+  private static final String SYSTEM_LAST_SQL = "CASE WHEN cr.ad_client_id = '0' THEN 1 ELSE 0 END";
   private static final String AUTO_CURRENCIES_SQL =
       "SELECT CASE WHEN r.c_currency_id_from = ? THEN r.c_currency_id_to"
       + " ELSE r.c_currency_id_from END FROM smfcr_rule r"
@@ -108,7 +113,7 @@ class ConversionRateStore {
       + " AND (cr.c_currency_id = ? OR cr.c_currency_id_to = ?)"
       + " AND cr.validfrom <= now()"
       + " AND COALESCE(cr.validto, TO_DATE('31-12-9999', 'DD-MM-YYYY')) >= now()"
-      + " ORDER BY c.iso_code, " + ConversionRateLookup.SYSTEM_LAST + ", cr.validfrom DESC,"
+      + " ORDER BY c.iso_code, " + SYSTEM_LAST_SQL + ", cr.validfrom DESC,"
       + " CASE WHEN cr.c_currency_id = ? THEN 0 ELSE 1 END";
   private static final String LATEST_DOWNLOAD_SQL = "SELECT MAX(l.sync_date) FROM smfcr_sync_log l"
       + " WHERE l.ad_client_id IN (?, '0') AND l.status = 'SUCCESS'";
