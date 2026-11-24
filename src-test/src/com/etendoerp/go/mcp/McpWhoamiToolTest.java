@@ -326,7 +326,7 @@ class McpWhoamiToolTest {
         .put(new JSONObject().put("name", "Warehouse").put("windows", new JSONArray()
             .put(windowRow("168", "Physical Inventory", "none")))));
     JSONObject reportMatrix = new JSONObject().put("categories", new JSONArray().put(
-        new JSONObject().put("name", "Finance").put("reports", new JSONArray()
+        new JSONObject().put("name", "Treasury").put("reports", new JSONArray()
             .put(windowRow("aging-receivable", "Aging", "read-only"))
             .put(windowRow("balance-sheet", "Balance Sheet", "none")))));
     matrix.when(() -> RoleAccessMatrix.buildMatrix(any(), any())).thenReturn(windowMatrix);

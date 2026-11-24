@@ -77,7 +77,7 @@ public class HubSpotSyncService {
       DemoTrials trials) {
     this(configuration, store, trials,
         new HubSpotEventSender(new HttpHubSpotClient(configuration), configuration, store,
-            trials));
+            trials, HubSpotSignupForm.fromRuntime()));
   }
 
   HubSpotSyncService(HubSpotConfiguration configuration, HubSpotOutboxStore store,

@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
@@ -58,6 +59,7 @@ import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -1136,6 +1138,135 @@ public class GoSessionEndpointsTest {
     JSONObject body = new JSONObject(resp.body.toString());
     assertFalse("platform token must NOT be in the body", body.has("token"));
     assertEquals("csrf-sso", body.getString("csrfToken"));
+  }
+
+  // ETP-5806 follow-up — writeSessionResponse() is the shared tail of register/login/SSO session
+  // creation; before this fix it built { status, account, csrfToken } and never called
+  // buildSessionCapabilities(), so a brand-new account's very first session (the one onboarding's
+  // CompanyStep reads) always saw capabilities as {} on the frontend even with the flag on. These
+  // three tests exercise each creation path end to end (not buildSessionCapabilities() directly,
+  // already covered by EtendoGoJwtServletCoverageTest) and check the flag is targeted at the
+  // correct account email in each one.
+
+  /** {@code POST /sws/go/session} (login): capabilities is evaluated for the authenticating account. */
+  @Test
+  public void loginSessionIncludesCapabilitiesForTheAuthenticatingAccount() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    when(account.getPasswordHash()).thenReturn(storedHash(PASSWORD));
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord()));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlagTargetedAt(EMAIL)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(jsonPost("/session", new JSONObject().put("email", EMAIL).put("password", PASSWORD)),
+          resp.response);
+
+      flags.verify(() -> GoFeatureFlags.isEnabled(eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(c -> EMAIL.equals(c.getTargetingKey()))));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertTrue("login response must carry the per-account capability", body.has("capabilities"));
+    assertTrue(body.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+  }
+
+  /** {@code POST /sws/go/session/register}: capabilities is evaluated for the just-created account. */
+  @Test
+  public void registerSessionIncludesCapabilitiesForTheNewAccount() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(
+        new IssuedGoSession("session-register", "refresh-register", "csrf-register",
+            new GoSessionRecord()));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlagTargetedAt(EMAIL)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(null);
+      dal.when(() -> EtendoGoJwtDalHelper.createAccount(eq(EMAIL), anyString(), eq("User"),
+          anyString())).thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/register", new JSONObject()
+          .put("email", EMAIL)
+          .put("password", PASSWORD)
+          .put("name", "User")), resp.response);
+
+      flags.verify(() -> GoFeatureFlags.isEnabled(eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(c -> EMAIL.equals(c.getTargetingKey()))));
+    }
+
+    assertEquals(201, resp.status);
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertTrue("register response must carry the per-account capability", body.has("capabilities"));
+    assertTrue(body.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+  }
+
+  /** {@code POST /sws/go/session/sso/{provider}}: capabilities is evaluated for the SSO account. */
+  @Test
+  public void ssoSessionIncludesCapabilitiesForTheAuthenticatedAccount() throws Exception {
+    EtendoGoSsoAssertion assertion = mock(EtendoGoSsoAssertion.class);
+    when(assertion.getProvider()).thenReturn("google");
+    when(assertion.getSubject()).thenReturn("sub-1");
+    when(assertion.getEmail()).thenReturn(EMAIL);
+    when(assertion.getName()).thenReturn("SSO User");
+    when(ssoRegistry.verify(eq("google"), any(), anyString())).thenReturn(assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("SSO User");
+    when(goSessionService.create(eq("ACC1"), eq("sso"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-sso", "ref-sso", "csrf-sso", new GoSessionRecord()));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlagTargetedAt(EMAIL)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity("google", "sub-1"))
+          .thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/sso/google",
+          new JSONObject().put("credential", "google-id-token")), resp.response);
+
+      flags.verify(() -> GoFeatureFlags.isEnabled(eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(c -> EMAIL.equals(c.getTargetingKey()))));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertTrue("SSO response must carry the per-account capability", body.has("capabilities"));
+    assertTrue(body.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+  }
+
+  /**
+   * Stubs {@code GoFeatureFlags.isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)} to resolve
+   * {@code true} ONLY when the context's targeting key is exactly {@code targetedEmail}, and
+   * {@code false} for every other context — including an account-less one. This way a test that
+   * forgets to pass the account's own email through to {@code buildSessionCapabilities} (e.g. a
+   * regression that reintroduces a {@code null}/wrong account) fails on the capability assertion
+   * instead of passing by accident.
+   */
+  private static MockedStatic<GoFeatureFlags> mockStructuredAddressFlagTargetedAt(
+      String targetedEmail) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+        any())).thenReturn(false);
+    flags.when(() -> GoFeatureFlags.isEnabled(eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+        argThat(ctx -> ctx != null && targetedEmail.equals(ctx.getTargetingKey()))))
+        .thenReturn(true);
+    return flags;
   }
 
   private static String errorMessage(CapturedResponse resp) throws Exception {

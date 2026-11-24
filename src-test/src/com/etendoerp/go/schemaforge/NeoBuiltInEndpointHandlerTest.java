@@ -54,12 +54,16 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -68,6 +72,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.BoundedJsonParserTest;
@@ -1141,7 +1146,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsHelper.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "100")).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
@@ -1166,7 +1171,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsHelper.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request, false))
           .thenReturn(payload);
 
@@ -1191,7 +1196,7 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       authorizerMock.when(() -> NeoAttachmentAuthorizer.checkWriteOnTable("c_order"))
           .thenReturn(denied);
 
@@ -1224,7 +1229,7 @@ public class NeoBuiltInEndpointHandlerTest {
       try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
           NeoAttachmentsHelper.class);
            MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-               NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
         authorizerMock.when(() -> NeoAttachmentAuthorizer.checkWriteOnAttachment("ATT123"))
             .thenReturn(denied);
 
@@ -1239,7 +1244,8 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * ETP-5205 — reads are out of this slice's scope: a GET download never consults the authorizer.
+   * ETP-5205 / ETP-4570 — a GET download is a READ: it needs the parent-record authorization but
+   * never the write tier.
    */
   @Test
   public void handleAttachmentsFileGetDoesNotConsultTheWriteAuthorizer() throws Exception {
@@ -1250,12 +1256,14 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
         NeoAttachmentsDownloader.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
       downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
-      authorizerMock.verifyNoInteractions();
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeById("ATT123",
+          NeoAttachmentAuthorizer.Access.READ));
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.checkWriteOnAttachment(any()), never());
     }
   }
 
@@ -1294,7 +1302,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
@@ -1321,7 +1329,7 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
         NeoAttachmentsDownloader.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
@@ -1362,7 +1370,7 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleCount("c_order", "123")).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
@@ -1389,7 +1397,7 @@ public class NeoBuiltInEndpointHandlerTest {
       try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
           NeoAttachmentsHelper.class);
            MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-               NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
         boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
             method, request, response);
 
@@ -1415,7 +1423,7 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "count")).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
@@ -1458,7 +1466,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
@@ -1500,7 +1508,7 @@ public class NeoBuiltInEndpointHandlerTest {
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
 
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleDelete("ATT123")).thenReturn(deleteResponse);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -1530,7 +1538,7 @@ public class NeoBuiltInEndpointHandlerTest {
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
 
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleDelete("ATT123")).thenReturn(deleteResponse);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -1559,7 +1567,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsHelper.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", "new"))
           .thenReturn(payload);
 
@@ -1586,7 +1594,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsHelper.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "PATCH", request, response);
 
@@ -1614,7 +1622,7 @@ public class NeoBuiltInEndpointHandlerTest {
         NeoAttachmentsHelper.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
-             NeoAttachmentAuthorizer.class)) {
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", null))
           .thenReturn(payload);
 
@@ -1889,6 +1897,300 @@ public class NeoBuiltInEndpointHandlerTest {
 
       endpoint.verify(() -> InvoiceInboxUploadEndpoint.handle(any()), never());
       verify(servlet, never()).writeResponse(any(), any());
+    }
+  }
+
+  /**
+   * ETP-4570 — default answers of a mocked {@link NeoAttachmentAuthorizer}: the parent-record
+   * authorization allows, the write tier (null) allows, and {@code notFound()} is the real one.
+   */
+  private static final Answer<Object> PARENT_ALLOWED = invocation -> {
+    switch (invocation.getMethod().getName()) {
+      case "authorizeByRecord":
+        return true;
+      case "authorizeById":
+        return mock(Attachment.class);
+      case "notFound":
+        return NeoResponse.error(404, NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND);
+      default:
+        return Mockito.RETURNS_DEFAULTS.answer(invocation);
+    }
+  };
+
+  /**
+   * ETP-4570 — every attachment route answers the uniform 404 and touches nothing when the parent
+   * record is not authorized.
+   */
+  @Test
+  public void handleAttachmentsRoutesAnswerUniformNotFoundWhenParentIsNotAuthorized()
+      throws Exception {
+    String[][] cases = {
+        {"GET", "/attachments/c_order/100"},
+        {"POST", "/attachments/c_order/100"},
+        {"GET", "/attachments/c_order/100/zip"},
+        {"GET", "/attachments/c_order/100/main"},
+        {"GET", "/attachments/c_order/100/count"},
+        {"GET", "/attachments/file/ATT123"},
+        {"DELETE", "/attachments/file/ATT123"},
+        {"PATCH", "/attachments/file/ATT123"},
+        {"PATCH", "/attachments/file/ATT123/main"},
+    };
+    for (String[] c : cases) {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(request.getPathInfo()).thenReturn(c[1]);
+      Mockito.clearInvocations(servlet);
+      NeoResponse notFound = NeoResponse.error(404, NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND);
+      try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+          NeoAttachmentsHelper.class);
+           MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+               NeoAttachmentsDownloader.class);
+           MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+               NeoAttachmentAuthorizer.class)) {
+        authorizerMock.when(NeoAttachmentAuthorizer::notFound).thenReturn(notFound);
+
+        handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), c[0], request,
+            response);
+
+        verify(servlet).writeResponse(response, notFound);
+        // Nothing the route delegates to (list, count, main, upload, mark-main, delete,
+        // description, both downloads) ran, and the 403 write tier was never reached first.
+        downloaderMock.verifyNoInteractions();
+        attachmentsMock.verifyNoInteractions();
+        authorizerMock.verify(() -> NeoAttachmentAuthorizer.checkWriteOnTable(any()), never());
+        authorizerMock.verify(() -> NeoAttachmentAuthorizer.checkWriteOnAttachment(any()), never());
+      }
+    }
+  }
+
+  /**
+   * ETP-4570 — drives the routes with the real authorizer: an id that has no attachment row and
+   * an id whose attachment hangs off a foreign-client parent must reach {@code writeResponse}
+   * as the same status, body and headers, for a read (bare-id download) and a write (delete).
+   */
+  @Test
+  public void missingAndForeignIdsAreAnsweredIdenticallyByTheRoutes() throws Exception {
+    String[][] routes = {{"GET", "/attachments/file/ATT1"}, {"DELETE", "/attachments/file/ATT1"}};
+    for (String[] route : routes) {
+      NeoResponse missing = answerFor(route, null);
+      NeoResponse foreign = answerFor(route,
+          NeoAttachmentParentAuthorizationTest.parent("client-other", "org-own", true));
+      assertEquals(404, missing.getHttpStatus());
+      assertEquals(missing.getHttpStatus(), foreign.getHttpStatus());
+      assertEquals(missing.getBody().toString(), foreign.getBody().toString());
+      assertEquals(missing.getHeaders(), foreign.getHeaders());
+    }
+  }
+
+  /** Runs one attachment route with the real authorizer; {@code null} parent means no attachment. */
+  private NeoResponse answerFor(String[] route, BaseOBObject parent)
+      throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(request.getPathInfo()).thenReturn(route[1]);
+    Mockito.clearInvocations(servlet);
+    ArgumentCaptor<NeoResponse> written =
+        ArgumentCaptor.forClass(NeoResponse.class);
+    try (NeoAttachmentParentAuthorizationTest.Env env =
+        new NeoAttachmentParentAuthorizationTest.Env(parent)) {
+      env.attachmentPresent = parent != null;
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), route[0], request,
+          response);
+    }
+    verify(servlet).writeResponse(eq(response), written.capture());
+    return written.getValue();
+  }
+
+  /**
+   * ETP-4570 — positive path of the record routes: an authorized caller gets exactly what the
+   * helper answers, unchanged.
+   */
+  @Test
+  public void authorizedRecordRoutesReturnTheHelperResponseUnchanged() throws Exception {
+    String[] paths = {"/attachments/c_order/100", "/attachments/c_order/100/main",
+        "/attachments/c_order/100/count"};
+    NeoResponse list = NeoResponse.ok(new JSONObject().put("items", new JSONArray()));
+    NeoResponse main = NeoResponse.ok(new JSONObject());
+    NeoResponse count = NeoResponse.ok(new JSONObject().put("count", 2));
+    NeoResponse[] expected = {list, main, count};
+    for (int i = 0; i < paths.length; i++) {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(request.getPathInfo()).thenReturn(paths[i]);
+      Mockito.clearInvocations(servlet);
+      try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+          NeoAttachmentsHelper.class);
+           MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+               NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+        attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "100"))
+            .thenReturn(list);
+        attachmentsMock.when(() -> NeoAttachmentsHelper.handleGetMain("c_order", "100"))
+            .thenReturn(main);
+        attachmentsMock.when(() -> NeoAttachmentsHelper.handleCount("c_order", "100"))
+            .thenReturn(count);
+
+        handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "GET", request,
+            response);
+
+        verify(servlet).writeResponse(response, expected[i]);
+        authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeByRecord("c_order", "100",
+            NeoAttachmentAuthorizer.Access.READ));
+      }
+    }
+  }
+
+  /** ETP-4570 — positive path of the zip route. */
+  @Test
+  public void authorizedZipRouteDelegatesToTheDownloader() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "GET", request,
+          response);
+
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownloadAll("c_order", "100",
+          null, response));
+    }
+  }
+
+  /** ETP-4570 — upload: parent WRITE authorization, then the helper, whose answer is written as is. */
+  @Test
+  public void authorizedUploadRunsTheHelperAndWritesItsAnswer() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse created = NeoResponse.created(new JSONObject());
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/100");
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request, false))
+          .thenReturn(created);
+
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "POST", request,
+          response);
+
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeByRecord("c_order", "100",
+          NeoAttachmentAuthorizer.Access.WRITE));
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request, false));
+      verify(servlet).writeResponse(response, created);
+    }
+  }
+
+  /** ETP-4570 — delete: WRITE authorization, helper, flush, and the helper's own answer. */
+  @Test
+  public void authorizedDeleteRunsTheHelperAndWritesItsAnswer() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+    NeoResponse deleted = NeoResponse.noContent();
+    when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleDelete("ATT123")).thenReturn(deleted);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "DELETE", request,
+          response);
+
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeById("ATT123",
+          NeoAttachmentAuthorizer.Access.WRITE));
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDelete("ATT123"));
+      verify(dal).flush();
+      verify(servlet).writeResponse(response, deleted);
+    }
+  }
+
+  /** ETP-4570 — update description: WRITE authorization, helper with the body's text. */
+  @Test
+  public void authorizedDescriptionUpdateRunsTheHelperAndWritesItsAnswer() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse updated = NeoResponse.ok(new JSONObject());
+    when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader("{\"description\":\"d\"}")));
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", "d"))
+          .thenReturn(updated);
+
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "PATCH", request,
+          response);
+
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeById("ATT123",
+          NeoAttachmentAuthorizer.Access.WRITE));
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", "d"));
+      verify(servlet).writeResponse(response, updated);
+    }
+  }
+
+  /** ETP-4570 — mark-main: WRITE authorization, helper with the body's flag. */
+  @Test
+  public void authorizedMarkMainRunsTheHelperAndWritesItsAnswer() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse marked = NeoResponse.ok(new JSONObject());
+    when(request.getPathInfo()).thenReturn("/attachments/file/ATT123/main");
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader("{\"isMain\":true}")));
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleMarkMain("ATT123", true))
+          .thenReturn(marked);
+
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "PATCH", request,
+          response);
+
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeById("ATT123",
+          NeoAttachmentAuthorizer.Access.WRITE));
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleMarkMain("ATT123", true));
+      verify(servlet).writeResponse(response, marked);
+    }
+  }
+
+  /**
+   * ETP-4570 — bare-id single download with no table or record in the request: an authorized
+   * caller still gets the file from the downloader, and the decision used the READ access.
+   * The list → bare-id download sequence is what the OCR flow does after a contextual list
+   * (ADR-0003 D1); the sequence is asserted end to end here. The OCR caller itself is not in
+   * this module's sources, so this pins the route contract it relies on, not its code.
+   */
+  @Test
+  public void bareIdDownloadAfterContextualListStillWorksForAuthorizedCaller() throws Exception {
+    HttpServletRequest listRequest = mock(HttpServletRequest.class);
+    HttpServletRequest fileRequest = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(listRequest.getPathInfo()).thenReturn("/attachments/c_order/100");
+    when(fileRequest.getPathInfo()).thenReturn("/attachments/file/ATT123");
+    NeoResponse listed = NeoResponse.ok(new JSONObject());
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+             NeoAttachmentsDownloader.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class, PARENT_ALLOWED)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "100"))
+          .thenReturn(listed);
+
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "GET", listRequest,
+          response);
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null), "GET", fileRequest,
+          response);
+
+      verify(servlet).writeResponse(response, listed);
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
+      authorizerMock.verify(() -> NeoAttachmentAuthorizer.authorizeById("ATT123",
+          NeoAttachmentAuthorizer.Access.READ));
     }
   }
 }

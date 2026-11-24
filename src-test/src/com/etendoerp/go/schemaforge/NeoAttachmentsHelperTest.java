@@ -157,6 +157,100 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+  // ── markAsMain(attachment, keepPrevious) ─────────────────────────────────────
+
+  /**
+   * keepPrevious = true (ETP-6247, a regenerated SEPA file): the new file becomes the record's main
+   * attachment and the earlier main one only loses the flag, it is never deleted. Every write is
+   * the native C_File UPDATE (no DAL entity is dirtied).
+   */
+  @Test
+  public void markAsMainKeepingPreviousUnflagsTheEarlierMainWithoutDeletingIt() throws Exception {
+    MarkMainRun run = markAsMain(Arrays.asList("OLD-MAIN", "NEW"), true);
+
+    assertEquals(Arrays.asList("OLD-MAIN=N", "NEW=Y"), run.flagged);
+    verify(run.manager, never()).delete(any());
+  }
+
+  /** keepPrevious = false (an upload marked main, «Marcar como principal»): the earlier is deleted. */
+  @Test
+  public void markAsMainReplacingPreviousDeletesTheEarlierMainAndFlagsTheNewOne() throws Exception {
+    MarkMainRun run = markAsMain(Collections.singletonList("OLD-MAIN"), false);
+
+    verify(run.manager).delete(run.attachments.get("OLD-MAIN"));
+    assertEquals("the deleted one is not unflagged, the new one is flagged",
+        Collections.singletonList("NEW=Y"), run.flagged);
+  }
+
+  /** Marking the attachment that already is the main one touches nothing else, in both modes. */
+  @Test
+  public void markAsMainOnTheCurrentMainNeitherDeletesNorUnflagsIt() throws Exception {
+    for (boolean keepPrevious : new boolean[] { true, false }) {
+      MarkMainRun run = markAsMain(Collections.singletonList("NEW"), keepPrevious);
+
+      assertEquals("keepPrevious=" + keepPrevious, Collections.singletonList("NEW=Y"), run.flagged);
+      verify(run.manager, never()).delete(any());
+    }
+  }
+
+  /** What one {@code markAsMain} call did: the C_File flags written, in order, and the manager. */
+  private static final class MarkMainRun {
+    final java.util.List<String> flagged = new java.util.ArrayList<>();
+    final java.util.Map<String, Attachment> attachments = new java.util.HashMap<>();
+    AttachImplementationManager manager;
+  }
+
+  /**
+   * Runs {@code markAsMain} on attachment {@code NEW} of record REM-1 while {@code currentMain}
+   * are the record's main-flagged attachments.
+   */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static MarkMainRun markAsMain(java.util.List<String> currentMain, boolean keepPrevious)
+      throws Exception {
+    MarkMainRun run = new MarkMainRun();
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(anyString())).thenAnswer(inv -> {
+      NativeQuery query = mock(NativeQuery.class);
+      java.util.Map<String, Object> params = new java.util.HashMap<>();
+      when(query.setParameter(anyString(), any())).thenAnswer(set -> {
+        params.put(set.getArgument(0), set.getArgument(1));
+        return query;
+      });
+      when(query.list()).thenReturn(currentMain);
+      when(query.executeUpdate()).thenAnswer(update -> {
+        run.flagged.add(params.get("id") + "=" + params.get("flag"));
+        return 1;
+      });
+      return query;
+    });
+    for (String id : currentMain) {
+      Attachment existing = mock(Attachment.class);
+      when(existing.getId()).thenReturn(id);
+      run.attachments.put(id, existing);
+      when(dal.get(Attachment.class, id)).thenReturn(existing);
+    }
+    org.openbravo.model.ad.datamodel.Table table =
+        mock(org.openbravo.model.ad.datamodel.Table.class);
+    when(table.getId()).thenReturn("TABLE-REM");
+    Attachment attachment = mock(Attachment.class);
+    when(attachment.getId()).thenReturn("NEW");
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("REM-1");
+    run.manager = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weld = Mockito.mockStatic(WeldUtils.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      weld.when(() -> WeldUtils.getInstanceFromStaticBeanManager(
+          AttachImplementationManager.class)).thenReturn(run.manager);
+
+      NeoAttachmentsHelper.markAsMain(attachment, keepPrevious);
+    }
+    return run;
+  }
+
   @Test
   public void updateDataTypeWritesAndReleasesTheSavepoint() throws Exception {
     DataTypeWork w = new DataTypeWork();
@@ -333,26 +427,11 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * Verifies default binary content type fallback when metadata is blank.
-   */
-  @Test
-  public void resolveContentTypeReturnsDefaultForBlankValues() throws Exception {
-    String fromNull = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, (Object) null);
-    String fromBlank = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "   ");
-    String fromValue = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "text/plain");
-
-    assertEquals("application/octet-stream", fromNull);
-    assertEquals("application/octet-stream", fromBlank);
-    assertEquals("text/plain", fromValue);
-  }
-
-  /**
    * Verifies that content disposition includes both ASCII and RFC 5987 entries.
    */
   @Test
-  public void buildContentDispositionIncludesAsciiAndUtf8Filename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "invoice 2026.pdf");
+  public void contentDispositionIncludesAsciiAndUtf8Filename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("invoice 2026.pdf");
 
     assertTrue(disposition.contains("filename=\"invoice 2026.pdf\""));
     assertTrue(disposition.contains("filename*=UTF-8''invoice%202026.pdf"));
@@ -362,9 +441,8 @@ public class NeoAttachmentsHelperTest {
    * Verifies that dangerous quotes in file names are normalized.
    */
   @Test
-  public void buildContentDispositionReplacesQuotesInFilename() throws Exception {
-    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
-        "in\"voice\".pdf");
+  public void contentDispositionReplacesQuotesInFilename() {
+    String disposition = NeoDownloadHeaders.contentDisposition("in\"voice\".pdf");
 
     assertTrue(disposition.contains("filename=\"in_voice_.pdf\""));
   }
@@ -801,6 +879,9 @@ public class NeoAttachmentsHelperTest {
       verify(aim, times(1)).download(eq("ATT-OTHER"), any());
       verify(aim, times(1)).download(eq("ATT-MAIN"), any());
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response).setContentType("application/zip");
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
+      verify(response).setHeader("Cache-Control", "no-store");
 
       assertEquals(
           new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
@@ -1908,7 +1989,55 @@ public class NeoAttachmentsHelperTest {
     verify(response).setStatus(422);
     verify(response).setContentType("application/json");
     verify(response).setCharacterEncoding(StandardCharsets.UTF_8.name());
+    verify(response).setHeader("Cache-Control", "no-store");
+    verify(response).setHeader("X-Content-Type-Options", "nosniff");
     assertTrue(sink.toString().contains("unprocessable"));
+  }
+
+  /**
+   * ETP-4571 — a legacy record stored as HTML or SVG is served inert: type from the extension
+   * allow-list (never the stored one), attachment, nosniff, no-store, sandbox CSP.
+   */
+  @Test
+  public void handleDownloadServesLegacyActiveTypesInert() throws Exception {
+    String[][] cases = { { "page.html", "text/html", "application/octet-stream" },
+        { "logo.svg", "image/svg+xml", "application/octet-stream" },
+        { "informe.v2.final.pdf", "text/html", "application/pdf" },
+        { "factura_año.pdf", "application/pdf", "application/pdf" } };
+    for (String[] c : cases) {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      stubOutputStream(response);
+      Attachment attachment = stubAttachment("ATT1", c[0]);
+      when(attachment.getDataType()).thenReturn(c[1]);
+      AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
+
+      try (MockedStatic<TenantOwnership> ownership = Mockito.mockStatic(TenantOwnership.class);
+          MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+        ownership.when(() -> TenantOwnership.loadOwned(Attachment.class, "ATT1"))
+            .thenReturn(attachment);
+        weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(
+            AttachImplementationManager.class)).thenReturn(aim);
+
+        NeoAttachmentsDownloader.handleDownload("ATT1", response);
+      }
+
+      verify(response).setContentType(c[2]);
+      verify(response).setHeader("X-Content-Type-Options", "nosniff");
+      verify(response).setHeader("Cache-Control", "no-store");
+      verify(response).setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
+      verify(response).setHeader("Content-Disposition",
+          NeoDownloadHeaders.contentDisposition(c[0]));
+    }
+  }
+
+  /** ETP-4571 — a Unicode name keeps its RFC 5987 form; a multi-dot name stays intact. */
+  @Test
+  public void contentDispositionKeepsUnicodeAndMultiDotNames() {
+    String unicode = NeoDownloadHeaders.contentDisposition("factura_año.pdf");
+    assertTrue(unicode.startsWith("attachment;"));
+    assertTrue(unicode.contains("filename*=UTF-8''factura_a%C3%B1o.pdf"));
+    assertTrue(NeoDownloadHeaders.contentDisposition("informe.v2.final.pdf")
+        .contains("filename=\"informe.v2.final.pdf\""));
   }
 
   /**

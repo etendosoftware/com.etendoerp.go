@@ -93,7 +93,7 @@ public class ProductStockWarehouseHandlerTest {
     List<Object[]> rows = new ArrayList<>();
     rows.add(new Object[]{
         "sd-1", "loc-1", "BIN-A", "wh-1", "Main Warehouse",
-        new BigDecimal("10.00"), new BigDecimal("2.00"), new BigDecimal("1.00"), "0"
+        new BigDecimal("10.00"), new BigDecimal("2.00"), new BigDecimal("1.00"), "0", java.sql.Timestamp.valueOf("2026-01-02 03:04:05")
     });
 
     NativeQuery<Object[]> query = mock(NativeQuery.class);
@@ -106,11 +106,16 @@ public class ProductStockWarehouseHandlerTest {
     when(obDal.getSession()).thenReturn(session);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<TenantOwnership> tenantMock = mockStatic(TenantOwnership.class)) {
+      tenantMock.when(() -> TenantOwnership.loadOwned(org.mockito.ArgumentMatchers.any(), anyString()))
+          .thenReturn(mock(org.openbravo.model.common.plm.Product.class));
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
       NeoResponse resp = handler.handle(ctx);
       assertEquals(200, resp.getHttpStatus());
+      String body = resp.getBody().toString();
+      org.junit.Assert.assertTrue("row must carry updated: " + body, body.contains("\"updated\":\"2026-01-02T03:04:05"));
     }
   }
 

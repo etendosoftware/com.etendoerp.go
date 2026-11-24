@@ -358,7 +358,7 @@ link we mailed.
 | `return-to-vendor-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the vendor-return business partner | `version`, `recordId` |
 | `return-material-receipt-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the return receipt business partner | `version`, `recordId` |
 | `return-to-vendor-shipment-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the return shipment business partner | `version`, `recordId` |
-| `portal-quotation-decision-confirm` | `custom` | The **first To** stored on the root `ETGO_Portal_Link` row of the session's link — never CC, never an address from the caller | `linkId`, `recordId` (the quotation), `tenantId`, `language`, `decision`, `reasonCode`?, `reasonText`?. Only inside `PortalDecisionScope` (set by `PortalDecisionService#request`); else 403. Mints the `ETGO_PORTAL_DECISION` row in `resolve`, usable from `onDelivered`. Its button names the decision ("Confirmar rechazo" / "Confirmar aceptación", `confirm.cta.<DECISION>`) and is the confirmation itself: the landing auto-submits the confirm POST on open, a bare GET applies nothing |
+| `portal-quotation-decision-confirm` | `custom` | The **first To** stored on the root `ETGO_Portal_Link` row of the session's link — never CC, never an address from the caller | `linkId`, `recordId` (the quotation), `tenantId`, `language`, `decision`, `reasonCode`?, `reasonText`?. Only inside `PortalDecisionScope` (set by `PortalDecisionService#request`); else 403. Mints the `ETGO_PORTAL_DECISION` row in `resolve`, usable from `onDelivered`. Card design and Etendo footer (see *Portal email design* below). Its button names the decision ("Confirmar rechazo" / "Confirmar aceptación", `confirm.cta.<DECISION>`) and is the confirmation itself: the landing auto-submits the confirm POST on open, a bare GET applies nothing |
 | `portal-quotation-decision-notice` | `custom` | The ETGO_ACCOUNT email of the user who created the decision's root link (the sender of the quotation) | `decisionId`, `recordId`, `tenantId`, `language`. Only inside `PortalDecisionScope`, after the confirmation's commit |
 | `portal-link-renewal` | `custom` | The To and CC stored on the expired `ETGO_Portal_Link` row named by `linkId` — never the person who opened the link | `linkId`, `recordId` (the document), `tenantId`, `language`. Accepted only inside `PortalRenewalScope` (set by `PortalLinkService#renew`); any other caller gets 403 |
 
@@ -373,6 +373,45 @@ portal") and the download button goes — the portal shows the same printable �
 return contracts) the email is byte-identical to before. The base class only asks whether a kind
 was declared and whether a link was minted; it names no window or table.
 The portal side (endpoints, renewal checks, rate limits, PDF) is in `customer-portal.md`.
+
+### Portal email design: the decision card and the Etendo footer (ETP-6209)
+
+- **`portal-quotation-decision-confirm` uses the card design** (Figma): issuer avatar + "Confirmación
+  pendiente" badge, title and subtitle per decision, a "Datos del presupuesto" box with three
+  columns, a note over a full-width button, the link fallback, a "¿No reconoces esta solicitud?"
+  block and the footer. `EmailLayout.render` selects it when the content has a `title`; the markup
+  is in the package-private `EmailCardLayout`, still reached only through `EmailLayout`. Copy:
+  `portal-quotation-decision.confirm.*` (tuteo, as the design), subject per decision.
+  - Accept columns: Empresa (tenant name) · Nº presupuesto · Importe total, formatted as the app
+    shows it ("2.450,00 €") by `EmailAmountFormat`: the instance separators of
+    `NeoCurrencyFormatConfig` (the source behind `GET /sws/neo/currency-format`), the currency's
+    `Symbol` on the side `IsSymbolRightSide` says, the ISO code when it has no symbol. The
+    document emails keep `DalEmailContractDataResolver.formatAmount` ("2450.00 EUR"), untouched.
+  - Reject columns: Empresa · Nº presupuesto · Motivo — **no amount** (PO decision). Motivo is the
+    customer's portal reason in the email language; for `OTHER` it is the text the customer typed
+    (whitespace collapsed, cut to 80 characters with "…", escaped), falling back to the "Otros"
+    label when empty. The tenant's internal reject reasons never appear.
+  - The avatar is the tenant's **logo**, through the token-free `GET /sws/portal/public-logo/{ref}`
+    (`PortalLogoReference`; see `customer-portal.md` → *The public logo*), never `/sws/portal/logo`,
+    whose portal token must not travel in an image URL. The logo is fitted inside the 52px circle
+    with its aspect kept (fixed width/height; email clients ignore `object-fit`). Only a tenant
+    with no PNG/JPEG logo, or an instance without the app base URL or signing secret, gets the
+    initials avatar.
+  - The "¿El botón no funciona?" block is centred; the "¿No reconoces esta solicitud?" block is
+    left-aligned, as in the design.
+- **The "Creado con Etendo" footer** (`EmailFooter`, copy `footer.*`) closes the emails our
+  customers' customers receive through the portal: both decision confirmations, the
+  `portal-link-renewal`, and the four portal document sends **only when a portal link was minted**
+  (`CallToAction#isPortal`). Flag off, purchase/return sends, account emails and the seller's
+  `portal-quotation-decision-notice` render byte-identical: the footer exists only when the
+  content asks for it. The icon is the hosted `EmailLayout.LOGO_URL` (the lime Etendo tile) on a
+  lime cell, so it still reads with images blocked.
+- **Footer URLs are provisional.** `EmailFooter.PRICING_URL` is `https://etendo.ai`.
+  `EmailFooter.PRIVACY_URL` is empty, so the "Política de cookies y privacidad" row is **not
+  rendered** (a privacy link to the home page would mislead); setting marketing's real URL there
+  brings it back, copy `footer.privacy` is kept. Marketing will send the final ones plus a UTM per piece: fill
+  `EmailFooter.Piece`'s tracking query (`DOCUMENT_SEND`, `LINK_RENEWAL`, `DECISION_ACCEPT`,
+  `DECISION_REJECT`); `EmailFooter.link` appends it to every footer link, no contract changes.
 
 - **One link per send.** `PortalLinkService#mintForSend` inserts an `ETGO_Portal_Link` row in
   `resolve()` with `SENT_AT` null (pending) and the email's To and CC. The link id travels as

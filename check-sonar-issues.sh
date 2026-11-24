@@ -28,7 +28,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+CLASSIC_ROOT="${GO_CORE_DIR:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 
 BASE_REF="${1:-}"
 POLL_INTERVAL=5

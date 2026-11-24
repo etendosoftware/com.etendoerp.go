@@ -20,10 +20,12 @@ package com.etendoerp.go.mcp;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.ClassicMessageRemap;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -75,6 +77,23 @@ import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
  * rendered, leaves every {@code BigDecimal} exactly as the producer put it. This is why the JSON
  * overloads of the content wrappers take the object and render it here, rather than accepting a
  * rendered string and sanitising that.
+ *
+ * <p><b>Dash-joined identifiers (ETP-5806 CP-8b, QA Pasada 2 — persists).</b> Core's
+ * {@code IdentifierProvider} builds an address-wrapping entity's own {@code _identifier} (and any
+ * FK's {@code <prop>$_identifier}) by concatenating every segment with {@code " - "} even when a
+ * segment is blank, so {@code etendo_list} on {@code warehouse}, {@code contacts} and
+ * {@code bp-location} returned raw strings like
+ * {@code "Poligono Industrial Norte, s/n - Nave 3 - - - Getafe - - España"}. A client-side fix
+ * ({@code sanitizeDashJoinedIdentifier} in the SPA, {@code tools/app-shell/src/lib/locationAddress.js})
+ * only cleaned up what the SPA itself renders; an MCP agent reading {@code etendo_list}/
+ * {@code etendo_get} directly still saw the raw, double-separated string. {@link #strip(JSONObject)}
+ * now runs the same algorithm — split on {@code " - "}, trim each segment, drop the blank ones,
+ * rejoin — on every key named {@link JsonConstants#IDENTIFIER} or ending in
+ * {@code "$" + JsonConstants#IDENTIFIER}, at any depth, on every MCP tool result. This is
+ * structural (keyed by the generic identifier-field SHAPE every entity can carry, not by a spec or
+ * table name naming {@code warehouse}/{@code contacts}/{@code bp-location} specifically), so it
+ * also covers any other entity whose identifier happens to concatenate blank segments the same
+ * way, without a fourth per-entity patch.
  */
 final class McpResponseSanitizer {
 
@@ -203,8 +222,82 @@ final class McpResponseSanitizer {
       keys.add(String.valueOf(it.next()));
     }
     for (String key : keys) {
-      stripValue(object.get(key));
+      Object value = object.get(key);
+      // ETP-5806 CP-8b — an identifier key never nests further (its value is always a String),
+      // so this is checked before the generic object/array descent below, not after it.
+      if (isIdentifierKey(key) && value instanceof String) {
+        String cleaned = sanitizeDashJoinedIdentifier((String) value);
+        if (!cleaned.equals(value)) {
+          object.put(key, cleaned);
+        }
+      } else {
+        stripValue(value);
+      }
     }
+  }
+
+  /**
+   * Whether {@code key} names a generic identifier field — the entity's own ({@link
+   * JsonConstants#IDENTIFIER}, {@code "_identifier"}) or an FK's ({@code "<prop>$_identifier"}) —
+   * the two shapes {@code DataToJsonConverter} ever produces this suffix under. Structural: the
+   * key's own shape, not any entity or table name (ETP-5806 CP-8b).
+   */
+  private static boolean isIdentifierKey(String key) {
+    return JsonConstants.IDENTIFIER.equals(key)
+        || key.endsWith("$" + JsonConstants.IDENTIFIER);
+  }
+
+  /** The literal segment separator {@code IdentifierProvider} joins address segments with. */
+  private static final String DASH_SEPARATOR = " - ";
+
+  /**
+   * Matches a run of one or more {@code " -"} tokens followed by a trailing space — i.e. the
+   * whole separator cluster left behind by N consecutive blank segments (N+1 repetitions of the
+   * {@code " -"} token), collapsing to a single delimiter regardless of how many blank segments
+   * produced it. A single isolated separator ({@code " - "}) is exactly one repetition, so this
+   * also covers the ordinary single-separator case. Splitting on the literal {@code " - "}
+   * string instead (the previous approach) under-counts matches on a run of repeated separators,
+   * because consecutive {@code " - "} tokens share boundary characters and the literal split
+   * finds fewer matches than there are blank segments — see ETP-5806 CP-8b follow-up.
+   *
+   * <p>Written as {@code " (?:- )++"} rather than the equivalent {@code "(?: -)+ "}: both match
+   * exactly the same strings ({@code (" -")^k + " "} equals {@code " " + ("- ")^k}), but with the
+   * repetition last and possessive the engine has nothing to backtrack into, which is what the
+   * regex-DoS rule (Sonar S5852) asks for. Behaviour is unchanged.
+   */
+  private static final Pattern DASH_RUN_PATTERN = Pattern.compile(" (?:- )++");
+
+  /**
+   * Drops empty segments from a {@code " - "}-joined identifier string, so a blank address
+   * segment never leaves a double or dangling separator on the wire (ETP-5806 CP-8b).
+   *
+   * <p>Mirrors the SPA's own {@code sanitizeDashJoinedIdentifier}
+   * ({@code tools/app-shell/src/lib/locationAddress.js}) exactly: split on the separator-run
+   * pattern, trim each segment, filter the blank ones, rejoin with the canonical separator. A
+   * string with no occurrence of the separator — the common case for most identifiers — is
+   * returned unchanged without being split at all.
+   *
+   * @param raw the identifier value as the default service built it; never {@code null} here,
+   *            since the only call site already checked {@code instanceof String}
+   * @return the cleaned identifier; equal to {@code raw} when there was nothing to clean
+   */
+  static String sanitizeDashJoinedIdentifier(String raw) {
+    if (!raw.contains(DASH_SEPARATOR)) {
+      return raw;
+    }
+    String[] segments = DASH_RUN_PATTERN.split(raw, -1);
+    StringBuilder cleaned = new StringBuilder();
+    for (String segment : segments) {
+      String trimmed = segment.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      if (cleaned.length() > 0) {
+        cleaned.append(DASH_SEPARATOR);
+      }
+      cleaned.append(trimmed);
+    }
+    return cleaned.toString();
   }
 
   /**

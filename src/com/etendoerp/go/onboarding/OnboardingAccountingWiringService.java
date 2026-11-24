@@ -456,12 +456,18 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     return text.isEmpty() ? null : text;
   }
 
-  /** Parses a bundled sourcedata XML resource from the classpath; returns null when absent. */
-  private Document parseSourceResource(String resourcePath) {
+  /** Class loader used to locate the bundled sourcedata; overridable so tests control it. */
+  protected ClassLoader getSourceResourceClassLoader() {
     ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
     if (classLoader == null) {
       classLoader = OnboardingAccountingWiringService.class.getClassLoader();
     }
+    return classLoader;
+  }
+
+  /** Parses a bundled sourcedata XML resource from the classpath; returns null when absent. */
+  private Document parseSourceResource(String resourcePath) {
+    ClassLoader classLoader = getSourceResourceClassLoader();
     try (InputStream inputStream = classLoader.getResourceAsStream(resourcePath)) {
       if (inputStream == null) {
         return null;

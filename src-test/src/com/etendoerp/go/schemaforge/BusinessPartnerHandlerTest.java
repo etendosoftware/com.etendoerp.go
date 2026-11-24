@@ -2869,4 +2869,51 @@ class BusinessPartnerHandlerTest {
     assertEquals(java.time.LocalDate.now().toString(),
         body.getString(ContactSepaMandateDefaults.FIELD_MANDATE_DATE));
   }
+
+  /** ETP-6225: a rejected phone/NIF 400 is keyed by field so the import can mark its column. */
+  @Test
+  void testInvalidPhoneIsKeyedByField() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoPhone", "'+34 910 565 400");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    JSONObject errors = result.getBody().getJSONObject("response").getJSONObject("errors");
+    assertEquals("The phone number can only contain digits and the + ( ) - . characters, up to 15 characters.",
+        errors.getString("etgoPhone"));
+    assertEquals(errors.getString("etgoPhone"), result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  void testInvalidNifIsKeyedByField() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_FORMAT);
+    body.put("oBTIKTaxIDKey", "1");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertEquals(SpanishTaxIdValidator.ERR_FORMAT,
+        result.getBody().getJSONObject("response").getJSONObject("errors").getString("taxID"));
+  }
+
+  @Test
+  void testInvalidEmailIsKeyedByField() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoEmail", "not-an-email");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    JSONObject errors = result.getBody().getJSONObject("response").getJSONObject("errors");
+    assertEquals(result.getBody().getJSONObject("error").getString("message"), errors.getString("etgoEmail"));
+  }
 }

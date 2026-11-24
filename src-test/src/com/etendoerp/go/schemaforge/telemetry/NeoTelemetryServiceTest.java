@@ -261,6 +261,76 @@ class NeoTelemetryServiceTest {
     assertTrue(sink.last().getProperties().isEmpty(), sink.last().getProperties().toString());
   }
 
+  /**
+   * ETP-6247: backend_remittance_file_generated keeps its properties with their types: role_groups
+   * a sorted, deduplicated list of known groups, direction AR or AP, invoice_count a bounded
+   * number, is_regeneration a real boolean.
+   */
+  @Test
+  void emitKeepsTheRemittanceFilePropertiesWithTheirTypes() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED, mapOf(
+        "account_id", "CLIENT-1", "direction", "AR", "invoice_count", 12,
+        "is_regeneration", false, "channel", "ui", "flag_enabled", true,
+        "role_groups", List.of("sales", "finance", "sales")));
+
+    Map<String, Object> properties = sink.last().getProperties();
+    assertEquals(7, properties.size(), properties.toString());
+    assertEquals(List.of("finance", "sales"), properties.get("role_groups"),
+        "sorted and deduplicated");
+    assertEquals("AR", properties.get("direction"));
+    assertEquals(12, properties.get("invoice_count"));
+    assertEquals(false, properties.get("is_regeneration"));
+  }
+
+  @Test
+  void aRoleGroupsListIsDroppedWhenEmptyNotAListOrCarryingAnUnknownGroup() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    for (Object value : new Object[] { List.of(), List.of("finance", "Jane Doe"),
+        "finance", List.of(1), java.util.Arrays.asList("finance", null) }) {
+      service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+          mapOf("role_groups", value, "direction", "AP"));
+
+      assertFalse(sink.last().getProperties().containsKey("role_groups"), "must drop " + value);
+      assertEquals("AP", sink.last().getProperties().get("direction"));
+    }
+    service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+        mapOf("role_groups", java.util.Set.of("admin")));
+    assertEquals(List.of("admin"), sink.last().getProperties().get("role_groups"));
+  }
+
+  @Test
+  void theRemittanceDirectionCountAndRegenerationFlagRejectAnythingElse() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    for (Object direction : new Object[] { "ar", "AR/AP", "XX", 1 }) {
+      service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+          mapOf("direction", direction));
+      assertFalse(sink.last().getProperties().containsKey("direction"), "must drop " + direction);
+    }
+    service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+        mapOf("invoice_count", 0, "is_regeneration", true));
+    assertEquals(0, sink.last().getProperties().get("invoice_count"));
+    assertEquals(true, sink.last().getProperties().get("is_regeneration"));
+    service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+        mapOf("invoice_count", 1000000));
+    assertEquals(1000000, sink.last().getProperties().get("invoice_count"));
+    for (Object outOfBounds : new Object[] { -1, 1000001, "3" }) {
+      service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+          mapOf("invoice_count", outOfBounds));
+      assertFalse(sink.last().getProperties().containsKey("invoice_count"),
+          "must drop " + outOfBounds);
+    }
+    service.emit(NeoTelemetryEvents.BACKEND_REMITTANCE_FILE_GENERATED,
+        mapOf("is_regeneration", "true"));
+    assertFalse(sink.last().getProperties().containsKey("is_regeneration"));
+  }
+
   /** The contact flags must be real booleans and the contact age a whole number within bounds. */
   @Test
   void emitDropsMistypedOrOutOfBoundsContactKpiValues() {
@@ -301,6 +371,26 @@ class NeoTelemetryServiceTest {
     Map<String, Object> emitted = sink.last().getProperties();
     assertEquals(Map.of("account_id", "CLIENT-1", "internal", true, "source", "spa",
         "operation", "post"), emitted);
+  }
+
+  /** ETP-6209: the portal KPI properties pass the allowlist; the link's identifiers never do. */
+  @Test
+  void emitKeepsThePortalKpiPropsAndDropsTheLinksIdentifiers() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_PORTAL_OPENED, mapOf("account_id", "CLIENT-1",
+        "third_party", "pseudonym", "entry_doc_type", "credit_note", "origin", "send",
+        "linkId", "LINK-1", "recordId", "INV-1", "email", "a@customer.test"));
+    Map<String, Object> opened = sink.last().getProperties();
+    service.emit(NeoTelemetryEvents.BACKEND_PORTAL_EMAIL_SENT, mapOf("account_id", "CLIENT-1",
+        "piece", "document_send", "doc_type", "invoice", "businessPartner", "BP-1"));
+    Map<String, Object> emailSent = sink.last().getProperties();
+
+    assertEquals(Map.of("account_id", "CLIENT-1", "third_party", "pseudonym",
+        "entry_doc_type", "credit_note", "origin", "send"), opened);
+    assertEquals(Map.of("account_id", "CLIENT-1", "piece", "document_send", "doc_type",
+        "invoice"), emailSent);
   }
 
   @Test

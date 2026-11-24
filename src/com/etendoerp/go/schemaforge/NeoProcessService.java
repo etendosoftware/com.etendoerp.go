@@ -101,6 +101,7 @@ public class NeoProcessService {
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
+  static final String BUNDLE_RECORD_ID = "recordID";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -496,7 +497,7 @@ public class NeoProcessService {
       String key = keys.next();
       Object value = params.isNull(key) ? null : params.get(key);
       if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", value);
+        bundleParams.put(BUNDLE_RECORD_ID, value);
       } else if (INP_TAB_ID.equals(key)) {
         bundleParams.put("tabId", value);
       } else {
@@ -607,8 +608,10 @@ public class NeoProcessService {
 
   /**
    * Pushes a VariablesSecureApp into RequestContext and restores the previous one on close.
+   * Package-private since ETP-6247: the remittance returns call Classic helpers that read
+   * {@code RequestContext.get().getVariablesSecureApp()} ({@code TransactionRemovalUtil}).
    */
-  private static RequestContextScope pushRequestContextVars() {
+  static RequestContextScope pushRequestContextVars() {
     VariablesSecureApp previous = null;
     try {
       previous = RequestContext.get().getVariablesSecureApp();
@@ -794,7 +797,7 @@ public class NeoProcessService {
   }
 
   /**
-   * ETP-5669 — a classic bundle with a {@code ProcessContext} and a connection: many
+   * ETP-5669/ETP-5809 — a classic or scheduling bundle with a {@code ProcessContext} and a connection: many
    * {@code DalBaseProcess}es call {@code bundle.getContext()} / {@code getConnection()} and NPE'd
    * on the bare map-built bundle. {@code init} resets the params, so they are set after it.
    * Package-private seam for unit tests.
@@ -812,7 +815,7 @@ public class NeoProcessService {
    *
    * These processes are called via {@link Process#execute(ProcessBundle)}.
    * The bundle params include both generic keys (recordID, inpRecordId) and
-   * the table-specific key injected by the caller (e.g. M_Inventory_ID).
+   * the table-specific key injected by this service (e.g. M_Inventory_ID, see NeoSchedulingKeyColumn).
    */
   private static NeoResponse executeSchedulingProcess(
       org.openbravo.model.ad.ui.Process adProcess,
@@ -824,13 +827,12 @@ public class NeoProcessService {
           "Process class does not implement org.openbravo.scheduling.Process: "
           + processClass.getName());
     }
-    // Use the VariablesSecureApp constructor so ProcessBundle.getContext() is non-null.
-    // Scheduling processes (e.g. InventoryCountProcess) call getContext().getLanguage()
-    // internally; the Map-based constructor leaves context null.
-    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
-        OBContext.getOBContext());
-    ProcessBundle bundle = new ProcessBundle(adProcess.getId(), vars);
-    bundle.setParams(buildBundleParams(params));
+    // ETP-5809 — same bundle as the classic path: context and connection, params kept after init.
+    // Scheduling processes (e.g. InventoryCountProcess, RMCreateInvoice) call getContext() and
+    // getConnection() internally.
+    Map<String, Object> bundleParams = buildBundleParams(params);
+    NeoSchedulingKeyColumn.addKeyColumnParam(bundleParams, params, adProcess);
+    ProcessBundle bundle = newClassicBundle(adProcess.getId(), bundleParams);
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, adProcess);
@@ -961,7 +963,7 @@ public class NeoProcessService {
   }
 
 
-  private static final class RequestContextScope implements AutoCloseable {
+  static final class RequestContextScope implements AutoCloseable {
     private final VariablesSecureApp previous;
 
     private RequestContextScope(VariablesSecureApp previous) {

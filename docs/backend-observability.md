@@ -40,9 +40,26 @@ Current constants:
 - `backend_bank_bounce_pair_decided` (ETP-5581)
 - `backend_bank_bounce_pair_restored` (ETP-5581)
 - `backend_bank_bounce_suggestions_applied` (ETP-5581)
+- `backend_remittance_file_generated` (ETP-6247)
 - `backend_portal_document_sent` (ETP-6209)
 - `backend_portal_document_downloaded` (ETP-6209)
 - `backend_quotation_decided` (ETP-6209)
+- `backend_portal_opened` (ETP-6209)
+- `backend_portal_email_sent` (ETP-6209)
+
+### When the backend emits to Mixpanel (ETP-5466)
+
+`MixpanelNeoTelemetrySink` submits only when `MixpanelNeoTelemetryConfig.isConfigured()`: the
+switch **and** a token. The switch, `etendo.go.mixpanel.enabled` (JVM / `Openbravo.properties`)
+or `ETGO_MIXPANEL_ENABLED`, defaults to **`false`**; only `true` / `Y` turn it on. A developer
+machine with a token in `Openbravo.properties` / `gradle.properties` therefore sends nothing:
+before ETP-5466 it defaulted to `true` and local traffic landed in the production project.
+
+Every environment that must emit (production, and staging/experimental if wanted) sets
+`ETGO_MIXPANEL_ENABLED=true` in its deployment, plus the token and its own
+`etendo.go.mixpanel.distinctId` / `ETGO_MIXPANEL_DISTINCT_ID` (a local validation uses
+`neo-backend-localhost`), so backend events of each environment are told apart. The browser side
+follows the same rule by host: see schema_forge `docs/ops/app-shell-observability.md`.
 
 ### Added to every event by the Mixpanel sink (ETP-5581)
 
@@ -74,25 +91,37 @@ that cannot be resolved is left out, never guessed:
 `RuntimeNeoTelemetryIdentityResolver`: the user and client come from the explicit arguments or the
 session (`OBContext`; the session's user only for the session's own client, never another tenant's),
 and `etgo_account_id` and `tenant_type` are looked up together for that client, cached for 60 s
-(at most 256 clients) so an ownership transfer shows up within a minute. System context (client or
+(at most 256 clients, least recently used out first; the owner account also sits in the
+`OwnerAccountResolver` 60 s cache, so a transfer shows up within two minutes).
+The lookup runs in its own DAL session through `IsolatedDalRead` (ETP-6386), never on the caller's
+session and never on a sender thread: a failed query cannot poison a request's transaction, a
+sender thread never opens a session nothing closes, and the read ends with a rollback, so telemetry
+never writes (the tenant type can insert an `AD_Preference`; the rollback discards it). It waits at
+most 5 s; on a timeout or any failure the event goes out with `ad_user_id` and `ad_client_id` but
+without `etgo_account_id` and `tenant_type`. The facts are not cached, but the client is skipped for
+30 s (a negative cache, also bounded to 256 clients) so a slow database does not make every event
+wait 5 s; after that the next event retries. The isolated read shares its 4 workers with the
+reports (a timed-out read is cancelled and removed from the queue). The cache lock is not held
+during the lookup. System context (client or
 user `0`) or no session means no identity: events from a scheduler or an anonymous endpoint go out
 without the ids.
 
 Emitters that send from a background thread (`BankBounceKpiTelemetry`, `ContactTypeTelemetry`,
-`AccountingKpiTelemetry`)
+`AccountingKpiTelemetry`, `GoodsShipmentTelemetry`, `InvoiceInboxTelemetry`, `PortalKpiTelemetry`)
 capture the identity on the calling thread through the service (`NeoTelemetryService.captureIdentity`,
 so it uses the service's own resolver) and hand it to the sender (`NeoTelemetryIdentity.runWith`);
 `McpSessionManager.executeInContext` captures it for the call's client and user on the request
 thread, while the call's context and DAL session (owned by `DalRequestFilter`) are live, and the row
 carries it to the writer thread, which has no session and never touches `OBDal`. A new emitter
-must do the same, or run on a thread that has the session.
+must capture the identity on the request thread, at its public entry point (never inside an
+after-commit callback or on the sender) and hand it over with `runWith`; the resolver itself never
+touches the caller's or a sender's session. Portal customer-triggered events run in System context
+and so carry no `ad_user_id`; app-side ones carry the signed-in user's.
 
 The same owner account is exposed to the SPA as `environment.etgoAccountId` in `GET /sws/go/session`
 (`OwnerAccountResolver`), so both sides send one `etgo_account_id`.
 
-**Open items.** The rule below that `account_id` is the only identifier a backend event may carry
-(PM legal rule, ETP-5791) predates this agreement: the issue owner must confirm that the agreement
-supersedes it. The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
+**Open items.** The backend `distinct_id` stays the fixed per-deployment value; the proposal (SHA-256
 of `ad_user_id` with a per-deployment secret salt) is pending sign-off and is not shipped. Platform
 must still name the `ETGO_Account` lookup table's test-account flag in Mixpanel.
 
@@ -106,9 +135,10 @@ Payloads are allowlisted before reaching the sink.
 
 Allowed low-cardinality keys:
 
-- `account_id` — the tenant (`AD_Client_ID`). The **only** identifier a backend event may carry
-  (PM legal rule, ETP-5791; superseded by the ETP-6228 common identity, pending owner
-  confirmation); the web client sends the same key. No record id of any kind.
+- `account_id` — the tenant (`AD_Client_ID`); the web client sends the same key. No business
+  record id of any kind (contacts, documents, ...) — legal rule ETP-5791; the internal identity ids
+  of the ETP-6228 section above are allowed. The PM confirmed on 2026-11-19 that `ad_user_id` is
+  allowed: the rule forbids business record ids only.
 - `category`
 - `change_origin`
 - `change_trigger`
@@ -116,6 +146,7 @@ Allowed low-cardinality keys:
 - `confidence` (ETP-5581)
 - `decision` (ETP-5581)
 - `detection_signal` (ETP-5581)
+- `direction` — only `AR` or `AP`, any other value is dropped (ETP-6247)
 - `internal` (ETP-6230) — boolean: the tenant owner's e-mail domain is internal (see *Accounting Calendar KPIs*)
 - `entity`
 - `entityType`
@@ -138,6 +169,7 @@ Allowed boolean keys (a non-boolean value is dropped):
 - `critical`
 - `flag_enabled`
 - `is_customer`
+- `is_regeneration` (ETP-6247)
 - `is_vendor`
 - `previous_is_customer`
 - `preselected` (ETP-5581)
@@ -155,6 +187,7 @@ Allowed numeric keys:
 - `days_since_decided` (0–36500, ETP-5581)
 - `durationMs`
 - `httpStatus`
+- `invoice_count` (0–1000000, ETP-6247)
 - `pairs_shown`, `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` (0–1000000, ETP-5581)
 - `position`
 - `score`
@@ -165,6 +198,14 @@ Allowed numeric keys:
 
 Numeric keys must receive finite numeric values within their configured bounds.
 String and boolean values are dropped for numeric keys.
+
+Allowed list keys (ETP-6247) — a collection whose every element is one of the listed values; it is
+sent sorted and deduplicated, as a JSON array. An empty collection, a non-collection or any unknown
+element drops the whole property:
+
+- `role_groups` — `warehouse`, `sales`, `purchasing`, `finance`, `admin`, `other`: the SPA's
+  ETP-6043 property, computed in Java by `NeoRoleGroups` (the system role templates composed into
+  the user's personal role, `admin` for the client-admin role, `other` otherwise).
 
 The denylist always wins. Do not pass secrets, raw URLs, document numbers,
 record ids, names, labels, OAuth values, authorization values, or user-entered
@@ -403,15 +444,19 @@ document number or user data is sent.
 
 ## Customer Portal KPIs (ETP-6209)
 
-`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the three events behind the PO's customer
-portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*). Every event carries only
-allowlisted keys; no new key was added to the allowlist.
+`PortalKpiTelemetry` (`com.etendoerp.go.portal`) emits the events behind the PO's customer
+portal metrics (GitHub etendosoftware/etendo-ai#22, *Métricas de éxito*) and marketing's portal
+KPIs. Every event carries only allowlisted keys; the portal visit and email events added
+`third_party`, `entry_doc_type`, `origin`, `piece` and `doc_type` to the allowlist
+(`NeoTelemetryService`).
 
 | Event | Properties | Fires |
 |---|---|---|
 | `backend_portal_document_sent` | `account_id`, `type` | once per document: the first time a portal link of an email **send** (`LINK_ORIGIN = SEND`) is confirmed delivered and no other sent `SEND` link of the same record exists. Renewals, decision links and re-sends of the same document never fire |
 | `backend_portal_document_downloaded` | `account_id`, `type` | once per document: the first successful portal `/pdf` stream of a document that was sent with a portal link. "First" is the atomic stamp `ETGO_PORTAL_LINK.FIRST_DOWNLOADED` on the document's first sent `SEND` link — only the request whose `UPDATE … WHERE first_downloaded IS NULL` set it emits, so concurrent downloads emit once. A document never sent with a link emits nothing: it is outside the KPI's denominator |
-| `backend_quotation_decided` | `account_id`, `decision` (`accepted`, `rejected`), `source` (`portal`, `app`) | `portal`: a portal decision applied by its confirmation (`appliedNow`). `app`: a rejection (`RejectQuotationHandler#reject`, so also MCP and `DocAction = RJ`), or a conversion into an order (`Convertquotation`) or an invoice (`createDraftInvoice` on a quotation) — **not** when the quotation was `ETGO_AC`, i.e. already accepted from the portal and counted then |
+| `backend_portal_opened` | `account_id`, `third_party`, `entry_doc_type`, `origin` (`send`, `renewal`, `decision`, `shared`) | a portal **visit** opened from a link: `GET /sws/portal/me` answered `valid` and the same link had no valid `/me` in the last 30 minutes (sliding, in memory per node — a deploy starts every visit anew). A reload or the SPA's re-checks inside a visit do not count. `third_party` = `HMAC(per-purpose key "kpi-third-party:v1", C_BPartner_ID)` base64url — stable per customer, irreversible, omitted when the email signing secret is not configured. `entry_doc_type` is the link's document type, `credit_note` told apart from `invoice` |
+| `backend_portal_email_sent` | `account_id`, `piece` (`document_send`, `link_renewal`, `decision_accept`, `decision_reject`), `doc_type` (`document_send` only) | every portal email that actually left, on delivery after its commit: `PortalLinkService#confirm` for a document send carrying a portal link (`SEND`) and a renewal (`RENEWAL`); `PortalDecisionService#markSent` for a decision confirmation. Throttled, duplicate or failed sends never fire. Every send counts (unlike `backend_portal_document_sent`, first per document, unchanged) |
+| `backend_quotation_decided` | `account_id`, `decision` (`accepted`, `rejected`), `source` (`portal`, `app`) | `portal`: a portal decision applied by its confirmation (`appliedNow`), **once per quotation and only for a quotation emailed with a portal link** — the quotation has a confirmed `SEND` link and this is its first `CONFIRMED` portal decision (checked read-only after the commit; a shared-link or other-document entry, or a second decision after a re-open, never fires), so the numerator stays inside the `backend_portal_document_sent` denominator. `app`: a rejection (`RejectQuotationHandler#reject`, so also MCP and `DocAction = RJ`), or a conversion into an order (`Convertquotation`) or an invoice (`createDraftInvoice` on a quotation) — **not** when the quotation was `ETGO_AC`, i.e. already accepted from the portal and counted then |
 
 `type` is the portal document kind in lower case: `invoice`, `quotation`, `order`, `shipment`. A
 credit note is an `invoice`: the portal kinds do not tell them apart, and the PO's invoice metric
@@ -437,6 +482,14 @@ are unchanged.
   `source = portal`, broken down by `decision`, ÷ count of `backend_portal_document_sent` where
   `type = quotation` (target ≥ 20 %). Manual decisions (`source = app`) are excluded from the
   metric and kept for comparison.
+- **Portal reach (marketing):** distinct `third_party` on `backend_portal_opened` = customers who
+  opened the portal; count of `backend_portal_opened` = visits, by `entry_doc_type` / `origin`.
+- **Portal emails by piece (marketing):** count of `backend_portal_email_sent` broken down by
+  `piece` (and `doc_type` for `document_send`). Visits per email sent = `backend_portal_opened`
+  ÷ `backend_portal_email_sent`, same period.
+- **Rotating the email signing secret** (`etendo.go.email.documentDownloadTokenSecret`) changes
+  every `third_party` pseudonym — the same customers count as new ones in the month of the
+  rotation — and every public logo reference (logos in emails already sent stop loading).
 - Per tenant: break down by `account_id`. The events carry no record id, so a document sent in one
   month and downloaded or answered in the next falls in different periods; read the ratio over
   windows long enough (a quarter) for that lag to wash out.
@@ -553,6 +606,28 @@ Example (`backend_bank_bounce_pair_decided` as submitted to Mixpanel):
   "decision": "discarded", "surface": "modal",
   "environment": "production", "$insert_id": "3f0c2b9e8d7a4c1b9e6f5a4d3c2b1a09"}}
 ```
+
+## Remittance SEPA File KPIs (ETP-6247)
+
+`backend_remittance_file_generated` — a remittance's SEPA file was generated and stored, by
+«Confirmar» (`confirm`) or «Regenerar fichero» (`generateFile`). Emitted by
+`RemittanceFileTelemetry`, only with `sepa-remittances` on, through `NeoBatchScope.runAfterCommit`,
+on one bounded background thread. Outside a batch (the SPA and a single MCP call) the event is
+handed off **as soon as the action succeeds, before the request's own commit** — the same as the
+bounce-pair KPIs —, so a commit that failed afterwards would still have emitted it; inside a batch it
+waits for the batch commit and is dropped on rollback. A refused action (any 4xx/5xx) emits nothing.
+
+| Property | Value |
+|---|---|
+| `account_id` | the tenant (`AD_Client_ID`) |
+| `direction` | `AR` (collection, CORE) or `AP` (payment, SCT) |
+| `invoice_count` | distinct invoices of the remittance's active lines |
+| `is_regeneration` | `false` for `confirm`, `true` for `generateFile` |
+| `channel` | `ui` or `mcp` (`NeoWriteChannel`, as the bounce KPIs) |
+| `flag_enabled` | always `true` |
+| `role_groups` | list, see *Payload Safety*; omitted when no role can be read |
+
+No record id, document number, amount or name.
 
 ## Adding Authoritative Backend KPIs
 

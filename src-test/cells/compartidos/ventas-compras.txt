@@ -3,7 +3,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Se ejecuta con -Pcell=ventas o -Pcell=compras.
 
-# --- con mocks (56)
+# --- con mocks (57)
 com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerTest
 com.etendoerp.go.schemaforge.AbstractLegacyInvoiceActionHandlerTest
 com.etendoerp.go.schemaforge.AbstractOrderHeaderHandlerTest
@@ -51,6 +51,7 @@ com.etendoerp.go.schemaforge.NeoCloneRecordHandlerTest
 com.etendoerp.go.schemaforge.NeoInvoiceSupportTest
 com.etendoerp.go.schemaforge.OrderDocActionSupportTest
 com.etendoerp.go.schemaforge.OrderInvoicePendingAmountTest
+com.etendoerp.go.schemaforge.OrderLineCurrencyConversionTest
 com.etendoerp.go.schemaforge.OrderLineDiscountSupportTest
 com.etendoerp.go.schemaforge.OrderLineHandlerTest
 com.etendoerp.go.schemaforge.OrderPendingDocsAnnotationTest

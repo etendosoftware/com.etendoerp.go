@@ -415,4 +415,114 @@ class NeoAccessStartupTest {
     verify(obProvider, never()).get(org.openbravo.client.application.ProcessAccess.class);
     verify(obDal, never()).save(any());
   }
+
+  @Test
+  @DisplayName("ETP-6410: existing-access lookups include inactive rows (unique index ignores isactive)")
+  @SuppressWarnings("unchecked")
+  void existingAccessLookupsIncludeInactiveRows() {
+    stubRoleCriteria(List.of(targetRole()));
+    stubSpecCriteria(List.of(), List.of());
+    OBCriteria<WindowAccess> waCriteria = mock(OBCriteria.class);
+    when(waCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(WindowAccess.class)).thenReturn(waCriteria);
+    OBCriteria<ProcessAccess> paCriteria = mock(OBCriteria.class);
+    when(paCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(ProcessAccess.class)).thenReturn(paCriteria);
+    OBCriteria<org.openbravo.client.application.ProcessAccess> opaCriteria = mock(OBCriteria.class);
+    when(opaCriteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(opaCriteria);
+
+    startup.grantMissingAccess();
+
+    verify(waCriteria).setFilterOnActive(false);
+    verify(paCriteria).setFilterOnActive(false);
+    verify(opaCriteria).setFilterOnActive(false);
+  }
+
+  @Test
+  @DisplayName("ETP-6410: a spec window equal to a report anchor yields one WindowAccess, one lookup")
+  void specWindowEqualToReportAnchorIsGrantedOnce() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(windowSpec(ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID)),
+        List.of());
+    stubExistingAccess(List.of(), List.of());
+    Window financialReportsWindow = mock(Window.class);
+    when(obDal.get(Window.class, ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+        .thenReturn(financialReportsWindow);
+    Window inventoryWindow = mock(Window.class);
+    when(obDal.get(Window.class, ReportAccessCatalog.INVENTORY_STOCK_REPORT_WINDOW_ID))
+        .thenReturn(inventoryWindow);
+    when(obProvider.get(WindowAccess.class)).thenAnswer(i -> mock(WindowAccess.class));
+
+    startup.grantMissingAccess();
+
+    verify(obDal, times(1)).createCriteria(WindowAccess.class);
+    // Financial reports: once (spec pass only); inventory stock report: once (anchor pass).
+    verify(obDal, times(2)).save(any(WindowAccess.class));
+  }
+
+  @Test
+  @DisplayName("ETP-6410: an existing window row blocks the insert, a missing window is still granted")
+  void existingWindowRowBlocksInsertWhileMissingWindowIsGranted() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(windowSpec("win-a"), windowSpec("win-b")), List.of());
+    WindowAccess existingWa = mock(WindowAccess.class);
+    Window existingWindow = mock(Window.class);
+    when(existingWindow.getId()).thenReturn("win-a");
+    when(existingWa.getWindow()).thenReturn(existingWindow);
+    stubExistingAccess(List.of(existingWa), List.of());
+    when(obDal.get(Window.class, ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+        .thenReturn(null);
+    WindowAccess newWa = mock(WindowAccess.class);
+    when(obProvider.get(WindowAccess.class)).thenReturn(newWa);
+
+    startup.grantMissingAccess();
+
+    // Only win-b is inserted: one WindowAccess object requested and saved.
+    verify(obProvider, times(1)).get(WindowAccess.class);
+    verify(obDal, times(1)).save(any(WindowAccess.class));
+    verify(obDal).commitAndClose();
+  }
+
+  @Test
+  @DisplayName("ETP-6410: an existing process row blocks the insert, a missing process is still granted")
+  void existingProcessRowBlocksInsertWhileMissingProcessIsGranted() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of(processSpec("proc-a"), processSpec("proc-b")));
+    ProcessAccess existingPa = mock(ProcessAccess.class);
+    Process existingProcess = mock(Process.class);
+    when(existingProcess.getId()).thenReturn("proc-a");
+    when(existingPa.getProcess()).thenReturn(existingProcess);
+    stubExistingAccess(List.of(), List.of(existingPa));
+    ProcessAccess newPa = mock(ProcessAccess.class);
+    when(obProvider.get(ProcessAccess.class)).thenReturn(newPa);
+
+    startup.grantMissingAccess();
+
+    verify(obProvider, times(1)).get(ProcessAccess.class);
+    verify(obDal, times(1)).save(any(ProcessAccess.class));
+    verify(obDal).commitAndClose();
+  }
+
+  @Test
+  @DisplayName("ETP-6410: a process spec equal to the tax-report anchor yields one ProcessAccess")
+  void specProcessEqualToTaxReportAnchorIsGrantedOnce() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of(processSpec(ReportAccessCatalog.TAX_REPORT_PROCESS_ID)));
+    stubExistingAccess(List.of(), List.of());
+    Process taxReportProcess = mock(Process.class);
+    when(obDal.get(Process.class, ReportAccessCatalog.TAX_REPORT_PROCESS_ID))
+        .thenReturn(taxReportProcess);
+    when(obProvider.get(ProcessAccess.class)).thenAnswer(i -> mock(ProcessAccess.class));
+
+    startup.grantMissingAccess();
+
+    verify(obDal, times(1)).createCriteria(ProcessAccess.class);
+    verify(obDal, times(1)).save(any(ProcessAccess.class));
+  }
 }

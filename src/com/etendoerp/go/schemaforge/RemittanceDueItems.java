@@ -219,18 +219,25 @@ final class RemittanceDueItems {
     int page = Math.max(1, params.optInt(P_PAGE, 1));
 
     StringBuilder where = candidateWhere(criteria);
+    StringBuilder laterWhere = candidateWhere(criteria, true);
     if (search != null) {
-      where.append(" and (lower(inv.documentNo) like :search or lower(bp.name) like :search)");
+      String bySearch = " and (lower(inv.documentNo) like :search or lower(bp.name) like :search)";
+      where.append(bySearch);
+      laterWhere.append(bySearch);
     }
     Query<Long> count = session().createQuery(
         "select count(distinct ips.id)" + from() + where, Long.class);
     criteria.bind(count);
+    Query<Long> laterCount = session().createQuery(
+        "select count(distinct ips.id)" + from() + laterWhere, Long.class);
+    criteria.bind(laterCount);
     Query<Object[]> rows = session().createQuery(SELECT_ROWS + from() + where + GROUP_ORDER,
         Object[].class);
     criteria.bind(rows);
     if (search != null) {
       String pattern = "%" + search.toLowerCase(Locale.ROOT) + "%";
       count.setParameter(P_SEARCH, pattern);
+      laterCount.setParameter(P_SEARCH, pattern);
       rows.setParameter(P_SEARCH, pattern);
     }
     List<Object[]> page0 = rows.setFirstResult((page - 1) * pageSize).setMaxResults(pageSize)
@@ -246,7 +253,26 @@ final class RemittanceDueItems {
     JSONObject body = new JSONObject();
     body.put(P_ITEMS, items);
     body.put("total", total != null ? total : 0L);
+    putLaterDues(body, laterCount.uniqueResult(), remittance.getDueDate());
     return NeoResponse.ok(body);
+  }
+
+  /**
+   * ETP-5850: the dues left out only because they are expected after the remittance due date. An
+   * agent asked to remit a customer's invoice dated the remittance today, the invoice was due
+   * tomorrow, the list did not offer it and nothing said why: the agent processed another
+   * customer's due instead. With {@code laterDues} and a hint the reason is in the answer.
+   */
+  static void putLaterDues(JSONObject body, Long later, Date dueDate) throws JSONException {
+    long n = later != null ? later : 0L;
+    if (n == 0) {
+      return;
+    }
+    body.put("laterDues", n);
+    body.put("hint", n + " more due item(s) match but are expected after this remittance's due "
+        + "date (" + toLocalDate(dueDate) + ") and are not listed. To include one, set the "
+        + "remittance dueDate on or after its due date. Never select another customer's due "
+        + "instead of the one the user asked for.");
   }
 
   /**
@@ -488,15 +514,27 @@ final class RemittanceDueItems {
 
   /** The candidate rules, see the class comment. Parameters bound by {@link Criteria#bind}. */
   static StringBuilder candidateWhere(Criteria criteria) {
+    return candidateWhere(criteria, false);
+  }
+
+  /**
+   * The candidate rules, or with {@code later} the same rules for the dues expected AFTER the
+   * remittance due date: the ones {@link #available} leaves out only because of that date.
+   */
+  static StringBuilder candidateWhere(Criteria criteria, boolean later) {
     StringBuilder where = new StringBuilder(" where psd.client.id = :client")
         .append(" and psd.paymentDetails is null")
         .append(" and psd.canceled = false and psd.invoicePaid = false")
-        .append(" and psd.organization.id in (:orgs)")
-        // A due already in this remittance stays listed even if the due date moved earlier.
-        .append(" and (ips.expectedDate < :dueDateLimit or exists (select 1 from ")
-        .append(RemittanceLine.ENTITY_NAME).append(" as mine where mine.paymentScheduleDetail.id")
-        .append(" = psd.id and mine.remittance.id = :remittance))")
-        .append(" and cur.id = :currency")
+        .append(" and psd.organization.id in (:orgs)");
+    if (later) {
+      where.append(" and ips.expectedDate >= :dueDateLimit");
+    } else {
+      // A due already in this remittance stays listed even if the due date moved earlier.
+      where.append(" and (ips.expectedDate < :dueDateLimit or exists (select 1 from ")
+          .append(RemittanceLine.ENTITY_NAME).append(" as mine where mine.paymentScheduleDetail.id")
+          .append(" = psd.id and mine.remittance.id = :remittance))");
+    }
+    where.append(" and cur.id = :currency")
         .append(" and not exists (select 1 from ").append(RemittanceLine.ENTITY_NAME)
         .append(" as other where other.paymentScheduleDetail.id = psd.id")
         .append(" and other.remittance.id <> :remittance and other.remittance.processed = false)");

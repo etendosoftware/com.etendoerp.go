@@ -98,6 +98,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * @covers com.etendoerp.go.mcp.McpQuerySupport
  * @covers com.etendoerp.go.mcp.McpHqlConditions
  * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
+ * @covers com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -805,6 +806,38 @@ class McpWriteGateTest {
 
         dispatcher.verifyNoInteractions();
       }
+    }
+
+    /**
+     * ETP-5806 CP-12g (QA finding, Pasada 2, bloqueante) — repro: {@code bp-location}'s own
+     * entity IS {@code C_Location} (not a wrapper around one), so
+     * {@code streetName}/{@code buildingNumber}/{@code buildingName} resolve against neither the
+     * entity's DAL property name ({@code oBSEPABuildingNumber}) nor its own DB column name
+     * ({@code EM_OBSEPA_BldgNb}) — only against the published alias
+     * {@code com.etendoerp.go.schemaforge.BpLocationHandler#KEYS_BUILDING_NUMBER} and friends
+     * actually read. Before this fix the key was reported in {@code unknownFields} even though
+     * the handler recognises and persists it correctly, which an MCP agent reads as a silent
+     * write failure.
+     */
+    @Test
+    @DisplayName("a structured-address field the entity's OWN table carries is not reported "
+        + "unknown, even though no generic property resolves it")
+    void aStructuredAddressFieldOnItsOwnTableIsNotReported() throws Exception {
+      // The DAL property IS oBSEPABuildingNumber — "buildingNumber" (the published name every
+      // handler actually reads/writes) resolves to neither it nor its own DB column name.
+      declareProperty("oBSEPABuildingNumber", "EM_OBSEPA_BLDGNB");
+      Set<String> unknown = new TreeSet<>();
+      JSONObject body = new JSONObject();
+      body.put("buildingNumber", "99");
+
+      JSONObject mapped = McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab,
+          specEntity(), unknown);
+
+      assertTrue(unknown.isEmpty(),
+          "buildingNumber IS handled — by BpLocationHandler's own alias resolution — so it must "
+              + "not be reported unknown just because no generic DAL property resolves it");
+      assertEquals("99", mapped.getString("buildingNumber"),
+          "the key is left exactly as sent, for the handler's own alias lookup to find");
     }
 
     /**

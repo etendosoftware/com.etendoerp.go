@@ -19,7 +19,6 @@ package com.etendoerp.go.mcp;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Optional;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,7 +36,6 @@ import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 
 /**
  * The MCP attachment tools (ETP-5715): {@code etendo_request_attachment_upload},
@@ -316,12 +314,8 @@ final class McpAttachmentTools {
    * @return the link, or {@code null} when the signing secret is not configured
    */
   static String downloadUrl(NeoAttachmentTarget target, String attachmentId) {
-    String clientId = (String) OBContext.getOBContext().getCurrentClient().getId();
-    Optional<String> token = DocumentDownloadTokenService.createAttachmentToken(
-        target.getSpecName(), target.getRecordId(), clientId, attachmentId,
-        DOWNLOAD_LINK_TTL.getSeconds());
-    return token.map(value -> McpImageTools.publicUrl(McpImageTools.NEO_SERVLET_PATH
-        + DocumentDownloadTokenService.DOWNLOAD_PATH + value)).orElse(null);
+    return McpAttachmentLinks.downloadUrl(target.getSpecName(), target.getRecordId(),
+        attachmentId);
   }
 
   // ── etendo_delete_attachment ───────────────────────────────────────────────

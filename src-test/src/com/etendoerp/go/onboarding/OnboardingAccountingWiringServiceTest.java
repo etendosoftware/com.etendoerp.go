@@ -607,14 +607,19 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // provisionElementTreeNodes() — empty-source warn branch (bundled XML absent on test classpath)
+  // provisionElementTreeNodes() — empty-source warn branch (bundled XML hidden from the service)
   // ---------------------------------------------------------------------------------------------
 
   @Test
   public void testProvisionElementTreeNodesWarnsWhenNoSourceNodes() {
-    // The bundled sourcedata XML is staged at build time and is not on the unit-test classpath,
-    // so loadSourceTreeNodes() returns empty and the method takes the early warn-and-return branch.
-    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    // The bundled sourcedata XML is hidden via a controlled class loader (a full build copies it
+    // onto the classpath), so loadSourceTreeNodes() returns empty and the method takes the early warn-and-return branch.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService() {
+      @Override
+      protected ClassLoader getSourceResourceClassLoader() {
+        return classLoaderWithoutSampledata();
+      }
+    };
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("C1");
     Tree tree = mock(Tree.class);
@@ -633,16 +638,36 @@ public class OnboardingAccountingWiringServiceTest {
   // loadSourceTreeNodes() / loadSourceElementValues() — absent classpath resource → empty
   // ---------------------------------------------------------------------------------------------
 
+  /** Class loader hiding the build-copied GOClient sampledata, whatever the build left behind. */
+  private static ClassLoader classLoaderWithoutSampledata() {
+    return new ClassLoader(OnboardingAccountingWiringServiceTest.class.getClassLoader()) {
+      @Override
+      public java.net.URL getResource(String name) {
+        return name.startsWith("com/etendoerp/go/onboarding/sampledata/") ? null : super.getResource(name);
+      }
+    };
+  }
+
   @Test
   public void testLoadSourceTreeNodesReturnsEmptyWhenResourceAbsent() {
-    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService() {
+      @Override
+      protected ClassLoader getSourceResourceClassLoader() {
+        return classLoaderWithoutSampledata();
+      }
+    };
     assertTrue("no bundled tree-node XML on the test classpath",
         service.loadSourceTreeNodes().isEmpty());
   }
 
   @Test
   public void testLoadSourceElementValuesReturnsEmptyWhenResourceAbsent() {
-    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService() {
+      @Override
+      protected ClassLoader getSourceResourceClassLoader() {
+        return classLoaderWithoutSampledata();
+      }
+    };
     assertTrue("no bundled element-value XML on the test classpath",
         service.loadSourceElementValues().isEmpty());
   }
